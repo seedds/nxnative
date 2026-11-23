@@ -817,6 +817,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game), in the first form (binding changes only, no size table; [PR #1611](https://github.com/seedds/nxnative/pull/1611)): 7,094 full encodes a frame fell to 1,489 (5,645 patched); submit-thread instructions per draw 14.4k to 13.6k, 60 fps on both (M3 Pro, `scripts/bench.py`, 3 runs each, an early-game route the submit thread does not limit). The reuse was measured first in [issue #1290](https://github.com/seedds/nxnative/issues/1290). **Open:** the form here, with the size table and the deferred updates, is not measured on Bananza; the deferred updates matter most in Breath of the Wild (221 small updates of a uniform block a frame).
 - **Arena rollover fix:** the allocation must keep its own GPU address across allocating helpers: [An argument block points into another arena after a nested allocation](rendering.md#an-argument-block-points-into-another-arena-after-a-nested-allocation). The optimization remains enabled.
 
+### Per-draw checks walked every reflected binding
+
+- **Symptom:** `fb_prepare`, `fb_depth_rule`, `ubd_conflict_textures` and `ubd_conflict_sh` in the replay thread's samples, mostly in their own loops.
+- **Cause:** each walked all of the shader's reflected bindings at every draw and skipped the kinds it does not handle. A material's fragment shader has samplers and more beside each texture.
+- **Fix:** each shader keeps, made once, the indices of its texture and image bindings and of the bindings `ubd_conflict_sh` looks at (`sh_lists_make` in `nvn_mtl.m`). The loops walk those lists with the same conditions inside, and a shader with no texture binding skips `ubd_conflict_textures`' lock. The lists are published by a release store of `tl_nb`, read with acquire.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 45 bindings at the 90th percentile, a third of them textures; the walks were about 7 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).

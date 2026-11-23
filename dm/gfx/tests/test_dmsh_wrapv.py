@@ -17,6 +17,7 @@ import ios_metal  # noqa: E402
 
 sys.path.insert(0, str(TOOLS))
 import dmsh_chain  # noqa: E402
+from dmsh_wrap import wrap_signed_integers  # noqa: E402
 
 
 def mac_metal(): return list(dmsh_chain.MAC_METAL)   # the build's Mac compile
@@ -37,6 +38,22 @@ kernel void check(device const uint* input [[buffer(0)]], device uint* output [[
     o[0] = as_type<uint>(lo); o[1] = b < as_type<int>(w) ? 1u : 0u; o[2] = as_type<uint>(c);
 }
 '''
+RUNTIME_KERNEL = '''#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { uint words[]; } inputData;
+layout(set = 0, binding = 1, std430) writeonly buffer OutputData { uint words[]; } outputData;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint w = inputData.words[i];
+    int a = int(w) * 65536;
+    int lo = ((a >> 31) << 16) | int(uint(a) >> 16);
+    int b = int(w) + 2147483647;
+    int c = int(w) * 2 / 2;
+    outputData.words[i * 3] = uint(lo);
+    outputData.words[i * 3 + 1] = b < int(w) ? 1u : 0u;
+    outputData.words[i * 3 + 2] = uint(c);
+}
+'''
 RUNNER = r'''#import <Metal/Metal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,7 +62,13 @@ int main(int argc, char **argv) {
     id<MTLDevice> d = MTLCreateSystemDefaultDevice();
     if (!d) return 2;
     NSError *err = nil;
-    id<MTLLibrary> lib = [d newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
+    id<MTLLibrary> lib;
+    if (argc > 2) {
+        NSString *source = [NSString stringWithContentsOfFile:@(argv[1]) encoding:NSUTF8StringEncoding error:&err];
+        MTLCompileOptions *opt = [MTLCompileOptions new];
+        opt.languageVersion = MTLLanguageVersion4_0; opt.preserveInvariance = YES;
+        lib = source ? [d newLibraryWithSource:source options:opt error:&err] : nil;
+    } else lib = [d newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&err];
     id<MTLComputePipelineState> ps = lib ? [d newComputePipelineStateWithFunction:[lib newFunctionWithName:@"check"] error:&err] : nil;
     if (!ps) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     const unsigned n = 65536;
@@ -94,6 +117,23 @@ class WrappingOverflow(unittest.TestCase):
             subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(root / 'test.air'), '-o', str(root / 'test.metallib')], check=True, capture_output=True)
             subprocess.run(['clang', '-fobjc-arc', '-O1', str(root / 'run.m'), '-framework', 'Metal', '-framework', 'Foundation', '-o', str(root / 'run')], check=True, capture_output=True)
             r = subprocess.run([str(root / 'run'), str(root / 'test.metallib')], capture_output=True, text=True)
+            if r.returncode == 2: self.skipTest('no Metal device')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    @unittest.skipUnless(shutil.which('glslangValidator') and shutil.which('clang'), 'needs a GLSL compiler and Metal')
+    def test_runtime_gpu_wraps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            glsl, spirv, source = (root / f'test.{suffix}' for suffix in ('comp', 'spv', 'metal'))
+            glsl.write_text(RUNTIME_KERNEL)
+            subprocess.run(['glslangValidator', '-V', glsl, '-o', spirv], check=True, capture_output=True)
+            spirv.write_bytes(wrap_signed_integers(spirv.read_bytes()))
+            subprocess.run([dmsh_chain.SPIRV_CROSS, spirv, '--msl', '--msl-version', '30200',
+                            '--rename-entry-point', 'main', 'check', 'comp', '--output', source], check=True, capture_output=True)
+            runner, exe = root / 'run.m', root / 'run'
+            runner.write_text(RUNNER)
+            subprocess.run(['clang', '-fobjc-arc', '-O1', runner, '-framework', 'Metal', '-framework', 'Foundation', '-o', exe], check=True, capture_output=True)
+            r = subprocess.run([exe, source, 'source'], capture_output=True, text=True)
             if r.returncode == 2: self.skipTest('no Metal device')
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 

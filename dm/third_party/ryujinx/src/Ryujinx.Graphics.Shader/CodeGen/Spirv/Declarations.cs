@@ -34,6 +34,15 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         public static void DeclareLocals(CodeGenContext context, StructuredFunction function)
         {
+            if (context.Properties.RayQueryBinding.HasValue)
+            {
+                // Function variables must precede all executable instructions.
+                // Sequential traces reuse this query; native callees have their
+                // own variable, so calls cannot overwrite an in-flight query.
+                context.RayQueryVariable = context.Variable(
+                    context.TypePointer(StorageClass.Function, context.TypeRayQueryKHR()), StorageClass.Function);
+                context.AddLocalVariable(context.RayQueryVariable);
+            }
             foreach (AstOperand local in function.Locals)
             {
                 SpvInstruction localPointerType = context.TypePointer(StorageClass.Function, context.GetType(local.VarType));
@@ -46,6 +55,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         public static void DeclareAll(CodeGenContext context, StructuredProgramInfo info)
         {
+            if (context.Properties.RayQueryBinding is SetBindingPair rayBinding)
+            {
+                context.AddCapability(Capability.RayQueryKHR);
+                context.AddExtension("SPV_KHR_ray_query");
+                context.RayQueryScene = context.Variable(
+                    context.TypePointer(StorageClass.UniformConstant, context.TypeAccelerationStructureKHR()),
+                    StorageClass.UniformConstant);
+                context.Decorate(context.RayQueryScene, Decoration.DescriptorSet, (LiteralInteger)rayBinding.SetIndex);
+                context.Decorate(context.RayQueryScene, Decoration.Binding, (LiteralInteger)rayBinding.Binding);
+                context.Name(context.RayQueryScene, "rt_scene");
+                context.AddGlobalVariable(context.RayQueryScene);
+            }
             DeclareConstantBuffers(context, context.Properties.ConstantBuffers.Values);
             DeclareStorageBuffers(context, context.Properties.StorageBuffers.Values);
             DeclareMemories(context, context.Properties.LocalMemories, context.LocalMemories, StorageClass.Private);

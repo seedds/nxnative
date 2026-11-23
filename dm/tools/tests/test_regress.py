@@ -50,6 +50,43 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 
 
 class Regress(unittest.TestCase):
+    def test_gl_chain_key_tracks_the_glsl_compiler(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); compiler = root / 'glslangValidator'; compiler.write_bytes(b'compiler version one')
+            tree = NS(path=root)
+            g = NS(kind='gl', ver='v0', shader_roots=list)
+            gl = NS(sources=lambda roots: [(b'void main() {}', 'frag', 'synthetic')])
+            with patch.dict(os.environ, {}, clear=True), patch.object(regress, 'load_module', return_value=gl), \
+                 patch.object(regress.shutil, 'which', return_value=str(compiler)):
+                before = regress.chain_key(tree, g, 'other tools')
+                self.assertEqual(before, regress.chain_key(tree, g, 'other tools'))
+                compiler.write_bytes(b'compiler version two')
+                self.assertNotEqual(before, regress.chain_key(tree, g, 'other tools'))
+
+    def test_gl_manifest_preserves_translation_failures(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'translations.json'
+            p.write_text(json.dumps({'a_frag': {'st': 'ok', 'msl': 'abc', 'refl': 'def'}, 'b_frag': {'st': 'translation failed', 'err': 'sampler limit'}}))
+            built = regress.gl_manifest(p, True, Path(d) / 'log')
+            self.assertEqual((built['a_frag']['st'], built['b_frag']['st']), ('ok', 'translation failed'))
+            failed = regress.gl_manifest(p, False, Path(d) / 'log')
+            self.assertEqual((failed['a_frag']['st'], failed['b_frag']['st']), ('library failed', 'translation failed'))
+            p.write_text('{}')
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(p, True, Path(d) / 'log')
+
+    def test_gl_game_capture_roots_and_provisional_route(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); build = root / '0100000000000000_build'
+            (build / 'patched_v0').mkdir(parents=True); (build / 'shader/gl').mkdir(parents=True)
+            capture = build / 'extract/v0/gl_capture'; capture.mkdir(parents=True)
+            profile = build / 'profile/0100000000000000'; profile.mkdir(parents=True)
+            (profile / 'game.tsv').write_text('name\tSynthetic GL game\n')
+            (profile / 'smoke.tsv').write_text('secs\t120\nsave\tnew\n')
+            g = regress.Game(root, build)
+            self.assertEqual(g.kind, 'gl'); self.assertEqual(g.route()['secs'], 120)
+            with patch.object(regress.Game, 'romfs', return_value=root / 'romfs'):
+                self.assertEqual(g.shader_roots(), [root / 'romfs', capture, build / 'extract/v0/ExeFS/main'])
+
     def test_run_env_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync a route's scratch save with the player's cloud save (docs/reference/services.md)
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -160,6 +197,26 @@ class Regress(unittest.TestCase):
             self.assertEqual((cwd / 'ctl').read_text(), 'shot x.png\ndump\n')
             with patch.object(regress.time, 'sleep'), patch.object(regress.subprocess, 'run', side_effect=OSError):
                 self.assertIsNone(regress.hang_evidence(NS(pid=4242), cwd))
+
+    def test_gl_frames_progress_while_display_link_messages_stop(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            now = [0.0]; log = Path(td) / 'log.txt'
+            child = NS(pid=4242, returncode=0, poll=lambda: 0 if now[0] >= 1.5 else None, send_signal=lambda _: None, wait=lambda _: None)
+            cafe = NS(poll=lambda: 0)
+            def popen(cmd, **kw):
+                if cmd[0] == 'caffeinate': return cafe
+                kw['stdout'].write('[dm] [nvn-mtl] presents 1\n'); kw['stdout'].flush(); return child
+            def sleep(secs):
+                now[0] += secs
+                with log.open('a') as f: f.write(f'[dm] [gl] frame {int(now[0] * 1200)}: draws 10\n')
+            for name, value in (('check_disk', None), ('wait_idle', True), ('take_lock', None), ('footprint', None), ('hang_evidence', None)):
+                stack.enter_context(patch.object(regress, name, return_value=value))
+            stack.enter_context(patch.object(regress.subprocess, 'Popen', side_effect=popen))
+            stack.enter_context(patch.object(regress.time, 'monotonic', side_effect=lambda: now[0]))
+            stack.enter_context(patch.object(regress.time, 'sleep', side_effect=sleep))
+            r = regress.run_watched(['host'], {}, Path(td), log, NS(min_free_gb=0, wait_idle=0, lock=None), limit=2, hang=0.5, kind='gl', what='synthetic')
+            self.assertIsNone(r['hang_at_s'])
+            self.assertGreaterEqual(r['max_frame'], 1200)
 
     def test_routes(self):   # every profile's smoke.tsv reads
         for f in (REPO / 'dm/games').glob('*/smoke.tsv'):
@@ -776,6 +833,63 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
             stack.enter_context(patch.object(regress, 'say'))
             regress.cmd_check(a)
             self.assertEqual(finish.call_args.args[0]['games']['game']['status'], 'NEW-FAIL')
+
+
+class InterfaceCheck(unittest.TestCase):
+    def test_each_tree_uses_its_own_pso_offline_and_imports(self):   # baseline and candidate trees each run pso_offline in their own process (PR #3190 / #3176: new dmsh_abi constant)
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            out = root / 'out'; lib = out / 'b-testchain'; lib.mkdir(parents=True)
+            vs, ps = '0' * 16, '1' * 16
+            (lib / f'{vs}_b.json').write_text(json.dumps({'chain': 'testchain', 'entry': 'main0'}))
+            (lib / f'{vs}_b.metal').write_text(VS)
+            (lib / f'{ps}_b.json').write_text(json.dumps({'chain': 'testchain', 'entry': 'main0'}))
+            (lib / f'{ps}_b.metal').write_text(PS)
+            prof = root / 'prof'; prof.mkdir()
+            (prof / 'shader_pairs.tsv').write_text(f'{vs}\t{ps}\n')
+
+            trees = {}
+            for name, has_new_const, include_in_plan in (('base', False, False), ('cand', True, True)):
+                t = root / name
+                tools = t / 'dm/gfx/tools'; tools.mkdir(parents=True)
+                dm_tools = t / 'dm/tools'; dm_tools.mkdir(parents=True)
+                games = t / 'dm/games'; games.mkdir(parents=True)
+                (games / 'game.py').write_text('print("gl")\n')
+                (dm_tools / 'romfs.py').write_text(f'TREE = {name!r}\n')   # romfs is already in the harness process's sys.modules
+                (tools / 'dmsh_abi.py').write_text('BORDER_FC = 216\n' + ('BLEND_OFF_FC = 217\n' if has_new_const else ''))
+                (tools / 'lazy_helper.py').write_text(f'INCLUDE = {include_in_plan!r}\n')
+                (tools / 'pso_offline.py').write_text(
+                    'import os, sys\n'
+                    'from pathlib import Path\n'
+                    'sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools"))\n'
+                    'import romfs\n'
+                    f'assert romfs.TREE == {name!r}, romfs.TREE\n'
+                    'import dmsh_abi as abi\n'
+                    + ('_ = abi.BLEND_OFF_FC\n' if has_new_const else '_ = abi.BORDER_FC\n') +
+                    'def pair_text(paths): return b"".join(Path(p).read_bytes() for p in paths if p and Path(p).is_file())\n'
+                    'def read_pairs(text): return [tuple(l.split("\\t")[:2]) for l in text.decode().splitlines() if l and "\\t" in l]\n'
+                    'def plan(lib_dir, chain, pairs, zero):\n'
+                    '    import lazy_helper\n'
+                    '    bases = [(f"{vk}_b", "main0", f"{fk}_b", "main0") for vk, fk in pairs] if lazy_helper.INCLUDE else []\n'
+                    '    return bases, [], {}\n'
+                )
+                tr = regress.Tree.__new__(regress.Tree); tr.id, tr.path = name, t
+                trees[name] = tr
+
+            g = NS(id='0100000000000000', build=root / 'build',
+                   profile_dir=lambda tree: prof, env=lambda tree: dict(os.environ))
+            path0 = list(sys.path)
+            self.assertIn('romfs', sys.modules)
+            for order in (('base', 'cand'), ('cand', 'base')):
+                res = {name: regress.interface_check(trees[name], g, out) for name in order}
+                self.assertEqual(res['base'], {'checked': 1, 'bad': [], 'not_in_archive': 1})
+                self.assertEqual(res['cand']['checked'], 1)
+                self.assertEqual(res['cand']['not_in_archive'], 0)
+                self.assertEqual(res['cand']['bad'], [{'vs': vs, 'entry': 'main0', 'ps': ps, 'missing': ['locn1'], 'type': ['locn2 float4/int4']}])
+            self.assertEqual(sys.path, path0)
+            for modname in ('pso_offline', 'dmsh_abi', 'lazy_helper'):
+                self.assertNotIn(modname, sys.modules)
 
 
 class Validated(unittest.TestCase):

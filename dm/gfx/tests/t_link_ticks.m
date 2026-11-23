@@ -29,11 +29,13 @@ static int test_fps_max = 120;
 #define DM_GAME_FPS_MAX test_fps_max
 #include "../nvn/hle_nvn.c"
 #undef g_ft
-void *front_metal_layer(void) { return NULL; }
+int test_screen_hz, test_capable_hz, test_low_power;   // t_link_ticks_screen.c: the screen's current / native rate (0 = not known) and Low Power Mode
+static void *test_layer;   // a window only while the 40 fps screen check runs (fps40_refused); the acquires below run without one
+void *front_metal_layer(void) { return test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
-uint64_t now_ns(void) { return bp_now(); }
+uint64_t now_ns(void) { return test_now; }
 static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 // Only the OS wait is replaced: the production wait loop, timeout calculation,
@@ -65,6 +67,28 @@ static void acquire_ticks(int hz, int display, int interval, double want, const 
     double got = per_acquire(hz, display, interval);
     printf("%s: %.2f ticks per acquire (expected %.2f)\n", label, got, want);
     CHECK(got == want, label);
+}
+static void acquire_lateness(void) {
+    char *rows = NULL;
+    size_t size = 0;
+    FILE *tsv = open_memstream(&rows, &size);
+    CHECK(tsv != NULL, "open a capture for the acquire timing rows");
+    if (!tsv) return;
+    g_tsv = tsv;
+    g_link_mode = 1;
+    nvn_present_config(60, 0);
+    win_t win = {.interval = 1, .ntex = 1}; int idx;
+    // The test wait delivers each link tick 2 ms after entering the acquire.
+    win.avail[0] = test_now + 3000000ull;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    win.avail[0] = test_now + 750000ull;
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+    g_tsv = NULL;
+    const char *line_end = fclose(tsv) == 0 && rows ? strchr(rows, '\n') : NULL;
+    const char early[] = "0\t@late_ms\t0.000\n";
+    CHECK(line_end && !strncmp(rows, early, sizeof early - 1), "a link wake 1 ms before the slot logs zero lateness");
+    CHECK(line_end && !strcmp(line_end + 1, "0\t@late_ms\t1.250\n"), "a link wake 1.25 ms after the slot logs 1.250 ms");
+    free(rows);
 }
 // Present snapshots (mtl_snap_on, fixed for the process: run as "t_link_ticks snap"): the acquire takes the display link's wait as without them, the ring slot wait only on top.
 // It used to wait for a free slot alone, and the link frees slots by dropping frames, so a game ran ahead of its present interval (Donkey Kong Bananza at the 30 fps cap: 43-65 fps).
@@ -109,11 +133,46 @@ int main(int argc, char **argv) { @autoreleasepool {
     acquire_ticks(120, 1, 1, 2, "native 60 fps cap waits two 120 Hz ticks");
     CHECK(nvn_game_fps() == 60, "native 60 fps cap configures the display link");
     setenv("DM_FPS_TARGET", "0", 1); g_present_cap = -1;
-    _Alignas(8) float state[10] = {60}; dm_fps_state = (uint8_t *)state;   // include the fixed-step flag at +0x24 read by rt_period_ns
+    _Alignas(8) float state[32] = {60}; dm_fps_state = (uint8_t *)state;   // include the fixed-step flag at +0x24 read by rt_period_ns, and the step's unit at +0x38 (0: vsyncs)
     acquire_ticks(120, 1, 1, 2, "the 60 fps frame step keeps 60 Hz vsyncs");
     acquire_ticks(60, 0, 0, 2, "the 60 fps frame step paces game interval 0: two 120 Hz ticks");
     state[0] = 30;
     acquire_ticks(120, 1, 1, 4, "the 30 fps frame step keeps two 60 Hz vsyncs");
+    state[0] = 40;
+    CHECK(fps_step_cap() == 30 && nvn_game_fps() == 30, "40 in a page in vsyncs (no FRAME_STEP_120 stub): the frame step holds 30");
+    // 40 fps: a page whose step is in ticks of 1/120 s (+0x38 120, a FRAME_STEP_120 stub). Headless (no window) the pacer's clock holds 25 ms
+    uint32_t unit = 120; memcpy((uint8_t *)state + FSTEP_UNIT_OFF, &unit, 4);
+    CHECK(fstep_t120() && fstep_hz() == 120, "a page in ticks: the frame step counts 120 a second");
+    CHECK(fps_step_cap() == 40 && nvn_game_fps() == 40, "40 fps without a window: cap 40, the target the display link reads");
+    acquire_ticks(120, 0, 1, 3, "40 fps: each acquire waits 3 ticks of a 120 Hz link (25 ms), whatever interval the game asks for");
+    acquire_ticks(120, 0, 2, 3, "  game interval 2 too");
+    win_t w40 = {.interval = 1}; nvn_present_config(120, 0);
+    CHECK(present_itv(&w40) == 3 && present_period(&w40) == 25000000ull && rt_period_ns(&w40, 25000000ull) == 25000000ull, "  present interval 3 ticks, period 25 ms, the scheduler's deadline 25 ms");
+    atomic_store(&g_fs_k, 4);
+    acquire_ticks(120, 0, 1, 4, "  40 falling back to 30 under load (hold 4): four ticks");
+    CHECK(rt_period_ns(&w40, present_period(&w40)) == 25000000ull, "  the scheduler keeps the 40 fps deadline while the hold is longer");
+    atomic_store(&g_fs_k, 3); g_link_mode = 1;
+    acquire_ticks(120, 0, 1, 2, "  a 60 Hz link (while the link changes to 120): 3 ticks round up to 2 refreshes (33 ms), never 1 (16.7 ms)");
+    g_link_mode = 2; atomic_store(&g_fs_k, 0);
+    state[0] = 60; acquire_ticks(120, 0, 1, 2, "60 fps in ticks: two 120 Hz ticks");
+    g_link_mode = 1; acquire_ticks(120, 0, 1, 1, "  one tick of a 60 Hz link");
+    g_link_mode = 3; state[0] = 30; acquire_ticks(120, 0, 1, 1, "30 fps in ticks: one tick of the 30 Hz link");
+    CHECK(nvn_game_fps() == 30, "  30 fps in ticks configures the 30 Hz link");
+    g_link_mode = 2; acquire_ticks(120, 0, 1, 4, "  four ticks of a 120 Hz link");
+    // The screen check with a window: a screen at a multiple of 120 Hz shows 40; 60 Hz, 144 Hz, Low Power Mode, and DM_PRESENT_LINK=1 hold 30;
+    // a Mac ProMotion display temporarily matched to fixed 60 Hz (capable 120 Hz) still allows 40
+    state[0] = 40; int dummy_layer; test_layer = &dummy_layer;
+    test_screen_hz = 120; test_capable_hz = 0; CHECK(fps_step_cap() == 40, "a window on a 120 Hz screen: 40");
+    test_screen_hz = 240; CHECK(fps_step_cap() == 40, "  on a 240 Hz screen: 40");
+    test_screen_hz = 60; CHECK(fps_step_cap() == 30, "  on a 60 Hz screen: 30 (a line says why)");
+    test_screen_hz = 60; test_capable_hz = 120; CHECK(fps_step_cap() == 40, "  ProMotion temporarily matched to 60 Hz (capable 120 Hz): 40");
+    test_capable_hz = 0; test_screen_hz = 144; CHECK(fps_step_cap() == 30, "  on a 144 Hz screen: 30 (25 ms is not a whole number of its refreshes)");
+    test_screen_hz = 120; test_low_power = 1; CHECK(fps_step_cap() == 30, "  in Low Power Mode: 30");
+    test_low_power = 0; CHECK(fps_step_cap() == 40, "  out of it: 40 again");
+    setenv("DM_PRESENT_LINK", "1", 1); CHECK(fps_step_cap() == 30, "  DM_PRESENT_LINK=1 (pinned 60 Hz link): 30");
+    setenv("DM_PRESENT_LINK", "2", 1); CHECK(fps_step_cap() == 40, "  DM_PRESENT_LINK=2 (120 Hz link): 40");
+    unsetenv("DM_PRESENT_LINK");
+    test_layer = NULL; test_screen_hz = 0; test_capable_hz = 0;
     dm_fps_state = NULL;
     // 120 fps: the frame step's hold is in ticks of 1/120 s, whatever interval the game asks for, and the target the host writes follows it
     setenv("DM_FPS_TARGET", "120", 1); g_present_cap = -1; g_fps_high = -1;
@@ -165,6 +224,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     atomic_store(&g_link_drain_req, 1); g_link_tick_n += 4; waits = test_waits;
     CHECK(mtl_link_wait_ticks(1, 100000000ull) && test_waits == waits, "a game that fell behind does not wait for a drain");
     CHECK(atomic_load(&g_link_drained) == 2 && !atomic_load(&g_link_drain_req) && atomic_load(&g_link_blocked_ns) == 0, "and the request is dropped, with no acquire wait reported");
+    acquire_lateness();
     pid_t pid; int st = 1; extern char **environ;   // the snapshot cases in a process of their own (mtl_snap_on is decided once)
     CHECK(!posix_spawn(&pid, argv[0], NULL, NULL, (char *[]){argv[0], "snap", NULL}, environ) && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && !WEXITSTATUS(st), "the snapshot cases pass");
     printf("t_link_ticks: %d checks, %d failed\n", checks, failed); return failed != 0;

@@ -33,19 +33,40 @@ static void expect(id<MTLTexture> image,int first,const char *label){
     float *out=result.contents;for(int lv=0;lv<3;lv++)for(int c=0;c<4;c++)CHECK(label,fabsf(out[lv*4+c]-(colors[(first+lv)%4][c]?1.f:0.f))<.001f);
 }
 static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32_t tex_flags) {   // c0: the first fill's colour (distinct per run: a run's pool and storage may reuse an earlier run's addresses)
-    void *mem=NULL; if(posix_memalign(&mem,getpagesize(),65536))abort(); memset(mem,0,65536);
-    pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=65536,.flags=pool_flags};
-    mtl_pool_add(mem,65536);
+    const int late_fill = (tex_flags & NVN_TEXTURE_FLAGS_SPARSE) != 0;
+    size_t pool_size = late_fill ? 131072 : 65536;
+    void *mem=NULL; if(posix_memalign(&mem,getpagesize(),pool_size))abort(); memset(mem,0,pool_size);
+    pool_t pool={.magic=MAGIC('P','O','O','L'),.mem=mem,.size=pool_size,.flags=pool_flags};
+    mtl_pool_add(mem,pool_size);
     tex_t t={.magic=MAGIC('T','E','X',0),.serial=serial,.pool=&pool,.mem=mem};
     t.d=(nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D,.format=format,.width=12,.height=12,.depth=1,.levels=3,.samples=1,.flags=tex_flags};
     nvn_tex_layout(&t.d,&t.L);
-    fill(&t,mem,c0);
-    mtl_tex_init(&t);mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
+    if (!late_fill) fill(&t,mem,c0);
+    mtl_tex_init(&t);
+    if (late_fill) {
+        // Bloodstained resolves textures with sparse layout in ordinary CPU-visible storage before filling them.
+        mtl_sub_begin();
+        CHECK("unfilled sparse-layout ASTC texture resolves", tex_mtl(&t) != nil);
+        finish();
+        dm_guest_write_prepare(mem, t.L.size);
+        fill(&t,mem,c0);
+    }
+    mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
     CHECK("ASTC texture resolves",image!=nil);finish();
     expect(image,c0,"literal ASTC mip color at first use");
+    uint8_t *staging = (uint8_t *)mem + 65536;
+    if (late_fill) CHECK("staging holds the first mip", !nvn_deswizzle(&t.d, 0, 0, mem, staging, 32));
     // A later CPU write is the texture's content (a block-compressed texture is never rendered into, and GPU copies into it reach its storage too)
     dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+1);mtl_sub_begin();id<MTLTexture> again=tex_mtl(&t);finish();
     expect(again,c0+1,"a later CPU write is re-uploaded");
+    if (late_fill) {
+        p_copy_b2t copy = {.tex = &t, .src = (uint64_t)(uintptr_t)staging, .r = {.width = 12, .height = 12, .depth = 1}};
+        mtl_sub_begin();
+        copy_b2t(&copy, sizeof copy);
+        finish();
+        uint8_t stored[64];
+        CHECK("a GPU copy is written back to sparse-layout storage", !nvn_deswizzle(&t.d, 0, 0, mem, stored, 32) && !memcmp(stored, staging, sizeof stored));
+    }
     // A new texture object with the same description over the rewritten storage (GitHub issue #568): its own upload, not the earlier object's texture
     dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+2);
     tex_t u=t;u.serial=serial+100;mtl_tex_init(&u);mtl_sub_begin();id<MTLTexture> other=tex_mtl(&u);finish();
@@ -84,5 +105,6 @@ int main(void){@autoreleasepool{mtl_init();
     const uint32_t uncached=NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED,cached=NVN_MEMORY_POOL_FLAGS_CPU_CACHED|NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
     run(NVN_FORMAT_RGBA_ASTC_6x6,9750,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6_SRGB,9751,uncached,0,0);run(NVN_FORMAT_RGBA_ASTC_6x6,9752,cached,3,0);
     run(NVN_FORMAT_RGBA_ASTC_6x6,9753,uncached,1,NVN_TEXTURE_FLAGS_IMAGE);   // IMAGE on a block-compressed format: shaders cannot write it (Pokemon Pokopia's icons)
+    run(NVN_FORMAT_RGBA_ASTC_6x6_SRGB,9754,uncached,2,NVN_TEXTURE_FLAGS_SPARSE);
     run3d(9760,0,1);run3d(9761,NVN_TEXTURE_FLAGS_IMAGE,0);
     printf("t_initial_uncached: %d checks, %d failed\n",checks,failed);return failed!=0;}}

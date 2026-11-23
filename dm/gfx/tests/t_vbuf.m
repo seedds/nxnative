@@ -64,47 +64,47 @@ int main(void) { @autoreleasepool {
     EXPECT("compact vertex replay restores first full range",1,S.vbuf[0].address==(uint64_t)mem&&S.vbuf[0].size==4);
     EXPECT("compact vertex replay restores high stream range",1,S.vbuf[15].address==(uint64_t)(mem+2)&&S.vbuf[15].size==4);
     id<MTL4RenderCommandEncoder> en = encoder(ps);
-    bind_vbufs(en, NULL); capture(en, out, 0);
+    bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 0);
     uint64_t resolves = g_vbuf_resolve, sets = g_vbuf_set;
-    for (int i = 0; i < 1000; i++) bind_vbufs(en, NULL);
+    for (int i = 0; i < 1000; i++) bind_vbufs(en, NULL, NULL, NULL);
     EXPECT("unchanged streams avoid lookups", g_vbuf_cache ? 0 : 3000, g_vbuf_resolve - resolves);
     EXPECT("unchanged table avoids writes", g_vbuf_cache ? 0 : 4000, g_vbuf_set - sets);
     capture(en, out, 1);
     // A converted stream changes the real table, even though the guest stream address is unchanged.
     enc_r_vbuf(en, VB_SLOT(0), other); capture(en, out, 2);
-    bind_vbufs(en, NULL); capture(en, out, 3);
+    bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 3);
     // All vertex table writers must participate, including argument-buffer writes.
-    enc_r_args(en, MTLRenderStageVertex, other, VB_SLOT(14)); bind_vbufs(en, NULL); capture(en, out, 4);
+    enc_r_args(en, MTLRenderStageVertex, other, VB_SLOT(14)); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 4);
     enc_r_end(en);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 5); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 5); enc_r_end(en); finish();
     mtl_sub_begin(); en = encoder(ps);
-    S.vbuf[0].address = (uint64_t)(mem + 3); bind_vbufs(en, NULL); capture(en, out, 6); enc_r_end(en); finish();
+    S.vbuf[0].address = (uint64_t)(mem + 3); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 6); enc_r_end(en); finish();
     // The same guest address can acquire a new Metal GPU address. Hold the old buffer to prevent address recycling.
     id<MTLBuffer> old = (__bridge id<MTLBuffer>)mb;
     mtl_pool_del(mem); mtl_pool_add(mem, size);
     uint64_t newgpu; mtl_gpu_addr((uint64_t)(mem + 3), 1, &mb, &off, &newgpu);
     EXPECT("replacement buffer has a different GPU address", 1, old.gpuAddress + 12 != newgpu);
     mtl_sub_begin(); en = encoder(ps); resolves = g_vbuf_resolve;
-    bind_vbufs(en, NULL); EXPECT("pool replacement resolves all streams", 3, g_vbuf_resolve - resolves);
+    bind_vbufs(en, NULL, NULL, NULL); EXPECT("pool replacement resolves all streams", 3, g_vbuf_resolve - resolves);
     EXPECT("replacement address bound", newgpu, g_vt_addr[VB_SLOT(0)]);
     capture(en, out, 7); enc_r_end(en); finish();
     mtl_sub_begin(); S.vbuf[0].address = (uint64_t)(ub + 2); S.vbuf[0].size = 6;
     uint64_t copies = g_vbuf_copies, copy_bytes = g_vbuf_copy_bytes; en = encoder(ps);
-    bind_vbufs(en, NULL); bind_vbufs(en, NULL); capture(en, out, 8); enc_r_end(en);
+    bind_vbufs(en, NULL, NULL, NULL); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 8); enc_r_end(en);
     EXPECT("unchanged unaligned binding reuses one copy", 1, g_vbuf_copies - copies);
     EXPECT("unaligned stream copy size", 6, g_vbuf_copy_bytes - copy_bytes);
     mtl_sub_copy((uint64_t)producer, (uint64_t)ub, 8);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 9); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 9); enc_r_end(en); finish();
     EXPECT("unaligned stream readback", want, ((const uint32_t *)out.contents)[8 * 4]);
     EXPECT("unaligned stream refreshed after GPU write", changed, ((const uint32_t *)out.contents)[9 * 4]);
     memcpy(producer + 2, &want, 4);
     mtl_sub_begin(); mtl_sub_copy((uint64_t)producer, (uint64_t)ub, 8);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 10); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 10); enc_r_end(en); finish();
     EXPECT("unaligned stream reads queued GPU write", want, ((const uint32_t *)out.contents)[10 * 4]);
     // A pool remap at the same guest address invalidates the snapshot even within one submission.
-    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 11); enc_r_end(en);
+    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 11); enc_r_end(en);
     copies = g_vbuf_copies; mtl_pool_del(mem); mtl_pool_add(mem, size);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 12); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 12); enc_r_end(en); finish();
     EXPECT("unaligned pool replacement makes a new copy", 1, g_vbuf_copies - copies);
     EXPECT("unaligned pool replacement readback", want, ((const uint32_t *)out.contents)[12 * 4]);
     // Every nonzero residue, a short odd-sized range, and a source write between two uses of the same binding.
@@ -112,33 +112,33 @@ int main(void) { @autoreleasepool {
         uint32_t value = 0x76543210u + residue; memcpy(producer + residue, &value, 4);
         S.vbuf[0].address = (uint64_t)(ub + residue); S.vbuf[0].size = 5;
         mtl_sub_begin(); mtl_sub_copy((uint64_t)producer, (uint64_t)ub, 8);
-        en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 12 + residue); enc_r_end(en); finish();
+        en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 12 + residue); enc_r_end(en); finish();
         EXPECT("byte-aligned GPU copy readback", value, ((const uint32_t *)out.contents)[(12 + residue) * 4]);
     }
     // Inline updates may still be deferred when the next draw needs their bytes as vertices.
     changed = 0xa1b2c3d4u; memcpy(producer + 3, &changed, 4);
     mtl_sub_begin(); mtl_sub_update(producer, (uint64_t)ub, 8);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 16); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 16); enc_r_end(en); finish();
     EXPECT("unaligned stream reads deferred update", changed, ((const uint32_t *)out.contents)[16 * 4]);
     mtl_sub_begin(); mtl_sub_fill((uint64_t)ub, 8, 0x6d6d6d6du);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 17); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 17); enc_r_end(en); finish();
     EXPECT("unaligned stream reads GPU fill", 0x6d6d6d6du, ((const uint32_t *)out.contents)[17 * 4]);
     // Begin the consumer without a CPU wait for the producer submission.
     mtl_sub_begin(); mtl_sub_copy((uint64_t)producer, (uint64_t)ub, 8); uint64_t prior = mtl_sub_commit();
-    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 18); enc_r_end(en); finish();
+    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 18); enc_r_end(en); finish();
     EXPECT("producer submission completed", 1, mtl_wait(prior, 5000000000ull));
     EXPECT("unaligned stream reads preceding submission", changed, ((const uint32_t *)out.contents)[18 * 4]);
     // A real vertex shader writes the source; storage writes are tracked separately from copy/update/fill ranges.
     S.vbuf[0].address = (uint64_t)(mem + 3); S.vbuf[0].size = 4;
     uint64_t ubgpu; mtl_gpu_addr((uint64_t)ub, 16, &mb, &off, &ubgpu);
-    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL); enc_r_vbuf(en, TF_SLOT, ubgpu); enc_r_draw(en, MTLPrimitiveTypePoint, 0, 1); enc_r_end(en);
+    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); enc_r_vbuf(en, TF_SLOT, ubgpu); enc_r_draw(en, MTLPrimitiveTypePoint, 0, 1); enc_r_end(en);
     sbw_note((uint64_t)ub, 16, SBW_GPU);
     S.vbuf[0].address = (uint64_t)(ub + 2); S.vbuf[0].size = 6;
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 19); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 19); enc_r_end(en); finish();
     EXPECT("unaligned stream reads shader write", 22u << 16, ((const uint32_t *)out.contents)[19 * 4]);
-    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 20); enc_r_end(en); copies = g_vbuf_copies;
+    mtl_sub_begin(); en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 20); enc_r_end(en); copies = g_vbuf_copies;
     mtl_sub_update(producer, (uint64_t)mem + 256, 8);
-    en = encoder(ps); bind_vbufs(en, NULL); capture(en, out, 21); enc_r_end(en); finish();
+    en = encoder(ps); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 21); enc_r_end(en); finish();
     EXPECT("unrelated uniform update reuses vertex copy", copies, g_vbuf_copies);
     EXPECT("reused unaligned stream readback", 22u << 16, ((const uint32_t *)out.contents)[21 * 4]);
     S.vbuf[0].address = (uint64_t)(mem + 3); S.vbuf[0].size = 4;
@@ -162,8 +162,8 @@ int main(void) { @autoreleasepool {
     EXPECT("an absent stream leaves the range unknown", 99, absent_last);
     mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
     EXPECT("bytes the draw reads past the bound size", 36, g_vbuf_need[0]);
-    en = encoder_prepared(tail); bind_vbufs(en, NULL); capture(en, out, 22);
-    pull_layout L; pull_layout_fill(&L);
+    en = encoder_prepared(tail); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 22);
+    pull_layout L; pull_layout_fill(&L, &rf, &dw, NULL);
     EXPECT("pulling layout reads the padded copy", g_vt_addr[VB_SLOT(0)] & ~3ull, L.s[0].base);
     enc_r_end(en); finish();
     EXPECT("padded stream copied once", 1, g_vbuf_copies - copies);
@@ -173,7 +173,7 @@ int main(void) { @autoreleasepool {
     EXPECT("vertex 2's last word reads zero", 0, ((const uint32_t *)out.contents)[22 * 4 + 3]);
     dw.count = 1; mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
     EXPECT("a draw inside the bound range needs no copy", 0, g_vbuf_need[0]);
-    en = encoder_prepared(tail); bind_vbufs(en, NULL); capture(en, out, 23); enc_r_end(en); finish();
+    en = encoder_prepared(tail); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 23); enc_r_end(en); finish();
     EXPECT("in-range stream bound as it is", 0, g_vbuf_copies - copies);
     EXPECT("in-range stream reads the pool", 0x1003u, ((const uint32_t *)out.contents)[23 * 4 + 1]);
     S.stream[0].divisor = 1; p_draw inst = {.prim = 4, .first = 0, .count = 1, .instances = 2, .base_instance = 1};
@@ -186,34 +186,77 @@ int main(void) { @autoreleasepool {
     // A stream bound with size 0 at an unaligned address: no bytes to align, so no copy and no red line while nothing reads it; a draw that reads it gets zeros
     S.nattr = 0; S.vbuf[0] = (NVNbufferRange){1, 0}; unsigned reds = g_red_once[120];
     mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(NULL, NULL, NULL);
-    en = encoder_prepared(tail); bind_vbufs(en, NULL); enc_r_end(en); finish();
+    en = encoder_prepared(tail); bind_vbufs(en, NULL, NULL, NULL); enc_r_end(en); finish();
     EXPECT("an unread empty stream is not copied", 0, g_vbuf_copies - copies);
     EXPECT("an unread empty stream logs no red line", reds, g_red_once[120]);
     S.nattr = 1; S.stream[0].stride = 12; S.vbuf[0] = (NVNbufferRange){(uint64_t)tri + 1, 0}; dw.count = 3;
     mtl_sub_begin(); copies = g_vbuf_copies; vbuf_prepare(&rf, &dw, NULL);
     EXPECT("a draw reads past an empty stream", 36, g_vbuf_need[0]);
-    en = encoder_prepared(tail); bind_vbufs(en, NULL); capture(en, out, 24); enc_r_end(en); finish();
+    en = encoder_prepared(tail); bind_vbufs(en, NULL, NULL, NULL); capture(en, out, 24); enc_r_end(en); finish();
     EXPECT("the read empty stream is copied once", 1, g_vbuf_copies - copies);
     for (int i = 0; i < 4; i++) EXPECT("the read empty stream reads zero", 0, ((const uint32_t *)out.contents)[24 * 4 + i]);
     S.vbuf[0] = (NVNbufferRange){(uint64_t)tri, 8};
     S.nattr = 0; S.stream[0].stride = 0; vbuf_prepare(NULL, NULL, NULL);
+    // Snowdrop binds the whole size of a buffer from an offset inside it. A draw within the mapped prefix can read it; a larger or unknown draw cannot.
+    uint32_t *pool_tail = (uint32_t *)((uint8_t *)mem + size - 16);
+    *pool_tail = 0x5a17c0deu;
+    S.nattr = 1; S.attr[0] = (va_st){.fmt = 0x0a, .stream = 0}; S.stream[0].stride = 4;
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)pool_tail, 4};
+    p_draw short_draw = {.first = 0, .count = 1, .instances = 1};
+    mtl_sub_begin(); vbuf_prepare(&rf, &short_draw, NULL); en = encoder_prepared(ps);
+    EXPECT("cache a fully mapped short binding", (uint64_t)-1, (uint64_t)bind_vbufs(en, &rf, &short_draw, NULL));
+    S.vbuf[0].size = 32;
+    p_draw_idx indexed = {.prim = 4, .itype = 1, .count = 3, .instances = 1, .base_vertex = 1, .ibuf = (uint64_t)(ub + 16)};
+    uint16_t indices[] = {0, 2, 1};
+    memcpy((void *)indexed.ibuf, indices, sizeof indices);
+    indexed.ind = (uint64_t)mem;
+    EXPECT("an indirect draw cannot reuse a shorter binding", 0, bind_vbufs(en, &rf, NULL, &indexed));
+    indexed.ind = 0;
+    EXPECT("a direct draw can bind the mapped prefix", (uint64_t)-1, (uint64_t)bind_vbufs(en, &rf, &short_draw, NULL));
+    EXPECT("format conversion uses the mapped prefix", 1, g_vbuf_prefix_mask);
+    EXPECT("format conversion can read one vertex", 4, g_vbuf_prefix_bytes[0]);
+    pull_layout_fill(&L, &rf, &short_draw, NULL);
+    EXPECT("pulling can also bind the prefix", g_vt_addr[VB_SLOT(0)], L.s[0].base);
+    capture(en, out, 25);
+    short_draw.count = 5;
+    EXPECT("a draw that reaches beyond the pool is rejected", 0, bind_vbufs(en, &rf, &short_draw, NULL));
+    EXPECT("the next draw cannot reuse the mapped prefix", 0, g_vbuf_prefix_mask);
+    pull_layout_fill(&L, &rf, &short_draw, NULL);
+    EXPECT("pulling also rejects an out-of-pool fetch", 0, L.s[0].base);
+    EXPECT("direct indexed draw can bind the mapped prefix", (uint64_t)-1, (uint64_t)bind_vbufs(en, &rf, NULL, &indexed));
+    EXPECT("indexed prefix includes the largest index plus base vertex", 16, g_vbuf_prefix_bytes[0]);
+    pull_layout_fill(&L, &rf, NULL, &indexed);
+    EXPECT("indexed pulling can bind the same prefix", g_vt_addr[VB_SLOT(0)], L.s[0].base);
+    indexed.base_vertex = 2;
+    EXPECT("indexed draw that reaches beyond the pool is rejected", 0, bind_vbufs(en, &rf, NULL, &indexed));
+    indexed.base_vertex = -1;
+    EXPECT("negative effective index cannot prove a prefix", 0, bind_vbufs(en, &rf, NULL, &indexed));
+    indexed.base_vertex = 1;
+    pend_add(indexed.ibuf, sizeof indices, 2);
+    EXPECT("pending index copy prevents a prefix based on stale data", 0, bind_vbufs(en, &rf, NULL, &indexed));
+    pull_layout_fill(&L, &rf, NULL, &indexed);
+    EXPECT("indexed pulling also rejects pending indices", 0, L.s[0].base);
+    enc_r_end(en); finish();
+    EXPECT("mapped prefix reads its vertex", *pool_tail, ((const uint32_t *)out.contents)[25 * 4]);
+    S.vbuf[0] = (NVNbufferRange){(uint64_t)tri, 8};
+    S.nattr = 0; S.stream[0].stride = 0;
     // A stream at an address in no memory pool: reported when the vertex shader reads it (the draw is skipped), not when only a stale stream holds it; the others are still bound
     {
         static uint32_t outside[16];   // never added as a pool
         S.nattr = 1; S.attr[0] = (va_st){.fmt = 1, .offset = 0, .stream = 5}; S.vbuf[5] = (NVNbufferRange){(uint64_t)outside, sizeof outside};
         mtl_sub_begin(); en = encoder_prepared(tail);
-        EXPECT("a read stream in no pool is reported", 5, bind_vbufs(en, &rf));
+        EXPECT("a read stream in no pool is reported", 5, bind_vbufs(en, &rf, NULL, NULL));
         EXPECT("the other streams are still bound", 1, g_vt_addr[VB_SLOT(0)] != 0);
         S.attr[0].stream = 0;
-        EXPECT("an unread stream in no pool is not", (uint64_t)-1, (uint64_t)bind_vbufs(en, &rf));
-        EXPECT("without the shader's inputs nothing is reported", (uint64_t)-1, (uint64_t)bind_vbufs(en, NULL));
+        EXPECT("an unread stream in no pool is not", (uint64_t)-1, (uint64_t)bind_vbufs(en, &rf, NULL, NULL));
+        EXPECT("without the shader's inputs nothing is reported", (uint64_t)-1, (uint64_t)bind_vbufs(en, NULL, NULL, NULL));
         enc_r_end(en); finish();
         S.vbuf[5] = (NVNbufferRange){0, 0}; S.attr[0] = (va_st){0}; S.nattr = 0;
     }
     // CPU-only binding microbenchmark, after GPU validation; reports overhead, not game frame time.
     for (int mode = 0; mode < 2; mode++) {
-        g_vbuf_cache = mode; bind_vbufs(nil, NULL); uint64_t start = bp_now(), r = g_vbuf_resolve, w = g_vbuf_set;
-        for (int i = 0; i < 200000; i++) bind_vbufs(nil, NULL);
+        g_vbuf_cache = mode; bind_vbufs(nil, NULL, NULL, NULL); uint64_t start = bp_now(), r = g_vbuf_resolve, w = g_vbuf_set;
+        for (int i = 0; i < 200000; i++) bind_vbufs(nil, NULL, NULL, NULL);
         printf("bindings cache=%d: %.2f ns/draw, lookups=%llu writes=%llu\n", mode, (bp_now() - start) / 200000.0,
             (unsigned long long)(g_vbuf_resolve - r), (unsigned long long)(g_vbuf_set - w));
     }

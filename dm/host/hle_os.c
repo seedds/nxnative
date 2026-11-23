@@ -6,32 +6,40 @@
 #include <stdatomic.h>
 
 // ---------- Side table ----------
+// Guest object -> host state, linear probing with backward-shift deletion: no deleted markers, so every key sits once in the run of
+// occupied slots from its home slot, and an empty slot ends every search (t_objmap). Keys are guest pointers, never NULL.
 #define OM_SIZE (1u << 18)
+#define OM_MASK (OM_SIZE - 1)
 static struct { const void *k; void *v; } g_om[OM_SIZE];
 static pthread_mutex_t g_om_lock = PTHREAD_MUTEX_INITIALIZER;
-static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & (OM_SIZE - 1); }
+static unsigned om_h(const void *k) { uint64_t x = (uint64_t)k; x ^= x >> 29; x *= 0xbf58476d1ce4e5b9ull; return (unsigned)(x >> 40) & OM_MASK; }
+// The key's slot, or the empty slot that ends its run. Called with g_om_lock held
+static unsigned om_find(const void *k) {
+    unsigned i = om_h(k);
+    while (g_om[i].k && g_om[i].k != k) i = (i + 1) & OM_MASK;
+    return i;
+}
 void *objmap_get(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; break; }
-        if (!g_om[i].k) break;
-    }
+    void *r = g_om[om_find(k)].v;   // an empty slot holds NULL
     pthread_mutex_unlock(&g_om_lock);
     return r;
 }
 void objmap_put(const void *k, void *v) {
     pthread_mutex_lock(&g_om_lock);
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1))
-        if (g_om[i].k == k || !g_om[i].k || g_om[i].k == (void *)1) { g_om[i].k = k; g_om[i].v = v; break; }
+    unsigned i = om_find(k);
+    g_om[i].k = k; g_om[i].v = v;
     pthread_mutex_unlock(&g_om_lock);
 }
 void *objmap_del(const void *k) {
     pthread_mutex_lock(&g_om_lock);
-    void *r = NULL;
-    for (unsigned i = om_h(k);; i = (i + 1) & (OM_SIZE - 1)) {
-        if (g_om[i].k == k) { r = g_om[i].v; g_om[i].k = (void *)1; g_om[i].v = NULL; break; }
-        if (!g_om[i].k) break;
+    unsigned i = om_find(k);
+    void *r = g_om[i].v;
+    if (g_om[i].k) {
+        // Close the hole: each later entry of the run whose home slot is not after the hole (cyclically) moves back into it
+        for (unsigned j = (i + 1) & OM_MASK; g_om[j].k; j = (j + 1) & OM_MASK)
+            if (((j - om_h(g_om[j].k)) & OM_MASK) >= ((j - i) & OM_MASK)) { g_om[i] = g_om[j]; i = j; }
+        g_om[i].k = NULL; g_om[i].v = NULL;
     }
     pthread_mutex_unlock(&g_om_lock);
     return r;
@@ -74,35 +82,40 @@ void dm_guest_frame_tick(void) {
         atomic_store(&g_gdet, wall_guest_ns()); atomic_store(&g_gdet_on, 1);
         LOG("DM_DETCLOCK: from the first present on, the guest clock advances by presents, step %llu ns", (unsigned long long)g_gdet_step); return;
     }
-    if (!atomic_load(&g_gfz)) { atomic_fetch_add(&g_gdet, g_gdet_step); dm_guest_clock_advanced(); }
+    if (!atomic_load(&g_gfz)) atomic_fetch_add(&g_gdet, g_gdet_step);
 }
 static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
     else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
 }
-// Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up): freeze if any holds, release only when all are lifted --
-// otherwise "switch to background and back while the keyboard is up" would be released early by the unfreeze on returning to foreground
+// Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up, 3 NVN prepare step, 4 NVN pipeline archive init):
+// freeze if any holds, release only when all are lifted -- otherwise "switch to background and back while the keyboard is up" or "archive init finishes inside the prepare step"
+// would release the clock early
 static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_gfz_reasons;
 // A suspended application does not run: Horizon suspends the whole process out of focus, iOS suspends a background app. The host freezes the guest clock in the background but its
 // guest threads go on until they block, so a guest reading the clock twice there saw no time pass. Super Mario Galaxy 2's frame pacing (main+0x5926a8) took the interval between two
-// frames as its period, got 0, and the next frame's loop that steps by it (main+0x9abd0) never ended. Guest reads of the system counter (the cntpct gate, svc GetSystemTick) wait while
-// the app is in the background (reason 1); host work (dm_host_work: inside a submit or present, which the graphics suspend waits for) reads the frozen clock, as do the other reasons
-static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gfz_bg;
+// frames as its period, got 0, and the next frame's loop that steps by it (main+0x9abd0) never ended. The same stall on the render thread during the host's first-submission prepare
+// step or pipeline archive open (reasons 3 and 4: seconds on a slow disk or cold prebuild) let Vanillaware's main thread skip hundreds of frames and advance into texture teardown
+// before frame 1 finished (13 Sentinels: Aegis Rim, SIGSEGV at main+0x309128 / +0x309e28). Guest reads of the system counter (the cntpct gate, svc GetSystemTick) wait while any
+// GFZ_WAIT_MASK reason holds; host work (dm_host_work: inside a submit or present, which the graphics suspend waits for) reads the frozen clock, as do the other reasons
+enum { GFZ_WAIT_MASK = (1u << 1) | (1u << 3) | (1u << 4) };
+static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gfz_wait;
 // Each read also counts on the reading thread: a run of yields whose passes read the clock is a wait for a time, which the yield back-off sleeps from its start (hle_thread.c thr_yield)
 __thread uint64_t dm_clock_reads;
 void guest_clock_read_wait(void) {
     dm_clock_reads++;
-    if (!atomic_load(&g_gfz_bg) || atomic_load(&dm_host_work)) return;
+    if (!atomic_load(&g_gfz_wait) || atomic_load(&dm_host_work)) return;
     pthread_mutex_lock(&g_gfz_mu);
-    while (g_gfz_reasons & 2u) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
+    while (g_gfz_reasons & GFZ_WAIT_MASK) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze_for(int reason, int on) {
     pthread_mutex_lock(&g_gfz_mu);
     if (on) g_gfz_reasons |= 1u << reason; else g_gfz_reasons &= ~(1u << reason);
     guest_clock_freeze_apply(g_gfz_reasons != 0);
-    atomic_store(&g_gfz_bg, (g_gfz_reasons & 2u) != 0);
-    if (!(g_gfz_reasons & 2u)) pthread_cond_broadcast(&g_gfz_cv);   // after the clock is running again: a released read sees it continue
+    int wait = (g_gfz_reasons & GFZ_WAIT_MASK) != 0;
+    atomic_store(&g_gfz_wait, wait);
+    if (!wait) pthread_cond_broadcast(&g_gfz_cv);   // after the clock is running again: a released read sees it continue
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dmsh_rewrite.py float_add_msl: a float add to storage memory (RED.F32's compare-and-swap loop, InstEmitMemory EmitAtomicAddF32) as one native atomic_fetch_add on a device
-atomic_float. The loop as spirv-cross writes it is replaced and any other loop is left alone; and on this Mac's GPU 8,192 threads adding into the same four words, through the loop
-and through the rewrite, reach the exact sums. test_dmsh_ampere_alu.py FloatRed checks that the translator's own loop is the one rewritten (PR #1930)."""
+atomic_float. The loop as spirv-cross writes it is replaced and any other loop is left alone; a later read of its retry flag still gets false. On this Mac's GPU 8,192 threads
+adding into the same four words, through the loop and through the rewrite, reach the exact sums. test_dmsh_ampere_alu.py FloatRed checks that the translator's own loop is the one rewritten (PR #1930)."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(TOOLS))
-import dmsh_chain
 import dmsh_rewrite
 float_add_msl = dmsh_rewrite.float_add_msl
 
@@ -48,56 +48,47 @@ class FloatAdd(unittest.TestCase):
         src = loop('(*spvDescriptorSet0.cp_s4)', 0, '_2580', 10) + loop('(*spvDescriptorSet0.cp_s4)', 'int(_7)', '_2572', 20)
         out = float_add_msl(src)
         self.assertEqual(out, '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[0], _2580, memory_order_relaxed);\n'
-                              '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[int(_7)], _2572, memory_order_relaxed);\n')
+                              '    bool _10 = false;\n'
+                              '    atomic_fetch_add_explicit((device atomic_float*)&(*spvDescriptorSet0.cp_s4)._m0[int(_7)], _2572, memory_order_relaxed);\n'
+                              '    bool _20 = false;\n')
 
     def test_exact_add_too(self):   # the translator's exact form (XLATE_REDUCED=0): spvFAdd(old, v)
         src = loop('b', 0, 'v', 10).replace('_11 + v;', 'spvFAdd(_11, v);')
-        self.assertEqual(float_add_msl(src), '    atomic_fetch_add_explicit((device atomic_float*)&b._m0[0], v, memory_order_relaxed);\n')
+        self.assertEqual(float_add_msl(src), '    atomic_fetch_add_explicit((device atomic_float*)&b._m0[0], v, memory_order_relaxed);\n'
+                                           '    bool _10 = false;\n')
+
+    def test_live_retry_flag_is_false_after_add(self):
+        tail = '    b._m0[0] = uint(_10);\n'
+        for add in ('_11 + v', 'spvFAdd(_11, v)'):
+            with self.subTest(add=add):
+                src = loop('b', 0, 'v', 10).replace('_11 + v', add) + tail
+                out = float_add_msl(src)
+                self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
+                self.assertIn('    bool _10 = false;\n', out)   # the do-while can only finish with this value
+                self.assertTrue(out.endswith(tail))
 
     def test_other_words_and_shapes_left_alone(self):
         other = loop('b', 0, 'v', 10).replace('&b._m0[0], &', '&b._m0[1], &')   # the swap on another word than the read
         self.assertEqual(float_add_msl(other), other)
-        used = loop('b', 0, 'v', 10) + '    out = _11;\n'   # a loop whose read is used after it is the same text: the rewrite drops only the do-block's own names
-        self.assertNotIn('_11 = as_type<float>', float_add_msl(used))
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_sums_on_gpu(self):
         body = loop('b', 0, 'v', 10) + loop('b', 1, 'w', 20) + loop('b', 2, 'v', 30) + loop('b', 3, 'w', 40)
-        runner = r'''#import <Metal/Metal.h>
-#include <stdio.h>
-int main(int ac, char **av) { @autoreleasepool {
-    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
-    for (int k = 1; k < ac; k++) {
-        id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[k])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
-        id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; if (!ps) { puts(e.description.UTF8String); return 2; }
-        id<MTLBuffer> b = [d newBufferWithLength:16 options:MTLResourceStorageModeShared]; memset(b.contents, 0, 16);
-        id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> c = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [c computeCommandEncoder];
-        [ce setComputePipelineState:ps]; [ce setBuffer:b offset:0 atIndex:0]; [ce dispatchThreads:MTLSizeMake(8192, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)]; [ce endEncoding]; [c commit]; [c waitUntilCompleted];
-        const float *f = b.contents; printf("%g %g %g %g\n", f[0], f[1], f[2], f[3]);
-    }
-    return 0;
-} }
-'''
-        with tempfile.TemporaryDirectory() as w:
-            w = Path(w); libs = []
-            for name, src in (('loop', KERNEL % body), ('native', KERNEL % float_add_msl(body))):
-                (w / f'{name}.metal').write_text(src)
-                subprocess.run([*dmsh_chain.mac_metal(), str(w / f'{name}.metal'), '-o', str(w / f'{name}.air')], check=True, capture_output=True)   # the chain's flags: its deployment target is its language version
-                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / f'{name}.air'), '-o', str(w / f'{name}.metallib')], check=True)
-                libs.append(str(w / f'{name}.metallib'))
-            self.assertIn('atomic_float', (w / 'native.metal').read_text())
-            (w / 'r.m').write_text(runner)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r')] + libs, capture_output=True, text=True)
-            want = f'{sum((i & 7) * 0.25 for i in range(8192)):g} 8192 {sum((i & 7) * 0.25 for i in range(8192)):g} 8192'
-            self.assertEqual(out.stdout.split('\n')[:2], [want, want], out.stdout + out.stderr)
+        body += '    if (_10 || _20 || _30 || _40) { b._m0[0] = as_type<uint>(-1.0f); }\n'
+        import metal_kernel, struct
+        want = [sum((i & 7) * 0.25 for i in range(8192)), 8192.0] * 2
+        for name, src in (('loop', KERNEL % body), ('native', KERNEL % float_add_msl(body))):
+            if name == 'native': self.assertIn('atomic_float', src)
+            got = [struct.unpack('<f', struct.pack('<I', x))[0] for x in metal_kernel.run(src, 'k', [0, 0, 0, 0], 8192, per_group=256)]
+            self.assertEqual(got, want, name)
 
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_compiles_for_iphone(self):   # atomic_float at the iPhone libraries' deployment target and flags (ios_metal.METAL)
         sys.path.insert(0, str(TOOLS.parents[1] / 'ios/tools')); import ios_metal
         with tempfile.TemporaryDirectory() as w:
-            src = Path(w) / 'n.metal'; src.write_text(KERNEL % float_add_msl(loop('b', 0, 'v', 10)))
+            body = loop('b', 0, 'v', 10) + '    if (_10) { b._m0[0] = 0u; }\n'
+            src = Path(w) / 'n.metal'; src.write_text(KERNEL % float_add_msl(body))
             r = subprocess.run([*ios_metal.METAL, str(src), '-o', str(Path(w) / 'n.air')], capture_output=True, text=True)
             if 'SDK "iphoneos" cannot be located' in r.stderr: self.skipTest('no iPhone SDK')
             self.assertEqual(r.returncode, 0, r.stderr)

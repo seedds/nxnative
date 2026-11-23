@@ -23,19 +23,19 @@ void dm_host_helper_qos(qos_class_t q) { (void)q; }
 
 static int checks, fails;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
-static const char *const codes[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+static const char *const codes[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR", "pl", "th"};
 
 int main(void) {
     // Check the full matrix: both Chinese spellings match their own script;
     // different scripts, region variants and every unrelated language stay distinct.
-    for (int32_t lang = 0; lang < 18; lang++) for (int i = 0; i < 18; i++) {
+    for (int32_t lang = 0; lang < 20; lang++) for (int i = 0; i < 20; i++) {
         char code[8] = {0}; memcpy(code, codes[i], strlen(codes[i]));
         unsigned want = lang == i || (lang == 6 && i == 15) || (lang == 15 && i == 6)
                                  || (lang == 11 && i == 16) || (lang == 16 && i == 11);
         CHECK(h_set_LangEq(&lang, code) == want, "Language == LanguageCode matrix");
         CHECK(h_set_LangEq2(code, &lang) == want, "LanguageCode == Language matrix");
     }
-    const int32_t invalid[] = {-1, INT_MIN, 18, INT_MAX};
+    const int32_t invalid[] = {-1, INT_MIN, 20, INT_MAX};
     for (unsigned i = 0; i < sizeof invalid / sizeof *invalid; i++) {
         CHECK(!h_set_LangEq(&invalid[i], "zh-Hans"), "invalid Language is not equal");
         CHECK(!h_set_LangEq2("zh-Hans", &invalid[i]), "invalid Language is not equal (reversed)");
@@ -52,17 +52,57 @@ int main(void) {
         }
     // Matching aliases must not collapse the system table: newer games use its
     // indices, and callers of Make must continue to receive the original spelling.
+    // Polish (18) and Thai (19) have codes, but a Switch game's list stays 18 long.
     char available[19 * 8]; memset(available, 0xa5, sizeof available);
     CHECK(h_set_AvailLangN() == 18, "available language count stays 18");
     CHECK(h_set_AvailLang(available, 19) == 18, "available language list keeps all 18 entries");
-    for (int i = 0; i < 18; i++) {
+    for (int i = 0; i < 20; i++) {
         char expected[8] = {0}; memcpy(expected, codes[i], strlen(codes[i]));
         uint64_t code = h_set_LangMake(i);
         CHECK(!memcmp(&code, expected, 8), "Make preserves each exact spelling");
-        CHECK(!memcmp(available + i * 8, expected, 8), "available language list preserves order and spelling");
+        if (i < 18) CHECK(!memcmp(available + i * 8, expected, 8), "available language list preserves order and spelling");
     }
     const unsigned char *tail = (const unsigned char *)available + 18 * 8;
     for (int i = 0; i < 8; i++) CHECK(tail[i] == 0xa5, "available language list leaves the unused entry alone");
+    memset(available, 0xa5, sizeof available);
+    CHECK(h_set_AvailLang(available, 3) == 3 && !memcmp(available + 16, "fr\0\0\0\0\0\0", 8)
+          && (unsigned char)available[24] == 0xa5, "a short buffer takes the first codes");
+    CHECK(!h_set_AvailLang(NULL, 0), "an empty buffer writes nothing");
+
+    // nn::oe::GetDisplayVersion: reads the exact 16-byte DisplayVersion field from control.nacp (+0x3060),
+    // preserving suffixes like "1.0.2 b723"; falls back to DM_GAME_DISPLAY_VERSIONS / "1.0.0" when absent.
+    {
+        char tmp[] = "/tmp/t_dispver.XXXXXX", nacp_path[256], rom_path[256], out[16];
+        CHECK(mkdtemp(tmp) != NULL, "mkdtemp for display version");
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", tmp);
+        snprintf(rom_path, sizeof rom_path, "%s/romfs.img", tmp);
+        uint8_t nacp[0x4000] = {0};
+        memcpy(nacp + 0x3060, "1.0.2 b723", 10);
+        FILE *f = fopen(nacp_path, "wb"); CHECK(f && fwrite(nacp, 1, sizeof nacp, f) == sizeof nacp, "write control.nacp"); if (f) fclose(f);
+        unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom_path, 1);
+        memset(out, 0xaa, sizeof out); h_oe_DispVer(out);
+        CHECK(!strcmp(out, "1.0.2 b723") && out[15] == 0, "GetDisplayVersion reads exact DisplayVersion beside DM_ROMFS");
+        // 16 non-NUL bytes in control.nacp must NUL-terminate at byte 15 without reading past the buffer.
+        memset(nacp + 0x3060, '9', 16);
+        f = fopen(nacp_path, "wb"); CHECK(f && fwrite(nacp, 1, sizeof nacp, f) == sizeof nacp, "rewrite full-width control.nacp"); if (f) fclose(f);
+        setenv("DM_CONTROL_NACP", nacp_path, 1);
+        memset(out, 0xaa, sizeof out); h_oe_DispVer(out);
+        CHECK(!memcmp(out, "999999999999999\0", 16), "GetDisplayVersion NUL-terminates a full 16-byte NACP field");
+        // Missing control.nacp falls back to DM_GAME_DISPLAY_VERSIONS by main build ID, else "1.0.0".
+        unlink(nacp_path); rmdir(tmp);
+        memset(out, 0xaa, sizeof out); h_oe_DispVer(out);
+        CHECK(!strcmp(out, "1.0.0"), "GetDisplayVersion falls back to 1.0.0 without control.nacp or matching build");
+        const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
+        if (k[0].build) {
+            module_t fake = {0}; strlcpy(fake.name, "main", sizeof fake.name); strlcpy(fake.build_id, k[0].build, sizeof fake.build_id);
+            g_mod = &fake; g_nmod = 1;
+            memset(out, 0xaa, sizeof out); h_oe_DispVer(out);
+            CHECK(!strcmp(out, k[0].ver), "GetDisplayVersion falls back to profile build row without control.nacp");
+            g_mod = NULL; g_nmod = 0;
+        }
+        unsetenv("DM_CONTROL_NACP"); unsetenv("DM_ROMFS");
+    }
+
     printf("language: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

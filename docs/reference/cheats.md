@@ -233,6 +233,16 @@ The host side is what [docs/development.md, Cheats](../development.md#cheats) st
 | Frozen addresses | `dmnt:cht` list, written after each pass | no such list; `freeze` is compiled into cheats, plus host-only never-decrease | different | Overlay freezes have no equivalent; compiled freezes behave like cheats. |
 | Writes into main's code | allowed by the debug write SVC | on the Mac, through a writable alias of the image, with an icache flush, except into a word the rewriter changed or moved (`main.changed.tsv`: its sites, cuts, lock acquires, and the windows and spin waits that run from copies), which turns the cheat off with the reason; refused whole without that list (modules from an older rewriter). On the iPhone never: its code pages are the app's signed pages | different | Most code patches apply on the Mac. One that writes over a rewritten word, often the off half of a pair putting the Switch's original instruction back over the rewriter's branch, would undo the site (an SVC or TLS read running natively) or never run, so it stays off. On the iPhone only data cheats run. |
 
+## Porting cheats between builds
+
+### Pointer bases in .bss refused as outside the image
+
+- **Symptom:** `scripts/cheat_anchor.py import` keeps every pointer cheat bound to its own build (`kept for build … only: address 0xC284D8 is outside the main NSO image or crosses a segment`), and `compile` / `check` refuse `.bss` targets (`address … is outside the main NSO image`), for addresses the NSO header places in `.bss`.
+- **Cause:** `Build.where` and `Compiler.addr` bounded the module by `len(img)`, taking the loaded image to include `.bss`. `dm/tools/nso.py`'s image stops at the end of `.data` (`bss` is only a size on `nso.Module`), so every address in `.bss`—where games keep most singletons a pointer cheat starts from—was treated as outside the module.
+- **Fix:** `Build` loads the NSO through `dm/tools/nso.py` directly, computes the module's end from `bss_start + mod.bss`, and both `Build.where` and `Compiler.addr` bound `.bss` by it. Xenoblade Chronicles 2's 2.1.0 file then anchored all 23 of its cheats instead of none.
+- **Check:** `python3 dm/tools/tests/test_cheat_anchor.py`: `test_bss_is_inside_the_module_up_to_the_headers_size` (an address in `.bss` is a data anchor up to the header's bss size, outside past it or across `.data`'s end, and `.bss` pointer cheats, freezes, and fixed `main+` addresses round-trip through `import` and `compile`).
+- **Found on:** Xenoblade Chronicles 2's 2.1.0 cheat file (build `F77F1559371C0EC6`), carried to its Switch 2 Edition (`0400E95004038001`). That program is a recompile (687 of 35,522 functions match exactly), so `compile` still found none of the anchors' code references; the three objects were found by their allocation sizes and field offsets instead, which the two builds share.
+
 ## Sources
 
 All read on 2026-10-26 at Atmosphère commit [`6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8`](https://github.com/Atmosphere-NX/Atmosphere/tree/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8) (2026-10-15), identical to tag 1.12.1 and to `master` that day. Files under `https://raw.githubusercontent.com/Atmosphere-NX/Atmosphere/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8/`:

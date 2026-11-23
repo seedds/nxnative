@@ -146,6 +146,12 @@ t_tbuf_live: t_tbuf_live.m $(MTL_T_DEP)
 check_t_tbuf_live: t_tbuf_live
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_live
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_tbuf_live
+t_img_pool: t_img_pool.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_img_pool.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_img_pool
+check_t_img_pool: t_img_pool
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_img_pool
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_img_pool
 .PHONY: check_t_tbuf_access
 check_t_tbuf_access: t_tbuf_access
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_tbuf_access shadow

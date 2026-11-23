@@ -338,7 +338,7 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
                 const p_bind_buf *u=b->kind==NVN_RB_SBUFP?&S.ssbo[st][b->reg]:&S.ubo[st][b->reg];
                 int write=b->kind==NVN_RB_SBUFP && b->rw && !(sh->sb_ro>>b->reg&1);
                 geo_access_add(&a,u->addr,b->kind==NVN_RB_CBUF?cb_len(sh,b->reg,u->size):u->size,write);
-            } else if (b->kind==NVN_RB_SBUFU || b->kind==NVN_RB_SBUFQ || b->kind==NVN_RB_IMG || b->kind==NVN_RB_IMGU || b->kind==NVN_RB_TBUF || b->kind==NVN_RB_TBUFU) a.unknown=1;
+            } else if (b->kind==NVN_RB_SBUFU || b->kind==NVN_RB_SBUFQ || b->kind==NVN_RB_IMG || b->kind==NVN_RB_IMGU || b->kind==NVN_RB_IMGP || b->kind==NVN_RB_TBUF || b->kind==NVN_RB_TBUFU) a.unknown=1;
         }
     }
     return a;

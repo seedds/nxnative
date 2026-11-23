@@ -108,6 +108,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             {
                 context.AddCapability(Capability.Geometry);
 
+                // nxnative: BuiltIn ViewportIndex in a geometry shader needs MultiViewport
+                if (context.Info.IoDefinitions.Contains(new IoDefinition(StorageKind.Output, IoVariable.ViewportIndex)))
+                {
+                    context.AddCapability(Capability.MultiViewport);
+                }
+
                 if (parameters.Definitions.GpPassthrough && context.HostCapabilities.SupportsGeometryShaderPassthrough)
                 {
                     context.AddExtension("SPV_NV_geometry_shader_passthrough");

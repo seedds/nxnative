@@ -2082,8 +2082,10 @@ static void gp_report(int n, gp_lab *lab, uint64_t frame) {   // the frame's las
     MLOG("[gpuprof] frame %llu: render %.2f ms, compute / copy %.2f ms over %d encoders (%d render passes, attachments load %.1f MB store %.1f MB), first start to last end %.2f ms", (unsigned long long)frame, tot[0] / 1e3, tot[1] / 1e3, n, np, ld / 1024.0, st / 1024.0, span / 1e3);
     free(lab); atomic_store(&g_gp_busy, 0);
 }
+static void fbd_written(id t);   // DM_NVN_FB_DEPTH_RECT: a GPU write into texture t not bounded by depth snapshot rectangles
+static void fbd_pass_begin(MTL4RenderPassDescriptor *d, int main_pass);
 static void tf_pass_end(void); static id<MTL4RenderCommandEncoder> g_tf_enc;   // the open transform feedback capture pass (nvn_feedback.inc): ended before any other encoder begins
-static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2);   // the draw passes (rp_begin_ex); see barrier_game
+static inline id<MTL4RenderCommandEncoder> enc_r_begin_pass(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2); fbd_pass_begin(d, 1);   // the draw passes (rp_begin_ex); see barrier_game
     id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0);
     if (g_last_end_relaxed && !(g_game_barrier & GAME_BARRIER_FULL) && barrier_game()) { g_bar_skip++;   // ordered by the relaxed end barrier; the alias flush, when aliases exist, is a consumer barrier before this pass's fragments (see m4_end)
         MTL4VisibilityOptions vis = resource_vis(); if (vis & MTL4VisibilityOptionResourceAlias) [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageFragment visibilityOptions:vis]; }
@@ -2096,7 +2098,7 @@ static inline void enc_r_end_pass(id e) {
     gp_end(e); [(id<MTL4CommandEncoder>)e barrierAfterStages:MTLStageVertex | MTLStageObject | MTLStageMesh | MTLStageFragment beforeQueueStages:MTLStageFragment | MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     [e endEncoding]; g_last_end_relaxed = 1;
 }
-static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
+static inline id<MTL4RenderCommandEncoder> enc_r_begin(MTL4RenderPassDescriptor *d) { if (g_tf_enc) tf_pass_end(); g_cm_enc++; cm_enc_mark(2); fbd_pass_begin(d, 0); id<MTL4RenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:d]; cm_enc_mark(0); [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:resource_vis()]; [e setArgumentTable:g_vt atStages:MTLRenderStageVertex]; [e setArgumentTable:g_ft atStages:MTLRenderStageFragment]; gp_begin(e, 'R', d); return e; }
 static inline void enc_r_end(id e) { m4_end(e); }
 static inline void enc_r_pso(__unsafe_unretained id<MTL4RenderCommandEncoder> e, __unsafe_unretained id<MTLRenderPipelineState> p) { [e setRenderPipelineState:p]; }   // the caller holds both: no retain and release a draw
 static inline void enc_r_dss(id<MTL4RenderCommandEncoder> e, id<MTLDepthStencilState> s) { [e setDepthStencilState:s]; }
@@ -2169,12 +2171,12 @@ static inline id enc_b_begin(id cb) {
     return e; }
 static inline void enc_b_end(id e) { m4_end(e); }
 static inline void enc_b_copy_buffer(id e, id<MTLBuffer> s, NSUInteger so, id<MTLBuffer> d, NSUInteger doff, NSUInteger n) { [e copyFromBuffer:s sourceOffset:so toBuffer:d destinationOffset:doff size:n]; }
-static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o) { [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o]; }
+static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o) { fbd_written(d); [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o]; }
 static inline void enc_b_copy_texture_buffer(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img]; }
 // The same with a blit option: one plane of a combined depth / stencil texture (MTLBlitOptionDepthFromDepthStencil)
-static inline void enc_b_copy_buffer_texture_opt(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLBlitOption opt) { [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o options:opt]; }
+static inline void enc_b_copy_buffer_texture_opt(id e, id<MTLBuffer> s, NSUInteger so, NSUInteger row, NSUInteger img, MTLSize z, id<MTLTexture> d, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLBlitOption opt) { fbd_written(d); [e copyFromBuffer:s sourceOffset:so sourceBytesPerRow:row sourceBytesPerImage:img sourceSize:z toTexture:d destinationSlice:sl destinationLevel:lv destinationOrigin:o options:opt]; }
 static inline void enc_b_copy_texture_buffer_opt(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img, MTLBlitOption opt) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img options:opt]; }
-static inline void enc_b_copy_texture(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:so sourceSize:z toTexture:d destinationSlice:dl destinationLevel:dv destinationOrigin:doo]; }
+static inline void enc_b_copy_texture(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) { fbd_written(d); [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:so sourceSize:z toTexture:d destinationSlice:dl destinationLevel:dv destinationOrigin:doo]; }
 static void blit_note(void);   // Per-pass dump: a copy / buffer update ended the render pass (defined after PD)
 // Ordering inside the copy encoder: Metal 4 does not order copies / fills within one encoder (no automatic hazard tracking); an operation reading or writing a range an earlier one wrote needs an intra-encoder barrier.
 // Without it, SMBW's two updates per frame to the same uniform slot ("write 4 bytes −1, then 16 bytes of coefficients") occasionally landed in reverse order; the fountain water wave simulation took −1 as its self coefficient, diverged, and the water vertices were pushed to the top of the screen.
@@ -4424,7 +4426,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                     if(nvn_deswz_gpu_direct_m4(g_up_ce,g_up_ct,params,poff,(__bridge id<MTLBuffer>)mb,mo,&t->d,l,view)){ok=0;break;}
                     g_direct_dispatches++;
                 }
-                if(ok){[g_up_texs addObject:mt];g_direct_uploads++;if(!g_cb)up_flush();return mt;}
+                if(ok){fbd_written(mt);[g_up_texs addObject:mt];g_direct_uploads++;if(!g_cb)up_flush();return mt;}
                 // Any encoded writes must finish before fallback copies replace
                 // them; both versions read the same source and write all texels.
                 [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
@@ -6079,7 +6081,8 @@ static void ts_boundary(void) {   // the end of a segment and the start of the n
 }
 static int enc_open(void) { return g_enc != nil; }
 // Target info of the current render pass: determined once from the attachments at rp_begin and shared by all draws in the pass (pipeline key, depth-stencil, viewport / scissor all depend only on it)
-static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial; int layered; } g_pass;
+static struct { uint32_t cfmt[8], dfmt, sfmt, samples; int hd, hs; NSUInteger tw, th; uint64_t serial; int layered;
+    const void *dsrc, *dheap; int dlv, dsl; NSUInteger dw, dh; } g_pass;
 static int g_rp_layered;   // the pass about to open is for a vertex shader that writes the layer (draw → rp_begin_ex)
 // Slice-merged passes (DM_NVN_SLICE_MERGE, on by default; 0 off): consecutive passes that each draw into another layer of one level of the same array or cube texture,
 // with nothing between them but state, uniform updates and draws (no game barrier, clear, copy or dispatch: sm_scan), run as one layered pass. Each draw reaches its layer through a vertex
@@ -6967,6 +6970,11 @@ static void *rp_begin_ex_(int clear_only) {
         id<MTLTexture> dt = R.rt.depth ? pd.depthAttachment.texture : nil, stt = R.rt.depth ? pd.stencilAttachment.texture : nil;   // Depth / stencil attachments are fetched separately (possibly only one of them is attached)
         g_pass.hd = dt != nil; g_pass.hs = stt != nil;
         g_pass.dfmt = dt ? (uint32_t)dt.pixelFormat : 0; g_pass.sfmt = stt ? (uint32_t)stt.pixelFormat : 0;
+        { id<MTLTexture> ds = dt ? dt : stt;
+          if (ds) { id<MTLTexture> root = ds; NSUInteger lv = dt ? pd.depthAttachment.level : pd.stencilAttachment.level, sl = dt ? pd.depthAttachment.slice : pd.stencilAttachment.slice;
+              while (root.parentTexture) { lv += root.parentRelativeLevel; sl += root.parentRelativeSlice; root = root.parentTexture; }
+              g_pass.dsrc = (__bridge const void *)root; g_pass.dheap = (__bridge const void *)root.heap; g_pass.dlv = (int)lv; g_pass.dsl = (int)sl;
+              g_pass.dw = mip_extent(root.width, lv); g_pass.dh = mip_extent(root.height, lv); } }
         PD("J pass=%llu depth-stencil NVN=%#x view=%#x Metal=%u/%u use=%d/%d mode=%d", g_stat_pass + 1, R.rt.depth ? R.rt.depth->d.format : 0,
            R.rt.has_dview && R.rt.dview.set_format ? R.rt.dview.format : 0, g_pass.dfmt, g_pass.sfmt, g_pass.hd, g_pass.hs, clear_only);
         if (dt || stt) g_pass.samples = (uint32_t)(dt ? dt : stt).sampleCount;
@@ -15881,7 +15889,8 @@ void ms_after(void) {
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread, g_fb_dwrote;   // color slots written and read directly; depth/stencil planes read and written
-typedef struct { uint64_t ser, bar, sub, use, draw; int lv, sl; uint32_t lvm; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); draw: the draw it was last handed to (g_draw_seq); lvm: the levels copied into it (fb_prepare's range snapshots)
+typedef struct { uint64_t ser, bar, sub, use, draw; int lv, sl; uint32_t lvm; __strong id<MTLTexture> snap;
+    const void *src, *heap; uint64_t sp_gen; int inc, dfull, nr; uint32_t r[16][4]; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); draw: the draw it was last handed to (g_draw_seq); lvm: the levels copied into it (fb_prepare's range snapshots); src/heap/sp_gen/inc/dfull/nr/r: incremental bounded depth snapshot state (DM_NVN_FB_DEPTH_RECT)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
     if (g_fb_mode < 0) { const char *e = getenv("DM_NVN_FB_SNAP"); g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
@@ -15928,7 +15937,7 @@ static fb_cache_t *fb_snap_shape(uint64_t ser, int lv, int sl, const fb_shape_t 
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
         e->snap = rh_place(d); if (!e->snap) e->snap = [g_dev newTextureWithDescriptor:d];   // recycled memory: a resized attachment's snapshot takes the heap of an earlier size's
         if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
-    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; e->draw = g_draw_seq; e->lvm = 0; *fresh = 1; return e;
+    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; e->draw = g_draw_seq; e->lvm = 0; e->src = NULL; e->heap = NULL; e->sp_gen = 0; e->inc = 0; e->dfull = 0; e->nr = 0; *fresh = 1; return e;
 }
 // The attachment's level and layer alone, which the caller copies when it is fresh
 static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
@@ -16136,6 +16145,117 @@ static int fb_depth_on(void) {
     if (g_fb_depth_m < 0) { const char *e = getenv("DM_NVN_FB_DEPTH"); g_fb_depth_m = !(e && !strcmp(e, "0")); if (!g_fb_depth_m) MLOG("same-pass depth sampling: draws read their depth attachment in the pass (DM_NVN_FB_DEPTH=0)"); }
     return g_fb_depth_m;
 }
+// ---- Bounded depth snapshots (DM_NVN_FB_DEPTH_RECT) ----
+// When a draw samples and writes a large depth atlas across repeated game barriers (e.g. a cached shadow atlas), copying the entire attachment every barrier wastes GPU copy bandwidth.
+// Each depth snapshot cache entry remembers its root Metal texture and heap plus the pairwise-disjoint, 16-pixel tile-aligned rectangles written to that level/slice since the copy.
+// On the next barrier, only those rectangles are blitted into the existing snapshot (or nothing if no write happened, leaving the pass open). Any untracked write (non-Load pass, layered
+// pass, enc_r_begin, MSAA resolveTexture, blit/upload into the texture, heap alias, sparse pool remap, waiting clear, mesh-task draw, or unbounded viewport) forces a whole copy.
+// Off by default (0); 1 enables, ab alternates with DM_AB for same-thermal measurement.
+static int g_fbd_mode = -1, g_fbd_any;
+static uint64_t g_fbd_snaps, g_fbd_whole, g_fbd_rects, g_fbd_none, g_fbd_bytes, g_fbd_bytes_whole;
+static int fbd_on(void) {
+    if (g_fbd_mode < 0) {
+        g_fbd_mode = sw_mode("DM_NVN_FB_DEPTH_RECT", 0);
+        if (g_fbd_mode == 1) MLOG("depth snapshots by rectangle (DM_NVN_FB_DEPTH_RECT=1): only the parts written since the last snapshot are copied");
+    }
+    return sw_on(g_fbd_mode);
+}
+static void fbd_written(id t) {
+    if (!g_fbd_any || !t) return;
+    id<MTLTexture> root = (id<MTLTexture>)t;
+    while (root.parentTexture) root = root.parentTexture;
+    const void *b = (__bridge const void *)root, *h = (__bridge const void *)root.heap;
+    for (int i = 0; i < 8; i++) {
+        fb_cache_t *e = &g_fbc[i];
+        if (e->inc && (e->src == b || (e->heap && h && e->heap == h))) e->dfull = 1;
+    }
+}
+static void fbd_pass_begin(MTL4RenderPassDescriptor *d, int main_pass) {
+    if (!g_fbd_any || !d) return;
+    id<MTLTexture> dt = d.depthAttachment.texture, st = d.stencilAttachment.texture;
+    if (d.depthAttachment.resolveTexture) fbd_written(d.depthAttachment.resolveTexture);
+    if (d.stencilAttachment.resolveTexture) fbd_written(d.stencilAttachment.resolveTexture);
+    int layered = d.renderTargetArrayLength > 1;
+    if (dt && (!main_pass || layered || d.depthAttachment.loadAction != MTLLoadActionLoad)) fbd_written(dt);
+    if (st && (!main_pass || layered || d.stencilAttachment.loadAction != MTLLoadActionLoad)) fbd_written(st);
+}
+static void fbd_full_pass(void) {
+    if (!g_fbd_any || !g_pass.dsrc) return;
+    for (int i = 0; i < 8; i++) {
+        fb_cache_t *e = &g_fbc[i];
+        if (e->inc && (e->src == g_pass.dsrc || (e->heap && g_pass.dheap && e->heap == g_pass.dheap))) e->dfull = 1;
+    }
+}
+// Record a bounded write [x0, x1) x [y0, y1) to the open pass's depth/stencil attachment. Rectangles are snapped outward to 16-pixel tile boundaries and iteratively merged with any
+// overlapping rectangle so all stored rectangles stay pairwise tile-disjoint (no concurrent Metal 4 blit race on shared compression blocks).
+static void fbd_add(long x0, long y0, long x1, long y1) {
+    if (!g_fbd_any || !g_pass.dsrc) return;
+    long W = (long)g_pass.dw, H = (long)g_pass.dh;
+    x0 = MAX(x0, 0); y0 = MAX(y0, 0); x1 = MIN(x1, W); y1 = MIN(y1, H);
+    if (x1 <= x0 || y1 <= y0) return;
+    x0 &= ~15l; y0 &= ~15l;
+    x1 = MIN((x1 + 15l) & ~15l, W); y1 = MIN((y1 + 15l) & ~15l, H);
+    for (int i = 0; i < 8; i++) {
+        fb_cache_t *e = &g_fbc[i];
+        if (!e->inc || e->dfull) continue;
+        if (e->src != g_pass.dsrc) {
+            if (e->heap && g_pass.dheap && e->heap == g_pass.dheap) e->dfull = 1;
+            continue;
+        }
+        if (e->lv != g_pass.dlv || e->sl != g_pass.dsl) continue;
+        long ax0 = x0, ay0 = y0, ax1 = x1, ay1 = y1;
+        int covered = 0;
+        for (;;) {
+            int merged = 0;
+            for (int k = 0; k < e->nr; k++) {
+                uint32_t *q = e->r[k];
+                if ((long)q[0] < ax1 && ax0 < (long)q[2] && (long)q[1] < ay1 && ay0 < (long)q[3]) {
+                    if ((long)q[0] <= ax0 && (long)q[1] <= ay0 && (long)q[2] >= ax1 && (long)q[3] >= ay1) { covered = 1; break; }
+                    ax0 = MIN(ax0, (long)q[0]); ay0 = MIN(ay0, (long)q[1]);
+                    ax1 = MAX(ax1, (long)q[2]); ay1 = MAX(ay1, (long)q[3]);
+                    e->nr--;
+                    if (k < e->nr) memcpy(e->r[k], e->r[e->nr], sizeof e->r[0]);
+                    merged = 1;
+                    break;
+                }
+            }
+            if (covered || !merged) break;
+        }
+        if (covered) continue;
+        if (e->nr == 16) {
+            for (int k = 0; k < e->nr; k++) {
+                ax0 = MIN(ax0, (long)e->r[k][0]); ay0 = MIN(ay0, (long)e->r[k][1]);
+                ax1 = MAX(ax1, (long)e->r[k][2]); ay1 = MAX(ay1, (long)e->r[k][3]);
+            }
+            e->nr = 0;
+        }
+        e->r[e->nr][0] = (uint32_t)ax0; e->r[e->nr][1] = (uint32_t)ay0;
+        e->r[e->nr][2] = (uint32_t)ax1; e->r[e->nr][3] = (uint32_t)ay1;
+        e->nr++;
+    }
+}
+static void fbd_draw_note(NvProg *pr, MTLPrimitiveType mp, MTLScissorRect sc, int unbounded) {
+    if (!g_fbd_any || !g_pass.dsrc || S.rast_discard) return;
+    int dw = g_pass.hd && S.ds.dt && S.ds.dw;
+    int sw = g_pass.hs && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]);
+    if (!dw && !sw) return;
+    if (unbounded || g_pass.layered || (pr && pr->sh[0] && (pr->sh[0]->layer_out || pr->sh[0]->viewport_mask))) { fbd_full_pass(); return; }
+    long x0 = (long)sc.x, y0 = (long)sc.y, x1 = (long)(sc.x + sc.width), y1 = (long)(sc.y + sc.height);
+    // Point sprites are clipped by Metal to the scissor rect, not the viewport: only clip to viewport +/- 8 px for non-point primitives.
+    if (mp != MTLPrimitiveTypePoint && S.has_vp) {
+        double vx = S.vp[0][0], vy = S.vp[0][1], vw = S.vp[0][2], vh = S.vp[0][3];
+        if (!(vx == vx && vy == vy && vw == vw && vh == vh) || fabs(vx) > 1e7 || fabs(vy) > 1e7 || fabs(vw) > 1e7 || fabs(vh) > 1e7) { fbd_full_pass(); return; }
+        x0 = MAX(x0, (long)floor(MIN(vx, vx + vw)) - 8); x1 = MIN(x1, (long)ceil(MAX(vx, vx + vw)) + 8);
+        y0 = MAX(y0, (long)floor(MIN(vy, vy + vh)) - 8); y1 = MIN(y1, (long)ceil(MAX(vy, vy + vh)) + 8);
+    }
+    fbd_add(x0, y0, x1, y1);
+}
+static void fbd_report(void) {
+    if (!g_fbd_snaps || (g_fbd_snaps != 1 && g_fbd_snaps != 10 && g_fbd_snaps != 100 && g_fbd_snaps % 2000)) return;
+    MLOG("depth snapshots by rectangle so far: %llu (%llu by rectangles, %llu with nothing to copy, %llu whole); copied %.1f MB where whole copies would have been %.1f MB",
+         (unsigned long long)g_fbd_snaps, (unsigned long long)g_fbd_rects, (unsigned long long)g_fbd_none, (unsigned long long)g_fbd_whole,
+         g_fbd_bytes / 1048576.0, g_fbd_bytes_whole / 1048576.0);
+}
 // This draw's texture slot b, texture tid of serial ser, the depth attachment: substitute a copy of its level and layer; 0 when that cannot be (not a single-level 2D view of it)
 static int fb_depth_snap(NvShader *fs, const nvn_rbind *b, int tid, uint64_t ser) {
     if (g_fb_n >= 4 || b->dtt != MTLTextureType2D) return 0;
@@ -16146,20 +16266,62 @@ static int fb_depth_snap(NvShader *fs, const nvn_rbind *b, int tid, uint64_t ser
     id<MTLTexture> base = t.parentTexture ? t.parentTexture : t; NSUInteger tl = t.parentTexture ? t.parentRelativeLevel : 0, ts = t.parentTexture ? t.parentRelativeSlice : 0;
     if (base.parentTexture || tl != (NSUInteger)lv || ts != (NSUInteger)sl) return 0;
     NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul); int fresh;
+    int rect_on = fbd_on();
+    int sparse = R.rt.depth && R.rt.depth->pool && nvn_sparse_pool(R.rt.depth->pool);
+    fb_cache_t *p = NULL; __unsafe_unretained id<MTLTexture> psnap = nil; int pfull = 1, pnr = 0; uint32_t pr_[16][4];
+    if (rect_on && !sparse) {
+        const void *bptr = (__bridge const void *)base;
+        uint64_t spg = nvn_sparse_gen();
+        for (int i = 0; i < 8; i++) {
+            fb_cache_t *c = &g_fbc[i];
+            if (c->inc && c->snap && c->ser == ser && c->lv == lv && c->sl == sl && c->src == bptr && c->sp_gen == spg) {
+                p = c; psnap = c->snap; pfull = c->dfull; pnr = c->nr; memcpy(pr_, c->r, sizeof pr_); break;
+            }
+        }
+        if (R.clear_d || R.clear_s || g_nlc || g_fb_mode == 2) pfull = 1;   // waiting clears or DM_NVN_FB_SNAP=all always take a whole copy
+    }
     fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) return 0;
     MTLTextureSwizzleChannels sw = t.swizzle;
     int same = t.pixelFormat == e->snap.pixelFormat && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
     id<MTLTexture> use = same ? e->snap : [e->snap newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
     if (!use) { e->ser = 0; RED_ONCE(163, "same-pass depth sampling: cannot create the snapshot view (format %lu); left as is", (unsigned long)t.pixelFormat); return 0; }
+    int skipped_copy = 0;
     if (fresh) {
-        if (g_enc) g_fb_split++;
-        rp_flush();   // the same for a clear still waiting (see fb_snap)
-        enc_b_copy_texture(blit(), base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
-        fb_pass_sync();
+        int part = rect_on && !sparse && p && e == p && e->snap == psnap && !pfull;
+        size_t bpp = base.pixelFormat == MTLPixelFormatDepth16Unorm ? 2 : base.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 ? 5 : 4;
+        uint64_t area = 0;
+        if (part) for (int k = 0; k < pnr; k++) area += (uint64_t)(pr_[k][2] - pr_[k][0]) * (pr_[k][3] - pr_[k][1]);
+        if (part && !pnr) {
+            skipped_copy = 1;
+            g_fbd_none++;
+        } else {
+            if (g_enc) g_fb_split++;
+            rp_flush();   // the same for a clear still waiting (see fb_snap)
+            id<MTL4ComputeCommandEncoder> bl = blit();
+            if (part && !(pnr > 1 && area * 4 >= (uint64_t)w * h * 3)) {
+                g_fbd_rects++;
+                for (int k = 0; k < pnr; k++) {
+                    uint32_t *q = pr_[k]; NSUInteger rw = q[2] - q[0], rh = q[3] - q[1];
+                    enc_b_copy_texture(bl, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(q[0], q[1], 0), MTLSizeMake(rw, rh, 1), e->snap, 0, 0, MTLOriginMake(q[0], q[1], 0));
+                }
+                g_fbd_bytes += area * bpp;
+            } else {
+                if (rect_on) g_fbd_whole++;
+                enc_b_copy_texture(bl, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
+                if (rect_on) g_fbd_bytes += (uint64_t)w * h * bpp;
+            }
+            fb_pass_sync();
+        }
+        if (rect_on && !sparse) {
+            e->inc = 1; e->src = (__bridge const void *)base; e->heap = (__bridge const void *)base.heap;
+            e->sp_gen = nvn_sparse_gen(); e->dfull = 0; e->nr = 0;
+            g_fbd_any = 1; g_fbd_snaps++; g_fbd_bytes_whole += (uint64_t)w * h * bpp;
+            fbd_report();
+        }
     } else g_fb_dsnap_reuse++;
     if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
     g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
-    if (!fresh) { PD("N %llu same-pass depth sampling: depth ser=%llu level %d layer %d: this draw samples the copy taken since the last barrier", g_stat_pass + !g_enc, (unsigned long long)ser, lv, sl); return 1; }
+    if (!fresh || skipped_copy) { PD("N %llu same-pass depth sampling: depth ser=%llu level %d layer %d: this draw samples the copy taken since the last %s", g_stat_pass + !g_enc, (unsigned long long)ser, lv, sl, skipped_copy ? "write" : "barrier"); return 1; }
     if (++g_fb_dsnaps == 1 || g_fb_dsnaps == 10 || g_fb_dsnaps == 1000 || g_fb_dsnaps % 100000 == 0)
         MLOG("same-pass depth sampling: copy #%llu, %llu draws reused one (frame %llu pass %llu, shader %s slot %d samples its depth attachment ser=%llu %lux%lu format %lu while writing it)", (unsigned long long)g_fb_dsnaps,
              (unsigned long long)g_fb_dsnap_reuse, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, b->reg, (unsigned long long)ser, (unsigned long)w, (unsigned long)h, (unsigned long)base.pixelFormat);
@@ -17631,6 +17793,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_kd_force = 0;
     udc_note_draw(pr, raster_mask);
+    fbd_draw_note(pr, mp, sc, g_mtk.on);
     swrite_note(pr); order_note(pr);
     if (g_fsp_pass) { fsp_encode(en, mp, dw, di); if (g_fsm_na) fsm_run((id<MTL4RenderCommandEncoder>)en); rp_end(); return; }
     if (g_mtk.on) { mtk_encode(en); return; }
@@ -18900,6 +19063,7 @@ static void mfx_order(id<MTL4CommandBuffer> cb, id<MTLTexture> src, MTLOrigin o,
     if (cb == g_cb && g_tf_enc) tf_pass_end();   // no other encoder may be open on the replay's command buffer
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
+    if (dst) fbd_written(dst);
     if (dst) [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:o sourceSize:z toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     else [ce copyFromBuffer:word sourceOffset:0 toBuffer:word destinationOffset:8 size:4];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
@@ -19326,6 +19490,7 @@ static void clear_ds_tri(const p_clear_ds *c) {
     float z = c->depth > 0 ? (c->depth < 1 ? c->depth : 1) : 0;   // as clearDepth: within [0, 1] (NaN → 0)
     const uint32_t v[4] = {0};
     clr_tri(en, ps, ds, sc, v, z, (uint32_t)c->stencil & 0xff, g_pass.tw, g_pass.th); clr_note(-1, dw, sm != 0);
+    fbd_add((long)sc.x, (long)sc.y, (long)(sc.x + sc.width), (long)(sc.y + sc.height));
     fb_ds_note_write((dw ? FB_DS_DEPTH : 0) | (sm ? FB_DS_STENCIL : 0));
     if (!g_clr_tri[1]++) MLOG("mid-pass scissored depth-stencil clear: drawn as a full-pass triangle (first case pass %llu depth %d stencil mask %#x scissor %lu,%lu %lux%lu)", g_stat_pass, dw, sm,
                               (unsigned long)sc.x, (unsigned long)sc.y, (unsigned long)sc.width, (unsigned long)sc.height);

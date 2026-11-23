@@ -10459,11 +10459,13 @@ static int arch_keys_old(NSString *path) {   // an index of keys by library file
     ssize_t n = read(fd, m, sizeof m); close(fd);
     return n == (ssize_t)sizeof m && !memcmp(m, "DMPSOIX1", 8);
 }
-// g_arch_ix: key → the newest file whose index names it, filled in pso4_init and read only after (so with no lock). g_arch_ixf: the files with a complete index, which only the
-// index leads to (it holds them; g_arch4 and g_arch4p hold the files without one, and those whose index is not complete). g_arch_run: every plain run file, in g_compact_files'
-// order (arch_compact_takes). g_arch_asks: archive files asked for a pipeline (the tests)
+// g_arch_ix: key → the newest file whose index names it, filled before the first frame (pso4_init and, after a prepare-step prebuild, arch_adopt_prebuilt) and read only after
+// (so with no lock). g_arch_ixf: the files with a complete index, which only the index leads to (it holds them; g_arch4 and g_arch4p hold the files without one, and those whose
+// index is not complete). g_arch_run: every plain run file, in g_compact_files' order (arch_compact_takes). g_arch_opened: device files already opened in this run (arch_adopt_prebuilt
+// opens only files written after pso4_init). g_arch_asks: archive files asked for a pipeline (the tests)
 static nvn_hmap g_arch_ix = {.klen = sizeof(uint64_t)};
 static NSArray<id<MTL4Archive>> *g_arch_ixf, *g_arch_run;
+static NSMutableSet<NSString *> *g_arch_opened;
 static _Atomic uint64_t g_arch_asks;
 // The device's archive files opened at start, with how many pipelines were taken from each (arch_lookup, all threads): arch_sweep moves out those none was taken from once every
 // pipeline a start can want was asked for. A pipeline's key covers its libraries' bytes, so a chain change, a profile edit or a host change that alters a library or a descriptor
@@ -10525,7 +10527,8 @@ static _Atomic uint64_t g_pb_built, g_pb_archived, g_pb_reused, g_pb_spec, g_pb_
 static _Atomic uint64_t g_pt_hit_n, g_pt_hit_ns, g_pt_miss_n, g_pt_miss_ns, g_pt_spec_ns, g_pt_comp_ns, g_pt_pred_n, g_pt_pred_ns, g_pp_done_n;   // bases compiled / taken from the archive / reused, specializations, MTLDevice builds
 typedef struct { const void *vf, *ff; uint32_t samples, a2c, rast, topo, amp, off; uint32_t va[31][3], vl[31][3]; } pbase_key;   // off: its functions without the border corrections (fn_off);   // what a base depends on: pso_desc's descriptor less the colour attachments
 static nvn_hmap g_pbase = {.klen = sizeof(pbase_key)};
-// Bases the archives do not have. pso4_init opens the archives once and nothing adds to them in a run, so a miss holds for the process: a later call for the base skips the search
+// Bases the archives do not have. After the prepare step nothing adds to the open archives in a run (arch_adopt_prebuilt clears this map before the first frame when it opens
+// newly prebuilt files), so a miss holds for the rest of the process: a later call for the base skips the search
 // (a compile 0 one returns nil, a compiling one goes straight to the compiler), and g_pbase, looked at first, takes the base once it is built. Without it every draw of a pipeline
 // whose build the full table refused (pso_pend_demand) searched every archive again while it drew with its stand-in: Ocarina of Time's castle town, 9,208 searches / 30.5 s in
 // 300 frames, CPU translation 114 ms a frame (PR #1825)
@@ -11169,6 +11172,7 @@ static void pso4_init_once(void) {
             } });
             NSMutableArray<id<MTL4Archive>> *ixf = [NSMutableArray array], *run = [NSMutableArray array]; int nopen = 0, np = 0, nidx = 0; unsigned long nkeys = 0;
             NSMutableArray<ArchUse *> *use = [NSMutableArray array];
+            g_arch_opened = [NSMutableSet set];
             for (NSUInteger i = 0; i < nn; i++) {
                 NSString *n = names[i], *p = [g_arch_dir stringByAppendingPathComponent:n]; int pf = [n hasPrefix:@"p"];
                 g_arch_seq = MAX(g_arch_seq, [n substringFromIndex:pf].intValue + 1);
@@ -11181,6 +11185,7 @@ static void pso4_init_once(void) {
                     continue;
                 }
                 id<MTL4Archive> a = opened[i]; NSArray *ix = ixs[i] != NSNull.null ? ixs[i] : nil;
+                [g_arch_opened addObject:p];
                 ArchUse *u = [ArchUse new]; u->path = p; u->a = a; u->pf = pf; objc_setAssociatedObject(a, &g_arch_use_tag, u, OBJC_ASSOCIATION_RETAIN_NONATOMIC); [use addObject:u];
                 if (ix) u->keys = [ix[0] length] / sizeof(uint64_t);
                 bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
@@ -11885,7 +11890,8 @@ void mtl_pso_line(char *o, size_t n) {
 // (DM_PSO_PREBUILD=0: not at all), or as a tool on the Mac (DM_PSO_PREBUILD=tool: build, write, exit). Vertex shaders that write the layer, pairs whose vertex shader has stage
 // inputs but no pulling library, and integer-output or multisampled bases are left to the draws. An app that bundles these bases made offline (DM_PSO_BUNDLE, pso_bundle_covers)
 // builds none of them, only the pairs that archive left to the device (rest_pairs.tsv beside it: functions with constants)
-static _Atomic int g_pre_running; static _Atomic int g_pre_next, g_pre_done, g_pre_built, g_pre_archived, g_pre_skipped, g_pre_failed;   // g_pre_next: pairs handed to a worker
+static _Atomic int g_pre_running, g_pre_flushing; static _Atomic int g_pre_next, g_pre_done, g_pre_built, g_pre_archived, g_pre_skipped, g_pre_failed;   // g_pre_next: pairs handed to a worker
+static int g_pre_tail_ms = 10000;   // bounded wait in prepare_prebuild for the last in-flight compiles after every pair is handed out (tests may shorten)
 // Pairs whose base failed to build, kept with the system build and the stamp they failed under (prebuild_failed.tsv beside prebuilt.tsv): prebuilt.tsv is written with them, and a
 // later start with both the same leaves them to the draws instead of building them again, which would fail the same way (Metal reports a compile that its compiler service
 // could not finish only after retrying it itself: Super Mario Odyssey's alRenderMaterialUber at -O2, 33.7 minutes, on every start in the background). Another system build (a new
@@ -12114,7 +12120,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     g_pre_nolib = 0; g_pre_nolib_file = nil;
     int n = (int)pairs.count; uint64_t t0 = bp_now(); int done0 = g_pre_done;
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
-    atomic_store(&g_pre_next, 0); g_pre_later_n = 0; g_pre_deferred = 0;
+    atomic_store(&g_pre_next, 0); atomic_store(&g_pre_flushing, 0); g_pre_later_n = 0; g_pre_deferred = 0;
     NSArray<NSNumber *> *ord = pre_order(pairs);
     void (^pre_done)(void) = ^{
         int d = ++g_pre_done;
@@ -12141,6 +12147,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         while (pre_later_take(&l, 1)) one(l.p);   // then the ones still put back, each once its functions are free: every worker stays until none is left
     });
     dispatch_block_t done = ^{
+        atomic_store(&g_pre_flushing, 1);
         arch_flush_wait();
         NSMutableArray<NSString *> *fails = [NSMutableArray arrayWithArray:g_pre_known.allValues]; [fails addObjectsFromArray:g_pre_fails];
         if (fails.count) [[NSString stringWithFormat:@"# pipeline prebuild: pairs whose base failed to build on this system build, left to the draws until it or the stamp changes (nvn_mtl.m, pre_fail_load)\n%@%@\n",
@@ -12155,6 +12162,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
         g_pre_running = 0;
+        atomic_store(&g_pre_flushing, 0);
     };
     if (wait) { dispatch_group_wait(g, DISPATCH_TIME_FOREVER); done(); }
     else dispatch_group_notify(g, dispatch_get_global_queue(qos, 0), done);
@@ -12534,11 +12542,93 @@ static void warm_prepare(NSArray<WarmTask *> *tasks, long lines) {
          lines, (unsigned long long)g_warm_shaders, (unsigned long long)g_warm_rps, (unsigned long long)g_warm_cps, (bp_now() - t0) / 1e9, workers, shown ? "shown" : "not shown",
          (unsigned long long)(g_pb_built - built0), (unsigned long long)(g_pb_archived - arch0), again, (unsigned long long)(g_pb_reused - reused0), (unsigned long long)(g_pb_spec - spec0));
 }
+// Opens newly written prebuild files (p*.mtl4a) into g_arch_ix / g_arch4p before frame 0, so the session that just ran prepare_prebuild() finds those pulling bases without waiting
+// for a restart (and without duplicating them via hy_base_kick). Called synchronously after pso_prebuild finishes (no draw or prebuild worker runs concurrently, keeping arch_lookup
+// lock-free), while honoring arch_admit's address-space reserve. Newly adopted files stay out of g_arch_use so arch_sweep does not retire them before play has queried them
+static void arch_adopt_prebuilt(void) {
+    if (!g_arch_dir || !g_comp4 || g_pre_tool) return;
+    NSArray<NSString *> *all = [NSFileManager.defaultManager contentsOfDirectoryAtPath:g_arch_dir error:nil];
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSString *n in all) {
+        if (![n hasPrefix:@"p"] || ![n hasSuffix:@".mtl4a"]) continue;
+        NSString *p = [g_arch_dir stringByAppendingPathComponent:n];
+        if ([g_arch_opened containsObject:p]) continue;
+        [names addObject:n];
+    }
+    if (!names.count) return;
+    // Oldest first so a newer file's key wins in g_arch_ix, matching pso4_init's newest-first precedence
+    [names sortUsingComparator:^NSComparisonResult(NSString *x, NSString *y) {
+        int a = [x substringFromIndex:1].intValue, b = [y substringFromIndex:1].intValue;
+        return a < b ? NSOrderedAscending : a > b ? NSOrderedDescending : NSOrderedSame;
+    }];
+    uint64_t bytes = 0, pg = (uint64_t)getpagesize(); unsigned files = 0;
+    for (NSString *n in names) {
+        uint64_t sz = arch_file_size([g_arch_dir stringByAppendingPathComponent:n], NULL);
+        if (!sz) continue;
+        if (sz > UINT64_MAX - (pg - 1)) return;
+        sz = (sz + pg - 1) / pg * pg;
+        if (sz > UINT64_MAX - bytes) return;
+        bytes += sz; files++;
+    }
+    if (!files) return;
+    uint64_t free_va = 0, largest = 0;
+    const uint64_t reserve = 2ull << 30;
+    int have_vm = arch_vm_room(&free_va, &largest);
+    if (!have_vm || bytes > largest || reserve > largest - bytes) {
+        if (!have_vm) MLOG("pipeline archive %s: %u newly prebuilt files (%.1f MiB) not opened in this run (address-space bounds unavailable): taken at the next start",
+                           g_arch_dir.UTF8String, files, bytes / 1048576.0);
+        else MLOG("pipeline archive %s: %u newly prebuilt files (%.1f MiB) not opened in this run (largest address-space gap %.1f MiB, runtime reserve %.1f MiB): taken at the next start",
+                  g_arch_dir.UTF8String, files, bytes / 1048576.0, largest / 1048576.0, reserve / 1048576.0);
+        return;
+    }
+    uint64_t t0 = bp_now();
+    NSUInteger nn = names.count;
+    NSMutableArray *opened = [NSMutableArray arrayWithCapacity:nn], *ixs = [NSMutableArray arrayWithCapacity:nn], *why = [NSMutableArray arrayWithCapacity:nn];
+    for (NSUInteger i = 0; i < nn; i++) { [opened addObject:NSNull.null]; [ixs addObject:NSNull.null]; [why addObject:NSNull.null]; }
+    arch_open_begin();
+    dispatch_apply(nn, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { @autoreleasepool {
+        NSString *p = [g_arch_dir stringByAppendingPathComponent:names[i]]; NSError *ae = nil; int complete = 0;
+        id<MTL4Archive> a = arch_open(p, &ae);
+        NSData *keys = a ? arch_keys_read(arch_keys_path(p), &complete) : nil;
+        @synchronized (opened) {
+            if (a) opened[i] = a;
+            if (keys) ixs[i] = @[keys, @(complete)];
+            if (ae) why[i] = ae.localizedDescription ?: @"";
+        }
+    } });
+    arch_open_end();
+    NSMutableArray<id<MTL4Archive>> *ixf = [NSMutableArray arrayWithArray:g_arch_ixf ?: @[]];
+    NSMutableArray<id<MTL4Archive>> *archp = [NSMutableArray arrayWithArray:g_arch4p ?: @[]];
+    int nopen = 0, nidx = 0; unsigned long nkeys = 0; unsigned long long open_bytes = 0;
+    if (!g_arch_opened) g_arch_opened = [NSMutableSet set];
+    for (NSUInteger i = 0; i < nn; i++) {
+        NSString *p = [g_arch_dir stringByAppendingPathComponent:names[i]];
+        if (opened[i] == NSNull.null) {
+            MLOG("[RED] pipeline archive: newly prebuilt file %s not usable (%s)", p.UTF8String, why[i] != NSNull.null ? [why[i] UTF8String] : "not a pipeline archive");
+            continue;
+        }
+        id<MTL4Archive> a = opened[i]; NSArray *ix = ixs[i] != NSNull.null ? ixs[i] : nil;
+        [g_arch_opened addObject:p];
+        open_bytes += [[NSFileManager.defaultManager attributesOfItemAtPath:p error:nil] fileSize];
+        nopen++; nidx += ix != nil;
+        if (!ix) { [archp insertObject:a atIndex:0]; continue; }
+        NSData *keys = ix[0]; const uint64_t *kv = keys.bytes; NSUInteger nk = keys.length / sizeof(uint64_t);
+        for (NSUInteger j = 0; j < nk; j++) if (!nvn_hm_put(&g_arch_ix, &kv[j], (__bridge void *)a)) nkeys++;
+        if ([ix[1] intValue]) [ixf addObject:a]; else [archp insertObject:a atIndex:0];
+    }
+    if (!nopen) return;
+    g_arch_ixf = ixf; g_arch4p = archp;
+    os_unfair_lock_lock(&g_pbase_lock);
+    nvn_hm_clear(&g_pbase_miss, hm_rel);
+    os_unfair_lock_unlock(&g_pbase_lock);
+    MLOG("pipeline archive %s: %d newly prebuilt files (%d with an index of %lu pipelines), %.1f MB, opened in %.1f ms",
+         g_arch_dir.UTF8String, nopen, nidx, nkeys, open_bytes / 1048576.0, (bp_now() - t0) / 1e6);
+}
 // The prebuild in the prepare step: the bases of every shader pair are made before the game's first frame, behind the progress screen ("Preparing pipelines"), once per chain
 // version, depth mode and pair list (prebuilt.tsv), so a running game never compiles them meanwhile. Built in the background while playing, they took an iPhone 17 Pro Max's GPU
 // from about 13 to 15-18 ms a frame in Breath of the Wild (the compiler's load on the shared power budget); a first start waits for them instead. It waits until every pair is
-// handed to a worker: the compiles still under way then (at most one per worker) finish in the background, so one that does not return (a base Apple's compiler cannot build,
-// GitHub issue #294) does not hold the game's start
+// handed to a worker, then briefly for the last compiles and final archive flush so arch_adopt_prebuilt can open the newly written p*.mtl4a files before frame 0; a compile that
+// does not return (a base Apple's compiler cannot build, GitHub issue #294) still never holds the game's start past g_pre_tail_ms
 static void prepare_prebuild(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (e && !strcmp(e, "0")) return;
     if (!hybrid_on()) return;
@@ -12548,13 +12638,22 @@ static void prepare_prebuild(void) {
     // every pair handed out and none put back (pre_pair): a pair whose shader function was under way waits in g_pre_later, and counts as not yet built
     for (;;) {
         pthread_mutex_lock(&g_fn_mu); int later = g_pre_later_n; pthread_mutex_unlock(&g_fn_mu);
-        if (!atomic_load(&g_pre_running) || (atomic_load(&g_pre_next) >= n && !later)) break;
+        if (!atomic_load(&g_pre_running) || atomic_load(&g_warm_stop) || (atomic_load(&g_pre_next) >= n && !later)) break;
+        usleep(50000);
+        if (!shown && bp_now() - t0 >= 500000000ull) shown = 1;
+        if (shown) front_progress("Preparing pipelines", g_pre_done, n);
+    }
+    // Wait briefly for the last in-flight compiles so the final flush period can be opened before frame 0; once every worker has returned (g_pre_flushing), wait for the flush
+    uint64_t tail0 = bp_now();
+    while (atomic_load(&g_pre_running) && !atomic_load(&g_warm_stop)) {
+        if (!atomic_load(&g_pre_flushing) && bp_now() - tail0 >= (uint64_t)g_pre_tail_ms * NSEC_PER_MSEC) break;
         usleep(50000);
         if (!shown && bp_now() - t0 >= 500000000ull) shown = 1;
         if (shown) front_progress("Preparing pipelines", g_pre_done, n);
     }
     int left = atomic_load(&g_pre_running) ? n - (int)g_pre_done : 0;   // a worker's last compile can still be under way
     if (left > 0) MLOG("pipeline prepare: every shader pair handed out after %.1f s; %d compiles still under way finish in the background", (bp_now() - t0) / 1e9, left);
+    if (!atomic_load(&g_pre_running) && !atomic_load(&g_warm_stop)) arch_adopt_prebuilt();
     if (shown) front_progress(NULL, n, n);
 }
 // ---- The prebuild tool: what a first start would build, made with no game ----

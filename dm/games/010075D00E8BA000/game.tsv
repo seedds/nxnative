@@ -1,0 +1,41 @@
+# Game profile of Alien: Isolation (Switch, base game v0 + update v327680). Boots and renders 3D on the Mac and, through Peanuts Native, on an Android handheld
+# Format: see dm/games/README.md
+# Feral Interactive's port, SDK 8.2.0, NVN, with Havok and Wwise. Modules main, subsdk0 (the movie module), subsdk1 (GLSLC) and sdk.
+# The profile started as the provisional one of scripts/build_ipa_from_nsp.py; its memory layout held, and mem_used and shader_key_skip were added after the first boots
+
+# ---- Identity ----
+title_id	010075D00E8BA000
+program_id	010075D00E8BA000
+
+# ---- App ----
+name	Alien: Isolation
+ipa	AlienIsolation.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	?	main=1fedf6bf6d8c7392f122cef2ab8ed7b5	subsdk0=8df876f80ce4ceee62360b31405c452f	subsdk1=c8a3cc0b1d1858330a881c0c2fc87940	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	data/data/sound_switch/german_dialogue.pck
+zip_store	.bnk:.fzip:.gz:.pak:.pak_switch:.pck:.png:.webm:.wem:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − used: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the modules are 0x6400000 (100 MB), more than the 64 MB the host reports as used by default: with the default the heap request failed and the game got 0.03 GB. Modules + 4 MiB, as profile_guess.mem_used
+mem_used	0x6800000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data /resources/=resources
+shader_note	Alien: Isolation shaders
+# the engine hands some programs the control section of an earlier shader; it differs from the shipped one only in GLSLC's compile information (+0x7d0, 8 bytes: shaders 03749598c3c656f4 and 2b17c56bc893e2b0), so their keys missed the library and all 3D was dropped. The range of Batman: Arkham Knight
+shader_key_skip	0x770+0x78

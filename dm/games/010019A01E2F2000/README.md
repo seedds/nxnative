@@ -12,7 +12,6 @@ Brought up on the Mac with the provisional profile's values and no host change: 
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource |
 | `modules main subsdk0 sdk` | `game.tsv` | every module `main` imports from |
 | `shader_groups` (`/Worlds/`, `/Preload/`, `/UI/`, `/Patch/`) | `game.tsv` | the shader split's groups ([Shaders](#shaders)) |
-| [`dual_want.tsv`](dual_want.tsv) | profile | `af84ccd3191eaf89` writes colour output 1 that a pipeline blends as the second source (met in the first area; the host's red line names it) |
 
 No rendering key, no rewriter patch and no host row: beyond that table, the profile is the provisional one the NSP script wrote.
 

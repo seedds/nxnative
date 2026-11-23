@@ -11,6 +11,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "../gfx/nvn/nvn_fstep.h"   // the state page's target and tick unit (FSTEP_UNIT_OFF, nvn_fstep_target_put)
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -328,6 +329,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
+        else if (!strcmp(key, "FRAME_STEP_120")) m->fstep_t120 = v != 0;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
@@ -370,24 +372,29 @@ static void read_layout(module_t *m, const char *dir) {
 }
 
 // Frame step state (the page after the key page, read-write; layout in patch_nso.py FRAME_STEP): the rewriter's stubs step the game by the host's whole vsyncs capped at this
-// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60); the graphics layer decides the steps and paces presents
-// (hle_nvn.c fstep_tick)
+// target, 0 = the game's own interval logic. The profile's fps_target, overridden by DM_FPS_TARGET (0, 30 or 60; 40 for a stub that takes ticks of 1/120 s, FRAME_STEP_120);
+// the graphics layer decides the steps and paces presents (hle_nvn.c fstep_tick)
 uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+static int g_fstep_t120;                  // the frame step stub takes ticks of 1/120 s (the FRAME_STEP_120 capability): the page's unit (+0x38) is 120, and 40 fps is taken
 static void install_fps_state(module_t *m) {
     if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
+    g_fstep_t120 = m->fstep_t120;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
-    if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
-    float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);
+    // The step's unit, before the target: 120 (ticks of 1/120 s) for a stub that takes them, fixed for the run (nvn_fstep.h FSTEP_UNIT_OFF); 0 = vsyncs of 1/60 s
+    uint32_t unit = g_fstep_t120 ? 120 : 0; __atomic_store_n((uint32_t *)(dm_fps_state + FSTEP_UNIT_OFF), unit, __ATOMIC_RELAXED);
+    if (t == 40 && !g_fstep_t120) { LOG("[RED] DM_FPS_TARGET=40: this build's frame step takes whole vsyncs of 1/60 s only (no FRAME_STEP_120 stub), so 25 ms frames cannot be stepped; using 30"); t = 30; }
+    if (t != 0 && t != 30 && t != 40 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30%s or 60; using the game's own frame step", e, g_fstep_t120 ? ", 40" : ""); t = 0; }
+    nvn_fstep_target_put(dm_fps_state, (float)t);
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size, Ocarina of Time's view-size
     // update): 1.0 keeps the game's own size and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or
     // above for a stub that also raises it, Hades II's 3.0). Independent of the frame step: written at target 0 too
@@ -436,7 +443,7 @@ void dm_fps_state_apply(void) {
         }
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
-    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
+    LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : g_fstep_t120 ? "in ticks of 1/120 s decided by the host" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");
 }
 static void install_key_page(module_t *m) {
     if (m->key_page_off + m->key_page_size > m->size) die("%s: key page out of range", m->name);
@@ -868,7 +875,56 @@ static void map_image(module_t *m, const char *dir) {
     if (z2) remap_at(m, base + m->back_off, x2, z2, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     m->base = (uint8_t *)base; install_key_page(m);
 }
+static void mod_span_init(int n) { (void)n; }
+uint8_t *dm_mod_rtld_slot(size_t *page_out) { (void)page_out; return NULL; }
 #else
+static uint8_t *g_mod_span;
+static size_t g_mod_span_page;
+
+uint8_t *dm_mod_rtld_slot(size_t *page_out) {
+    if (!g_mod_span) return NULL;
+    if (page_out) *page_out = g_mod_span_page;
+    return g_mod_span;
+}
+
+// Reserve one contiguous virtual span for startup NSOs not placed by jit_slot: 3 pages at the bottom for an optional
+// stand-in rtld (hle_exl.c), then each module in load order (main, subsdk*, mod plugins, sdk) separated by a PROT_NONE
+// guard page. Guarantees Horizon's ascending address order (rtld < main < subsdks < sdk) even when small plugins would
+// otherwise land in an mmap gap below main, and keeps FAR modules' front patch areas strictly above the rtld slot.
+static void mod_span_init(int n) {
+    if (n <= 0) return;
+    long pg_raw = sysconf(_SC_PAGESIZE);
+    size_t pg = pg_raw >= 0x4000 ? (size_t)pg_raw : 0x4000;
+    size_t *offs = calloc((size_t)n, sizeof *offs), *lens = calloc((size_t)n, sizeof *lens);
+    if (!offs || !lens) { free(offs); free(lens); return; }
+    size_t total = 4 * pg;   // [0, 3*pg): optional stand-in rtld; [3*pg, 4*pg): guard page
+    int count = 0;
+    for (int i = 0; i < n; i++) {
+        module_t *m = &g_mod[i];
+        uint64_t pre = m->patch_off < 0 ? (uint64_t)-m->patch_off : 0, img;
+        if (m->patch_off < 0) img = m->image_size;
+        else {
+            char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", m->dir, m->name);
+            struct stat st;
+            if (stat(path, &st) || st.st_size <= 0) continue;
+            img = ((uint64_t)st.st_size + 0x3FFFull) & ~0x3FFFull;
+        }
+        if (jit_slot(m, img, pre)) continue;
+        size_t span = (size_t)((pre + img + (uint64_t)pg - 1) & ~((uint64_t)pg - 1));
+        offs[i] = total; lens[i] = span;
+        total += span + pg;   // one guard page after each module
+        count++;
+    }
+    if (count) {
+        uint8_t *base = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (base != MAP_FAILED) {
+            g_mod_span = base; g_mod_span_page = pg;
+            for (int i = 0; i < n; i++) if (lens[i]) { g_mod[i].span_slot = base + offs[i]; g_mod[i].span_len = lens[i]; }
+        }
+    }
+    free(offs); free(lens);
+}
+
 static uint8_t *slurp(const char *path, size_t *n) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) die("open %s", path);
@@ -891,6 +947,7 @@ static void map_image(module_t *m, const char *dir) {
         m->size = m->image_size; m->patch_len = (sz - bl - fl + 0x3FFF) & ~0x3FFFull;
         if (m->patch_len > pre) die("%s patch area of %#llx bytes does not fit in the %#llx before the base", path, (unsigned long long)m->patch_len, (unsigned long long)pre);
         uint8_t *slot = jit_slot(m, m->size, pre);
+        if (!slot && m->span_slot && m->span_len >= pre + m->size) slot = m->span_slot + pre;
         uint8_t *a = mmap(slot ? slot - pre : NULL, pre + m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
         if (a == MAP_FAILED) die("%s mmap %#llx", m->name, (unsigned long long)(pre + m->size));
         m->base = a + pre;
@@ -905,6 +962,7 @@ static void map_image(module_t *m, const char *dir) {
     }
     m->size = (sz + 0x3FFF) & ~0x3FFFull;
     uint8_t *slot = jit_slot(m, m->size, 0);
+    if (!slot && m->span_slot && m->span_len >= m->size) slot = m->span_slot;
     m->base = mmap(slot, m->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | (slot ? MAP_FIXED : 0), -1, 0);
     if (m->base == MAP_FAILED) die("%s mmap", m->name);
     memcpy(m->base, raw, sz); free(raw); install_key_page(m);
@@ -927,18 +985,22 @@ void load_modules(const char *dir, const char **names, int n) {
     allocate_modules(n, nros);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        // "<folder>/<name>": a module from another folder (a mod's code plugin), else one of the module folder
+        const char *sl = strrchr(names[i], '/');
+        if (sl) { char *d = strndup(names[i], (size_t)(sl - names[i])); if (!d) die("module folder"); m->dir = d; strlcpy(m->name, sl + 1, sizeof m->name); }
+        else { m->dir = g_module_dir; strlcpy(m->name, names[i], sizeof m->name); }
+        read_layout(m, m->dir);
     }
     create_keys();
     jit_layout_init();
+    mod_span_init(n);
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, m->dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
-        LOG("%s: base %p size %#zx", names[i], m->base, m->size);
+        t = now_ns(); register_gates(m, m->dir); tg += now_ns() - t;
+        LOG("%s: base %p size %#zx%s%s", m->name, m->base, m->size, m->dir != g_module_dir ? " from " : "", m->dir != g_module_dir ? m->dir : "");
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }
     force_init();
@@ -962,5 +1024,6 @@ void run_module_inits(void) {
         if (!m->init || m->nro) continue;   // an NRO's init runs when the game loads it (hle_ro.c)
         LOG("%s: DT_INIT +%#llx (init_array %llu entries)", m->name, m->init, m->init_arraysz / 8);
         ((void (*)(void))(m->base + m->init))();
+        dm_exl_sync_all();   // flush any persistent MapProcessMemory views before earlier modules' (e.g. main's) DT_INIT runs
     }
 }

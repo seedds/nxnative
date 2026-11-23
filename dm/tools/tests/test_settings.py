@@ -30,6 +30,17 @@ class FrameRateOption(unittest.TestCase):
                 self.assertEqual(fps['default'],'60',gid)
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
 
+    def test_40_only_where_the_frame_step_takes_ticks_of_1_120_s(self):
+        """40 fps needs a frame step stub in ticks of 1/120 s (FRAME_STEP_120 in main's fixups table: Ocarina of Time's ratio stub); both platforms offer it, the host and iOS launcher check the screen"""
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            p=Path(tmp)/'main.fixups.tsv'
+            for header,platform,has in [('# FRAME_STEP_120\t1\n','ios',True),('# FRAME_STEP_120\t1\n','mac',True),('','ios',False),('# DYNAMIC_RESOLUTION\t1\n','mac',False)]:
+                p.write_text(header)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    fps=next(s for s in settings.build('0400486024DEC000',tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
+                self.assertEqual(fps['default'],'60',(header,platform))
+                self.assertEqual(fps['options'],[['30','30 fps']]+([['40','40 fps']] if has else [])+[['60','60 fps']],(header,platform))
+
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):

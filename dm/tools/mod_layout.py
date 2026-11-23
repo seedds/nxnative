@@ -157,7 +157,11 @@ def relayout_module(mod):
 
     # .eh_frame_hdr and .eh_frame (old offsets; a pointer read at o from base b to target t is rewritten as mv(t) - mv(b))
     ehs, ehe = m0 + mod0[3], m0 + mod0[4]
-    if ehe - ehs >= 8 and old[ehs] == 1:
+    has_eh_hdr = ehe - ehs >= 8 and old[ehs] == 1
+    has_raw_eh = (not has_eh_hdr and ehe == ehs and mod0[3] != 0 and
+                  ehs + 8 <= len(old) and struct.unpack_from('<I', old, ehs)[0] not in (0, 0xFFFFFFFF) and
+                  struct.unpack_from('<I', old, ehs + 4)[0] == 0)
+    if has_eh_hdr or has_raw_eh:
         def fix(o, enc, optional=False):
             """rewrite the encoded pointer at old offset o; returns (old target, size)"""
             enc &= 0x7F   # strip DW_EH_PE_indirect: adjust the stored pointer itself, not its dereference
@@ -173,20 +177,21 @@ def relayout_module(mod):
             if not lo_v <= nv <= hi_v: raise Error(f'encoded pointer {enc:#x} at {o:#x} overflows after the move ({nv:#x})')
             if nv != v: put(f, o, nv); n['eh'] += 1
             return t, sz
-        _, penc, cenc, tenc = old[ehs:ehs + 4]
-        o = ehs + 4
-        ehf = None
-        if penc != 0xFF:
-            ehf, s = fix(o, penc); o += s
-        if cenc == 0xFF:
-            cnt = 0
-        elif (cenc & 0xF) in (0x3, 0xB):
-            cnt = struct.unpack_from('<I' if (cenc & 0xF) == 3 else '<i', old, o)[0]; o += 4
-        else:
-            raise Error(f'eh_frame_hdr count encoding {cenc:#x}')
-        if tenc not in (0xFF, 0):
-            for _ in range(cnt):
-                o += fix(o, tenc)[1]; o += fix(o, tenc)[1]
+        ehf = ehs if has_raw_eh else None
+        if has_eh_hdr:
+            _, penc, cenc, tenc = old[ehs:ehs + 4]
+            o = ehs + 4
+            if penc != 0xFF:
+                ehf, s = fix(o, penc); o += s
+            if cenc == 0xFF:
+                cnt = 0
+            elif (cenc & 0xF) in (0x3, 0xB):
+                cnt = struct.unpack_from('<I' if (cenc & 0xF) == 3 else '<i', old, o)[0]; o += 4
+            else:
+                raise Error(f'eh_frame_hdr count encoding {cenc:#x}')
+            if tenc not in (0xFF, 0):
+                for _ in range(cnt):
+                    o += fix(o, tenc)[1]; o += fix(o, tenc)[1]
         # walk .eh_frame
         if ehf is not None:
             cies, o = {}, ehf

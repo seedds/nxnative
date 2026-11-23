@@ -168,7 +168,7 @@ static void test_dispatch_after(dispatch_time_t when, dispatch_queue_t target, d
 // A HID device in the fake registry: its entry (one per connection), and the handles made on it
 @interface TestHid : NSObject
 @property io_service_t service;
-@property int vendor, product, opens, closes, reportAttempts;
+@property int vendor, product, page, usage, opens, closes, reportAttempts;
 @property BOOL bluetooth, synthetic, failOpen, failReport;
 @property NSData *report;
 @property NSMutableArray<NSData *> *reports;
@@ -188,7 +188,7 @@ static NSUInteger listedNext;
 static int objects;   // iterators and services not released yet
 static TestHid *hid_add_vp(int vendor, int product) {
     static io_service_t next = 1000;
-    TestHid *h = [TestHid new]; h.service = next++; h.vendor = vendor; h.product = product; h.bluetooth = YES;
+    TestHid *h = [TestHid new]; h.service = next++; h.vendor = vendor; h.product = product; h.page = 1; h.usage = 5; h.bluetooth = YES;
     [registry addObject:h]; return h;
 }
 static TestHid *hid_add(int product) { return hid_add_vp(0x054C, product); }
@@ -200,10 +200,14 @@ static TestHid *pro_of(int player) {
     __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = pro[player].dev; });
     return d ? ((__bridge TestHandle *)d).hid : nil;
 }
+static TestHid *abitdo_of(int player) {
+    __block IOHIDDeviceRef d; dispatch_sync(queue, ^{ d = abitdo[player].dev; });
+    return d ? ((__bridge TestHandle *)d).hid : nil;
+}
 static kern_return_t test_matching_services(mach_port_t port, CFDictionaryRef match, io_iterator_t *it) {
     (void)port;
     int vendor = [(__bridge NSNumber *)CFDictionaryGetValue(match, CFSTR(kIOHIDVendorIDKey)) intValue];
-    assert(!listed && (vendor == 0x054C || vendor == 0x057E));
+    assert(!listed && (vendor == 0x054C || vendor == 0x057E || vendor == 0x2DC8));
     CFRelease(match);
     NSMutableArray<TestHid *> *want = [NSMutableArray new];
     for (TestHid *h in registry) if (h.vendor == vendor) [want addObject:h];
@@ -233,6 +237,8 @@ static CFTypeRef test_device_property(IOHIDDeviceRef d, CFStringRef key) {
     TestHid *h = ((__bridge TestHandle *)d).hid;
     if (CFEqual(key, CFSTR(kIOHIDGCSyntheticDeviceKey))) return h.synthetic ? kCFBooleanTrue : NULL;
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)@(h.product);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsagePageKey))) return (__bridge CFTypeRef)@(h.page);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsageKey))) return (__bridge CFTypeRef)@(h.usage);
     assert(CFEqual(key, CFSTR(kIOHIDTransportKey)));
     return (__bridge CFTypeRef)(h.bluetooth ? @"Bluetooth" : @"USB");
 }
@@ -717,6 +723,113 @@ int main(void) { @autoreleasepool {
     assert(!pro_of(0) && !pro_of(1) && proBt.closes == 2 && proUsb.closes == 1 && objects == 0);
     assert(proUsb.reports.count == usbBefore + 1 && !memcmp((const uint8_t *)proUsb.report.bytes + 2, jc1_neutral_rumble, 8));
 
+    // 8BitDo Ultimate 2 Wireless (2DC8:6012) route: taken only when GameController gives no haptics and a live gamepad interface accepts report 0x05
+    [registry removeAllObjects];
+    TestController *eb = [TestController new]; eb.haptics = [TestHaptics new]; eb.haptics.supportedLocalities = [NSSet set]; eb.vendorName = @"8BitDo Ultimate 2 Wireless";
+    dm_haptics_apple_controller(0, (id)eb); drain();
+    assert(!abitdo_of(0) && channels[0].count == 0);   // no HID device: stays without rumble
+    dm_haptics_apple_controller(0, nil); drain();
+    // Skips another 8BitDo PID, non-gamepad interface (keyboard), synthetic device, refused open, and dead/unsupported entry whose 0x05 probe fails
+    hid_add_vp(0x2DC8, 0x301B);
+    TestHid *ebKeys = hid_add_vp(0x2DC8, 0x6012); ebKeys.usage = 6;
+    TestHid *ebSynth = hid_add_vp(0x2DC8, 0x6012); ebSynth.synthetic = YES;
+    TestHid *ebRefused = hid_add_vp(0x2DC8, 0x6012); ebRefused.failOpen = YES;
+    TestHid *ebDead = hid_add_vp(0x2DC8, 0x6012); ebDead.failReport = YES;
+    TestHid *ebPad = hid_add_vp(0x2DC8, 0x6012);
+    // A controller with haptics of its own or another name does not take the 8BitDo HID device
+    TestController *ebHaptic = [TestController new]; ebHaptic.haptics = [TestHaptics new]; ebHaptic.vendorName = @"8BitDo Pro 2";
+    dm_haptics_apple_controller(0, (id)ebHaptic); drain();
+    assert(!abitdo_of(0) && channels[0].count == 1 && ebPad.opens == 0);
+    TestController *generic = [TestController new]; generic.haptics = [TestHaptics new]; generic.haptics.supportedLocalities = [NSSet set]; generic.vendorName = @"Generic Gamepad";
+    dm_haptics_apple_controller(0, (id)generic); drain();
+    assert(!abitdo_of(0) && channels[0].count == 0 && ebPad.opens == 0);
+    // Live gamepad connects after probing {0x05, 0, 0, 0, 0}
+    dm_haptics_apple_controller(0, (id)eb); drain();
+    assert(abitdo_of(0) == ebPad && ebPad.opens == 1 && ebSynth.opens == 0 && ebKeys.opens == 1 && ebKeys.closes == 1 && ebDead.opens == 1 && ebDead.closes == 1);
+    assert(channels[0].count == 2 && [channels[0][0] isKindOfClass:DmAbitdoChannel.class]);
+    assert(ebPad.reports.count == 1 && ebPad.report.length == 5);
+    b = ebPad.report.bytes;
+    assert(b[0] == 0x05 && b[1] == 0 && b[2] == 0 && b[3] == 0 && b[4] == 0);
+    // Second 8BitDo gets its own HID device
+    TestHid *ebPad2 = hid_add_vp(0x2DC8, 0x6012);
+    TestController *eb2 = [TestController new]; eb2.haptics = [TestHaptics new]; eb2.haptics.supportedLocalities = [NSSet set]; eb2.vendorName = @"8BitDo Ultimate 2 Wireless";
+    dm_haptics_apple_controller(1, (id)eb2); drain();
+    assert(abitdo_of(1) == ebPad2 && abitdo_of(0) == ebPad && ebPad2.reports.count == 1);
+    // Linear 0.85/0.15 low/high band mix: strong motor follows low band, weak motor follows high band independently
+    dm_vibration_update ebu[] = {{0, 0, {1, 160, 0, 320}}, {0, 1, {0, 160, 0, 320}}, {1, 0, {0, 160, 0, 320}}, {1, 1, {0, 160, 1, 320}}};
+    dm_haptics_send(ebu, 4); drain();
+    b = ebPad.report.bytes;
+    assert(ebPad.reports.count == 2 && ebPad.report.length == 5 && b[0] == 0x05 && b[1] == 217 && b[2] == 0 && b[3] == 0 && b[4] == 0);
+    b = ebPad2.report.bytes;
+    assert(ebPad2.reports.count == 2 && ebPad2.report.length == 5 && b[0] == 0x05 && b[1] == 0 && b[2] == 217 && b[3] == 0 && b[4] == 0);
+    // Steady active level refreshes every 50 ms without extra writes in between
+    advance(0.049);
+    assert(ebPad.reports.count == 2 && ebPad2.reports.count == 2);
+    advance(0.001);
+    assert(ebPad.reports.count == 3 && ebPad2.reports.count == 3);
+    advance(0.050);
+    assert(ebPad.reports.count == 4 && ebPad2.reports.count == 4);
+    // 20 ms pacing with peak-hold: a 5 ms spike cleared at 10 ms is not dropped, then silence goes out three times 20 ms apart and ticks stop
+    before = ebPad.reports.count;
+    advance(0.005); send_pair(0.8f, 0.8f);   // low band 0.8 -> 204
+    assert(ebPad.reports.count == before);   // throttled inside 20 ms
+    advance(0.005); send_pair(0, 0);
+    assert(ebPad.reports.count == before);
+    advance(0.010);   // 20 ms after last send: plays held peak (204)
+    b = ebPad.report.bytes;
+    assert(ebPad.reports.count == before + 1 && b[1] == 204 && b[2] == 0);
+    advance(0.020);   // 1st zero report
+    b = ebPad.report.bytes;
+    assert(ebPad.reports.count == before + 2 && b[1] == 0 && b[2] == 0);
+    advance(0.020);   // 2nd zero report
+    assert(ebPad.reports.count == before + 3);
+    advance(0.020);   // 3rd zero report -> idle
+    assert(ebPad.reports.count == before + 4);
+    advance(0.2);
+    assert(ebPad.reports.count == before + 4);   // idle: no timers while silent
+    // Rumble cutoff (DM_RUMBLE_MIN) and gain apply linearly
+    rumble_min = 0.5f; gain = 2.0f;
+    before = ebPad.reports.count;
+    send_pair(0.2f, 0.2f);   // 0.2 * 2 = 0.4 <= 0.5: silenced
+    assert(ebPad.reports.count == before);
+    send_pair(0.375f, 0.375f);   // 0.375 * 2 = 0.75 -> stretched to 0.5 -> 128
+    b = ebPad.report.bytes;
+    assert(ebPad.reports.count == before + 1 && b[1] == 128 && b[2] == 0);
+    rumble_min = 0; gain = 1;
+    // Focus suspend immediately silences once and cancels pending refreshes; returning focus replays nothing
+    before = ebPad.reports.count;
+    NSUInteger eb2Before = ebPad2.reports.count;
+    suspend(DM_HAPTICS_INACTIVE, YES); drain();
+    b = ebPad.report.bytes;
+    assert(ebPad.reports.count == before + 1 && b[1] == 0 && b[2] == 0);
+    b = ebPad2.report.bytes;
+    assert(ebPad2.reports.count == eb2Before + 1 && b[1] == 0 && b[2] == 0);
+    suspend(DM_HAPTICS_INACTIVE, NO); advance(0.2);
+    assert(ebPad.reports.count == before + 1 && ebPad2.reports.count == eb2Before + 1);
+    // Switching a player to a sink closes its HID handle; clearing the sink re-acquires it
+    dm_haptics_apple_set_sink(0, test_sink); drain();
+    assert(!abitdo_of(0) && ebPad.closes == 1);
+    dm_haptics_apple_set_sink(0, NULL); drain();
+    assert(abitdo_of(0) == ebPad && ebPad.opens == 2);
+    // Failed silence write on a gone device tries once at the pacing boundary and does not spin retrying silence
+    send_pair(0.6f, 0.6f);
+    advance(0.005); ebPad.failReport = YES; send_pair(0, 0);
+    before = ebPad.reports.count;
+    attemptsBefore = ebPad.reportAttempts;
+    advance(0.2);
+    assert(ebPad.reports.count == before && ebPad.reportAttempts == attemptsBefore + 1);
+    ebPad.failReport = NO;
+    // Disconnect stops an active controller once and releases every IOKit object
+    dm_vibration_update ebu2[] = {{1, 0, {0.7f, 160, 0, 320}}, {1, 1, {0.7f, 160, 0, 320}}};
+    dm_haptics_send(ebu2, 2); drain();
+    eb2Before = ebPad2.reports.count;
+    dm_haptics_apple_controller(0, nil); dm_haptics_apple_controller(1, nil); drain();
+    assert(!abitdo_of(0) && !abitdo_of(1) && ebPad.closes == 2 && ebPad2.closes == 1 && objects == 0);
+    b = ebPad2.report.bytes;
+    assert(ebPad2.reports.count == eb2Before + 1 && b[1] == 0 && b[2] == 0);
+    advance(0.2);
+    assert(ebPad2.reports.count == eb2Before + 1);
+
     dm_haptics_apple_shutdown();
-    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, Joy-Con recovery and lifetime, the DualSense's handles, level cutoff, DualShock 4 and Pro Controller routes passed");
+    puts("Apple haptics: channels, pulses, idle release, startup handlers, engine replacement, backoff, stale callbacks, plain players, Joy-Con recovery and lifetime, the DualSense's handles, level cutoff, DualShock 4, Pro Controller and 8BitDo report routes passed");
 } }

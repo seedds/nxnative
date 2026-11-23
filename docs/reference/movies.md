@@ -281,6 +281,14 @@ A decoder hands out as many outputs as it has slots, and while every slot is tak
 - **Fix** (`hle_movie.c`, `md_rendered`): a slot written into the client's texture is kept until the client releases it, or, for a client that has never released a rendered slot itself (Super Mario Party Jamboree, Metroid Prime 4: Beyond), until its next `GetOutputBuffer`. A decoder learns which kind its client is at the client's first release of a rendered slot; the earlier slots are returned under the same lock that checks them.
 - **Found on:** [TSUKIHIME A piece of blue glass moon](../../dm/games/010057A01E4D4000/README.md) ([GitHub issue #700](https://github.com/seedds/nxnative/issues/700), its prologue, a 1080p H.264 movie, `type 1 output 3 mode 2`) and [Metroid Dread](../../dm/games/010093801237C000/README.md#movies), whose movies jumped the same way (15 times in 75 s on the Mac before, none after).
 
+### A native-texture movie's upload mixes two frames
+
+- **Symptom:** during a movie decoded into a native texture, a horizontal band near the top of the picture comes from a different frame, and its edge moves between rows.
+- **Cause:** the decoder writes each frame into the block-linear storage (`nvn_host_write_texture`), and the upload deswizzles that storage later, when the GPU runs it. A frame written in between lands under the GPU's read, so one image holds rows of two pictures.
+- **Fix:** an upload of a texture the movie decoder writes reads a copy of its storage, taken whole under a lock that the decoder's writes also take (`hle_nvn.c`, `pkg_upload_`). Only these textures pay for the copy. Other CPU-written textures are still read at GPU time, as a Switch reads them. The lock is a leaf lock, so it adds no lock order.
+- **Check:** `t_cpu_tex --metal`: an upload held behind a GPU event keeps its frame after the next write, and uploads against a 1080p writer thread stay whole (on unfixed main, 180 of 200 images were torn). Not yet run on the game.
+- **Found on:** [The Legend of Zelda: Skyward Sword HD](../../dm/games/01002DA013484000/README.md) (1.0.1, `THP/Demo01_01.webm`, issue #497, reproduced there on an M3 Max).
+
 ### A BGRA8 client texture gets its movie with red and blue swapped
 
 - **Symptom:** `[RED] movie: client texture format 0x9a is not RGBA8 / RGBX8 (sRGB included), writing in RGBA byte order`; a native-texture movie plays in the wrong colours, warm lamps blue.

@@ -457,6 +457,78 @@ static void write_texels_bounds(void) {
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
+// A movie frame (issue #497): hold the GPU until after the next frame is written; the queued upload must keep the first complete picture.
+int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, size_t row, int *tw, int *th);
+static void queued_write_snapshot(void) {
+    const size_t len = 262144;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "snapshot pool initialized");
+    NVNtextureBuilder tb; _Alignas(8) NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);   // the host's write checks the object's alignment
+    h_nvnTextureBuilderSetWidth(&tb, 4); h_nvnTextureBuilderSetHeight(&tb, 4); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "snapshot texture initialized");
+    uint8_t first[64], next[64]; for (int i=0;i<64;i++) { first[i]=(uint8_t)(i+17); next[i]=(uint8_t)(255-i); }
+    nvn_host_write_texture(&tex, first, 4, 4, 16, NULL, NULL);
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent]; [g_q4 waitForEvent:gate value:1];
+    mtl_sub_begin(); id<MTLTexture> image = tex_mtl((const tex_t *)&tex);
+    CHECK(image != nil, "queued snapshot resolves");
+    nvn_host_write_texture(&tex, next, 4, 4, 16, NULL, NULL);
+    gate.signaledValue = 1;
+    CHECK(mtl_wait(mtl_sub_commit(),5000000000ull), "queued snapshot upload completes");
+    CHECK(!mtl_last_commit_error(), "snapshot upload has no GPU error");
+    id<MTLBuffer> readback = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb=q_cb(); id<MTLBlitCommandEncoder> enc=[cb blitCommandEncoder];
+    [enc copyFromTexture:image sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(4,4,1)
+               toBuffer:readback destinationOffset:0 destinationBytesPerRow:16 destinationBytesPerImage:64];
+    [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.status == MTLCommandBufferStatusCompleted, "snapshot readback completes");
+    int same_first = !memcmp(readback.contents,first,64), same_next = !memcmp(readback.contents,next,64);
+    fprintf(stderr, "queued_write_snapshot: upload holds %s\n", same_first ? "the FIRST picture" : same_next ? "the SECOND picture (read at GPU time)" : "a MIX");
+    CHECK(same_first, "queued upload retains the old complete frame after the next write");
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); mtl_drain(); munmap(mem,len);
+}
+
+// Issue #497 stress: a movie thread keeps replacing a 1080p texture through the host's write path while the submit thread uploads it; every uploaded image must be one whole picture
+#include <pthread.h>
+void crash_install(void);
+static _Atomic int g_st_stop; static NVNtexture *g_st_tex; static _Atomic unsigned g_st_writes;
+static void *st_writer(void *arg) {
+    (void)arg; enum { W = 1920, H = 1080 }; uint32_t *f = malloc(W * H * 4); uint32_t k = 1;
+    while (!atomic_load(&g_st_stop)) { uint32_t v = 0xff000000u | (k & 0xff) * 0x010101u; for (size_t i = 0; i < (size_t)W * H; i++) f[i] = v;
+        nvn_host_write_texture(g_st_tex, f, W, H, W * 4, NULL, NULL); k = k % 250 + 1; atomic_fetch_add(&g_st_writes, 1); }
+    free(f); return NULL;
+}
+static void upload_tear_stress(int rounds) {
+    crash_install();
+    enum { W = 1920, H = 1080 }; const size_t len = 64u << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "stress pool");
+    NVNtextureBuilder tb; _Alignas(8) static NVNtexture tex; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, H); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "stress texture");
+    uint32_t *first = malloc(W * H * 4); for (size_t i = 0; i < (size_t)W * H; i++) first[i] = 0xff000000u;
+    nvn_host_write_texture(&tex, first, W, H, W * 4, NULL, NULL); free(first);
+    g_st_tex = &tex; pthread_t th; pthread_create(&th, NULL, st_writer, NULL);
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:(NSUInteger)W * H * 4 options:MTLResourceStorageModeShared];
+    int torn = 0, done = 0, firstrow = -1, changed = 0; uint32_t last = 0; uint64_t bytes0 = mtl_upload_bytes();
+    for (int r = 0; r < rounds; r++) { @autoreleasepool {
+        mtl_sub_begin(); id<MTLTexture> im = tex_mtl((const tex_t *)&tex);
+        if (!im || !mtl_wait(mtl_sub_commit(), 5000000000ull)) { fprintf(stderr, "stress: upload failed\n"); break; }
+        id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+        [e copyFromTexture:im sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(W,H,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:W*4 destinationBytesPerImage:(NSUInteger)W*H*4];
+        [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        const uint32_t *p = rb.contents; int seam = -1; for (int y = 1; y < H && seam < 0; y++) if (p[(size_t)y * W] != p[0]) seam = y;
+        if (p[0] != last) { changed++; last = p[0]; } done++; if (seam >= 0) { torn++; if (firstrow < 0) firstrow = seam; }
+    } }
+    atomic_store(&g_st_stop, 1); pthread_join(th, NULL);
+    fprintf(stderr, "upload_tear_stress: %d images (%d changed value, %llu MB uploaded), %d torn (first seam at row %d), %u pictures written\n", done, changed, (unsigned long long)((mtl_upload_bytes() - bytes0) >> 20), torn, firstrow, atomic_load(&g_st_writes));
+    CHECK(!torn, "every uploaded image is one whole picture");
+    h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); mtl_drain(); munmap(mem, len);
+}
 int main(int argc, const char **argv) { @autoreleasepool {
     enum { N = 6442, BASE = 1000 };
     static tex_t t[N];
@@ -494,6 +566,6 @@ int main(int argc, const char **argv) { @autoreleasepool {
     own.serial = 900002; mtl_tex_init(&own); moved = own; own.magic = 0; mtl_tex_release(&moved);
     CHECK(!own_tex_live(moved.serial), "a copy outliving the object it was initialized in ends the texture");
     retired_classification(); pool_index(); descriptor_replacement();
-    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); write_texels_bounds(); finalized_upload(0); finalized_upload(1); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
+    if (argc > 1 && !strcmp(argv[1], "--metal")) { mtl_init(); write_texels_bounds(); finalized_upload(0); finalized_upload(1); queued_write_snapshot(); upload_tear_stress(argc > 2 ? atoi(argv[2]) : 40); for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads(); }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

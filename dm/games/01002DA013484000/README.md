@@ -35,6 +35,7 @@ The work folder is `<NSP folder>/01002DA013484000-work`, with `boot.sh`, `ctl.sh
 
 General host changes first needed here; each applies to every game:
 
+- [A native-texture movie's upload mixes two frames](../../../docs/reference/movies.md#a-native-texture-movies-upload-mixes-two-frames): the band in the opening movie (issue #497). The host change has not been run on the game here.
 - **The compile cache as one file, read in place** (`shader_cache.py`): [The compile cache was unpacked for each build](../../../docs/reference/packing.md#the-compile-cache-was-unpacked-for-each-build).
 - **The shader libraries as one file, read in place** (`shader_lib.py`, `msl_image.h`): [Shader libraries take a file per shader variant](../../../docs/reference/packing.md#shader-libraries-take-a-file-per-shader-variant). Measured here: the route from `save_ref` to the file list, 6,600 frames from the folder and from the image, with no `[RED]` line in either and pictures alike.
 - **Logic operations on normalized targets** (`dmsh_logic.py` `dm_logic_norm`, `nvn_mtl.m` `lop_key`, `unorm_chan_masks`): [Logic operations through a library of its own](../../../docs/reference/rendering.md#logic-operations-through-a-library-of-its-own).

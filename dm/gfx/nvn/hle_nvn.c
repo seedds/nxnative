@@ -4666,6 +4666,23 @@ static void region_image(const tex_t *t, unsigned layer0, const NVNcopyRegion *r
     if (t->d.target == NVN_TEXTURE_TARGET_3D) { *layer = 0; *slice = (unsigned)(r->zoffset + z); }
     else { *layer = layer0 + (unsigned)(r->zoffset + z); *slice = 0; }
 }
+// A movie decoder rewrites its native texture every frame, while the GPU may still be about to deswizzle the last frame from that storage: an upload would mix two pictures, a band of rows
+// from each (Skyward Sword HD's opening movie, issue #497). Its uploads read a copy taken whole under this lock, and only its writes take it. A leaf lock: nothing else is taken inside it
+enum { MOVIE_TEX_MAX = 32 };
+static _Atomic uint64_t g_movie_tex[MOVIE_TEX_MAX];
+static _Atomic unsigned g_movie_tex_next;
+static pthread_mutex_t g_movie_tex_mu = PTHREAD_MUTEX_INITIALIZER;
+int nvn_tex_is_movie(uint64_t serial) {
+    if (!serial) return 0;
+    for (unsigned i = 0; i < MOVIE_TEX_MAX; i++) if (atomic_load_explicit(&g_movie_tex[i], memory_order_acquire) == serial) return 1;
+    return 0;
+}
+static void movie_tex_mark(uint64_t serial) {
+    if (serial && !nvn_tex_is_movie(serial)) atomic_store_explicit(&g_movie_tex[atomic_fetch_add_explicit(&g_movie_tex_next, 1, memory_order_relaxed) % MOVIE_TEX_MAX], serial, memory_order_release);
+}
+void nvn_tex_movie_copy(const tex_t *t, void *dst) {
+    pthread_mutex_lock(&g_movie_tex_mu); memcpy(dst, t->mem, t->L.size); pthread_mutex_unlock(&g_movie_tex_mu);
+}
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("[RED] WriteTexels: texture has no storage"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
@@ -4706,8 +4723,10 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);
-        int ok = 1;
+        int ok = 1, movie = nvn_tex_is_movie(t->serial);
+        if (movie) pthread_mutex_lock(&g_movie_tex_mu);
         for (int z = 0; z < nz && ok; z++) { unsigned layer, slice; region_image(t, layer0, r, z, &layer, &slice); ok = !write_region_bl(t, level, layer, slice, r, src + (size_t)z * img0, row0, bw, bh, bpb); }
+        if (movie) pthread_mutex_unlock(&g_movie_tex_mu);
         if (ok) { mtl_tex_cpu_written(t); return; }
     }
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
@@ -4717,17 +4736,20 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     uint8_t *lin = malloc(lp * lr * lz); if (!lin) die("WriteTexels allocation failed");
     dm_guest_write_prepare(t->mem, t->L.size);
     // when the region is exactly the whole level (2D) every texel is overwritten, so the old content need not be decoded first (movies write whole frames; saves one deswizzle per 1080p frame)
-    int whole = !is3d && !r->xoffset && !r->yoffset && (uint32_t)r->width == lw && (uint32_t)r->height == lh;
+    int whole = !is3d && !r->xoffset && !r->yoffset && (uint32_t)r->width == lw && (uint32_t)r->height == lh, movie = nvn_tex_is_movie(t->serial);
+    if (movie) pthread_mutex_lock(&g_movie_tex_mu);
     for (int z = 0; z < nz; z++) {
         unsigned layer = is3d ? 0 : layer0 + (unsigned)(r->zoffset + z);
-        if (((is3d && z == 0) || !is3d) && !whole) if (nvn_deswizzle(&t->d, level, layer, t->mem, lin, lp)) { ONCE_LOG("[RED] WriteTexels deswizzle failed (format %#x target %d)", t->d.format, t->d.target); free(lin); return; }
+        if (((is3d && z == 0) || !is3d) && !whole) if (nvn_deswizzle(&t->d, level, layer, t->mem, lin, lp)) { if (movie) pthread_mutex_unlock(&g_movie_tex_mu); ONCE_LOG("[RED] WriteTexels deswizzle failed (format %#x target %d)", t->d.format, t->d.target); free(lin); return; }
         uint8_t *dst = lin + (is3d ? (size_t)(r->zoffset + z) * lp * lr : 0) + (size_t)(r->yoffset / bh) * lp + (size_t)(r->xoffset / bw) * bpb;
         for (size_t y = 0; y < hb; y++) memcpy(dst + y * lp, src + (size_t)z * img + y * row, wb);
         if ((!is3d || z == nz - 1) && nvn_swizzle(&t->d, level, layer, lin, lp, t->mem)) {
+            if (movie) pthread_mutex_unlock(&g_movie_tex_mu);
             static int once; if (!once++) LOG("[RED] WriteTexels swizzle failed (format %#x target %d flags %#x): not written", t->d.format, t->d.target, t->d.flags);
             free(lin); return;
         }
     }
+    if (movie) pthread_mutex_unlock(&g_movie_tex_mu);
     free(lin);
     mtl_tex_cpu_written(t);
 }
@@ -4751,7 +4773,7 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
     if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
     if (tw) *tw = (int)t->d.width;
     if (th) *th = (int)t->d.height;
-    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
+    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; movie_tex_mark(t->serial); write_texels(t, NULL, &r, src, row, 0); }
     return (int)t->d.format;
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)

@@ -4205,6 +4205,7 @@ static void up_blit_add(id<MTLBuffer> src, size_t off, size_t row, size_t image,
                         id<MTLTexture> dst, NSUInteger slice, NSUInteger level) { up_blit_add_at(src, off, row, image, size, dst, slice, level, MTLOriginMake(0, 0, 0)); }
 
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep, id<MTLTexture> prev, const void *span, uint64_t since, unsigned *taken);
+int nvn_tex_is_movie(uint64_t serial); void nvn_tex_movie_copy(const tex_t *t, void *dst);   // hle_nvn.c
 static int g_direct_upload_on = -1; static uint64_t g_direct_uploads, g_direct_dispatches;
 static int direct_upload_on(void) { if (g_direct_upload_on < 0) { const char *e=getenv("DM_NVN_DIRECT_UPLOAD"); g_direct_upload_on=!e||atoi(e); } return g_direct_upload_on; }
 int nvn_host_readable(uint64_t a, uint64_t n);   // hle_nvn.c: guest memory and sparse pools
@@ -4491,9 +4492,15 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     int use_gpu = !linear && !rb_shift && g_nvn_deswz_gpu && (sparse ? spt != NULL : upsrc || mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo));
     t_tex_upload_lookup = 0;
     if (g_nvn_deswz_gpu && !use_gpu && !sparse && !rb_shift && !linear) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
+    id<MTLBuffer> movie_src = nil; unsigned movie_batch = 0;
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
         up_begin();
+        if (!sparse && nvn_tex_is_movie(t->serial)) {   // the exception: a movie's next frame can land in this storage before the GPU reads it, so this upload reads one whole frame (hle_nvn.c, issue #497)
+            if (!(movie_src = [g_dev newBufferWithLength:t->L.size options:MTLResourceStorageModeShared])) MDIE("failed to copy a movie frame (%llu bytes)", (unsigned long long)t->L.size);
+            nvn_tex_movie_copy(t, movie_src.contents);
+            res_add(movie_src); [g_up_keep addObject:movie_src]; movie_batch = g_up_seq; mb = (__bridge void *)movie_src; mo = 0; upsrc = nil;
+        }
         if (direct && !need && !(mo & 7)) {
             id<MTLTexture> view = [mt newTextureViewWithPixelFormat:MTLPixelFormatRGBA16Uint textureType:MTLTextureType2DArray levels:NSMakeRange(0,mt.mipmapLevelCount) slices:NSMakeRange(0,mt.arrayLength)];
             if (view) {
@@ -4519,6 +4526,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
         // up_alloc may have flushed the batch that held the first source buffer: only then the new batch needs one of its own. Made for every texture, each staged upload from a large pool
         // put its storage twice into the residency set (Switch Sports Resort's first court frame: 855 textures, 1.8 GB of source buffers for 908 MB of storage; t_upload_src)
+        if (movie_src && g_up_seq != movie_batch) { res_add(movie_src); [g_up_keep addObject:movie_src]; }   // a flush in up_alloc retired the batch that held the copy
         if (upsrc && g_up_seq != src_batch) {
             upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo, 0);
             mb = (__bridge void *)upsrc;   // if the new buffer was refused, fall back to the CPU instead of using the old batch's address

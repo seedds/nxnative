@@ -342,6 +342,34 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             context.LoopTargets = loopTargets;
 
+            // An "else if" (AstBlockType.ElseIf: an If that was the only content of an Else) is a selection construct
+            // of its own, nested in the false branch of the If or ElseIf before it. Its header is the ElseIf's first
+            // label, and it gets its own merge block, which branches on to the merge of the enclosing construct
+            // (SPIR-V wants one header per merge block). Without this the false edge of the If went straight to the
+            // If's merge block, and the ElseIf and every Else after it were unreachable.
+            Dictionary<AstBlock, SpvInstruction> elseIfMerges = new();
+
+            static bool IsElseOrElseIf(IAstNode node)
+            {
+                return node is AstBlock block && (block.Type == AstBlockType.Else || block.Type == AstBlockType.ElseIf);
+            }
+
+            // Where control goes after the body of an If, ElseIf or Else block: the merge of the innermost selection.
+            SpvInstruction SelectionMergeOf(AstBlock block)
+            {
+                if (block.Type == AstBlockType.ElseIf)
+                {
+                    return elseIfMerges[block];
+                }
+
+                if (block.Type == AstBlockType.Else && AstHelper.Previous(block) is AstBlock previous && previous.Type == AstBlockType.ElseIf)
+                {
+                    return elseIfMerges[previous];
+                }
+
+                return context.GetNextLabel(block.Parent);
+            }
+
             visitor.BlockEntered += (sender, e) =>
             {
                 AstBlock mergeBlock = e.Block.Parent;
@@ -351,7 +379,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     AstBlock ifTrueBlock = e.Block;
                     AstBlock ifFalseBlock;
 
-                    if (AstHelper.Next(e.Block) is AstBlock nextBlock && nextBlock.Type == AstBlockType.Else)
+                    if (AstHelper.Next(e.Block) is AstBlock nextBlock && IsElseOrElseIf(nextBlock))
                     {
                         ifFalseBlock = nextBlock;
                     }
@@ -364,6 +392,23 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                     context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                     context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
+                }
+                else if (e.Block.Type == AstBlockType.ElseIf)
+                {
+                    // The header of the nested selection: the false target of the If or ElseIf before it.
+                    context.EnterBlock(e.Block);
+
+                    SpvInstruction elseIfMerge = context.Label();
+                    elseIfMerges[e.Block] = elseIfMerge;
+
+                    SpvInstruction ifFalseLabel = AstHelper.Next(e.Block) is AstBlock nextBlock && IsElseOrElseIf(nextBlock)
+                        ? context.GetNextLabel(nextBlock)
+                        : elseIfMerge;
+
+                    SpvInstruction condition = context.Get(AggregateType.Bool, e.Block.Condition);
+
+                    context.SelectionMerge(elseIfMerge, SelectionControlMask.MaskNone);
+                    context.BranchConditional(condition, context.GetNextLabel(e.Block), ifFalseLabel);
                 }
                 else if (e.Block.Type == AstBlockType.DoWhile)
                 {
@@ -409,7 +454,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                         if (!lastIsCf)
                         {
-                            context.Branch(context.GetNextLabel(e.Block.Parent));
+                            context.Branch(SelectionMergeOf(e.Block));
                         }
                     }
 
@@ -417,9 +462,22 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         (nextBlock.Type == AstBlockType.Else ||
                          nextBlock.Type == AstBlockType.ElseIf);
 
-                    // Re-enter the parent block.
                     if (e.Block.Parent != null && !hasElse)
                     {
+                        // The end of an "else if" chain: close its nested selections, innermost first.
+                        AstBlock chainBlock = e.Block.Type == AstBlockType.Else ? AstHelper.Previous(e.Block) as AstBlock : e.Block;
+
+                        while (chainBlock != null && chainBlock.Type == AstBlockType.ElseIf)
+                        {
+                            AstBlock outer = AstHelper.Previous(chainBlock) as AstBlock;
+
+                            context.AddLabel(elseIfMerges[chainBlock]);
+                            context.Branch(outer.Type == AstBlockType.ElseIf ? elseIfMerges[outer] : context.GetNextLabel(chainBlock.Parent));
+
+                            chainBlock = outer;
+                        }
+
+                        // Re-enter the parent block.
                         context.EnterBlock(e.Block.Parent);
                     }
                 }

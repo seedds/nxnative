@@ -7,7 +7,8 @@ module_t *g_mod;
 int g_nmod;
 uint64_t g_t0_ns;
 uint64_t now_ns(void) { return 0; }
-int dm_sdk_major(void) { return 20; }
+static int sdk_major = 20;
+int dm_sdk_major(void) { return sdk_major; }
 int dm_game_imports(const char *prefix) { (void)prefix; return 1; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void *guest_sym(const char *name) { (void)name; return NULL; }
@@ -68,6 +69,30 @@ int main(void) {
     CHECK(h_set_AvailLang(available, 3) == 3 && !memcmp(available + 16, "fr\0\0\0\0\0\0", 8)
           && (unsigned char)available[24] == 0xa5, "a short buffer takes the first codes");
     CHECK(!h_set_AvailLang(NULL, 0), "an empty buffer writes nothing");
+
+    // SDK 1-3 use settings commands 1/3: a fixed 15-code list. SDK 4+
+    // use the extended commands 5/6 and retain the existing fallback list.
+    const int legacy_sdks[] = {1, 2, 3};
+    for (unsigned i = 0; i < sizeof legacy_sdks / sizeof *legacy_sdks; i++) {
+        sdk_major = legacy_sdks[i]; memset(available, 0xa5, sizeof available);
+        CHECK(h_set_AvailLangN() == 15, "legacy settings count is 15");
+        CHECK(h_set_AvailLang(available, 19) == 15, "legacy settings list stops at 15");
+        for (int n = 0; n < 15; n++) {
+            char expected[8] = {0}; memcpy(expected, codes[n], strlen(codes[n]));
+            CHECK(!memcmp(available + n * 8, expected, 8), "legacy list preserves the original codes");
+        }
+        for (unsigned n = 15 * 8; n < sizeof available; n++)
+            CHECK((unsigned char)available[n] == 0xa5, "legacy list leaves the tail untouched");
+        CHECK(h_set_AvailLang(available, 3) == 3, "legacy list respects a smaller buffer");
+        CHECK(!h_set_AvailLang(NULL, 0), "legacy empty list writes nothing");
+    }
+    const int modern_sdks[] = {0, 4, 10, 20};
+    for (unsigned i = 0; i < sizeof modern_sdks / sizeof *modern_sdks; i++) {
+        sdk_major = modern_sdks[i];
+        CHECK(h_set_AvailLangN() == 18, "modern or unknown SDK retains the fallback count");
+        CHECK(h_set_AvailLang(available, 19) == 18, "modern or unknown SDK retains the fallback list");
+    }
+    sdk_major = 20;
 
     // nn::oe::GetDisplayVersion: reads the exact 16-byte DisplayVersion field from control.nacp (+0x3060),
     // preserving suffixes like "1.0.2 b723"; falls back to DM_GAME_DISPLAY_VERSIONS / "1.0.0" when absent.

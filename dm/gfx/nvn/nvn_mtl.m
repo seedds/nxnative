@@ -1134,22 +1134,28 @@ static NSHashTable *g_dead_pools;
 enum { PC_BITS = 10, PC_RECENT = 8 };
 static _Atomic uint64_t g_pool_gen = 1;
 typedef struct { uintptr_t lo, hi, base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; uintptr_t end; int reach; } pc_ent;
-static __thread struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS]; } t_pc;   // an empty entry has hi 0
+// A second table direct-mapped by 64 KB region, looked at first: a pool of megabytes is found from any page of a region already seen, where the page table needs each of its
+// pages seen once and, with 1,024 slots, kept, so a game binding from thousands of pools kept falling through to g_mu and the pool index (pool_held;
+// docs/reference/frame-rate.md, "Pool lookups by page missed with thousands of pools"). Pools that share a region take turns in its slot and are found in the page table as before
+static __thread struct { uint64_t gen; unsigned next; pc_ent r[PC_RECENT], e[1u << PC_BITS], w[1u << PC_BITS]; } t_pc;   // an empty entry has hi 0
 static inline unsigned pc_slot(uint64_t addr) { return (unsigned)(((addr >> 12) * 0x9E3779B97F4A7C15ull) >> (64 - PC_BITS)); }
+static inline unsigned pc_slot_w(uint64_t addr) { return (unsigned)(((addr >> 16) * 0x9E3779B97F4A7C15ull) >> (64 - PC_BITS)); }
 // A lookup of unknown length (1) may read on to its pool's end, so a chunk short of it does not answer one: big_lookup gives it the whole pool
 static inline int pc_holds(const pc_ent *c, uint64_t addr, uint64_t len) { return len > 1 ? addr + len <= c->end : c->reach != REACH_SHORT; }
 static inline const pc_ent *pc_get(uint64_t addr, uint64_t len) {
     if (t_pc.gen != atomic_load_explicit(&g_pool_gen, memory_order_acquire)) return NULL;
+    pc_ent *w = &t_pc.w[pc_slot_w(addr)];
+    if (addr >= w->lo && addr < w->hi && pc_holds(w, addr, len)) return w;
     pc_ent *c = &t_pc.e[pc_slot(addr)];
     if (addr >= c->lo && addr < c->hi && pc_holds(c, addr, len)) return c;
-    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (addr >= x->lo && addr < x->hi && pc_holds(x, addr, len)) { *c = *x; return c; } }
+    for (unsigned k = 0; k < PC_RECENT; k++) { const pc_ent *x = &t_pc.r[k]; if (addr >= x->lo && addr < x->hi && pc_holds(x, addr, len)) { *c = *x; *w = *x; return c; } }
     return NULL;
 }
 static void pc_put(int i, uint64_t addr) {   // caller holds g_mu, pool i is resident and holds addr
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-    if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); memset(t_pc.e, 0, sizeof t_pc.e); t_pc.gen = gen; }
+    if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); memset(t_pc.e, 0, sizeof t_pc.e); memset(t_pc.w, 0, sizeof t_pc.w); t_pc.gen = gen; }
     pc_ent c = {g_pools[i].lo, g_pools[i].hi, g_pools[i].base, g_pools[i].buf, g_pools[i].gpu, g_pools[i].end, g_pools[i].reach};
-    t_pc.e[pc_slot(addr)] = c; t_pc.r[t_pc.next++ % PC_RECENT] = c;
+    t_pc.e[pc_slot(addr)] = c; t_pc.w[pc_slot_w(addr)] = c; t_pc.r[t_pc.next++ % PC_RECENT] = c;
 }
 static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / texture / sampler registration: one of the invalidation conditions for argument buffer reuse
 // The changes behind g_reg_gen, by generation: a texture or sampler registration (under g_rmu) records the generation it made and its ID, so a pool table (pool_gpu) built at an earlier

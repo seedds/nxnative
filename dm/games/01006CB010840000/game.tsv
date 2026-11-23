@@ -32,6 +32,10 @@ sys_resource	0x5000000
 # The game sets NVN depth mode to near = 0.
 depth_mode	zero
 
+# ---- Frame rate ----
+# The shared Unreal timing code sets rhi.SyncInterval, found by its registered name, to one vsync.
+fps_target	60
+
 # ---- Shader split ----
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	Oceanhorn 2: Knights of the Lost Realm shaders

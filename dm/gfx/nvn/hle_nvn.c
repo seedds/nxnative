@@ -2632,9 +2632,9 @@ static void tsummary(uint64_t frame) {
             LOG("[nvn] thread policy: %s; %u guest worker threads QoS %#x; present QoS %#x", rl, wn, wq, mtl_present_qos()); }
         py = cy; pk = ck; pw = cw; }
       pi = ci; pc = cc; pd = dr_; pf = frame; }
-    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc; mtl_pkg_stats(&up, &re); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
+    uint64_t up, re, es = mtl_pkg_edge_skips(), fa, pr, op, oc, ea, eb, ep, ef, efb; mtl_pkg_stats(&up, &re); mtl_pkg_edge_stats(&ea, &eb, &ep, &ef, &efb); nvn_dirty_stats(&fa, &pr); nvn_dirty_open_stats(&op, &oc);
     { uint64_t sh, st, sm; mtl_spare_stats(&sh, &st, &sm); LOG("[nvn] packaged textures' spares: held %llu, retired idle or at memory pressure %llu, %llu MB", (unsigned long long)sh, (unsigned long long)st, (unsigned long long)sm); }
-    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu; write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
+    LOG("[nvn] packaged textures: first uploads %llu, re-uploads on pool content change %llu, writes beside a texture only (not re-uploaded) %llu, edge snapshots %llu (%llu KB, peak %llu KB, failed %llu / %llu KB); write-protection faults %llu, pages unprotected before host writes %llu, opened for pool buffers %llu (changed while open %llu); missed %llu (cumulative); CPU-written textures alive %u", up, re, es, (unsigned long long)ea, (unsigned long long)(eb >> 10), (unsigned long long)(ep >> 10), (unsigned long long)ef, (unsigned long long)(efb >> 10), fa, pr, op, oc, mtl_pkg_miss(), mtl_cpu_tex_count());
     memset(g_tn, 0, sizeof g_tn);
 }
 // DM_SLOWFRAME=1 (test switch, read over the log port on a real device): per-frame timings are first stored in a ring of the last 16 frames; dropped frames are judged 8 frames late (GPU / on-screen present times are back by then),

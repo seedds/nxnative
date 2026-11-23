@@ -780,6 +780,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `t_nvn` 6c2b writes a 37x5 `LINEAR | VIDEO_DECODE` texture with a stride of 256 and a 16x16 `LINEAR_RENDER_TARGET` texture with a stride of 128. Each gets four regions (whole, part, one texel, one row or column), some with a padded source stride. The check compares the storage byte for byte, including the row padding and the bytes after the texture, then reads the texture back with ReadTexels. It also checks that a region past the last row writes nothing, and that no CPU-written texture is added for these buffer views. Without the fix, three of these checks fail; with `mtl_tex_cpu_written` in place of the view rule, the last one fails.
 - **Open:** a `LINEAR_RENDER_TARGET` or `IMAGE` linear texture that the GPU drew into as a private texture (`cpu_unc_drop`) and the CPU then partly writes is uploaded from its storage, as a block-linear texture is. No game is known to do that.
 
+### Out-of-range `WriteTexels` regions overran the scratch buffer
+
+- **Symptom:** heap corruption or unexpected storage writes when a game calls `nvnTextureWriteTexels` / `nvnTextureWriteTexelsStrided` with an invalid mip level, negative coordinates/size, or a region exceeding the mip dimensions or layers.
+- **Cause:** `write_region_bl` returned `-1` on out-of-range regions and fell back to the whole-level `lin` scratch-buffer path in `write_texels` (`hle_nvn.c`), which had no bounds checks and copied past the end of `lin` before swizzling back into `t->mem`. A multi-layer region that overflowed on a later layer also mutated earlier layers before failing.
+- **Fix:** `write_texels` validates mip level (`levels = t->d.levels ? t->d.levels : 1`, `< 32`), non-negative origin/dimensions/depth, and mip width/height/depth/layer bounds (treating `1D` and `1D_ARRAY` mip height as `1`) up front before touching storage or allocating `lin`, logging `[RED] WriteTexels: ...` once on rejection; valid zero-width/height regions return without writing or marking the texture CPU-written.
+- **Found on:** [PR #2906](https://github.com/seedds/nxnative/pull/2906) (reported alongside Baldur's Gate: Dark Alliance, Guacamelee!, and Oceanhorn testing); reproduced directly by synthetic bounds checks.
+- **Check:** `t_cpu_tex --metal` (`write_texels_bounds`) verifies oversized width/height, negative origin/size, out-of-range mip level, zero-sized regions, overflowing multi-layer 2D array writes, and `1D_ARRAY` height > 1 all leave storage untouched and do not mark the texture CPU-written.
+
 ### Packaged texture data copied at `TextureInitialize`
 
 - **Cause:** a texture created with `TextureBuilderSetPackagedTextureData` gets that data copied into its storage by NVN at `TextureInitialize` (a compressible pool cannot be written by the CPU).
@@ -1238,6 +1246,13 @@ Games read this count as a position in their own command memory and size their h
 - **Cause:** Metal usage came only from the texture builder's `IMAGE` flag. A render texture may instead have only `COMPRESSIBLE`, then its descriptor be used in a shader image slot. Snowdrop writes these descriptors with `RegisterTexture`, not `RegisterImage`. Its depth-conversion compute shader `cf5ba107e29b51f4` gathers from a depth texture and unconditionally writes four pixels per invocation to a 256×256 R16F texture whose flags are `0x8`. Its Metal texture had read / render-target usage (`0x5`), so the image binding was rejected.
 - **Fix:** before a draw or dispatch uses a writable image, `image_prepare` resolves it with image intent and ensures its backing allows shader writes. `RegisterImage` also keeps this intent in its host snapshot; neither path changes the guest texture. A texture already rendered into is upgraded through `tex_upgrade`: end its render pass first, copy every mip / slice, replace all shared serials and invalidate cached sampled views. Load-only image slots accept read-only storage without upgrading, and ordinary render targets retain their original usage. `t_image_usage.m` exercises both registration entry points, a late registration while a render pass is open, the clear and other mip surviving the upgrade, and a GPU image write read through a sampled alias.
 - **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) (SDK 13.3.5, Snowdrop).
+
+### A writable buffer image took the registration lock twice
+
+- **Symptom:** macOS terminates the host before the game's title screen. The crash report shows `_os_unfair_lock_recursive_abort` in `encode_args_full` on the queue replay thread.
+- **Cause:** argument encoding already holds the texture and sampler registration lock. The sparse shadow writeback path for writable buffer images acquired that same lock again to look up the texture's guest memory range.
+- **Fix:** read the registration under the lock the argument encoder already holds and keep scheduling writeback for the same range. `t_buffer_image_bias` checks that the production encoder binds a real writable buffer image, and `t_sparse_shadow` checks writeback into physical pages.
+- **Found on:** [Mario + Rabbids Sparks of Hope](../../dm/games/0100317013770000/README.md) 1.6.2225577 on the Mac (Apple M6, macOS 27.2.1).
 
 ### Plural texture binds, builder-registered samplers, strided texel writes, device item 0x67
 

@@ -1027,6 +1027,154 @@ static void pending_clear_case(NvProg *pr) {
     mtl_tex_release(&source);
     printf("snapshot after a waiting clear: %s\n", before == failed ? "PASS" : "FAIL");
 }
+// Bounded depth snapshots (DM_NVN_FB_DEPTH_RECT): tracks tile-aligned dirty rectangles across barriers, skips copies when nothing wrote depth, and falls back to whole copies on untracked writes.
+static void depth_rect_case(NvProg *pr) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t depth = {.magic=MAGIC('T','E','X',0), .serial=99960};
+    depth.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH32F, .width=64, .height=64, .depth=1, .levels=1, .samples=1};
+    tex_t depth_alias = depth; depth_alias.serial = 99961;
+    tex_t src_depth = depth; src_depth.serial = 99962;
+    id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)];
+    id<MTLTexture> sdt = [g_dev newTextureWithDescriptor:tex_desc(&src_depth, 0)];
+    MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:64 height:64 mipmapped:NO];
+    md.textureType = MTLTextureType2DMultisample; md.sampleCount = 4; md.storageMode = MTLStorageModePrivate; md.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> msaa = [g_dev newTextureWithDescriptor:md];
+    CHECK(dt && sdt && msaa, "bounded depth rect textures allocate");
+    if (!dt || !sdt || !msaa) return;
+    res_add(dt); res_add(sdt); res_add(msaa);
+    mtl_tex_init(&depth); serial_put(depth.serial, dt);
+    mtl_tex_init(&depth_alias); serial_put(depth_alias.serial, dt);
+    mtl_tex_init(&src_depth); serial_put(src_depth.serial, sdt);
+    mtl_reg_tex(657, &depth, NULL);
+    const NSUInteger row = 64 * 4, img = row * 64;
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:img * 7 options:MTLResourceStorageModeShared];
+    CHECK(rb != nil, "bounded depth rect readback buffer allocates");
+    if (!rb) { mtl_tex_release(&depth); mtl_tex_release(&depth_alias); mtl_tex_release(&src_depth); return; }
+    res_add(rb);
+    int save_mode = g_fbd_mode, save_any = g_fbd_any;
+    g_fbd_mode = 1;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 0; R.rt.depth = &depth; S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 657;
+    // Initial full clear to 0.75 -> first snapshot must be a whole copy.
+    R.clear_d = 1; R.cd = 0.75; CHECK(rp_begin() != nil, "initial depth pass opens"); rp_end();
+    uint64_t whole0 = g_fbd_whole, rects0 = g_fbd_rects, none0 = g_fbd_none, bytes0 = g_fbd_bytes, dsnaps0 = g_fb_dsnaps;
+    fb_prepare(pr);
+    id<MTLTexture> snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    CHECK(snap && snap != dt && g_fbd_whole == whole0 + 1 && g_fb_dsnaps == dsnaps0 + 1, "first bounded depth snapshot is a whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, 0, row, img); }
+    // Barrier with no depth write since the snapshot -> skip copy and keep pass open.
+    CHECK(rp_begin() != nil, "load depth pass opens");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_enc != nil && g_fb_n == 1 && g_fb_use[0] == snap && g_fbd_none == none0 + 1 && g_fb_dsnaps == dsnaps0 + 1,
+          "no depth write since snapshot skips copy and leaves pass open");
+    rp_end();
+    // Bounded write via scissored clear_ds_tri on [0,0,16,16) to 0.25 -> copies only that 16x16 tile.
+    R.has_sc = 1; R.sc = (p_scissor){0, 0, 16, 16};
+    p_clear_ds cd = {.depth = 0.25f, .depth_mask = 1};
+    clear_ds_tri(&cd);
+    uint64_t b1 = g_fbd_bytes;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 1 && g_fbd_bytes == b1 + 16 * 16 * 4, "single scissored write copies only its 16x16 tile");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img, row, img); }
+    // Overlapping [8,0,24,16) (snaps to [0,0,32,16)) and disjoint [48,48,64,64) -> merged into 2 disjoint tile-aligned rects.
+    R.sc = (p_scissor){8, 0, 16, 16}; cd.depth = 0.125f; clear_ds_tri(&cd);
+    R.sc = (p_scissor){48, 48, 16, 16}; cd.depth = 0.375f; clear_ds_tri(&cd);
+    fb_cache_t *ent = NULL; for (int i = 0; i < 8; i++) if (g_fbc[i].inc && g_fbc[i].ser == depth.serial) ent = &g_fbc[i];
+    CHECK(ent && ent->nr == 2, "overlapping write snaps and merges cleanly while disjoint tile stays separate");
+    uint64_t b2 = g_fbd_bytes;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 2 && g_fbd_bytes == b2 + (32 * 16 + 16 * 16) * 4, "disjoint tile-aligned rectangles copy only their union");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 2, row, img); }
+    // Aliased tex_t serial sharing the same MTLTexture writes [32,0,48,16) to 0.625 -> tracked via root MTLTexture.
+    R.rt.depth = &depth_alias; R.sc = (p_scissor){32, 0, 16, 16}; cd.depth = 0.625f; clear_ds_tri(&cd);
+    R.rt.depth = &depth; R.has_sc = 0;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 3, "aliased serial write into same MTLTexture is tracked");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 3, row, img); }
+    // Point primitive with small viewport [0,0,8,8] and full scissor [0,0,64,64] must bound by scissor, not viewport +/- 8.
+    CHECK(rp_begin() != nil, "point primitive pass opens");
+    S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 8; S.vp[0][3] = 8;
+    fbd_draw_note(pr, MTLPrimitiveTypePoint, (MTLScissorRect){0, 0, 64, 64}, 0);
+    CHECK(ent && ent->nr == 1 && ent->r[0][0] == 0 && ent->r[0][1] == 0 && ent->r[0][2] == 64 && ent->r[0][3] == 64,
+          "point primitive ignores narrow viewport clamp and bounds by full scissor");
+    S.has_vp = 0; if (ent) ent->nr = 0;
+    // Unbounded draw (e.g. mesh-task) forces full-copy fallback.
+    fbd_draw_note(pr, MTLPrimitiveTypeTriangle, (MTLScissorRect){0, 0, 16, 16}, 1);
+    CHECK(ent && ent->dfull == 1, "unbounded draw marks snapshot entry for whole copy");
+    rp_end();
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 2, "unbounded draw falls back to whole copy");
+    // MSAA resolveTexture via enc_r_begin writes dt -> must invalidate and copy whole (0.5).
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.depthAttachment.texture = msaa; rp.depthAttachment.resolveTexture = dt;
+    rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 0.5;
+    rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+    rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+    enc_r_end(enc_r_begin(rp));
+    CHECK(ent && ent->dfull == 1, "MSAA resolveTexture into depth invalidates incremental snapshot");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 3, "MSAA resolve falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 4, row, img); }
+    // Blit into dt from sdt (0.875) -> must invalidate and copy whole.
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *sp = [MTL4RenderPassDescriptor new];
+    sp.depthAttachment.texture = sdt; sp.depthAttachment.loadAction = MTLLoadActionClear; sp.depthAttachment.clearDepth = 0.875; sp.depthAttachment.storeAction = MTLStoreActionStore;
+    enc_r_end(enc_r_begin(sp));
+    enc_b_copy_texture(blit(), sdt, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), dt, 0, 0, MTLOriginMake(0, 0, 0));
+    CHECK(ent && ent->dfull == 1, "blit into depth texture invalidates incremental snapshot");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 4, "blit write falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 5, row, img); }
+    // Waiting clear (R.clear_d = 1, no pass open) -> must fall back to whole copy of 0.25.
+    R.clear_d = 1; R.cd = 0.25;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 5 && !R.clear_d, "waiting depth clear falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 6, row, img); }
+    // Switch off (DM_NVN_FB_DEPTH_RECT=0) takes ordinary whole copies and does not bump fbd counters.
+    uint64_t fbd_snaps_before = g_fbd_snaps, dsnaps_before = g_fb_dsnaps;
+    g_fbd_mode = 0; g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_snaps == fbd_snaps_before && g_fb_dsnaps == dsnaps_before + 1, "with DM_NVN_FB_DEPTH_RECT=0 whole copies run as before");
+    R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "bounded depth rect submission completed under Metal validation");
+    // Verify GPU readback pixels for all 7 snapshots.
+    const uint8_t *base = rb.contents;
+    int ok0 = 1, ok1 = 1, ok2 = 1, ok3 = 1, ok4 = 1, ok5 = 1, ok6 = 1;
+    for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+        size_t o = (size_t)y * row + (size_t)x * 4;
+        float v0 = *(const float *)(base + o), v1 = *(const float *)(base + img + o), v2 = *(const float *)(base + img * 2 + o);
+        float v3 = *(const float *)(base + img * 3 + o), v4 = *(const float *)(base + img * 4 + o), v5 = *(const float *)(base + img * 5 + o), v6 = *(const float *)(base + img * 6 + o);
+        ok0 &= v0 == 0.75f;
+        ok1 &= v1 == ((x < 16 && y < 16) ? 0.25f : 0.75f);
+        float want2 = (x >= 8 && x < 24 && y < 16) ? 0.125f : (x < 8 && y < 16) ? 0.25f : (x >= 48 && y >= 48) ? 0.375f : 0.75f;
+        ok2 &= v2 == want2;
+        float want3 = (x >= 32 && x < 48 && y < 16) ? 0.625f : want2;
+        ok3 &= v3 == want3;
+        ok4 &= v4 == 0.5f;
+        ok5 &= v5 == 0.875f;
+        ok6 &= v6 == 0.25f;
+    }
+    CHECK(ok0, "readback 0: initial whole depth snapshot matches 0.75");
+    CHECK(ok1, "readback 1: single 16x16 dirty tile updated to 0.25 while rest stayed 0.75");
+    CHECK(ok2, "readback 2: merged overlapping tile + disjoint tile updated cleanly");
+    CHECK(ok3, "readback 3: aliased serial tile write updated cleanly");
+    CHECK(ok4, "readback 4: MSAA resolve fallback updated whole snapshot to 0.5");
+    CHECK(ok5, "readback 5: blit fallback updated whole snapshot to 0.875");
+    CHECK(ok6, "readback 6: waiting clear fallback updated whole snapshot to 0.25");
+    (void)bytes0;
+    g_fbd_mode = save_mode; g_fbd_any = save_any;
+    mtl_tex_release(&depth); mtl_tex_release(&depth_alias); mtl_tex_release(&src_depth);
+    printf("bounded depth rect snapshots: %s\n", before == failed ? "PASS" : "FAIL");
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
@@ -1063,6 +1211,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     depth_snap_case(pr);
+    depth_rect_case(pr);
     depth_after_write_case(pr,0); depth_after_write_case(pr,1);
     for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
     pending_clear_case(pr);

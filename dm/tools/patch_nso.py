@@ -1604,6 +1604,9 @@ SPIN_PATHS, SPIN_STEPS, SPIN_STORES = 256, 4096, 4   # complete paths back to T;
 SPIN_LSE = ('ldadd', 'ldclr', 'ldeor', 'ldset', 'ldsmax', 'ldsmin', 'ldumax', 'ldumin')
 SPIN_BAD = {'bl', 'blr', 'br', 'ret', 'eret', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'mrs', 'msr', 'sys', 'sysl', 'wfe', 'wfi', 'sev', 'sevl', 'clrex', 'dc', 'ic', 'at',
             'tlbi', 'drps', 'dcps1', 'dcps2', 'dcps3', 'blraa', 'blrab', 'blraaz', 'blrabz', 'braa', 'brab', 'braaz', 'brabz', 'retaa', 'retab', 'eretaa', 'eretab'}
+# Per-head decode cache for spin_region: cleared in spin_region's finally block, so it holds at most the ~135 instructions in [T - 4, hi + 20] for the head being analysed
+# (kept across heads, one 0.5-2.6 KB capstone object per instruction passed 24 GB on EA SPORTS FC 27 1.8e's 185 MB main; the parallel search strides heads by 8 * WORKERS,
+# so cross-head reuse is effectively zero). Returned regions keep the instruction objects they need, and spin_emit decodes nothing.
 spin_dec = {}
 def spin_ins(a):
     if a not in spin_dec: spin_dec[a] = next(md.disasm(bytes(IMG[a:a + 4]), a), None)
@@ -1660,36 +1663,40 @@ def spin_lock(a):
            ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the load>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>           the same without clrex
     'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends
     The forms without clrex retry the exclusive load at once: the next exclusive load replaces the reservation the failed test left"""
-    l = [spin_ins(a + 4 * i) for i in range(6)]
-    if l[0] is None: return None
+    x0 = spin_ins(a)
+    if x0 is None: return None
     r = lambda x, i: x.reg_name(x.operands[i].reg)
     plain = lambda x, i: x.operands[i].type == ARM64_OP_MEM and not x.operands[i].mem.index and not x.operands[i].mem.disp
-    m0 = l[0].mnemonic
-    if m0 in ('ldxr', 'ldaxr') and None not in l and r(l[0], 0).startswith('w') and plain(l[0], 1):
-        base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
-        if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
-                and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
-                and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
-            return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
-        if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
-                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
-            return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
-        if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
-                and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
-                and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
-            return ('acq', bn, l, 0, 6, {bn, spin_norm(r(l[4], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[4], 0))})
-        p = spin_ins(a - 4)
-        if (p is not None and p.mnemonic == 'clrex' and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a - 4 and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
-                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
-            return ('rel', bn, [p] + l[:5], 1, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
-    if m0 == 'stlr' and len(l[0].operands) == 2 and r(l[0], 0) in ('wzr', 'xzr') and plain(l[0], 1):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('rel', bn, l[:1], 0, 1, {bn}, set())
-    if (m0 in ('ldr', 'ldrb', 'ldrh') and None not in l[:3] and len(l[0].operands) == 2 and r(l[0], 0).startswith('w') and l[0].operands[1].type == ARM64_OP_MEM
-            and not l[0].operands[1].mem.index and not l[0].writeback and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-            and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l[:3], 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
+    m0 = x0.mnemonic
+    if m0 == 'stlr' and len(x0.operands) == 2 and r(x0, 0) in ('wzr', 'xzr') and plain(x0, 1):
+        bn = spin_norm(x0.reg_name(x0.operands[1].mem.base)); return ('rel', bn, [x0], 0, 1, {bn}, set())
+    if m0 in ('ldxr', 'ldaxr') and r(x0, 0).startswith('w') and plain(x0, 1):
+        l = [x0] + [spin_ins(a + 4 * i) for i in range(1, 6)]
+        if None not in l:
+            base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
+            if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
+                    and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
+                    and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
+                return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
+            if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                    and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                    and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+                return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
+            if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
+                    and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
+                    and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
+                return ('acq', bn, l, 0, 6, {bn, spin_norm(r(l[4], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[4], 0))})
+            p = spin_ins(a - 4)
+            if (p is not None and p.mnemonic == 'clrex' and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                    and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a - 4 and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                    and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+                return ('rel', bn, [p] + l[:5], 1, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
+    if (m0 in ('ldr', 'ldrb', 'ldrh') and len(x0.operands) == 2 and r(x0, 0).startswith('w') and x0.operands[1].type == ARM64_OP_MEM
+            and not x0.operands[1].mem.index and not x0.writeback):
+        l = [x0, spin_ins(a + 4), spin_ins(a + 8)]
+        if (None not in l and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
+            bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l, 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
     return None
 def spin_store(ins):
     """str / strb / strh / stur / sturb / sturh of a w register or zr to [xN{,#imm}] (no writeback, no register offset) → (value register or None for zr, base register), or None"""
@@ -1736,20 +1743,24 @@ def spin_region(T, bes):
     through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one.
     A lock sequence at T is one node of a poll that it heads (its own branches back to T stay inside it); when there is no such poll, T is the head of the sequence's own retry
     loop (a lock's wait for its holder, ld(a)xr; cbnz <the load>), found as plain instructions as before the lock rules"""
-    lk = spin_lock(T)
-    for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
-        ban = set()
-        for _ in range(8):
-            g = spin_region1(T, bes, ban, True, head)
-            if not isinstance(g, set): break
-            ban |= g
-        old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
-        g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
-        if g: break
-    return g
-def spin_region1(T, bes, ban, stores, head):
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
+    try:
+        lk = spin_lock(T)
+        for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
+            ban = set()
+            for _ in range(8):
+                g = spin_region1(T, bes, ban, True, head)
+                if not isinstance(g, set): break
+                ban |= g
+            old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
+            g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
+            if g: break
+        return g
+    finally:
+        spin_dec.clear()
+def spin_region1(T, bes, ban, stores, head):
+    hi = max(bes)
     nodes, back, bad, inner = {}, set(), set(), set()
     todo = [T]
     while todo:
@@ -1763,8 +1774,8 @@ def spin_region1(T, bes, ban, stores, head):
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:
             n = {'kind': lk[0], 'base': lk[1], 'k': {'acq': 1, 'rel': -1, 'tst': 0}[lk[0]], 'ins': lk[2], 'pre': lk[3], 'uses': lk[5], 'defs': lk[6], 'succ': [a + 4 * lk[4]]}
-        elif stores and spin_store(spin_ins(a)):
-            x = spin_ins(a); st = spin_store(x); n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
+        elif stores and (st := spin_store(x := spin_ins(a))):
+            n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
         else:
             x = spin_ins(a); k = spin_kind(x)
             if k is None: bad.add(a); continue
@@ -1890,7 +1901,7 @@ def find_spin_regions():
     heads = []
     for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)]):
         heads += found
-    return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
+    return [g for T in sorted(heads) if (g := spin_region(T, spin_cand[T]))]
 
 spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]

@@ -81,7 +81,6 @@ pyright	dm/tools/patch_nso.py	reportCallIssue	2	No overloads for "fullmatch" mat
 pyright	dm/tools/patch_nso.py	reportIndexIssue	3	"__getitem__" method not defined on type "set[Unknown]"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"exec_module" is not a known attribute of "None"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"loader" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalSubscript	2	Object of type "None" is not subscriptable
 pyright	dm/tools/patch_nso.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/sdis.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/tests/test_astral_fps.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"

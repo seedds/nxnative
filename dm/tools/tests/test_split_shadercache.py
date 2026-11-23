@@ -29,6 +29,14 @@ def container(stream):
     return struct.pack('<II', 13, len(blocks)) + b''.join(struct.pack('<I', len(b)) + b for b in blocks)
 
 
+def container_v28(stream):
+    """The same stream as version 28 writes it: each block keeps its stored and raw lengths, and the raw length varies
+    (BioShock 2 Remastered has 32 KiB blocks in shadercache.nx and one 30,178-byte block in startupshadercache.nx)"""
+    blocks = [zlib.compress(stream[i:i + BLOCK]) for i in range(0, len(stream), BLOCK)]
+    return struct.pack('<II', 28, len(blocks)) + b''.join(struct.pack('<II', len(b), min(BLOCK, len(stream) - i)) + b
+                                                          for i, b in zip(range(0, len(stream), BLOCK), blocks))
+
+
 VS, PS, GS = fz.stage(0x0461), fz.stage(0x1462), fz.stage(0x1061)   # vertex, pixel, geometry (SPH word 0: type in bits 10..13)
 A, B, C = rec(*VS), rec(*PS), rec(*GS)
 STREAM = bytes(BLOCK - 200) + A + B + C + B   # A starts 200 bytes before the boundary and ends past it; B is repeated to make one key from two records
@@ -63,6 +71,17 @@ class ShadercacheNx(unittest.TestCase):
             q = Path(tmp) / 'other.nx'
             q.write_bytes(bytes(4096))
             self.assertEqual(ss.scan_file_in((str(q), 'other.nx')), ('other.nx', {}, set(), {}))
+
+    def test_the_version_28_framing_reads_the_same_records(self):
+        # BioShock 2 Remastered's cache: each block carries its stored and raw length; the records are the same stream
+        wide = container_v28(STREAM)
+        self.assertEqual(ss.shadercache_nx_framing(FILE), 4)
+        self.assertEqual(ss.shadercache_nx_framing(wide), 8)
+        self.assertTrue(ss.is_shadercache_nx(wide))
+        self.assertFalse(ss.is_shadercache_nx(wide[:-1]))   # still has to end at the file's end
+        narrow, broad = ss.shadercache_nx(FILE, '/shadercache.nx'), ss.shadercache_nx(wide, '/shadercache.nx')
+        self.assertEqual([r[0] for r in narrow], [r[0] for r in broad])
+        self.assertEqual(len(ss.uniq_keys(broad)), 3)
 
     def test_a_code_area_with_no_record_header_is_left_out(self):
         # a control magic whose 16 bytes before the code area are not a header: skipped, not read as a record

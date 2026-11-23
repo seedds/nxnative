@@ -4742,20 +4742,28 @@ def fzlc_shaders(path, label):
         parts.append(p); at = end
     return glslc_shaders(b''.join(parts), label, need=False)
 
-def is_shadercache_nx(d):
-    """BioShock Remastered's RomFS shadercache.nx: {u32 version (13 in 1.0.2), u32 block count}, then each block {u32 stored length, one zlib stream} stored back to back
-    until the end of the file. The block table is walked without inflating: every stored length in range, every block a zlib stream (0x78), and the last block ending exactly
-    at the file's end. A game's zlib chunk table that does not fill its file, or a zstd/Yaz0 container, is not one"""
-    if len(d) < 16 or d[12:13] != b'\x78': return False
+def shadercache_nx_framing(d):
+    """The block framing of a RomFS shadercache.nx, or None when the file is not one. Two exist: version 13's blocks are
+    {u32 stored length, one zlib stream}, version 28's are {u32 stored length, u32 raw length, one zlib stream} (its raw length
+    varies: 32 KiB in the main cache, the whole file in startupshadercache.nx). The table is walked without inflating it: every
+    stored length in range, every block a zlib stream (0x78), and the last block ending exactly at the file's end — a game's
+    zlib chunk table that does not fill its file, or a zstd/Yaz0 container, is not one. Returns the bytes between a block's
+    stored length and its stream (4 or 8)"""
+    if len(d) < 16: return None
     ver, count = struct.unpack_from('<II', d, 0)
-    if not 1 <= ver <= 0x100 or not 1 <= count <= 1 << 20: return False
-    at = 8
-    for _ in range(count):
-        if at + 4 > len(d): return False
-        stored, = struct.unpack_from('<I', d, at)
-        if stored < 8 or at + 4 + stored > len(d) or d[at + 4] != 0x78: return False
-        at += 4 + stored
-    return at == len(d)
+    if not 1 <= ver <= 0x100 or not 1 <= count <= 1 << 20: return None
+    for word in (4, 8):
+        at, ok = 8, True
+        for _ in range(count):
+            if at + word > len(d): ok = False; break
+            stored, = struct.unpack_from('<I', d, at)
+            body = at + word
+            if stored < 8 or body + stored > len(d) or d[body] != 0x78: ok = False; break
+            at = body + stored
+        if ok and at == len(d): return word
+    return None
+
+def is_shadercache_nx(d): return shadercache_nx_framing(d) is not None
 
 def shadercache_nx(d, label):
     """The NVN graphics programs of shadercache.nx, the RomFS shader cache of BioShock Remastered (Blind Squirrel's Unreal Engine 3 port): 5,557 zlib blocks of 32 KiB
@@ -4766,15 +4774,17 @@ def shadercache_nx(d, label):
     when the header's code length equals the record's, the code area starts with the graphics magic and check() passes; the label is the control section's offset in the
     joined stream, so it is reproducible from the game's file alone"""
     ver, count = field(d, '<II', 0, label)
+    word = shadercache_nx_framing(d)
+    if word is None: red(f'{label}: {ver} version, {count} blocks that do not fill the file')
     parts, at = [], 8
     for i in range(count):
         where = f'{label}: block {i} at {at:#x}'
         stored, = field(d, '<I', at, where)
-        body = span(d, at + 4, stored, where)
+        body = span(d, at + word, stored, where)
         if body[:1] != b'\x78': red(f'{where}: {stored} stored bytes that are not a zlib stream')
         try: parts.append(zlib.decompress(body))
         except zlib.error as e: red(f'{where}: invalid zlib stream ({e})')
-        at += 4 + stored
+        at += word + stored
     if at != len(d): red(f'{label}: {count} blocks end at {at:#x}, the file is {len(d):#x} bytes')
     s = b''.join(parts)
     out, off = [], 0

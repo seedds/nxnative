@@ -330,6 +330,7 @@ bool dm_setting_live(const char *env, const char *value) {
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
+    if (!strcmp(env, "DM_BACKGROUND_RUN")) { if (value) LOG("front end: keep running in background %s (in-game menu)", atoi(value) ? "on" : "off"); return true; }   // read from the environment when the app goes to the background (bg_run)
     return false;
 }
 @interface DmTVSceneDelegate : UIResponder <UIWindowSceneDelegate>
@@ -617,7 +618,15 @@ int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.out
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.
 // All of this runs on the main queue, like the scene callbacks
 static int g_audio_bg, g_audio_intr;
-static void front_ios_audio_apply(void) { dm_audio_suspend(g_audio_bg || g_audio_intr); }
+// Keep running in background (DM_BACKGROUND_RUN, launcher and in-game menu): the audio units keep rendering, muted, while the app is in the background, so with the audio
+// background mode (UIBackgroundModes in Info.plist, build_ipa.sh) iOS keeps the process alive instead of suspending it and, when memory runs short, evicting it; the
+// game itself is paused as before (graphics suspended, guest clock frozen). An interruption (a call, Siri) still suspends the output: another session owns the audio then
+static int bg_run(void) { const char *e = getenv("DM_BACKGROUND_RUN"); return e && atoi(e) != 0; }
+static void front_ios_audio_apply(void) {
+    int keep = g_audio_bg && !g_audio_intr && bg_run();
+    dm_audio_suspend((g_audio_bg && !keep) || g_audio_intr);
+    dm_audio_mute(keep);
+}
 static BOOL front_ios_same_outputs(NSArray<AVAudioSessionPortDescription *> *previous, NSArray<AVAudioSessionPortDescription *> *current) {
     if (previous.count != current.count) return NO;
     for (NSUInteger i = 0; i < current.count; i++) {
@@ -681,6 +690,7 @@ void front_ios_focus_event(int ev) {
             dm_focus_set(3);
             g_audio_bg = 1;
             front_ios_audio_apply();
+            if (bg_run()) LOG("front end: in the background, kept running (Keep running in background); the game is paused, the audio session stays playing, muted");
             guest_clock_freeze_for(1, 1);
             save_sync_background();
             dm_gfx_suspend(1);

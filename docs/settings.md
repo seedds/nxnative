@@ -103,6 +103,13 @@ iPhone and iPad. **Automatic**, the default, turns with the device as before: la
 
 Shows the frames per second at the top left.
 
+### Keep running in background
+
+Off by default. On, the app stays alive when you switch to another app or lock the phone: the game is paused and silent meanwhile, and it carries on where it was when you come back. Off, iOS suspends the app and, when it needs the memory, quits it quietly: a game of a few gigabytes is usually the first to go, and you find the launcher screen on your return with everything since the last save lost.
+
+- **When to change it:** turn it on if you often switch away mid-game.
+- **Cost:** a little battery while in the background (the audio session is kept playing, muted); iOS can still quit the app under heavy memory pressure, but no longer does so just to make room.
+
 ## Controls
 
 **Microphone (Mac).** Apps that support microphone input have this switch off by default. Turn it on and press Play to grant macOS access. The first enabled launch can ask even if the settings window is hidden. Choose an input device while the switch is on. Microphone gain is under Advanced settings.
@@ -268,7 +275,7 @@ Each time the game starts, with or without cloud saves, the save it starts from 
 
 ## In-game menu
 
-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture**, **Rotation** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture**, **Rotation**, the **Frame-rate counter** and **Keep running in background**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 

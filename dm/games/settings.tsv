@@ -28,6 +28,7 @@ DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		lev
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	always	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_ROTATION	choice	auto=Automatic,landscape=Landscape,portrait=Portrait	auto	platform:ios	Game	Rotation
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
+DM_BACKGROUND_RUN	toggle	-	0	platform:ios	Game	Keep running in background	Keeps the app alive when you switch away, so iOS does not quit the game; it stays paused and silent meanwhile. Uses a little battery in the background.
 DM_COOP	toggle	auto/off	0	always	Game	Link Play on this network	Visit and host towns with players on the same Wi-Fi. Asks once for local network access.
 DM_COOP_JOIN	text	21		always	Game	Join address	Visit one host by its address, IPv4[:port] (on another network, turn on Internet play too). Empty: find hosts on this Wi-Fi, or host.	needs=DM_COOP=auto
 DM_COOP_INTERNET	toggle	-	0	always	Game	Internet play	Play with someone on another network: both enter the same room code. Not encrypted.	needs=DM_COOP=auto

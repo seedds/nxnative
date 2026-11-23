@@ -214,6 +214,10 @@ static unsigned queued_pcm_blocks(const aout *a) {
     uint32_t played = atomic_load_explicit(&a->q_played, memory_order_acquire);
     return atomic_load_explicit(&a->q_tail, memory_order_acquire) - played;
 }
+// Every output muted while the units keep rendering (the iOS front end's Keep running in background: an AudioUnit that renders, silence or not, keeps the app's audio
+// session playing, which with the audio background mode keeps iOS from suspending and evicting the app; the game's sound is not heard meanwhile)
+static _Atomic int g_mute_all;
+void dm_audio_mute(int on) { if (atomic_exchange(&g_mute_all, on ? 1 : 0) != (on ? 1 : 0)) LOG("audio %s", on ? "muted (background, kept running)" : "unmuted (foreground)"); }
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
@@ -234,7 +238,7 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     } else {
         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
-        if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+        if (a->mute || atomic_load_explicit(&g_mute_all, memory_order_relaxed)) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
     }
     return noErr;
 }

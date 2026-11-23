@@ -41,7 +41,7 @@ DM_UP_BLOCK_MB=8
 
 Measured with that set (Kokiri Forest, 2816x1762 window): **19.5-20 fps**, **App 2.6-3.0 GB** in the Metal HUD (Activity Monitor: 2.3 GB), Metal working set about 4.8-5.15 GB against the recommended 5.46 GB. Before the RAM saver the process used about 9 GB.
 
-A balanced starting point if the picture is too blocky: big 8, medium 4, small 2, shadow divider 16. Raising the texture numbers worked too (the owner went above the set shown); raise them one step at a time and watch the log's `GPU allocated`. If the log shows `GPU out of memory`, step back.
+A balanced starting point if the picture is too blocky: big 8, medium 4, small 2, shadow divider 16. Raised sets also ran to a clean exit: big 8 / medium 6 / small 6, and big 16 / medium 6 / small 4 (the latter peaked at 3.1 GB resident and 5.16 GB GPU, close to the 5.46 GB limit). Raise them one step at a time and watch the log's `GPU allocated`. If the log shows `GPU out of memory`, step back.
 
 Detail levels: higher number = bigger stand-in = more memory. 1 is tiny and blocky, 32 is close to normal. Pick the level, not the byte count.
 
@@ -82,6 +82,8 @@ If the app's own settings window had saved choices, press **Reset** there so the
 You need: a Mac with Xcode (iOS platform installed), Python 3.12+, the nxnative or NX2Apple checkout, your game's NSP folder and `prod.keys`, your Apple team ID (a free Personal Team has one), and an iPhone with A17 Pro or later on iOS 26+, connected by cable, unlocked, trusted, Developer Mode on. For fast game-file copies: `brew install libimobiledevice`.
 
 `python3 nx_ocarina_ios_builder.py` opens the window; fill in the checkout, NSP folder, keys, team ID, pick the phone and press **Build, sign and install**. The first build takes 30-60 minutes. The tool saves your entries.
+
+The tool finds a Python that has the build script's modules (lz4, capstone, fonttools, zbic), or makes a venv at `~/.nx_ocarina_ios_venv` and installs them (needs the internet once).
 
 Caveats: untested on a device; the Mac patcher's resolution edit is not part of it; whether a free account keeps Increased Memory Limit depends on Apple's side, and the log will tell you.
 

@@ -44,6 +44,30 @@ def build_env(o):
     return e
 
 
+NEEDED = 'import lz4.block, capstone, fontTools, zbic'
+VENV = Path.home() / '.nx_ocarina_ios_venv'
+
+
+def python_with_modules(log):
+    """The build script needs lz4, capstone, fontTools, zbic (and backports.zstd before Python 3.14). Use a Python that has them, or make a venv that does."""
+    import shutil
+    cands = [sys.executable, str(VENV / 'bin/python')] + [shutil.which(n) for n in ('python3.14', 'python3.13', 'python3.12', 'python3')] + ['/opt/homebrew/bin/python3', '/usr/local/bin/python3']
+    seen = []
+    for c in cands:
+        if not c or c in seen or not Path(c).exists(): continue
+        seen.append(c)
+        if subprocess.run([c, '-c', NEEDED], capture_output=True).returncode == 0: log(f'   Python for the build script: {c}'); return c
+    base = next((c for c in seen if subprocess.run([c, '-c', 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)'], capture_output=True).returncode == 0), None)
+    if not base: raise RuntimeError('the build script needs Python 3.12 or newer: brew install python@3.13')
+    log(f'   installing the build script\'s Python modules into {VENV} (needs the internet, once)')
+    if not (VENV / 'bin/python').exists(): P.run([base, '-m', 'venv', VENV], log)
+    py = str(VENV / 'bin/python')
+    ver = subprocess.run([py, '-c', 'import sys; print(sys.version_info >= (3, 14))'], capture_output=True, text=True).stdout.strip()
+    P.run([py, '-m', 'pip', 'install', '--upgrade', 'pip', 'lz4', 'capstone>=5,<6', 'fonttools', 'zbic'] + ([] if ver == 'True' else ['backports.zstd']), log)
+    if subprocess.run([py, '-c', NEEDED], capture_output=True).returncode: raise RuntimeError('the modules did not install: run  ' + py + ' -m pip install lz4 "capstone>=5,<6" fonttools zbic backports.zstd')
+    return py
+
+
 def devices(log):
     """(identifier, name, udid) of connected devices, from devicectl's JSON."""
     out = Path(tempfile.mkdtemp()) / 'dev.json'
@@ -77,7 +101,7 @@ def build(o, log):
 
     log('2. Preparing the Xcode project (extraction and shaders are reused when unchanged; the first run takes 30-60 minutes)')
     envf = Path(tempfile.mkdtemp()) / 'env.txt'; envf.write_text(''.join(f'{k}={v}\n' for k, v in env.items()))
-    cmd = [sys.executable, repo / 'scripts/build_ipa_from_nsp.py', nsp, '-k', keys, '--prepare-xcode', '--team-id', team, '--romfs', 'separate', '--env-file', envf, '--keep-extracted']
+    cmd = [python_with_modules(log), repo / 'scripts/build_ipa_from_nsp.py', nsp, '-k', keys, '--prepare-xcode', '--team-id', team, '--romfs', 'separate', '--env-file', envf, '--keep-extracted']
     if bundle: cmd += ['--bundle-id', bundle]
     if o.get('lang', '').strip(): cmd += ['-l', o['lang'].strip()]
     P.run(cmd, log, cwd=repo)

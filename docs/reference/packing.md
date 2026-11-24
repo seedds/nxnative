@@ -17,6 +17,13 @@
 - **Found on:** [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md), whose separate licence-only DLC package was truncated ([issue #2013](https://github.com/seedds/nxnative/issues/2013)). Main now has the shared [CASC/SHAD reader](shaders.md#blizzards-casc-storage-and-shad-containers); that separate shader-discovery fix does not repair missing package bytes. The reported base game alone (v0) remains unchecked, as the game note records.
 - **Check:** `dm/tools/tests/test_pfs0_storage.py` exercises synthetic payload truncation, out-of-range and overflowing spans, an empty file at EOF, and the CLI's damaged-input exit with and without `--allow-damaged`, with both normal and missing-final-NUL name tables.
 
+### DLC extraction rejects an archived filename
+
+- **Symptom:** `nx_extract --aoc --romfs-image` stops with `ResultFsInvalidCharacter (2002-6004)` after selecting the add-on's data NCA.
+- **Cause:** LibHac 0.19 enumerates a RomFS directory named `D:`, then rejects the colon when the string-based file-open overload validates the full path.
+- **Fix:** for this result on a LibHac RomFS, the image writer uses the path it got from archive enumeration with LibHac's typed file-open overload. Reads still go through the NCA's integrity-checked storage. The image preserves the original bytes and name.
+- **Found on:** [CAPTAIN TSUBASA 2: WORLD FIGHTERS](../../dm/games/01009720213B0000/README.md), all five supplied DLCs. `test_romfs_read.py` also exercises a synthetic archive with a literal `D:` directory.
+
 ### PFS0 file-name table missing its final NUL
 
 - **Symptom:** package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP.

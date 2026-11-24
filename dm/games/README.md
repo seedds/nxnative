@@ -79,6 +79,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [BRAVELY DEFAULT Ⅱ](01006DC010326000/README.md) | `01006DC010326000` | 1.0.0 (base) | 10.4.0 | Unreal Engine 4.23, CRIWARE | NVN | [60 fps target](01006DC010326000/README.md#frame-rate) |
 | [Burnout Paradise Remastered](0100DBF01000A000/README.md) | `0100DBF01000A000` | 1.0.0 (base) | 9.3.0 | Criterion's engine | NVN | — |
 | [Captain Toad: Treasure Tracker](01009BF0072D4000/README.md) | `01009BF0072D4000` | 1.4.2 | 8.2.0 | Nintendo EPD Tokyo (`al` over sead / agl) | NVN | — |
+| [CAPTAIN TSUBASA 2: WORLD FIGHTERS](01009720213B0000/README.md) | `01009720213B0000` | 1.0.6 | 18.3.1 | Unreal Engine 5.5.4, Wwise, Bink 2 | NVN | — |
 | [Castlevania: Belmont's Curse](0100BA4026E94000/README.md) | `0100BA4026E94000` | 1.1.0 | 19.3.16 | Unity 2022.3.62f2 IL2CPP, FMOD | NVN | — |
 | [Catherine: Full Body](0100BF00112C0000/README.md) | `0100BF00112C0000` | 1.0.1a | 8.2.1 | Atlus GFD (CRI middleware) | NVN | [60 fps mode](0100BF00112C0000/README.md#frame-rate) |
 | [Celeste](01002B30028F6000/README.md) | `01002B30028F6000` | 1.4.1.1 | 15.3.2 | MonoGame (C# → C++ by BRUTE) | NVN | — |

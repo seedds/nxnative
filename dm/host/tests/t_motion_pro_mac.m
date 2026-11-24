@@ -9,7 +9,7 @@
 
 @interface TestPro : NSObject
 @property BOOL synthetic;
-@property NSNumber *vendor, *product;   // a Pro Controller unless set
+@property NSNumber *vendor, *product, *usagePage, *usage;   // a Pro Controller GamePad unless set
 @property uint8_t *buffer;
 @property IOHIDReportCallback callback;
 @property void *context;
@@ -20,18 +20,21 @@ static CFTypeRef test_property(IOHIDDeviceRef device, CFStringRef key) {
     TestPro *d = (__bridge id)device;
     if (CFEqual(key, CFSTR(kIOHIDVendorIDKey))) return (__bridge CFTypeRef)(d.vendor ?: @0x057E);
     if (CFEqual(key, CFSTR(kIOHIDProductIDKey))) return (__bridge CFTypeRef)(d.product ?: @0x2009);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsagePageKey))) return (__bridge CFTypeRef)(d.usagePage ?: @1);
+    if (CFEqual(key, CFSTR(kIOHIDPrimaryUsageKey))) return (__bridge CFTypeRef)(d.usage ?: @5);
     return CFEqual(key, CFSTR(kIOHIDGCSyntheticDeviceKey)) && d.synthetic ? kCFBooleanTrue : NULL;
 }
 static void test_callback(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, IOHIDReportCallback callback, void *ctx) {
     TestPro *d = (__bridge id)device; assert(len >= 49);
     d.buffer = buffer; d.callback = callback; d.context = ctx;
 }
-static int sent, player, cleared = -1, ds4_sent;
+static int sent, player, cleared = -1, ds4_sent, abitdo_sent;
 static uint64_t tick = 1000000000, sample_time;
 uint64_t now_ns(void) { return tick; }
 void dm_motion_set_hid(int p, const float a[3], const float w[3], uint64_t ns) {
-    sent++; player = p; sample_time = ns; assert(a[2] == -1 && (w[2] == 0 || w[2] > 0));
-    if (w[2] > 0) ds4_sent++;   // the DualShock 4 reports below turn about z, the Pro's do not
+    sent++; player = p; sample_time = ns; assert(a[2] == -1);
+    if (w[2] > 0) ds4_sent++;       // the DualShock 4 reports below turn positively about z
+    else if (w[2] < 0) abitdo_sent++;   // the 8BitDo reports below turn negatively about z
 }
 void dm_motion_clear_hid(int p) { cleared = p; }
 #define LOG(...) ((void)0)
@@ -44,7 +47,7 @@ void dm_motion_clear_hid(int p) { cleared = p; }
 static IOHIDDeviceRef hid(TestPro *d) { return (__bridge IOHIDDeviceRef)d; }
 static void found(TestPro *d) { pro_found(NULL, kIOReturnSuccess, NULL, hid(d)); }
 static void removed(TestPro *d) { pro_removed(NULL, kIOReturnSuccess, NULL, hid(d)); }
-static int gc[PRO_MODELS], slot[PRO_MODELS] = {-1, -1};   // GameController's controllers of each model, as front_mac.m counts them
+static int gc[PRO_MODELS], slot[PRO_MODELS] = {[0 ... PRO_MODELS - 1] = -1};   // GameController's controllers of each model, as front_mac.m counts them
 static void players(int pros, int pro_slot) { gc[PRO_MODEL_PRO] = pros; slot[PRO_MODEL_PRO] = pro_slot; dm_motion_pro_players(gc, slot); }
 static void changed(void) { dm_motion_pro_players(gc, slot); }
 static int mock_gc_nz[2], stick_notifies, stick_notify_player = -1;
@@ -70,6 +73,12 @@ static void ds4_report(TestPro *d) {   // lying face up, turning about its own y
     d.callback(d.context, kIOReturnSuccess, hid(d), kIOHIDReportTypeInput, 0x11, d.buffer, 78);
     d.callback(d.context, kIOReturnSuccess, hid(d), kIOHIDReportTypeInput, 0x01, d.buffer, 78);   // USB's report: not read
     tick += 4000000;
+}
+static void abitdo_report(TestPro *d, CFIndex len) {   // lying face up (+4096 z accel), turning negatively about z (-4096 gyro z)
+    assert(d.callback && d.buffer); memset(d.buffer, 0, 34); d.buffer[0] = 0x01;
+    if (len >= 34) { d.buffer[20] = 0x10; d.buffer[26] = 0xf0; }
+    d.callback(d.context, kIOReturnSuccess, hid(d), kIOHIDReportTypeInput, 0x01, d.buffer, len);
+    tick += 16000000;
 }
 int main(void) { @autoreleasepool {
     g_pro_changed = changed;
@@ -118,6 +127,35 @@ int main(void) { @autoreleasepool {
     assert(g_pro_bound && g_pro_bound->hid == hid(c) && !g_pro_pair[PRO_MODEL_DS4].bound && player == 0);
     ds4_report(ds); assert(ds4_sent == ds4_before);   // the DS4 no longer feeds the shared player
     removed(ds); gc[PRO_MODEL_DS4] = 0; slot[PRO_MODEL_DS4] = -1; changed();
+    // 8BitDo Ultimate 2 Wireless (2DC8:6012, Bluetooth): vendorName matching, GamePad/Joystick filtering, firmware 1.02 short report, coexistence and DM_PAD_MERGE handover
+    assert(pro_model_of_controller("Switch Pro Controller", "8BitDo Ultimate 2 Wireless") == PRO_MODEL_PRO);   // category beats vendorName
+    assert(pro_model_of_controller("DualShock 4", "Wireless Controller") == PRO_MODEL_DS4);
+    assert(pro_model_of_controller("HID", "8BitDo Ultimate 2 Wireless") == PRO_MODEL_8BITDO_U2W);
+    assert(pro_model_of_controller("HID", "8BitDo Pro 2") == -1);
+    TestPro *ebKeys = [TestPro new]; ebKeys.vendor = @0x2DC8; ebKeys.product = @0x6012; ebKeys.usage = @6; found(ebKeys); assert(!ebKeys.callback);
+    TestPro *ebSynth = [TestPro new]; ebSynth.vendor = @0x2DC8; ebSynth.product = @0x6012; ebSynth.synthetic = YES; found(ebSynth); assert(!ebSynth.callback);
+    TestPro *ebOther = [TestPro new]; ebOther.vendor = @0x2DC8; ebOther.product = @0x301B; found(ebOther); assert(!ebOther.callback);
+    TestPro *eb = [TestPro new]; eb.vendor = @0x2DC8; eb.product = @0x6012; eb.usage = @4; found(eb); assert(eb.callback);   // Joystick usage accepted
+    gc[PRO_MODEL_8BITDO_U2W] = 1; slot[PRO_MODEL_8BITDO_U2W] = 2; changed();
+    assert(g_pro_bound && g_pro_bound->hid == hid(c) && !g_pro_pair[PRO_MODEL_8BITDO_U2W].bound);   // no 34-byte report 0x01 yet
+    abitdo_report(eb, 12);   // firmware 1.02's 12-byte report: logged once, does not pair or send
+    assert(!g_pro_pair[PRO_MODEL_8BITDO_U2W].bound && abitdo_sent == 0 && ((pro_device *)eb.context)->short_logged == 1);
+    abitdo_report(eb, 34);
+    assert(g_pro_pair[PRO_MODEL_8BITDO_U2W].bound && g_pro_pair[PRO_MODEL_8BITDO_U2W].player == 2 && abitdo_sent == 1 && player == 2);
+    assert(g_pro_bound && g_pro_bound->hid == hid(c));   // Pro stays paired on player 0
+    gc[PRO_MODEL_8BITDO_U2W] = 2; changed();   // two 8BitDo controllers: only that model unbinds
+    assert(!g_pro_pair[PRO_MODEL_8BITDO_U2W].bound && cleared == 2 && g_pro_bound && g_pro_bound->hid == hid(c));
+    abitdo_report(eb, 34); assert(abitdo_sent == 1);
+    gc[PRO_MODEL_8BITDO_U2W] = 1; slot[PRO_MODEL_8BITDO_U2W] = 0; changed();   // DM_PAD_MERGE: Pro (earlier in table) keeps player 0
+    assert(!g_pro_pair[PRO_MODEL_8BITDO_U2W].bound && g_pro_bound && g_pro_bound->hid == hid(c));
+    int eb_before = abitdo_sent;
+    for (int i = 0; i < 70; i++) abitdo_report(eb, 34);   // 1.12 s: Pro expires, 8BitDo takes player 0
+    assert(!g_pro_bound && g_pro_pair[PRO_MODEL_8BITDO_U2W].bound && g_pro_pair[PRO_MODEL_8BITDO_U2W].player == 0 && abitdo_sent > eb_before && player == 0);
+    dm_motion_pro_active(0); eb_before = abitdo_sent; abitdo_report(eb, 34); assert(cleared == 0 && abitdo_sent == eb_before);
+    dm_motion_pro_active(1); abitdo_report(eb, 34); assert(abitdo_sent == eb_before + 1);
+    report(c);   // Pro resumes and reclaims player 0
+    assert(g_pro_bound && g_pro_bound->hid == hid(c) && !g_pro_pair[PRO_MODEL_8BITDO_U2W].bound);
+    removed(eb); gc[PRO_MODEL_8BITDO_U2W] = 0; slot[PRO_MODEL_8BITDO_U2W] = -1; changed();
     removed(c); removed(b); removed(synthetic); assert(!g_pro_devices);
 
     // Automatic per-stick passive HID fallback (#2655, #382): latches only after sustained deflection while GameController (mapped and unmapped) stays zero

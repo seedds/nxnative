@@ -156,6 +156,7 @@ void dm_device_share(const void *p, uint64_t size, int share);   // guest memory
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)
+int dm_sdk_nvn1_minor(void);   // the minor version from older NVN's own nvnDeviceGetInteger switch, or -1 if its layout is unrecognized
 int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDeviceGetInteger answers for item, read from the sdk module (loader.c); 0 when it has none
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
 int dm_game_imports(const char *prefix);   // main or an NRO imports a symbol whose name starts with prefix (loader.c)
@@ -229,6 +230,8 @@ void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Re
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
 int dm_guest_as_contains(uintptr_t a);   // hle_svc.c: the address lies in the reserved guest address block
+int dm_stack_region_matches(uint64_t start, uint64_t end);   // hle_svc.c: [start, end) is the guest stack region
+uint64_t dm_stack_alloc(size_t size, size_t align, size_t align_offset, size_t guard_size);   // hle_svc.c: deterministic placement in the guest stack region (0 when none fits)
 // hle_exl.c: exlaunch code plugins (a mod's exefs/subsdk<N>). The process handle GetInfo 65001 answers; the stand-in rtld below the modules and its QueryMemory regions;
 // the writable views of module code MapProcessMemory makes, written back into the code on unmap and after each module's DT_INIT
 extern const uint32_t dm_exl_process_handle;

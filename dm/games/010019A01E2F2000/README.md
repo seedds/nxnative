@@ -37,6 +37,7 @@ The work folder is `<NSP folder>/010019A01E2F2000-work`: `host.sh` copies the wo
 General tool changes first needed here; each applies to every game:
 
 - **60-byte pack entries, zstd program records and `MTRL` forms, and program records whose control length is not a multiple of 0x40**, which the reader had skipped without a word in Metroid Prime Remastered too (28,479 of its shaders) (`rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
+- **JoyDual vibration handles routed to FullKey and Handheld controllers** (`vib_valid`, `hle_hid.c`; `main+0xaab6f8` requests only `STYLE_JOYDUAL` handles at boot): [services.md](../../../docs/reference/services.md#joydual-vibration-handles-on-a-whole-controller).
 
 ## Open
 

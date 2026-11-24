@@ -36,11 +36,19 @@ static kern_return_t render_policy_set(thread_t thread, thread_policy_flavor_t f
 enum { SAMPLES = 240, NMIX = 8, NCMD = 6 };
 enum { PACE_BLOCKS = 2000 };
 static struct {
-    int rate, device_frames, callbacks, played, released, appended, rendered, bursts, waits;
+    int rate, device_frames, callbacks, played, released, appended, rendered, bursts, waits, target_blocks;
+    Result update_rc;
+    int ev_clears;
+    void *last_cleared_ev;
     uint64_t now, last_exec, min_spacing;
     aout_buf *output[NBUF];
-    pthread_t catchup;
+    pthread_t concurrent_upd;
 } pace;
+static struct {
+    int on, queued, released, signaled, sleeping, wait_sleep, fresh_execs, ev_waits;
+    pthread_mutex_t mu;
+    pthread_cond_t ev_cv, sleep_cv;
+} dq;
 static _Alignas(8) uint8_t pace_sys[0x300];
 static void *pace_sym(const char *name);
 // test_renderer_blocks: the renderer each appended block came from; the output holds what it is given and plays none of it
@@ -77,7 +85,20 @@ int dm_pcmout_append(void *k, void *b) {
             assert(pcm[0] == expected && pcm[1] == -expected && pcm[6] == expected && pcm[7] == -expected);
         assert(pace.appended - pace.released < NBUF);
         pace.output[pace.appended++ % NBUF] = b;
-        if (pace.appended == PACE_BLOCKS) atomic_store(&t_ar->open, 0);
+        int limit = pace.target_blocks ? pace.target_blocks : PACE_BLOCKS;
+        if (pace.appended == limit) {
+            atomic_store(&t_ar->open, 0);
+            if (dq.on) {
+                pthread_mutex_lock(&dq.mu);
+                pthread_cond_broadcast(&dq.ev_cv);
+                pthread_mutex_unlock(&dq.mu);
+            }
+        } else if (dq.on) {
+            pthread_mutex_lock(&dq.mu);
+            while (dq.wait_sleep && !dq.sleeping) pthread_cond_wait(&dq.sleep_cv, &dq.mu);
+            dq.wait_sleep = 0;
+            pthread_mutex_unlock(&dq.mu);
+        }
         return 1;
     }
     if (!blocks_on) return 0;
@@ -110,6 +131,15 @@ void dm_pcmout_wait(void *k, int ms) {
     }
 }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
+void hle_clear_system_event(void *ev) {
+    pace.ev_clears++;
+    pace.last_cleared_ev = ev;
+    if (dq.on) {
+        pthread_mutex_lock(&dq.mu);
+        dq.signaled = 0;
+        pthread_mutex_unlock(&dq.mu);
+    }
+}
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
 static int32_t mix[NMIX * SAMPLES];
@@ -346,9 +376,9 @@ static void test_renderer_blocks(void) {
     blocks_on = 1;
     for (int r = 0; r < 2; r++) {
         ar_t *a = &g_ar[r];
-        pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
+        pthread_mutex_init(&a->mu, NULL); pthread_cond_init(&a->cv, NULL);
         atomic_store(&a->open, 1); render_main(a);
-        pthread_cond_destroy(&a->cq_cv); pthread_mutex_destroy(&a->cq_mu);
+        pthread_cond_destroy(&a->cv); pthread_mutex_destroy(&a->mu);
     }
     blocks_on = 0;
     for (int r = 0; r < 2; r++) {
@@ -448,6 +478,13 @@ static void test_update_lock(void) {
 
 static span_t pace_generate(void *sys, void *cl, size_t n) {
     (void)sys; (void)cl; (void)n;
+    if (dq.on) {
+        pthread_mutex_lock(&dq.mu);
+        assert(dq.queued > 0);
+        dq.queued--;
+        dq.released++;
+        pthread_mutex_unlock(&dq.mu);
+    }
     int frame = ++pace.rendered;
     for (int i = 0; i < SAMPLES; i++) { mix[i] = frame; mix[SAMPLES + i] = -frame; }
     return (span_t){list, build(20, NCMD)};
@@ -456,7 +493,15 @@ static void pace_noop(void *p) { (void)p; }
 static void pace_tmax(void *p, uint32_t n) { (void)p; (void)n; }
 static void pace_setup(void *p, const void *cl, size_t n) { (void)p; (void)cl; (void)n; }
 static Result pace_update(void *sys, void *o, size_t on, void *p, size_t pn, const void *in, size_t inn) {
-    (void)sys; (void)o; (void)on; (void)p; (void)pn; (void)in; (void)inn;
+    (void)sys; (void)on; (void)p; (void)pn; (void)inn;
+    if (pace.update_rc) return pace.update_rc;
+    if (dq.on) {
+        pthread_mutex_lock(&dq.mu);
+        if (in) dq.queued++;
+        if (o) *(int *)o = dq.released;
+        dq.released = 0;
+        pthread_mutex_unlock(&dq.mu);
+    }
     return RES_OK;
 }
 static void pace_exec(void *sys, void *state) {
@@ -468,6 +513,15 @@ static void pace_exec(void *sys, void *state) {
     }
     pace.last_exec = pace.now;
     assert(h_ars_Exec(sys) == RES_OK);
+    if (dq.on) {
+        pthread_mutex_lock(&dq.mu);
+        dq.fresh_execs++;
+        dq.signaled = 1;
+        dq.sleeping = 0;
+        dq.wait_sleep = 1;
+        pthread_cond_signal(&dq.ev_cv);
+        pthread_mutex_unlock(&dq.mu);
+    }
 }
 static void *pace_sym(const char *name) {
     if (strstr(name, "ExecuteAudioRendererRendering")) return pace_exec;
@@ -478,49 +532,133 @@ static void *pace_sym(const char *name) {
     if (strstr(name, "Processor5Setup")) return pace_setup;
     return NULL;
 }
-static void *pace_catchup(void *arg) {
+static void *pace_concurrent_update(void *arg) {
     assert(h_ars_Update(arg, NULL, 0, NULL, 0, NULL, 0) == RES_OK);
     return NULL;
 }
 static int wait_for_render(pthread_cond_t *cv, pthread_mutex_t *mu, const struct timespec *delay) {
     if (!pace.rate) return pthread_cond_timedwait_relative_np(cv, mu, delay);
-    if (!pace.waits++) {
-        // The first paced wait gets a real wake from a second RequestUpdate.
-        // The wait and publication use the production queue mutex and condition variable.
+    if (!dq.on && !pace.waits++) {
+        // Exercise a concurrent RequestUpdate while render_main is inside its paced wait (a->mu released).
         pthread_mutex_unlock(mu);
-        pace_catchup(pace_sys);   // record the latest render as the preceding update
+        assert(!pthread_create(&pace.concurrent_upd, NULL, pace_concurrent_update, pace_sys));
+        assert(!pthread_join(pace.concurrent_upd, NULL));
         pthread_mutex_lock(mu);
-        ar_t *a = &g_ar[0];
-        assert(a->cq_head == a->cq_tail);
-        assert(!pthread_create(&pace.catchup, NULL, pace_catchup, pace_sys));
-        struct timespec timeout = { .tv_sec = 1 };
-        while (a->cq_head == a->cq_tail) assert(!pthread_cond_timedwait_relative_np(cv, mu, &timeout));
-        return 0;
+    } else {
+        pace.waits++;
     }
     pace_advance(pace.now + (uint64_t)delay->tv_nsec);
     return ETIMEDOUT;
 }
+static void test_update_clears_event(void) {
+    // RequestUpdate clears the renderer event on RES_OK (matching Horizon's AudioRenderSystem::Update),
+    // leaves it untouched on failure or when no event is attached, and never renders or blocks on repeated polls.
+    ar_t *a = &g_ar[0];
+    uint8_t ev_storage = 0;
+    memset(a, 0, sizeof *a);
+    memset(&pace, 0, sizeof pace);
+    pace.rate = 48000;
+    *(int32_t *)(pace_sys + 0x48) = *(int32_t *)(pace_sys + 0x4c) = 1;
+    a->sys = pace_sys; a->handle[0] = pace_sys; a->ev = &ev_storage; a->ev_kernel = 1;
+    pthread_mutex_init(&a->mu, NULL); pthread_cond_init(&a->cv, NULL);
+    atomic_store(&a->open, 1);
+
+    for (int i = 0; i < 12; i++) assert(h_ars_Update(pace_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK);
+    assert(pace.rendered == 0 && pace.ev_clears == 12 && pace.last_cleared_ev == &ev_storage);
+
+    pace.update_rc = RES_FAIL;
+    assert(h_ars_Update(pace_sys, NULL, 0, NULL, 0, NULL, 0) == RES_FAIL);
+    assert(pace.ev_clears == 12 && pace.rendered == 0);
+    pace.update_rc = RES_OK;
+
+    a->ev = NULL;
+    assert(h_ars_Update(pace_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK);
+    assert(pace.ev_clears == 12 && pace.rendered == 0);
+
+    pthread_cond_destroy(&a->cv); pthread_mutex_destroy(&a->mu);
+    memset(&pace, 0, sizeof pace);
+    memset(a, 0, sizeof *a);
+    puts("audren update: clears renderer event on RES_OK, preserves on error, never renders or blocks on polls");
+}
+static void *dq_driver_thread(void *arg) {
+    // Models SQEX::Sd::Driver::Core::CoreAudioOut (DRAGON QUEST XI S) and event-paced drivers (Wonder):
+    // append while wave buffers are free, RequestUpdate, take released buffers, and wait on the renderer event
+    // only when none is released. Because Update clears any stale pre-update signal, the driver always waits for a fresh render.
+    ar_t *a = arg;
+    int bufs_free = 2;
+    while (atomic_load(&a->open)) {
+        int released = 0;
+        const void *append = NULL;
+        if (bufs_free > 0) { bufs_free--; append = (const void *)1; }
+        assert(h_ars_Update(pace_sys, &released, sizeof released, NULL, 0, append, 0) == RES_OK);
+        bufs_free += released;
+        if (bufs_free > 0) continue;
+        pthread_mutex_lock(&dq.mu);
+        dq.ev_waits++;
+        dq.sleeping = 1;
+        pthread_cond_signal(&dq.sleep_cv);
+        while (!dq.signaled && atomic_load(&a->open)) pthread_cond_wait(&dq.ev_cv, &dq.mu);
+        dq.signaled = 0;
+        dq.sleeping = 0;
+        pthread_mutex_unlock(&dq.mu);
+    }
+    return NULL;
+}
+static void test_event_paced_driver(int rate, int frames) {
+    ar_t *a = &g_ar[0];
+    uint8_t ev_storage = 0;
+    memset(a, 0, sizeof *a);
+    memset(&pace, 0, sizeof pace);
+    memset(&dq, 0, sizeof dq);
+    pace.rate = rate; pace.device_frames = frames; pace.min_spacing = UINT64_MAX; pace.target_blocks = 250;
+    dq.on = 1;
+    dq.signaled = 1;   // stale pre-update signal (as from startup prefill or a slow audio thread) must be cleared by Update
+    pthread_mutex_init(&dq.mu, NULL); pthread_cond_init(&dq.ev_cv, NULL); pthread_cond_init(&dq.sleep_cv, NULL);
+    *(int32_t *)(pace_sys + 0x48) = *(int32_t *)(pace_sys + 0x4c) = 1;
+    a->sys = pace_sys; a->handle[0] = pace_sys; a->ev = &ev_storage; a->ev_kernel = 1;
+    pthread_mutex_init(&a->mu, NULL); pthread_cond_init(&a->cv, NULL);
+    atomic_store(&a->open, 1);
+
+    pthread_t driver;
+    assert(!pthread_create(&driver, NULL, dq_driver_thread, a));
+    pthread_mutex_lock(&dq.mu);
+    while (!dq.sleeping) pthread_cond_wait(&dq.sleep_cv, &dq.mu);
+    pthread_mutex_unlock(&dq.mu);
+    // Update cleared the stale signal without rendering: voice holds 2 buffers, driver is sleeping on the event.
+    assert(pace.rendered == 0 && dq.queued == 2 && dq.ev_waits == 1 && !dq.signaled);
+
+    render_main(a);
+    assert(!pthread_join(driver, NULL));
+    assert(pace.appended == pace.target_blocks && pace.rendered == pace.target_blocks);
+    assert(dq.fresh_execs == pace.target_blocks && dq.ev_waits >= dq.fresh_execs);
+    printf("audren event-paced driver: %d Hz/%d device frames, %d PCM blocks in order, %d fresh exec wakes, no underruns\n",
+           rate, frames, pace.appended, dq.fresh_execs);
+    pthread_cond_destroy(&dq.sleep_cv); pthread_cond_destroy(&dq.ev_cv); pthread_mutex_destroy(&dq.mu);
+    pthread_cond_destroy(&a->cv); pthread_mutex_destroy(&a->mu);
+    memset(&dq, 0, sizeof dq);
+    memset(&pace, 0, sizeof pace);
+    memset(a, 0, sizeof *a);
+}
 static void test_render_cadence(int rate, int frames) {
     ar_t *a = &g_ar[0];
+    uint8_t ev_storage = 0;
     memset(a, 0, sizeof *a);
     pace.rate = rate; pace.device_frames = frames; pace.min_spacing = UINT64_MAX;
     *(int32_t *)(pace_sys + 0x48) = *(int32_t *)(pace_sys + 0x4c) = 1;
-    a->sys = pace_sys; a->handle[0] = pace_sys;
+    a->sys = pace_sys; a->handle[0] = pace_sys; a->ev = &ev_storage; a->ev_kernel = 1;
     lock_plt_stub();
     lock_got = (void *)pace_noop;
     lock_fn(F_IMPL, 0x2d0, F_STUB);
     lock_syms[0].name = "_ZN2nn2os12SdkMutexType4LockEv"; lock_syms[0].p = (void *)pace_noop;
     lock_syms[1].name = "_ZN2nn5audio6server17AudioRenderSystem10UpdateImplEPvmS3_mPKvm"; lock_syms[1].p = lock_code + F_IMPL;
-    pthread_mutex_init(&a->cq_mu, NULL); pthread_cond_init(&a->cq_cv, NULL);
+    pthread_mutex_init(&a->mu, NULL); pthread_cond_init(&a->cv, NULL);
     atomic_store(&a->open, 1);
     render_main(a);
-    assert(!pthread_join(pace.catchup, NULL));
-    assert(pace.waits > 1 && pace.bursts > 1);
-    assert(atomic_load(&a->catchups) == 1 && a->cq_head == a->cq_tail);
+    assert(pace.waits > 1 && pace.bursts > 1 && pace.ev_clears == 1);
     assert(pace.appended == PACE_BLOCKS && pace.rendered == PACE_BLOCKS);
     printf("audren cadence: %d Hz/%d device frames, %d callbacks (%d burst releases), %d PCM blocks in order, min exec spacing %.2f ms, no underruns\n",
            rate, frames, pace.callbacks, pace.bursts, pace.appended, pace.min_spacing / 1e6);
-    pthread_cond_destroy(&a->cq_cv); pthread_mutex_destroy(&a->cq_mu);
+    pthread_cond_destroy(&a->cv); pthread_mutex_destroy(&a->mu);
     memset(&pace, 0, sizeof pace);
 }
 
@@ -528,6 +666,9 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--cadence")) {
         test_render_cadence(44100, 256);
         test_render_cadence(48000, 512);
+        test_update_clears_event();
+        test_event_paced_driver(48000, 240);
+        test_event_paced_driver(48000, 512);
         return 0;
     }
     test_update_lock();
@@ -554,6 +695,9 @@ int main(int argc, char **argv) {
     test_histogram();
     test_render_cadence(44100, 256);
     test_render_cadence(48000, 512);
+    test_update_clears_event();
+    test_event_paced_driver(48000, 240);
+    test_event_paced_driver(48000, 512);
     puts("audren layout: update lock read off Update or UpdateImpl, renderers' own blocks, bounded histograms, malformed-list rejection, unaligned and truncated headers, SDK 4/5/6/16/21 stereo PCM and empty/incomplete startup recovery passed");
     return 0;
 }

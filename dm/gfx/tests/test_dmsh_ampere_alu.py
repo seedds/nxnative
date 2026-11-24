@@ -47,7 +47,8 @@ class FloatRed(Translated):
                 msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0], reduced=reduced)
                 self.assertIn('cp_s0', msl)   # traced to the storage buffer, not the memory pool table
                 out = dmsh_rewrite.float_add_msl(msl)
-                self.assertRegex(out, r'atomic_fetch_add_explicit\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+, memory_order_relaxed\);')
+                self.assertIn('static __attribute__((noinline)) void dm_atomic_add_f32', out)
+                self.assertRegex(out, r'dm_atomic_add_f32\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+\);')
                 self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
 
 

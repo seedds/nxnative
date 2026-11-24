@@ -1,5 +1,5 @@
-"""forge.py and unified shader_split.forge_jobs on synthetic Scimitar (v25/v31) and Anvil (v28) .forge files:
-tables, name records, stored and Oodle-decoded blocks/containers, NVN shader extraction, single-stage cover pairing,
+"""forge.py and unified shader_split.forge_jobs on synthetic Scimitar (v25/v27/v31) and Anvil (v28) .forge files:
+tables, name records, stored and compressed blocks/containers, NVN shader extraction and pairing,
 coexistence of v28 and v25/v31, unknown-version / truncated error jobs, and damaged files."""
 import contextlib
 import io
@@ -21,7 +21,7 @@ if _had is None: os.environ.pop('DM_GAME', None)
 else: os.environ['DM_GAME'] = _had
 
 
-def block(chunks, typ=6):   # a v25/v31 compressed block: chunks [(raw size, stored bytes)], each after its u32 checksum
+def block(chunks, typ=6):   # a Scimitar compressed block: chunks [(raw size, stored bytes)], each after its u32 checksum
     head = forge.BLOCK + struct.pack('<HBHHH', 1, typ, 0x8000, 0x8000, len(chunks)) + b''.join(struct.pack('<HH', raw, len(s)) for raw, s in chunks)
     return head + b''.join(b'\xcc' * 4 + s for _, s in chunks)
 
@@ -31,16 +31,18 @@ def entry(name, blocks):   # a v25/v31 FILEDATA entry: its 0x1b8-byte header (it
 
 
 def forge_file(ents, version=31):   # ents: [(name, entry bytes)]; header, file data header and one table, then the entries
-    n = len(ents); hdr = 0x20; tab = hdr + 0x28; idx = tab + 0x30; names = idx + 16 * n; data = names + forge.NAME_REC * n
+    v27 = version == 27
+    row, stride = struct.Struct('<QQI' if v27 else '<qII'), 0xc0 if v27 else forge.NAME_REC
+    n = len(ents); hdr = 0x20; tab = hdr + (0x2c if v27 else 0x28); idx = tab + 0x30; names = idx + row.size * n; data = names + stride * n
     out = bytearray(forge.MAGIC + struct.pack('<Iq', version, hdr))
-    out += bytes(hdr - len(out)) + struct.pack('<IIqqIIq', n, 1, 0, -1, 5000, 1, tab)
+    out += bytes(hdr - len(out)) + struct.pack('<IIqqII', n, 1, 0, -1, 5000, 1) + bytes(4 if v27 else 0) + struct.pack('<q', tab)
     out += struct.pack('<IIqqIIqq', n, 1, idx, -1, 0, 4999, names, data)
     offs = []; p = data
     for _, e in ents: offs.append(p); p += len(e)
-    for (nm, e), o in zip(ents, offs): out += struct.pack('<qII', o, 0x1000 + len(offs), len(e) - forge.ENTRY_HEAD)   # the index's size leaves the header out
+    for (_, e), o in zip(ents, offs): out += row.pack(o, 0x100000000 if v27 else 0x1000, len(e) - (0 if v27 else forge.ENTRY_HEAD))
     for nm, e in ents:
         rec = struct.pack('<IQ', len(e), 0x1234) + bytes(forge.NAME_AT - 12) + nm.encode()
-        out += rec + bytes(forge.NAME_REC - len(rec))
+        out += rec + bytes(stride - len(rec))
     for _, e in ents: out += e
     return bytes(out)
 
@@ -58,6 +60,20 @@ def shader(stage='vs', seed=1, code_len=0xa0):   # a valid NVN control section (
     return bytes(ctl), code
 
 
+def bnsh(stages):
+    d = bytearray(0x240)
+    d[:8] = b'BNSH\0\0\0\0'
+    d[0x60:0x64] = b'grsc'
+    struct.pack_into('<IQ', d, 0x7c, 1, 0x100)
+    struct.pack_into('<Q', d, 0x110, 0x140)
+    for (slot, descriptor), (ctl, code) in zip(((8, 0x200), (0x28, 0x220)), stages):
+        struct.pack_into('<Q', d, 0x140 + slot, descriptor)
+        struct.pack_into('<QQII', d, descriptor + 8, len(d), len(d) + len(ctl), len(code), len(ctl))
+        d += ctl + code
+    struct.pack_into('<I', d, 0x1c, len(d))
+    return bytes(d)
+
+
 class ForgeTests(unittest.TestCase):
     def test_entries(self):
         for ver, typ in ((31, 6), (25, 4)):
@@ -69,6 +85,27 @@ class ForgeTests(unittest.TestCase):
             self.assertEqual([n for _, _, n in es], ['GlobalMetaFile', 'TitleScreen'])
             self.assertEqual(d[es[1][0]:es[1][0] + es[1][1]], title)   # the size read includes the header
             self.assertEqual(forge.read(d, *es[1][:2], None, version=ver), [b'abc'])
+
+    def test_v27_lzo_bnsh_pairs_and_single_stage_cover(self):
+        vs, ps, solo = shader('vs', 1), shader('ps', 2), shader('vs', 3)
+        paired, standalone = bnsh([vs, ps]), bnsh([solo])
+        material = b'material' + block([(len(paired), b'compressed')], typ=0) + block([(len(standalone), standalone)], typ=0)
+        data = forge_file([('Metadata', b'stored metadata'), ('TitleMat', material)], version=27)
+        entries = forge.entries(data)
+        self.assertEqual([(size, name) for _, size, name in entries], [(15, 'Metadata'), (len(material), 'TitleMat')])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'DataNX.forge'
+            path.write_bytes(data)
+            jobs, _ = shader_split.forge_jobs([(str(path), path.name)])
+            with mock.patch.object(forge, 'lzo1x', return_value=paired) as decode:
+                scans = [shader_split.scan_file_in(job) for job in jobs]
+            decode.assert_called_once_with(b'compressed', len(paired))
+        vs_key, ps_key, solo_key = (shader_split.skey(*s) for s in (vs, ps, solo))
+        keys = {key: row for _, found, _, _ in scans for key, row in found.items()}
+        self.assertEqual(set(keys), {vs_key, ps_key, solo_key})
+        self.assertEqual({pair for _, _, pairs, _ in scans for pair in pairs}, {(vs_key, ps_key)})
+        self.assertEqual(shader_split.separable_pairs(keys), ({(solo_key, ps_key)}, [ps_key]))
+        self.assertIn(':TitleMat/block0#BNSH@', keys[vs_key][0])
 
     def test_blocks_stored_and_decoded(self):   # a chunk whose stored size is its raw size is taken as it is; the others go to the decoder with their raw size
         e = entry('a', [block([(2, b'hi')]), block([(5, b'\x8c\x0aXY'), (3, b'end')], typ=4)])

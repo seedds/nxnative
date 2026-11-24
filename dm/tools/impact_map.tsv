@@ -155,6 +155,7 @@ dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit 
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
+dm/host/hle_stack_alloc.c	svc:*	deterministic stack-region placement
 dm/host/thread.c	svc:*	threads
 dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
@@ -165,8 +166,8 @@ dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
-dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
-dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller and DualShock 4 raw motion transport and routing
+dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless IMU decoders
+dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless raw motion transport and routing
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)

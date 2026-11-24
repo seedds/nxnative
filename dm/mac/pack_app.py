@@ -27,8 +27,8 @@ MODULE_FILES = ('*.patched.bin', '*.fixups.tsv', '*.gates.tsv', '*.cuts.tsv', '*
 MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ (not the Mac build's .metal sources or _b_build.json); an NVN game's b-<chain> goes in as one file of them (shader_lib.py)
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
-TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
-RUNTIME_TABLES = ('game.tsv', 'shader_facts.tsv', 'bf_want.tsv', 'dual_want.tsv')
+TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'mesh_pairs.tsv')
+RUNTIME_TABLES = ('game.tsv', 'shader_facts.tsv', 'bf_want.tsv')
 PSO_FILES = ('*.mtl4a', '*-prewarm-*.keys', 'prebuilt.tsv', 'rest_pairs.tsv', 'archive.tsv', 'prewarm.tsv')   # what the app takes of pso_offline.py's output folder
 EXE = 'nxnative'   # the launcher's file name (Contents/MacOS/nxnative)
 ICON_SIZES = (16, 32, 128, 256, 512)
@@ -330,12 +330,13 @@ def selected_inputs(a):
         raise SystemExit(f'no pipeline archive with its prebuilt.tsv in {a.pso}')
     tables = [Path(a.tables) / n for n in TABLES if (Path(a.tables) / n).is_file()]
     pairs = Path(a.pso_pairs) if a.pso_pairs and not any(p.name == 'pso_pairs.tsv' for p in tables) else None
+    mpairs = Path(a.mesh_pairs) if getattr(a, 'mesh_pairs', None) and not any(p.name == 'mesh_pairs.tsv' for p in tables) else None
     fonts = sorted(p for p in Path(a.font).glob('*.ttf') if not detritus(p.name))
-    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else [])
+    files = [Path(a.host)] + mods + msls + pso + tables + fonts + ([pairs] if pairs else []) + ([mpairs] if mpairs else [])
     files += [Path(p) for p in (a.env_file, a.settings, a.icon, a.control_nacp) if p]
     for p in files:
         if not p.is_file(): raise SystemExit(f'no input file at {p}')
-    return mods, msls, pso, tables, pairs, fonts, files
+    return mods, msls, pso, tables, pairs, mpairs, fonts, files
 
 
 def replace_app(tmp, out):
@@ -432,9 +433,9 @@ def pack(a):
             if key_file.is_file(): os.replace(key_file, set_aside)
     try:
         a = argparse.Namespace(**vars(a))
-        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
-            if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
-        mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+        for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'mesh_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
+            if getattr(a, name, None): setattr(a, name, str(Path(getattr(a, name)).resolve()))
+        mods, msls, pso, tables, pairs, mpairs, fonts, files = selected_inputs(a)
         runtime_python = getattr(a, 'runtime_python', None)
         runtime = []
         if runtime_python:
@@ -453,8 +454,8 @@ def pack(a):
         programs = []
         for row in a.program or []:
             n, patched, prom, pmsl, ptab, phtml = row.split('\t')
-            pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
-            pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
+            pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'mesh_pairs': None, 'aoc': None, 'marker': None})
+            pmods, pmsls, _, ptables, _, _, _, pfiles = selected_inputs(pa)
             programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
         swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
@@ -513,6 +514,7 @@ def pack(a):
         step('bundled NVN shader compiler')
         copy_runtime(runtime_python, runtime, res / 'nvn-compiler')
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
+    if mpairs: shutil.copyfile(mpairs, dm / 'mesh_pairs.tsv')
     if fonts: copy(fonts, dm / 'font', False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
@@ -609,6 +611,7 @@ def parse(argv):
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')
+    ap.add_argument('--mesh-pairs', help='mesh_pairs.tsv for a profile that has none (the shader split\'s copy)')
     ap.add_argument('--html', help='the offline HTML pages (nx_extract --html), which go beside the RomFS')
     ap.add_argument('--program', action='append', help='another program of a game of several programs: index, rewritten modules, RomFS, Mac shader libraries, tables, offline pages (tab-separated)')
     ap.add_argument('--control-nacp', help='the game\'s control data (control.nacp; Resources/control.nacp, beside the RomFS, where the host reads it: fs::GetCacheStorageMax)')

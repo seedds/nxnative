@@ -880,6 +880,8 @@ class App(unittest.TestCase):
                          (str(res / 'romfs'), str(res / 'msl'), str(res / 'dm/shader_map.tsv'), str(res / 'dm/font'), str(res / 'aoc')))
         self.assertEqual(r['DM_PSO_BUNDLE'], str(res / 'pso'))   # the pipeline archive made offline, as the iOS app's main.m sets it
         self.assertEqual((r['DM_SAVE'], r['DM_TEMP'], r['DM_ROOT'], r['cwd']), (str(sup / 'save'), str(sup / 'temp'), str(sup), str(sup)))   # pso_user.tsv goes beside save/
+        self.assertEqual(r['DM_ALBUM_DIR'], str(home / f'Pictures/nxnative/{TID}'))
+        self.assertFalse((home / f'Pictures/nxnative/{TID}').exists())   # created lazily on first SaveScreenshot
         self.assertEqual((r['DM_WINDOW'], r['DM_AUDIO'], r['DM_LANG']), ('1', '1', 'ja'))   # the caller's DM_LANG wins over the packed language
         self.assertEqual((r['DM_BAKED'], r['DM_BOTH']), ('1', 'player'))   # the player's env.txt before the bundle's
         self.assertTrue((sup / 'save').is_dir()); self.assertTrue((sup / 'temp').is_dir())
@@ -1207,7 +1209,7 @@ class Script(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in pso.iterdir()), ['applegpu_g14s.mtl4a'])
 
     def test_prebake_shader_inputs_in_folder_and_image(self):
-        # A profile input (dual_want.tsv) can change the functions without changing the chain or shader keys.
+        # A profile input (bf_want.tsv, shader_facts.tsv) can change the functions without changing the chain or shader keys.
         for packed in (False, True):
             with self.subTest(packed=packed):
                 tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'

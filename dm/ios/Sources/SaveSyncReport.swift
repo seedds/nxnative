@@ -33,13 +33,14 @@ struct SaveSyncReport {
         case play(String?)   // start, with this DM_SAVE_SYNC_CHOICE (nil: leave it unset)
         case choose          // both changed: the player picks one
         case unreadable      // the cloud's save did not come: play this device's, try again, or cancel
+        case missing         // the cloud shows no save though this device synced one there (removed, or iCloud has not listed it yet): send this device's, try again, play without sending, or cancel
     }
 
     /// What the launcher does next. With no report (no save folder, no title ID: the call failed) nothing is set and the host decides as it always did
     static func step(_ r: SaveSyncReport?) -> Step {
         guard let r, r.sync else { return .play(nil) }
         if r.cloud < 0 { return .unreadable }
-        if r.conflict { return .choose }
+        if r.conflict { return r.cloud == 0 ? .missing : .choose }
         return .play("ask")   // nothing to choose now; if the cloud's changes before the mount, the mount replaces neither (save_sync.c read_choice)
     }
 
@@ -72,6 +73,13 @@ struct SaveSyncReport {
         "Both this \(here)'s save and the one in iCloud changed since they were last the same. The newer one is not always the one with more progress: "
             + "a new game saved a minute later is newer. The one you don't pick is kept in the save's backups folder."
     }
+    static let missingTitle = "No cloud save found"
+    /// Short: on a landscape iPhone the dialog is a popover, and a longer text pushed the buttons out of view
+    func missingMessage(here: String) -> String {
+        "This \(here) synced a save here before, but iCloud shows none now: not listed yet (often after choosing the folder again), or removed. "
+            + "Sending replaces any save iCloud has not shown yet."
+    }
+    func sendLabel(here: String) -> String { "Send This \(here)'s Save" }
     static let unreadableTitle = "The cloud save didn't come"
     func unreadableMessage(here: String) -> String {
         "iCloud didn't deliver this game's save in \(Self.waitMs / 1000) seconds. If you play this \(here)'s save now, it is not sent to iCloud "

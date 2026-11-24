@@ -12,7 +12,6 @@ Version 1.5.0.1 (`v1638400`), SDK 19.3.11, Firaxis's engine with Coherent Gamefa
 | `app_pool 0xCD500000` | hardware application-pool budget; the game requests a 3.01 GB heap |
 | `mem_reserve 0x300000000`, `mem_alias 0x218000000`, `mem_stack 0x10000000` | 3.125 GB heap region, 256 MB stacks, 8.375 GB alias region; the Mac automatically uses a 64 GB alias region with the same heap/stack partition |
 | `depth_mode zero` | the game calls `nvnDeviceSetDepthMode` with near = 0 |
-| [`dual_want.tsv`](dual_want.tsv) | pixel shaders `064c4ce6df409438` (gameplay) and `f2755f3bfebde977` (recorded pipeline prewarm) use output 1 as the second blend source; enables the existing dual-source entry points |
 
 No game-specific code patches, host branches or new profile switches. The existing SDK matcher reduces the address-region node area; the existing general odd-stack-frame rule handles this build's four hand-written SVC blocks.
 
@@ -47,7 +46,7 @@ The supplied folder has 42 licence-only DLC packages; the game displayed owned c
 - [Firaxis CIVBSF shader libraries](../../../docs/reference/shaders.md#firaxis-civbsf-shader-libraries).
 - [Mac prewarm pipelines reused after a packed shader library changes](../../../docs/reference/shaders.md#mac-prewarm-pipelines-reused-after-a-packed-shader-library-changes): stamp lookup now follows the packed library.
 - [Stack frames of an odd size](../../../docs/reference/rewriter.md#stack-frames-of-an-odd-size-sub-sp-sp-imm): existing general rule, no new cut in this port.
-- [A written secondary blend source](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending): two measured shaders in `dual_want.tsv`.
+- [A written secondary blend source](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending): two measured shaders (`064c4ce6df409438`, `f2755f3bfebde977`), originally in `dual_want.tsv`, now handled by `main0_u` in `<key>_bx`.
 
 ## Open
 

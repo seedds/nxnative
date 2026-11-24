@@ -279,12 +279,49 @@ static void replay_timeout(void) {
     }
     event_close(e);
 }
+typedef struct { _Atomic int entered, done; } cw_arg_t;
+static void *cw_reader(void *p) {
+    cw_arg_t *a = p;
+    atomic_store(&a->entered, 1);
+    guest_clock_read_wait();
+    atomic_store(&a->done, 1);
+    return NULL;
+}
+static void clock_freeze_wait(void) {
+    // Reason 2 (system keyboard) freezes the clock without parking clock reads.
+    guest_clock_freeze_for(2, 1);
+    guest_clock_read_wait();
+    guest_clock_freeze_for(2, 0);
+
+    // Reasons 3 (NVN prepare) and 4 (NVN archive init) park non-host-work readers and compose with reason 1 (background).
+    guest_clock_freeze_for(3, 1);
+    guest_clock_freeze_for(4, 1);
+    dm_host_work++;
+    guest_clock_read_wait();   // host work never parks itself
+    dm_host_work--;
+    cw_arg_t a = {0};
+    pthread_t th;
+    assert(!pthread_create(&th, NULL, cw_reader, &a));
+    while (!atomic_load(&a.entered)) sched_yield();
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(4, 0);   // reason 3 still holds
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(1, 1);   // background overlaps prepare
+    guest_clock_freeze_for(3, 0);   // reason 1 still holds
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(1, 0);   // all wait reasons lifted: reader wakes
+    assert(!pthread_join(th, NULL));
+    assert(atomic_load(&a.done));
+}
 int main(int argc, char **argv) {
     alarm(10);
     assert(!setenv("DM_DETCLOCK", "16666667", 1));
     svc_thread_main_init();
-    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted", "replay-sleep", "replay-timeout"};
-    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted, replay_sleep, replay_timeout};
+    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted", "replay-sleep", "replay-timeout", "clock-freeze-wait"};
+    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted, replay_sleep, replay_timeout, clock_freeze_wait};
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         if (argc > 1 && strcmp(argv[1], names[i])) continue;
         tests[i](); printf("PASS: %s\n", names[i]);

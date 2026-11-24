@@ -6,7 +6,7 @@
 # FRAME_STEP function against a recording context (no game files). Run it after changing a patch file, a build-keyed host table or a profile key; --check only reports whether the page is
 # current (dm/tools/tests/test_docs.py runs it).
 # Usage: docs_patches.py [--check]
-import importlib.util, re, subprocess, sys, pathlib, types
+import importlib.util, inspect, re, subprocess, sys, pathlib, types
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/games'))
@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource'}
+NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'shader_versions', 'shader_covers'}
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -74,8 +74,6 @@ HOST_BINDING = [
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_locks', 'Criterion', '', {'what': "Criterion's 60 fps mode, frame ticks and game step at fixed addresses", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
-    ('k_locks', 'FIFA', '', {'what': "Frostbite's frame regulator at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
-     'why': "engine code other Frostbite games ship (the simulation's own rate is already set by name)", 'blocked': 'one Frostbite game here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
@@ -107,6 +105,8 @@ SWITCH_BINDING = [
      'why': 'unified memory semantics; off by default because a flushed range could cover an image a shader writes: tracking GPU writes would make it safe for every game'}),
     ('tex_dirty_upload', '', {'what': 'CPU-written textures uploaded without a flush', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'as tex_flush_upload, for pools the CPU writes without a flush'}),
+    ('tex_copy_staging', '', {'what': 'record-time copy of CPU staging bytes at one verified buffer-to-texture upload site', 'now': 'build', 'goal': 'host', 'purpose': 'rendering',
+     'why': 'a main build ID and return address identify one CPU upload site because NVN also supports GPU-written buffer-to-texture copies; tracking GPU-written ranges would make staging capture general'}),
     ('tex_dyn_slots', '', {'what': "buffer-texture handles indexed through c2's tables", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
      'why': "right only where the handle comes from c2's tables: the translator could prove that per shader"}),
     ('feedback_snap', '', {'what': 'draws that sample their own colour attachment read a snapshot', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
@@ -128,6 +128,7 @@ SWITCH_BINDING = [
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
+    ('fps_max', '', {'what': '120 fps ceiling', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'enabled per game only after verifying its speed at 120 against 60 over the same inputs'}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('launch_param', '', {'what': 'the launch parameter its launcher program passes', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
@@ -233,7 +234,7 @@ def shader_rules():   # (file, line, comment) of translator rules keyed by a sha
 
 
 def switches(gs):   # [(key, value, [games])] of every profile key set away from its default in game.py
-    src = (REPO / 'dm/games/game.py').read_text(); src = src[src.find('def header('):]; src = re.split(r'\n(?=\S)', src)[0]   # the keys the host's header takes (to the next top-level line)
+    src = inspect.getsource(game.header) + '\n' + inspect.getsource(game.header_one)
     defaults = {}
     for k, d in re.findall(r'g\.(?:get|words)\(\s*[\'"](\w+)[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)', src): defaults.setdefault(k, d)
     out = {}

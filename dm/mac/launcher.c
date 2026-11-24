@@ -229,6 +229,7 @@ int main(int argc, char **argv) {
     cloud_saves_folder();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
+    snprintf(p, sizeof p, "%s/Pictures/nxnative/%s", home, id); setenv("DM_ALBUM_DIR", p, 0);   // local album screenshots (hle_album.c); created lazily on first save
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);

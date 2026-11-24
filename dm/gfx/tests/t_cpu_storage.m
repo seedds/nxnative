@@ -88,7 +88,7 @@ int main(void) {
         CHECK("a later CPU write is uploaded", first_red(resolve(&f.t)) == 80);
         mtl_tex_gpu_written(&f.t);
         CHECK("once the GPU writes its storage it keeps the content it has", first_red(resolve(&f.t)) == 80);
-        CHECK("and is no longer CPU-written", !tex_cpu_written(f.t.serial));
+        CHECK("and is no longer CPU-written", !tex_cpu_written(&f.t));
         dm_guest_write_prepare(f.mem, f.t.L.size); fill(&f.t, f.mem, 120);
         CHECK("and a CPU write is no longer uploaded", first_red(resolve(&f.t)) == 80);
         teardown(&f);
@@ -113,7 +113,7 @@ int main(void) {
         CHECK("over storage the GPU wrote, then the CPU rewrote, it is taken from storage", tex_cpu_content(&large));
         mtl_tex_gpu_written(&large);
         mtl_sub_begin(); cpu_unc_drop(); finish();
-        CHECK("and the GPU's next write there makes it a GPU texture", !tex_cpu_written(large.serial));
+        CHECK("and the GPU's next write there makes it a GPU texture", !tex_cpu_written(&large));
         CHECK("which then is not taken from storage again", !tex_cpu_content(&large));
         mtl_tex_release(&large);
         teardown(&f);
@@ -169,15 +169,15 @@ int main(void) {
         setup(&f, 7030, CACHED, NVN_FORMAT_RGBA8, 0);
         large = texture_at(&f, 7031, 0x40000, LARGE, NVN_FORMAT_RGBA8, 0);
         dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 40);
-        CHECK("a rewrite of storage the GPU never wrote is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(large.serial));
+        CHECK("a rewrite of storage the GPU never wrote is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(&large));
         mtl_tex_gpu_written(&large);
         mtl_sub_begin(); cpu_unc_drop(); finish();
-        CHECK("and the GPU's next write there makes it a GPU texture again", !tex_cpu_written(large.serial));
+        CHECK("and the GPU's next write there makes it a GPU texture again", !tex_cpu_written(&large));
         dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 80);
         mtl_tex_gpu_written(&large);
-        CHECK("a rewrite the GPU wrote over afterwards is the GPU's until the CPU rewrites it", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW && !tex_cpu_written(large.serial));
+        CHECK("a rewrite the GPU wrote over afterwards is the GPU's until the CPU rewrites it", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW && !tex_cpu_written(&large));
         dm_guest_write_prepare(large.mem, large.L.size); fill(&large, large.mem, 120);
-        CHECK("and the CPU's next rewrite is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(large.serial));
+        CHECK("and the CPU's next rewrite is uploaded", mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_UPLOADED && tex_cpu_written(&large));
         mtl_tex_release(&large);
         teardown(&f);
 
@@ -185,7 +185,7 @@ int main(void) {
         tex_t bc = texture_at(&f, 7033, 0x40000, LARGE, NVN_FORMAT_RGBA_DXT1, 0);
         dm_guest_write_prepare(bc.mem, bc.L.size); memset(bc.mem, 0x5a, bc.L.size);
         mtl_tex_gpu_written(&bc);
-        CHECK("a block-compressed rewrite is uploaded though a GPU copy into it followed", mtl_tex_cpu_rewritten(&bc) == MTL_REWRITE_UPLOADED && tex_cpu_written(bc.serial));
+        CHECK("a block-compressed rewrite is uploaded though a GPU copy into it followed", mtl_tex_cpu_rewritten(&bc) == MTL_REWRITE_UPLOADED && tex_cpu_written(&bc));
         mtl_tex_release(&bc);
         teardown(&f);
 
@@ -231,10 +231,10 @@ int main(void) {
         uint64_t stores = g_gsb_stores;
         gpu_clear(&large, 0.2f);
         CHECK("a clear of a GPU texture reaches its storage", stored_red(&large) == 51 && g_gsb_stores == stores + 1);
-        CHECK("which stays the GPU's: the GPU's write is not the CPU's", gws_owned(llo, lhi) && !tex_cpu_written(large.serial) && mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW);
+        CHECK("which stays the GPU's: the GPU's write is not the CPU's", gws_owned(llo, lhi) && !tex_cpu_written(&large) && mtl_tex_cpu_rewritten(&large) == MTL_REWRITE_GPU_NOW);
         tex_t moved = texture_at(&f, 7062, 0x60000, 128, NVN_FORMAT_RGBA8, 0);
         dm_guest_write_prepare(moved.mem, moved.L.size); memcpy(moved.mem, large.mem, large.L.size);
-        CHECK("its storage moved with memcpy: a texture made there holds the clear", first_red(resolve(&moved)) == 51 && tex_cpu_written(moved.serial));
+        CHECK("its storage moved with memcpy: a texture made there holds the clear", first_red(resolve(&moved)) == 51 && tex_cpu_written(&moved));
         // written in consecutive frames: every write is in the storage once its submission completes, and a copy right after the second finds the second (no quiet period)
         atomic_store(&g_cur_frame, 101); gpu_clear(&large, 0.4f);
         CHECK("a write the frame after another is in the storage at once", stored_red(&large) == 102);

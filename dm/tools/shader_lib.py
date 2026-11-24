@@ -72,12 +72,23 @@ def _names(folder):
     return out
 
 
-def write(files, dst):
+def write(files, dst, on_progress=None):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
-    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A failed write removes its .part, so a full drive gets its space back; a killed one leaves
+    only the .part. An image is whole or absent. on_progress, when given, is called as (done_files, total_files, bytes_written) at start and after each entry"""
     part = dst + '.part'
+    try: _write_part(files, part, on_progress); os.replace(part, dst)
+    except BaseException:
+        try: os.unlink(part)
+        except OSError: pass
+        raise
+
+
+def _write_part(files, part, on_progress=None):   # write()'s image, at part
     names = sorted((n.encode() for n in files))
+    total = len(names)
     ents, off = [], romfs.HEAD.size
+    if on_progress: on_progress(0, total, 0)
     # The sources given as functions are called on a few threads, up to 4 * READERS entries ahead of the writer, which takes them in order: one after the other, the 300,000 outputs of
     # Ocarina of Time's shader build came out of its cache file at 190 MB/s, a minute for its 10.7 GB image (shader_cache.py reads on a connection of each thread's own then)
     readers = concurrent.futures.ThreadPoolExecutor(READERS) if any(callable(v) for v in files.values()) else None
@@ -93,7 +104,7 @@ def write(files, dst):
     with builtins.open(part, 'wb') as out, contextlib.ExitStack() as done:
         if readers: done.callback(readers.shutdown, cancel_futures=True)   # after an error, the functions not yet called are not
         out.write(b'\0' * off)
-        for name, source in sources():
+        for i, (name, source) in enumerate(sources(), 1):
             off += -off % ALIGN
             out.seek(off)
             n = 0
@@ -104,6 +115,7 @@ def write(files, dst):
                 with romfs.open(source, 'rb') as f:
                     while b := f.read(8 << 20): out.write(b); n += len(b)
             ents.append((name, off, n)); off += n
+            if on_progress: on_progress(i, total, off)
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
         for name, a, b in ents:
@@ -111,7 +123,6 @@ def write(files, dst):
         out.write(idx); out.write(pool)
         out.seek(0); out.write(romfs.HEAD.pack(romfs.MAGIC, off, len(idx) + len(pool), len(names) + 1))
     romfs.Image(part)   # a read of it, as the host's check: nothing is published that a reader refuses
-    os.replace(part, dst)
 
 
 def pack(lib, say=print, leave_out=False):
@@ -138,8 +149,6 @@ def pack(lib, say=print, leave_out=False):
         shutil.rmtree(folder)
     except (OSError, ValueError) as e:
         say(f'[RED] could not pack {folder}, it stays a folder: {e}')
-        try: os.unlink(image + '.part')
-        except OSError: pass
         return False
     return True
 

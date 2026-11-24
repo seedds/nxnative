@@ -44,10 +44,10 @@ static float bits_float(uint32_t u) { float f; memcpy(&f, &u, sizeof f); return 
 
 static float input_user_gain(void) {
     const char *text = getenv("DM_MIC_GAIN");
-    if (!text || !*text) return 4.0f;
+    if (!text || !*text) return 1.0f;
     char *end = NULL;
     float gain = strtof(text, &end);
-    return end != text && !*end && isfinite(gain) && gain >= 1.0f && gain <= 8.0f ? gain : 4.0f;
+    return end != text && !*end && isfinite(gain) && gain >= 1.0f && gain <= 8.0f ? gain : 1.0f;
 }
 
 static uint64_t monotonic_ns(void) {

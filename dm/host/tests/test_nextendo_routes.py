@@ -116,6 +116,9 @@ def main():
         (root/'pin-endpoint.cnf').write_text('basicConstraints=critical,CA:TRUE\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n')
         command(['openssl','x509','-req','-in','server.csr','-signkey','server.key','-days','1','-extfile','pin-endpoint.cnf','-out','pin.pem'], folder)
         command(['openssl','x509','-in','pin.pem','-outform','der','-out','pin.der'], folder)
+        untrusted = root / 'untrusted-ca.tsv'
+        untrusted.write_text(text.replace('ca.der', 'pin.der').replace(digest, hashlib.sha256((root/'pin.der').read_bytes()).hexdigest()))
+        untrusted.chmod(0o600)
         command(['openssl','x509','-req','-in','server.csr','-signkey','server.key','-days','1','-set_serial','1234567','-out','other-pin.pem'], folder)
         command(['openssl','x509','-in','other-pin.pem','-outform','der','-out','other-pin.der'], folder)
         pin_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -142,6 +145,17 @@ def main():
             (root/certificate).chmod(0o600); pin_configs.append((path,reject,name == 'pin-handoff'))
         total = 0
         try:
+            verify_env = {**os.environ, "DM_SSL_TRACE": "1"}
+            for path, label in [(config, 'strict-x509'), (untrusted, 'platform-trust')]:
+                args = [str(executable), str(path), '0', str(listener.getsockname()[1])]
+                if path == untrusted: args.append('reject-peer')
+                result = subprocess.run(args, env=verify_env, text=True, capture_output=True, timeout=15, check=True)
+                failed = [line for line in result.stderr.splitlines() if line.startswith('[ssl-trace] stage=5 ') and 'result=0x00000000' not in line]
+                if len(failed) != 1 or not re.fullmatch(
+                    r'\[ssl-trace\] stage=5 session=\d+ result=0x[0-9a-f]{8} native=-?\d+ detail=\d+ flags=0x[0-9a-f]{2} verify=' + label, failed[0]
+                ):
+                    raise AssertionError(f"expected only the {label} verification failure label, got {failed}")
+            print("TLS verify trace: distinct fixed labels for platform trust and strict X.509")
             for path, status in cases:
                 args = [str(executable), path, str(status)]
                 if path in (str(config), str(v2)):
@@ -155,7 +169,7 @@ def main():
                     raise AssertionError(result.stdout)
                 total += int(match[1])
             for path,reject,handoff in pin_configs:
-                result=subprocess.run([str(executable),str(path),'0',str(pin_listener.getsockname()[1]),'reject-pin' if reject else 'handoff' if handoff else 'v2'],text=True,capture_output=True,timeout=15)
+                result=subprocess.run([str(executable),str(path),'0',str(pin_listener.getsockname()[1]),'reject-peer' if reject else 'handoff' if handoff else 'v2'],text=True,capture_output=True,timeout=15)
                 if result.returncode: raise AssertionError(f'enrolled leaf {path.name}: {result.stdout}\n{result.stderr}')
                 match = re.search(r'routes: (\d+) checks, 0 failures',result.stdout)
                 if match is None: raise AssertionError(result.stdout)

@@ -17,6 +17,7 @@ void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
 void mtl_pool_del(const void *mem);
 void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
+void mtl_sparse_alias_delta(int delta);   // active sparse virtual pools with mapped runs (resource_vis MTL4VisibilityOptionResourceAlias)
 void dm_gfx_addr_note(uint64_t a, char *note, size_t n);   // what the graphics layer knows of an address (the crash dump, red lines)
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
@@ -71,5 +72,6 @@ void mtl_ext_tex_release(uint64_t serial);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
+void mtl_set_fstep_fine(int on);                   // late frames at a 30 fps cap's hold 2 are shown on the 60 Hz link at frame latency 2 (hle_nvn.c fstep_tick)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait

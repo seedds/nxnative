@@ -846,9 +846,11 @@ void svc_thread_dump(void) {
                     char line[1200]; int p = snprintf(line, sizeof line, "[dm] host thread %#x:", ths[i]);
                     uint64_t fp = __darwin_arm_thread_state64_get_fp(st), pc = __darwin_arm_thread_state64_get_pc(st);
                     for (int k = 0; k < 12 && p < (int)sizeof line - 80; k++) {
-                        Dl_info di; module_t *m = module_of((void *)pc);
+                        Dl_info di = {0}; module_t *m = module_of((void *)pc);
+                        int have = !m && dladdr((void *)pc, &di);
                         if (m) p += snprintf(line + p, sizeof line - p, " %s+%#llx", m->name, pc - (uint64_t)m->base);
-                        else if (dladdr((void *)pc, &di) && di.dli_sname) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr));
+                        else if (have && di.dli_sname && strcmp(di.dli_sname, "<redacted>") != 0) p += snprintf(line + p, sizeof line - p, " %s+%#lx", di.dli_sname, (unsigned long)(pc - (uint64_t)di.dli_saddr));
+                        else if (have && di.dli_fname && *di.dli_fname) { const char *sl = strrchr(di.dli_fname, '/'); const char *im = (sl && sl[1]) ? sl + 1 : di.dli_fname; p += snprintf(line + p, sizeof line - p, " %s+%#lx(%#llx)", im, (unsigned long)(pc - (uint64_t)di.dli_fbase), (unsigned long long)pc); }
                         else p += snprintf(line + p, sizeof line - p, " %#llx", pc);
                         uint64_t fr[2]; vm_size_t g2 = 0;
                         if (!fp || vm_read_overwrite(mach_task_self(), fp, 16, (vm_address_t)fr, &g2) || g2 != 16 || fr[0] <= fp) break;

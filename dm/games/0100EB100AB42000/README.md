@@ -9,7 +9,6 @@ Update 1.1.0 (`v65536`), `main` build ID `c2932c4d1c84ed7def7ceb1042b78951`, SDK
 | Setting | Where | Why |
 |---|---|---|
 | `depth_mode zero` | [`game.tsv`](game.tsv) | The game sets `nvnDeviceSetDepthMode` near = 0 (`[nvn] depth mode near=0`); with the default `gl` the bundled pipeline archive was built for near = -w and every base was built again on the device |
-| [`dual_want.tsv`](dual_want.tsv) | profile | 20 pixel shaders blend with their output 1 as the second source. Without the dual-source entry point the second source counts as zero, and the menu cursor's highlight, button icons in dialogue and character icons drew nothing; most cutscene backgrounds and transitions were missing too. Listed with `DM_NVN_DUAL_WANT` over menus, dialogue, a cutscene and a battle |
 | `.vbf` stored in the bundle | `game.tsv` `zip_store` | `FFXII_TZA.vbf` (12.6 GB) and `FFXII_TZA_PATCH.vbf` are read by offset |
 
 The other keys are the provisional profile's guesses, which held.
@@ -24,12 +23,15 @@ The other keys are the provisional profile's guesses, which held.
 ## Validation
 
 - 2026-11-12, Apple M3 Max, macOS 27.3: logos, title, a new game's opening, menus with the cursor highlight, dialogue with button icons, a battle and cutscenes, about 30 minutes; no `not in the shader map` line, no `no dual-source entry point` line.
+- 2026-11-13, iPhone Duo, iOS 27.3: A new game, gone through intro tutorial, including cutscenes, example limit break from Basch, into early parts of Rabanastre, after ebf75c9; no purple blocks, limit breaks drawn right.
+- 2026-11-14: the split's `raw_shaders` of bee218d on this `main` gives the table's 23 of 23 main#PHYRE keys and labels.
 - Tests: `test_vbf.py` (LZ4 and zlib blocks, Phyre programs in `main`), all `test_split_*`, `test_docs`.
 
 ## Found on this game
 
 - [LZ4 blocks in FFXII's VBF archives and Phyre programs in main](../../../docs/reference/shaders.md#lz4-blocks-in-ffxiis-vbf-archives-and-phyre-programs-in-main).
 - [Same-pass feedback read through a snapshot](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot), uniform-buffer handles: magenta strokes over every limit break, from the echo shader `e40adef79f6f29b7` sampling the overlay layer it blends into.
+- [A written secondary blend source (NVN dual-source blending)](../../../docs/reference/rendering.md#a-written-secondary-blend-source-nvn-dual-source-blending): 27 `/gamedata/nvn/branch_shader/*.fpo` pixel shaders (20 in menus, dialogue, cutscenes and battle; 7 more in limit breaks, PR #2736) led to moving dual-source blending into every pixel shader's `main0_u` in `<key>_bx`, replacing per-game `dual_want.tsv` lists.
 
 ## Open
 

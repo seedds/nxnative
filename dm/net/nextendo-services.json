@@ -4,7 +4,7 @@
   "provider": {
     "server": "51.178.29.194",
     "nat": "164.132.111.120",
-    "caURL": "https://git.nextendo.network/NextendoNetwork/Prelude-Nextendo/raw/commit/482c182917228d69ebbbabfea44fffa4a44051be/romfs/sd/rootCA.pem",
+    "caURL": "https://git.nextendo.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/romfs/sd/rootCA.pem?ref=482c182917228d69ebbbabfea44fffa4a44051be",
     "caSHA256": "a654c0eff8aa20a72280ea0ef2b5c2a17392922dd78ffbb113862e1ad2c66d49"
   },
   "base": [

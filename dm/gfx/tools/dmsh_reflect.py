@@ -186,6 +186,14 @@ def c2_array(name, ty):
     if h >> 28 == 1 and slots & 0xffff == 2 and (slots >> 16) - 1 == 2: return (h & 0x3fff) * 4, ((h >> 14) & 0x3fff) * 4
     return None
 
+def pool_fallback(name):
+    """Ryujinx's array for a handle it traced to no slot: <stage>_<t|s|i...>_cb0_40000000, an image's with a trailing format suffix (cp_i3d_cb0_40000000_)"""
+    return re.fullmatch(r'\w+?_cb0_40000000(?:_\w*)?', name) is not None
+
+def pool_image(name):
+    """Whether a pool binding name is a storage image (<stage>_i...; matching reflect()'s image prefix rule), read-only or writable"""
+    return re.match(r'[a-z]+_i', name) is not None
+
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.
@@ -202,15 +210,23 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
 """
 
 def _buffer_pool_operation(src, start, base, index):
-    call = re.match(r'\.(read|get_width)\(', src[start:])
+    call = re.match(r'\.(read|write|get_width)\(', src[start:])
     if not call: raise ValueError(f'{base}: unsupported BUFFER table operation')
-    first, depth = start + call.end(), 1
+    first, depth, split = start + call.end(), 1, []
     end = first
     while depth:
         if end >= len(src): raise ValueError(f'{base}: unbalanced BUFFER operation')
-        depth += {'(': 1, ')': -1}.get(src[end], 0); end += 1
-    arg = src[first:end - 1]
-    out = f'dm_buffer_read({base}, {index}, {arg})' if call[1] == 'read' else f'dm_buffer_width({base}, {index})'
+        c = src[end]
+        if c == ',' and depth == 1: split.append(end)
+        depth += {'(': 1, ')': -1, '[': 1, ']': -1, '{': 1, '}': -1}.get(c, 0); end += 1
+    if call[1] == 'read':
+        out = f'dm_buffer_read({base}, {index}, {src[first:end - 1]})'
+    elif call[1] == 'get_width':
+        out = f'dm_buffer_width({base}, {index})'
+    else:
+        if len(split) != 1: raise ValueError(f'{base}: unsupported BUFFER write arguments')
+        val, coord = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
+        out = f'dm_buffer_write({base}, {index}, {val}, {coord})'
     return end, out
 
 
@@ -325,6 +341,12 @@ BUFFER_POOL_READ = """template<typename P> static inline __attribute__((always_i
     uint m = c + b;
     return (&p->e[0])[i].read(m < b ? c : m);
 }
+template<typename P, typename V> static inline __attribute__((always_inline)) void dm_buffer_write(constant P* p, uint i, V v, uint c)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    uint m = c + b;
+    (&p->e[0])[i].write(v, m < b ? c : m);
+}
 template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_width(constant P* p, uint i)
 {
     uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
@@ -350,8 +372,10 @@ def pool_arrays(src):
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
-        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and m.group(4).endswith('_cb0_40000000'))   # element, length, marked (a texture pool's reads)
+        if int(m.group(3)) < POOL_MIN or not (pool_fallback(m.group(4)) or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
+        if pool_image(m.group(4)) and not pool_fallback(m.group(4)): raise ValueError(f'{m.group(4)}: a table of images from a uniform buffer')
+        # element, length, marked (a texture pool's reads; an image pool's are not: the host fills it with every image-flagged texture, nvn_mtl.m img_pool_gpu)
+        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and not pool_image(m.group(4)) and pool_fallback(m.group(4)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     if not pools: return src
@@ -407,8 +431,8 @@ def pool_arrays(src):
     # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
     # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
     # a test before it would get wrong (then it stays late, and only costs the shading)
-    own = src.replace(POOL_MARK, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
-    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+    own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
+    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
         src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 
@@ -428,10 +452,10 @@ def reflect(key, stage, msl, res):
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
-        elif pool and not nm.endswith('_cb0_40000000'):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
+        elif pool and not pool_fallback(nm):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
             ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
             e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
-        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
+        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_IMG_POOL if pool_image(nm) else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif c := re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(c.group(1))
@@ -501,7 +525,7 @@ def reflect(key, stage, msl, res):
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
             if b and b['flags'] & 2:   # BufferUsageFlags.Bounded: its accesses compare with its entry in the length table (dmsh_abi.h DMSH_SBLEN_BANK), the translator's storage slot
-                if e['kind'] not in (abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
+                if e['kind'] not in (abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
                     raise ValueError(f"{key}: storage buffer {e['msl_name']} is bounded but is a {e['kind']} binding, slot {b['slot']}")
                 e['sbx'] = b['slot']
     if any('sbx' in e for e in binds) and not any(e['kind'] == abi.KIND_SBLEN for e in binds):

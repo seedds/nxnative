@@ -1356,6 +1356,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** none without a device; a device with its clock set by hand shows the line.
 - **Found on:** a review of where the host trusts the device's own state, 2026-11-14. No device with a wrong clock has been seen.
 
+### A Nextendo sign-in request has no total deadline
+
+- **Symptom:** sign-in can wait on a stalled HTTP request, or accept more data than a sign-in reply needs.
+- **Cause:** the request timeout is an idle timeout, and the synchronous caller waited indefinitely for a completion that buffered the whole response.
+- **Fix:** cap the total wait at 12 seconds per request, cancel on timeout and stop buffering at 64 KiB, even without a content length.
+- **Found on:** synthetic HTTP replies with no completion and with advertised or streamed oversize bodies.
+
 ### The Nextendo account's Mii and activity, and no play time
 
 - **Symptom:** in Nextendo mode the game's Mii list has only the six default Miis though the account has a Mii, and friends see the game's name with nothing about what the player is doing. Nextendo's site shows no play time and no games played for the game.

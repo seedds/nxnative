@@ -3,6 +3,7 @@
 // nor an associated domain can stand for. So the web authentication session is started without a callback scheme, a listener in the
 // app takes the redirect, and the session is then closed by the app.
 #import "NextendoSignIn.h"
+#define NXL_TRANSFER_CLASS DmNextendoSignInTransfer
 #import "../../host/nextendo_login_apple.inc"
 #import <AuthenticationServices/AuthenticationServices.h>
 #import <UIKit/UIKit.h>

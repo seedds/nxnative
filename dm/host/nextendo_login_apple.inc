@@ -34,7 +34,7 @@ static NSString *const kNxUserInfoEndpoint __attribute__((unused)) = @"https://n
 // other loopback ports, which are used when it is busy.
 static const uint16_t kNxCallbackPort __attribute__((unused)) = 47823;
 static const NSTimeInterval kNxTimeout __attribute__((unused)) = 12;
-enum { kNxRefreshMax = 8192 };
+enum { kNxRefreshMax = 8192, kNxReplyMax = 64 * 1024 };
 
 __attribute__((unused)) static void nxl_fail(NSString **error, NSString *text) { if (error) *error = text; }
 
@@ -128,8 +128,6 @@ __attribute__((unused)) static NSData *nxl_form_body(NSDictionary<NSString *, NS
 
 // ---- Nextendo's HTTPS endpoints ----
 
-// Sends one request and waits for it (the request's timeout bounds the wait). The JSON object of a 200 answer; otherwise nil, with
-// Nextendo's "error" code, the HTTP status or the transport's failure in *error
 // Nextendo's clock less this device's, from the Date header of its last answer; 0 until one arrives, and below 2 s (the header has whole
 // seconds). The game token's expiry is Nextendo's time, and the id token a game hands to Nextendo's game servers carries times they judge by
 // their clock, so the sign-in judges and stamps them by this device's clock plus the offset (nxl_now, dm_nextendo_clock_offset): a phone whose
@@ -155,17 +153,59 @@ __attribute__((unused)) static NSMutableURLRequest *nxl_request(NSString *endpoi
     NSURL *url = [NSURL URLWithString:endpoint];
     return url ? [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:timeout] : nil;
 }
-__attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
-    if (!request) { if (error) *error = @"the endpoint is not a URL"; return nil; }
-    __block NSData *body; __block NSHTTPURLResponse *response; __block NSError *transport;
-    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
-    [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *answer, NSError *failure) {
-        body = data; transport = failure; response = [answer isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)answer : nil;
-        dispatch_semaphore_signal(finished);
-    }] resume];
-    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
+// The host credential provider and the iOS sign-in screen each include this file.
+#ifndef NXL_TRANSFER_CLASS
+#define NXL_TRANSFER_CLASS DmNextendoLoginTransfer
+#endif
+@interface NXL_TRANSFER_CLASS : NSObject <NSURLSessionDataDelegate>
+@property(nonatomic, readonly) NSMutableData *body;
+@property(nonatomic, readonly) dispatch_semaphore_t finished;
+@property(nonatomic, readonly) BOOL oversized;
+@property(nonatomic, readonly) NSError *transport;
+@end
+@implementation NXL_TRANSFER_CLASS
+- (instancetype)init {
+    if ((self = [super init])) { _body = [NSMutableData new]; _finished = dispatch_semaphore_create(0); }
+    return self;
+}
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveResponse:(NSURLResponse *)response
+        completionHandler:(void (^)(NSURLSessionResponseDisposition))completion {
+    (void)session; (void)task;
+    _oversized = response.expectedContentLength > kNxReplyMax;
+    completion(_oversized ? NSURLSessionResponseCancel : NSURLSessionResponseAllow);
+}
+- (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)task didReceiveData:(NSData *)data {
+    (void)session;
+    if (_oversized) return;
+    if (data.length > kNxReplyMax - _body.length) { _oversized = YES; [task cancel]; }
+    else [_body appendData:data];
+}
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    (void)session; (void)task; _transport = error; dispatch_semaphore_signal(_finished);
+}
+@end
+
+// The caller's deadline bounds the whole request, not the idle time between bytes. After timeout the session still owns its delegate.
+static NSDictionary *nxl_send_with_config(NSURLRequest *request, NSURLSessionConfiguration *config, NSString **error) {
+    if (!request) { nxl_fail(error, @"the endpoint is not a URL"); return nil; }
+    NSTimeInterval timeout = request.timeoutInterval > 0 ? fmin(request.timeoutInterval, kNxTimeout) : kNxTimeout;
+    config.timeoutIntervalForResource = timeout;
+    NXL_TRANSFER_CLASS *transfer = [NXL_TRANSFER_CLASS new];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config delegate:transfer delegateQueue:nil];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request];
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
+    [task resume];
+    if (dispatch_semaphore_wait(transfer.finished, deadline)) {
+        [session invalidateAndCancel]; nxl_fail(error, @"Nextendo did not answer in time"); return nil;
+    }
     [session finishTasksAndInvalidate];
+    if (transfer.oversized) { nxl_fail(error, @"Nextendo's answer is too large"); return nil; }
+    if (transfer.transport) {
+        nxl_fail(error, transfer.transport.code == NSURLErrorTimedOut ? @"Nextendo did not answer in time" : @"no complete answer from Nextendo");
+        return nil;
+    }
+    NSHTTPURLResponse *response = [task.response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)task.response : nil;
+    NSData *body = transfer.body;
     if (response) nxl_note_server_date(response);
     id parsed = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
     NSDictionary *json = [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
@@ -175,10 +215,14 @@ __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSS
     }
     id code = json[@"error"];
     if ([code isKindOfClass:NSString.class]) nxl_fail(error, code);
-    else if (!response) nxl_fail(error, [NSString stringWithFormat:@"no answer from Nextendo (%@)", transport.localizedDescription ?: @"no response"]);
+    else if (!response) nxl_fail(error, @"no answer from Nextendo (no response)");
     else nxl_fail(error, [NSString stringWithFormat:@"Nextendo answered HTTP %ld", (long)response.statusCode]);
     return nil;
 }
+__attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
+    return nxl_send_with_config(request, NSURLSessionConfiguration.ephemeralSessionConfiguration, error);
+}
+#undef NXL_TRANSFER_CLASS
 
 // POSTs a grant to the token endpoint. Returns the access token and saves the refresh token that comes with it. A refused refresh
 // token (invalid_grant) is deleted, since it will never work again

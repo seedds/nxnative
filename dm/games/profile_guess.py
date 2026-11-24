@@ -10,6 +10,7 @@
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
 import collections, re, struct, sys
 from pathlib import Path
+from typing import TypedDict
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
@@ -376,7 +377,18 @@ def romfs_glsl_files(romfs):
     return n
 
 
-def decoder_archives(roots, mains=()):
+class DecoderArchives(TypedDict):
+    trinity_packs: int
+    legacy_paks: int
+    oodle_pkz: int
+    oodle_gfpak: int
+    oodle_ue3: int
+    frostbite: bool
+    oodle_ttdat: int
+    anvil_forges: int
+
+
+def decoder_archives(roots, mains=()) -> DecoderArchives:
     """Count decoder-backed NVN archives across one or more RomFS roots (directories or .img images), in one walk per root."""
     gfx_tools = str(HERE.parent / 'gfx/tools')
     if gfx_tools not in sys.path: sys.path.insert(0, gfx_tools)
@@ -416,8 +428,8 @@ def decoder_archives(roots, mains=()):
                 legacy_paks += len(uepak.unreal_paks(str(root), inline=True, mains=mains))
             if not is_frostbite and frostbite.is_frostbite(str(root)):
                 is_frostbite = True
-    return dict(trinity_packs=trinity, legacy_paks=legacy_paks, oodle_pkz=oodle_pkz, oodle_gfpak=oodle_gfpak,
-                oodle_ue3=oodle_ue3, frostbite=is_frostbite, oodle_ttdat=oodle_ttdat, anvil_forges=anvil_forges)
+    return {'trinity_packs': trinity, 'legacy_paks': legacy_paks, 'oodle_pkz': oodle_pkz, 'oodle_gfpak': oodle_gfpak,
+            'oodle_ue3': oodle_ue3, 'frostbite': is_frostbite, 'oodle_ttdat': oodle_ttdat, 'anvil_forges': anvil_forges}
 
 
 def decoder_sources(roots, mains=()):

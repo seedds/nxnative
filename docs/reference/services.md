@@ -683,6 +683,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Open:** a gameplay run with the physical drum and the revised host is pending.
 - **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
 
+### The mouse read through a `MouseHandle`
+
+- **Symptom:** `game called nn::diag abort: Result 0xe15` with the call site in the `sdk`, at the game's first read of the mouse.
+- **Cause:** the host took over `InitializeMouse`, `GetMouseStates` and `GetMouseState(MouseState *)`, but not the Switch 2 SDK's `nn::hid::GetMouseState(MouseState *, const MouseHandle &)`. The SDK's own function ran, opened the `hid` service, which the host does not serve, and aborted.
+- **Fix:** `hle_hid.c` takes over that overload. No USB mouse is connected whatever the handle names, so it answers as the handle-less form does: a zeroed 0x28-byte `MouseState` with a sampling number, and success. The mangled name does not give the return type, and 0 reads as success or as nothing for each candidate.
+- **Check:** `t_hid` finds the symbol in the real take-over registrations and calls it (fails without the fix).
+- **Found on:** Cyberpunk 2077 (no profile), [GitHub issue #3194](https://github.com/seedds/nxnative/issues/3194), where the reporter's build took over this call and 22 other mouse symbols. Only this one's name and call site are in the report's text, and the game was not run here. Open: the others, and the game's Red Engine shader reader.
+
 ### A keyboard receiver that declares a gamepad takes player 1
 
 - **Symptom:** on the Mac, with a keyboard and mouse receiver plugged in, the log shows `controller '<receiver>' (HID) connected: player 1` and the real controller as player 2; a one-player game takes no input from it and opens the controller applet again and again (`hid controller applet: 1 to 1 players wanted, 2 connected`).

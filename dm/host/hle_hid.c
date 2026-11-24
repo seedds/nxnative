@@ -1682,6 +1682,11 @@ HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 ent
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
+// The form that names a mouse (Switch 2 SDKs; Cyberpunk 2077, SDK 20.5.3, calls it every frame, sdk+0x64c250, GitHub issue #3194): the SDK's own one opens the hid service, which the
+// host does not serve, and aborted (Result 0xe15). No USB mouse is connected whatever the handle names: the same state as the form above, and success if the caller reads a Result
+HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateERKNS0_11MouseHandleE", "mouse state by handle: not connected (MouseState 0x28 bytes zeroed)", Result, h_hid_MouseStateH, void *s, const void *handle) {
+    (void)handle; memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1; return RES_OK;
+}
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "keyboard; not provided by the host", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "keyboard state: not connected (KeyboardState 0x30 bytes zeroed)", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

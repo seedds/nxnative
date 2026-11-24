@@ -22,6 +22,8 @@ static int hid_mutex_lock(pthread_mutex_t *m) {
     return pthread_mutex_lock(m);
 }
 #include "../pad_slots.h"
+#include <mach-o/getsect.h>
+extern const struct mach_header_64 _mh_execute_header;
 void dm_oe_execute(int index, const void *param, size_t n) { (void)index; (void)param; (void)n; }   // DM_CTL "program", "webshot": not exercised here
 void front_web_shot(const char *path) { (void)path; }
 // The controller applet's prompt (front.h): -1 is no window; a test sets the answer and the players that join while it is up
@@ -1866,6 +1868,19 @@ int main(void) {
         for (int i = 0; i < DM_PLAYERS; i++) pad_slot_take_lowest(&f, &o[i], "pad");
         CHECK(pad_slot_take_lowest(&f, &o[DM_PLAYERS], "pad") == -1, "press: none left when every player is held");
         CHECK(pad_slot_take_lowest(&f, NULL, "pad") == -1, "press: no owner, no slot");
+    }
+    {   // Issue #3194 (Cyberpunk 2077, SDK 20.5.3): nn::hid::GetMouseState(MouseState *, const MouseHandle &). Without a take-over the SDK's own one opens the hid service
+        // (abort 0xe15, sdk+0x64c250). Looked up by its mangled name in the real swforce registrations, as the game's import is bound: no USB mouse, so a zeroed MouseState with a sampling number
+        unsigned long bytes = 0; const hle_force_ent *e = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+        uint32_t (*get)(void *, const void *) = NULL; unsigned n = 0;
+        for (size_t i = 0; e && i < bytes / sizeof *e; i++) if (!strcmp(e[i].name, "_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateERKNS0_11MouseHandleE")) { n++; get = (uint32_t (*)(void *, const void *))e[i].fn; }
+        CHECK(n == 1 && get, "GetMouseState(MouseState *, const MouseHandle &) is taken over");
+        if (get) {
+            uint8_t st[0x28 + 8]; memset(st, 0xee, sizeof st); uint64_t handle = 0;
+            uint32_t r = get(st, &handle); int64_t samp; memcpy(&samp, st, 8); int zero = 1;
+            for (int i = 8; i < 0x28; i++) zero &= !st[i];
+            CHECK(r == 0 && samp > 0 && zero && st[0x28] == 0xee, "it answers no mouse: 0x28 bytes, a sampling number and nothing else, and no failure Result");
+        }
     }
     t_bind_gap();
     printf("hid players: %d checks, %d failed\n", checks, fails);

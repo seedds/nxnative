@@ -22,6 +22,7 @@
 #if TARGET_OS_IPHONE
 #include <os/proc.h>   // os_proc_available_memory: for the memory readout line
 #endif
+#include "nvn_aniso.h"
 #include "nvn_mtl.h"
 #include "nvn_queue.h"
 #include <mach/mach.h>
@@ -8840,7 +8841,13 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.lodBias = p.lod_bias < -16 ? -16 : p.lod_bias > 15.99f ? 15.99f : p.lod_bias;   // SetLodBias: Maxwell's sampler bias, Metal 26's range [-16, 15.99]
-    d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    static int aniso_floor = -1;
+    if (aniso_floor < 0) {
+        aniso_floor = nvn_aniso_env(getenv("DM_NVN_ANISO"));
+        if (aniso_floor) MLOG("DM_NVN_ANISO: surface samplers filter with anisotropy %d or more", aniso_floor);
+    }
+    float aniso = nvn_aniso_floor(p.minf, p.magf, p.cmp_mode, p.reduction, p.lod_min, p.lod_max, p.aniso, aniso_floor);
+    d.maxAnisotropy = aniso < 1 ? 1 : aniso > 16 ? 16 : (NSUInteger)aniso;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
@@ -10631,6 +10638,25 @@ static dispatch_queue_t g_arch_q; static _Atomic int g_arch_new, g_arch_new_vd, 
 // with the front end at -O2: 33.7 minutes until Metal gave up, GitHub issue #294) held the flush, and the flush every compile and draw that came after it. Now such a compile
 // holds back the file of its own period and nothing else
 static _Atomic uint64_t g_arch_deaths;   // all unwritten periods predating a compiler-service death are untrusted, including ones already handed over
+static _Atomic uint64_t g_arch_discarded;   // periods discarded by arch_write_file (compiler death, unresolved plain compile, write/index failure)
+// Offline packaging capture ledger (active only when g_pre_tool or g_pre_out is set; zero runtime overhead in play).
+// Tracks requested capture keys, retains descriptors only until their period writes cleanly, retries lost keys in fresh
+// periods after the serialization gate is released, and distinguishes permanently rejected pipelines from compiler-service loss.
+enum ArchPkgState {
+    ARCH_PKG_PENDING = 0,
+    ARCH_PKG_WRITTEN,
+    ARCH_PKG_LOST_BUILDABLE,
+    ARCH_PKG_LOST_UNCONFIRMED,
+    ARCH_PKG_REJECTED,
+};
+@interface ArchPkgItem : NSObject { @public uint64_t key; MTL4PipelineDescriptor *desc; int vd, compute, state, retries; NSString *reason; } @end
+@implementation ArchPkgItem @end
+enum { ARCH_PKG_MAX_RETRIES = 3 };
+static os_unfair_lock g_pkg_lock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSNumber *, ArchPkgItem *> *g_pkg_items;
+static _Atomic int g_pkg_unkeyed_lost;
+static int g_arch_pkg_max_retries = ARCH_PKG_MAX_RETRIES;
+static int g_pkg_last_requested, g_pkg_last_published, g_pkg_last_recovered, g_pkg_last_missing_lost, g_pkg_last_missing_died, g_pkg_last_rejected, g_pkg_last_rounds;
 @interface ArchEpoch : NSObject { @public id<MTL4Compiler> comp; id<MTL4PipelineDataSetSerializer> ser; dispatch_group_t busy; _Atomic int active, n, vd, cs, ms, failed, crashed; int compacting; uint64_t deaths;
     NSMutableData *keys; os_unfair_lock klock; _Atomic int unkeyed; } @end
 // n: pipelines captured; vd, cs, ms: those of them that are bases with a vertex layout, compute pipelines, native mesh pipelines; failed: a capture in it failed (arch_cap_failed); crashed: the compiler service died
@@ -11324,6 +11350,62 @@ static void fn_gave_up(const char *what) {   // a capture's wait ran out: it is 
         MLOG("pipeline archive: a %s capture waited %d ms for another of the same shader function: built without the archive (Metal crashes on two at once, fn_claim); "
              "the prebuild tool's last line counts them", what, g_fn_wait_ms);
 }
+static int arch_pkg_on(void) { return g_pre_tool || g_pre_out != nil; }
+static void arch_pkg_reset(void) {
+    os_unfair_lock_lock(&g_pkg_lock);
+    g_pkg_items = nil;
+    os_unfair_lock_unlock(&g_pkg_lock);
+    atomic_store(&g_pkg_unkeyed_lost, 0);
+    g_pkg_last_requested = g_pkg_last_published = g_pkg_last_recovered = g_pkg_last_missing_lost = g_pkg_last_missing_died = g_pkg_last_rejected = g_pkg_last_rounds = 0;
+}
+static void arch_pkg_note_entered(MTL4PipelineDescriptor *d, int vd, int compute) {
+    uint64_t k = arch_key(d);
+    if (!k) return;
+    MTL4PipelineDescriptor *copy = [d copy];
+    os_unfair_lock_lock(&g_pkg_lock);
+    if (!g_pkg_items) g_pkg_items = [NSMutableDictionary dictionary];
+    ArchPkgItem *it = g_pkg_items[@(k)];
+    if (!it) { it = [ArchPkgItem new]; it->key = k; g_pkg_items[@(k)] = it; }
+    if (it->state != ARCH_PKG_WRITTEN) {
+        it->state = ARCH_PKG_PENDING; it->vd = vd; it->compute = compute;
+        if (!it->desc) it->desc = copy;
+    }
+    os_unfair_lock_unlock(&g_pkg_lock);
+}
+static void arch_pkg_note_fallback(MTL4PipelineDescriptor *d, int vd, int compute, int built, NSError *ce, NSError *pe) {
+    uint64_t k = arch_key(d);
+    int state = built ? ARCH_PKG_LOST_BUILDABLE : err_compiler_died(pe) ? ARCH_PKG_LOST_UNCONFIRMED : pe ? ARCH_PKG_REJECTED : err_compiler_died(ce) ? ARCH_PKG_LOST_UNCONFIRMED : ARCH_PKG_REJECTED;
+    if (!k) { if (state != ARCH_PKG_REJECTED) atomic_fetch_add(&g_pkg_unkeyed_lost, 1); return; }
+    MTL4PipelineDescriptor *copy = state == ARCH_PKG_REJECTED ? nil : [d copy];
+    NSString *why = pe.localizedDescription ?: ce.localizedDescription;
+    os_unfair_lock_lock(&g_pkg_lock);
+    if (!g_pkg_items) g_pkg_items = [NSMutableDictionary dictionary];
+    ArchPkgItem *it = g_pkg_items[@(k)];
+    if (!it) { it = [ArchPkgItem new]; it->key = k; g_pkg_items[@(k)] = it; }
+    if (it->state != ARCH_PKG_WRITTEN) {
+        it->state = state; it->vd = vd; it->compute = compute;
+        if (state == ARCH_PKG_REJECTED) it->desc = nil;
+        else if (!it->desc) it->desc = copy;
+        if (why) it->reason = why;
+    }
+    os_unfair_lock_unlock(&g_pkg_lock);
+}
+static void arch_pkg_period_done(ArchEpoch *ep, int ok) {
+    if (!arch_pkg_on()) return;
+    if (!ok && atomic_load(&ep->unkeyed)) atomic_fetch_add(&g_pkg_unkeyed_lost, 1);
+    NSData *keys = ep->keys;
+    if (!keys.length) return;
+    const uint64_t *kv = keys.bytes; NSUInteger nk = keys.length / sizeof(uint64_t);
+    os_unfair_lock_lock(&g_pkg_lock);
+    for (NSUInteger i = 0; i < nk; i++) {
+        ArchPkgItem *it = g_pkg_items[@(kv[i])];
+        if (!it || it->state == ARCH_PKG_WRITTEN) continue;
+        if (ok) { it->state = ARCH_PKG_WRITTEN; it->desc = nil; }
+        else it->state = ARCH_PKG_LOST_BUILDABLE;
+    }
+    os_unfair_lock_unlock(&g_pkg_lock);
+}
+static int arch_pkg_recover(void);
 // A compile the archive captures, in the current flush period, counted there when it built (d: a base, or a native mesh pipeline (mtk_build); vd: the base has a vertex layout; *captured: it is in the period). No task options: a
 // captured base never imports archive entries (see the compaction crash below). One the capture refuses is built by the plain compiler (arch_cap_failed); a pipeline both refuse
 // returns the plain compiler's error, or the capture's when it gave none. wait_ms: how long it waits for its functions (fn_claim); busy (the prebuild): a capture that could not
@@ -11331,12 +11413,20 @@ static void fn_gave_up(const char *what) {   // a capture's wait ran out: it is 
 static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured, int wait_ms, int *busy) {
     if (captured) *captured = 0;
     if (busy) *busy = 0;
-    if (!arch_capturing()) return plain_rps(d, e);
+    if (!arch_capturing()) {
+        NSError *pe = nil; id<MTLRenderPipelineState> ps = plain_rps(d, &pe);
+        if (e && pe) *e = pe;
+        if (arch_pkg_on()) arch_pkg_note_fallback(d, vd, 0, ps != nil, nil, pe);
+        return ps;
+    }
     uint64_t fk[3]; int fn = fn_ids(d, fk);
     if (!fn_claim(fk, fn, wait_ms)) {
         if (busy) { *busy = 1; return nil; }
         fn_gave_up("render");
-        return plain_rps(d, e);
+        NSError *pe = nil; id<MTLRenderPipelineState> ps = plain_rps(d, &pe);
+        if (e && pe) *e = pe;
+        if (arch_pkg_on()) arch_pkg_note_fallback(d, vd, 0, ps != nil, nil, pe);
+        return ps;
     }
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
@@ -11344,35 +11434,49 @@ static id<MTLRenderPipelineState> arch_capture_try(MTL4PipelineDescriptor *d, NS
     if (!ps && err_compiler_died(ce)) { atomic_store(&ep->crashed, 1); arch_died(ce); }
     fn_release(fk, fn);
     int full = 0;
-    if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); }
+    if (ps) { ep_key(ep, d); if (arch_pkg_on()) arch_pkg_note_entered(d, vd, 0);
+              atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); }
               if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) atomic_fetch_add(&ep->ms, 1);
               full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
-    ps = plain_rps(d, e);
+    NSError *pe = nil; ps = plain_rps(d, &pe);
+    if (e && pe) *e = pe;
     if (ps && !atomic_load(&ep->crashed)) arch_cap_failed(ep, ce, "render"); else if (!ps && e && !*e) *e = ce;
+    if (arch_pkg_on()) arch_pkg_note_fallback(d, vd, 0, ps != nil, ce, pe);
     return ps;
 }
 static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) { return arch_capture_try(d, e, vd, captured, g_fn_wait_ms, NULL); }
 // The same for a compute pipeline (cps_new). It counts as a base with a vertex layout does: its file is a plain one, never a p<seq> file, so its lookups skip the prebuild's files
 static id<MTLComputePipelineState> arch_capture_cs(MTL4ComputePipelineDescriptor *d, NSError **e, int *captured) {
     if (captured) *captured = 0;
-    if (!arch_capturing()) return plain_cps(d, e);
+    if (!arch_capturing()) {
+        NSError *pe = nil; id<MTLComputePipelineState> ps = plain_cps(d, &pe);
+        if (e && pe) *e = pe;
+        if (arch_pkg_on()) arch_pkg_note_fallback(d, 0, 1, ps != nil, nil, pe);
+        return ps;
+    }
     uint64_t fk[3]; int fn = fn_ids(d, fk);
     if (!fn_claim(fk, fn, g_fn_wait_ms)) {
         fn_gave_up("compute");
-        return plain_cps(d, e);
+        NSError *pe = nil; id<MTLComputePipelineState> ps = plain_cps(d, &pe);
+        if (e && pe) *e = pe;
+        if (arch_pkg_on()) arch_pkg_note_fallback(d, 0, 1, ps != nil, nil, pe);
+        return ps;
     }
     ser_compile_begin(); ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLComputePipelineState> ps = [ep->comp newComputePipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
     if (!ps && err_compiler_died(ce)) { atomic_store(&ep->crashed, 1); arch_died(ce); }
     fn_release(fk, fn);
     int full = 0;
-    if (ps) { ep_key(ep, d); atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
+    if (ps) { ep_key(ep, d); if (arch_pkg_on()) arch_pkg_note_entered(d, 0, 1);
+              atomic_fetch_add(&g_arch_new, 1); atomic_fetch_add(&ep->cs, 1); full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep); ser_compile_end();
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
-    ps = plain_cps(d, e);
+    NSError *pe = nil; ps = plain_cps(d, &pe);
+    if (e && pe) *e = pe;
     if (ps && !atomic_load(&ep->crashed)) arch_cap_failed(ep, ce, "compute"); else if (!ps && e && !*e) *e = ce;
+    if (arch_pkg_on()) arch_pkg_note_fallback(d, 0, 1, ps != nil, ce, pe);
     return ps;
 }
 // Metal opens a pipeline archive through NSData with "mapped if safe", and Foundation takes a file on an external drive as not safe: it reads it into memory, whole and for the whole run (docs/reference/memory.md). newArchiveWithURL has no option for this, so while the host
@@ -11590,6 +11694,8 @@ static void arch_write_file(ArchEpoch *ep, int gate_held) {
     int crashed = atomic_load(&ep->crashed) || ep->deaths != atomic_load(&g_arch_deaths);
     if (crashed || plain) {
         ser_end();
+        atomic_fetch_add(&g_arch_discarded, 1);
+        arch_pkg_period_done(ep, 0);
         atomic_fetch_sub(&g_arch_new, n); atomic_fetch_sub(&g_arch_new_vd, vd);
         if (ep->compacting) g_compact_bad = 1;   // the old files keep the bases this period would have held
         if (crashed) MLOG("[RED] pipeline archive: a flush period the compiler service died in is not written (%d pipelines: %d bases, %d compute, %d task / mesh); they are captured again at a later start",
@@ -11610,6 +11716,8 @@ static void arch_write_file(ArchEpoch *ep, int gate_held) {
     NSString *kp = arch_keys_path(path); int keyed = ok && arch_keys_write(kp, ep->keys, !atomic_load(&ep->unkeyed));
     ok = ok && !rename(tmp.fileSystemRepresentation, path.fileSystemRepresentation);
     if (!ok && keyed) unlink(kp.fileSystemRepresentation);
+    if (!ok || !keyed) atomic_fetch_add(&g_arch_discarded, 1);
+    arch_pkg_period_done(ep, ok && keyed);
     if (!ok) { MLOG("[RED] pipeline archive: writing %s failed%s%s", path.UTF8String, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); unlink(tmp.fileSystemRepresentation); if (ep->compacting) g_compact_bad = 1; }
     else {
         MLOG("pipeline archive: %d new pipeline bases%s%s written to %s (%.1f MB, %.0f ms; compiles held back by the writes so far: %llu, %.0f ms in all)", n - cs - ms,
@@ -11646,7 +11754,8 @@ static int arch_hand_over(ArchEpoch *only, enum ArchFlush mode) {
     if (windowed_timer && arch_recent_present()) return 1;
     os_unfair_lock_lock(&g_ep_lock);
     int active = atomic_load(&g_ep->active);
-    int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || active || atomic_load(&g_ep->crashed));
+    int stale = atomic_load(&g_ep->crashed) || g_ep->deaths != atomic_load(&g_arch_deaths);
+    int any = (!only || g_ep == only) && (atomic_load(&g_ep->n) || active || stale);
     os_unfair_lock_unlock(&g_ep_lock);
     if (windowed_timer && active) return 1;
     // nothing captured or under way: the period goes on. A compaction due to close (the prewarm over, no recapture queued) closes all the same: its recaptures are all in periods
@@ -11660,7 +11769,7 @@ static int arch_hand_over(ArchEpoch *only, enum ArchFlush mode) {
     if (!ne) { MLOG("[RED] pipeline archive: Metal made no compiler for a new flush period: the captures go on into the current one"); return 0; }
     if (windowed_timer && !ser_try_begin()) return 1;
     os_unfair_lock_lock(&g_ep_lock);
-    ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active) || atomic_load(&old->crashed));   // again: another flush may just have handed it over
+    ArchEpoch *old = g_ep; any = (!only || old == only) && (atomic_load(&old->n) || atomic_load(&old->active) || atomic_load(&old->crashed) || old->deaths != atomic_load(&g_arch_deaths));   // again: another flush may just have handed it over
     if (any) {
         g_ep = ne; atomic_store(&g_ep_t0, bp_now());
         if (warm_due) atomic_fetch_add(&g_warm_flushes, 1);
@@ -11705,6 +11814,70 @@ void mtl_arch_save(int wait_ms, int ending) {
 static void arch_at_exit(void) { mtl_warm_stop(); mtl_arch_save(MTL_QUIT_ARCH_MS, 1); }
 // What the harvest queue holds captured, then a flush, then every period handed over is written (not on g_arch_q, which writes them, nor on the harvest queue)
 static void arch_flush_wait(void) { arch_harvest_wait(DISPATCH_TIME_FOREVER); arch_flush(); if (g_arch_pending) dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER); }
+// Recaptures offline packaging keys lost when a flush period was discarded or a capture fell back to plain compilation.
+// Runs only after arch_flush_wait() has drained prior writes and released the serialization gate (never on g_arch_q).
+// Known-buildable lost pipelines are retried in batched fresh periods first so an unconfirmed/poison pipeline cannot
+// repeatedly discard innocent captures; unconfirmed compiler-death failures are then retried one per isolated period.
+// Returns the count of keys still uncaptured (excluding permanently rejected pipelines).
+static int arch_pkg_recover(void) {
+    if (!arch_pkg_on()) return 0;
+    arch_flush_wait();
+    int rounds = 0;
+    while (arch_capturing()) {
+        NSMutableArray<ArchPkgItem *> *buildable = [NSMutableArray array], *unconfirmed = [NSMutableArray array];
+        os_unfair_lock_lock(&g_pkg_lock);
+        for (ArchPkgItem *it in g_pkg_items.allValues) {
+            if (!it->desc || it->retries >= g_arch_pkg_max_retries) continue;
+            if (it->state == ARCH_PKG_LOST_BUILDABLE) [buildable addObject:it];
+            else if (it->state == ARCH_PKG_LOST_UNCONFIRMED) [unconfirmed addObject:it];
+        }
+        os_unfair_lock_unlock(&g_pkg_lock);
+        if (!buildable.count && !unconfirmed.count) break;
+        rounds++;
+        MLOG("pipeline prebuild: recovery round %d/%d (%lu known-buildable, %lu unconfirmed compiler-death captures)",
+             rounds, g_arch_pkg_max_retries, (unsigned long)buildable.count, (unsigned long)unconfirmed.count);
+        if (buildable.count) {
+            for (ArchPkgItem *it in buildable) {
+                if (!arch_capturing()) break;
+                MTL4PipelineDescriptor *d = nil; int vd = 0, compute = 0;
+                os_unfair_lock_lock(&g_pkg_lock);
+                if (it->state == ARCH_PKG_LOST_BUILDABLE && it->desc && it->retries < g_arch_pkg_max_retries) {
+                    it->retries++; it->state = ARCH_PKG_PENDING; d = it->desc; vd = it->vd; compute = it->compute;
+                }
+                os_unfair_lock_unlock(&g_pkg_lock);
+                if (!d) continue;
+                @autoreleasepool {
+                    NSError *e = nil; int cap = 0;
+                    if (compute) (void)arch_capture_cs((MTL4ComputePipelineDescriptor *)d, &e, &cap);
+                    else (void)arch_capture_try(d, &e, vd, &cap, g_fn_wait_ms, NULL);
+                }
+            }
+            arch_flush_wait();
+        }
+        for (ArchPkgItem *it in unconfirmed) {
+            if (!arch_capturing()) break;
+            MTL4PipelineDescriptor *d = nil; int vd = 0, compute = 0;
+            os_unfair_lock_lock(&g_pkg_lock);
+            if (it->state == ARCH_PKG_LOST_UNCONFIRMED && it->desc && it->retries < g_arch_pkg_max_retries) {
+                it->retries++; it->state = ARCH_PKG_PENDING; d = it->desc; vd = it->vd; compute = it->compute;
+            }
+            os_unfair_lock_unlock(&g_pkg_lock);
+            if (!d) continue;
+            @autoreleasepool {
+                NSError *e = nil; int cap = 0;
+                if (compute) (void)arch_capture_cs((MTL4ComputePipelineDescriptor *)d, &e, &cap);
+                else (void)arch_capture_try(d, &e, vd, &cap, g_fn_wait_ms, NULL);
+            }
+            arch_flush_wait();   // isolate each unconfirmed pipeline in its own period so a deterministic crasher cannot discard innocent entries
+        }
+    }
+    g_pkg_last_rounds += rounds;
+    int missing = atomic_load(&g_pkg_unkeyed_lost);
+    os_unfair_lock_lock(&g_pkg_lock);
+    for (ArchPkgItem *it in g_pkg_items.allValues) if (it->state != ARCH_PKG_WRITTEN && it->state != ARCH_PKG_REJECTED) missing++;
+    os_unfair_lock_unlock(&g_pkg_lock);
+    return missing;
+}
 static void arch_note_new(void) {   // a base was compiled: try a flush after one interval (one timer for a burst of them)
     if (!g_arch_q || atomic_exchange(&g_arch_sched, 1)) return;
     // during a prewarm the game plays through, the flush waits for the period's age (arch_warm_flush_due): look again 10 s later while captures wait, new ones or not
@@ -12478,7 +12651,7 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     // done, unless its failures were found on another system build: then they are tried again (the rest are taken from the archive)
     if (pre_stamp_done([NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil], want) && !other) { g_pre_running = 0; return -1; }
     g_pre_nolib = 0; g_pre_nolib_file = nil;
-    int n = (int)pairs.count; uint64_t t0 = bp_now(); int done0 = g_pre_done;
+    int n = (int)pairs.count; uint64_t t0 = bp_now(); int done0 = g_pre_done; uint64_t disc0 = atomic_load(&g_arch_discarded);
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", txt3 ? " and " : "", txt3 ? pp3.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0); atomic_store(&g_pre_flushing, 0); g_pre_later_n = 0; g_pre_deferred = 0;
     NSArray<NSNumber *> *ord = pre_order(pairs);
@@ -12509,12 +12682,14 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     dispatch_block_t done = ^{
         atomic_store(&g_pre_flushing, 1);
         arch_flush_wait();
+        int missing = arch_pkg_on() ? arch_pkg_recover() : 0;
+        int intact = arch_pkg_on() ? !missing && !atomic_load(&g_arch_cap_off) : atomic_load(&g_arch_discarded) == disc0 && !atomic_load(&g_arch_cap_off);
         NSMutableArray<NSString *> *fails = [NSMutableArray arrayWithArray:g_pre_known.allValues]; [fails addObjectsFromArray:g_pre_fails];
         if (fails.count) [[NSString stringWithFormat:@"# pipeline prebuild: pairs whose base failed to build on this system build, left to the draws until it or the stamp changes (nvn_mtl.m, pre_fail_load)\n%@%@\n",
                             pre_fail_head(want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         else unlink(failp.fileSystemRepresentation);
-        // a prebuild the process's end cut short: no stamp, so the next start builds what is left (the rest it finds in the archive)
-        if (atomic_load(&g_pre_next) >= n && !g_pre_later_n) [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        // a prebuild the process's end cut short, or whose archive dropped a period: no stamp, so the next start builds what is left (the rest it finds in the archive)
+        if (atomic_load(&g_pre_next) >= n && !g_pre_later_n && intact) [pre_device_stamp(want) writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s; %d times a pair was put back while another capture had one of its shader functions (fn_claim)",
              n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9, (int)g_pre_deferred);
         if (g_pre_done - done0 == n && !atomic_load(&g_warm_stop)) { atomic_store(&g_sweep_pairs, 1); arch_sweep(); }   // every pair's base was asked for
@@ -13060,32 +13235,66 @@ static long pre_warm_lists(NSArray<NSString *> *paths, int threads) {
          (unsigned long long)g_warm_cps, (unsigned long long)g_warm_mps, (int)atomic_load(&g_pre_warm_failed));
     return lines;
 }
-// The bundle form's output (DM_PSO_PREBUILD_OUT): every file the work folder (DM_PSO_ARCHIVE) holds goes into the output folder as <GPU>-prewarm-<NN>.mtl4a, with its index
-// (<GPU>-prewarm-<NN>.keys) and its period's pipelines script (prewarm-<NN>.mtl4-json), and prewarm.tsv, the stamp: what pso_bundle_open_prewarm opens. The folder's files are
-// this run's captures and those of an earlier run into it (the NSP script keeps it only while its inputs are the same). Returns 1, or 2 when the output is incomplete
+// The bundle form's output (DM_PSO_PREBUILD_OUT): recovers any interrupted captures in fresh periods first, then copies every valid file the work folder (DM_PSO_ARCHIVE) holds
+// into the output folder as <GPU>-prewarm-<NN>.mtl4a, with its index (<GPU>-prewarm-<NN>.keys) and its period's pipelines script (prewarm-<NN>.mtl4-json), and prewarm.tsv,
+// and compares the published key set against the requested captures (excluding permanently rejected pipelines). Returns 1, or 2 when the output is incomplete
 static int pre_bundle_out(NSString *out, long lines) {
+    if (arch_pkg_on()) (void)arch_pkg_recover();
     NSFileManager *fm = NSFileManager.defaultManager; NSString *pre = prewarm_prefix(g_dev.architecture.name);
     NSArray<NSString *> *staged = [[[fm contentsOfDirectoryAtPath:g_arch_dir error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]] sortedArrayUsingSelector:@selector(compare:)];
     [fm createDirectoryAtPath:out withIntermediateDirectories:YES attributes:nil error:nil];
     for (NSString *old in [fm contentsOfDirectoryAtPath:out error:nil]) if ([old hasPrefix:pre] || [old hasPrefix:@"prewarm-"] || [old isEqualToString:@"prewarm.tsv"]) [fm removeItemAtPath:[out stringByAppendingPathComponent:old] error:nil];
     int k = 0, bad = 0; unsigned long long bytes = 0;
+    NSMutableSet<NSNumber *> *pub_keys = [NSMutableSet set];
     BOOL (^put)(NSString *, NSString *) = ^BOOL(NSString *src, NSString *dst) { return [fm linkItemAtPath:src toPath:dst error:nil] || [fm copyItemAtPath:src toPath:dst error:nil]; };   // a hard link, else a copy
     for (NSString *name in staged) {
         NSString *src = [g_arch_dir stringByAppendingPathComponent:name];
         if (!arch_file_ok(src)) { bad++; MLOG("[RED] pipeline prebuild: %s is not a pipeline archive, left out", src.UTF8String); continue; }
         NSString *dst = [out stringByAppendingPathComponent:[NSString stringWithFormat:@"%@%02d.mtl4a", pre, k]];
         if (!put(src, dst)) { bad++; MLOG("[RED] pipeline prebuild: cannot put %s in %s", name.UTF8String, out.UTF8String); continue; }
-        NSString *ksrc = arch_keys_path(src);   // its index goes with it (the host reads it at the open)
-        if ([fm fileExistsAtPath:ksrc] && !put(ksrc, arch_keys_path(dst))) MLOG("[RED] pipeline prebuild: cannot put the index of %s in %s", name.UTF8String, out.UTF8String);
+        NSString *ksrc = arch_keys_path(src), *kdst = arch_keys_path(dst);   // its index goes with it (the host reads it at the open)
+        if ([fm fileExistsAtPath:ksrc]) {
+            if (!put(ksrc, kdst)) MLOG("[RED] pipeline prebuild: cannot put the index of %s in %s", name.UTF8String, out.UTF8String);
+            else {
+                int complete = 0; NSData *kd = arch_keys_read(kdst, &complete);
+                const uint64_t *kv = kd.bytes; NSUInteger nk = kd.length / sizeof(uint64_t);
+                for (NSUInteger i = 0; i < nk; i++) [pub_keys addObject:@(kv[i])];
+            }
+        }
         NSString *js = [src.stringByDeletingPathExtension stringByAppendingPathExtension:@"mtl4-json"];   // the same pipelines for the other GPUs (build_ipa_from_nsp.py, metal-tt)
         if (js && [fm fileExistsAtPath:js]) put(js, [out stringByAppendingPathComponent:[NSString stringWithFormat:@"prewarm-%02d.mtl4-json", k]]);
         bytes += [[fm attributesOfItemAtPath:dst error:nil] fileSize]; k++;
     }
+    int requested = 0, published = 0, recovered = 0, rejected = 0, missing_lost = atomic_load(&g_pkg_unkeyed_lost), missing_died = 0;
+    NSMutableArray<NSNumber *> *missing_keys = [NSMutableArray array];
+    os_unfair_lock_lock(&g_pkg_lock);
+    for (ArchPkgItem *it in g_pkg_items.allValues) {
+        requested++;
+        if ([pub_keys containsObject:@(it->key)]) { published++; if (it->retries > 0) recovered++; }
+        else if (it->state == ARCH_PKG_REJECTED) rejected++;
+        else {
+            if (it->state == ARCH_PKG_LOST_UNCONFIRMED) missing_died++; else missing_lost++;
+            [missing_keys addObject:@(it->key)];
+        }
+    }
+    os_unfair_lock_unlock(&g_pkg_lock);
+    g_pkg_last_requested = requested; g_pkg_last_published = published; g_pkg_last_recovered = recovered;
+    g_pkg_last_missing_lost = missing_lost; g_pkg_last_missing_died = missing_died; g_pkg_last_rejected = rejected;
+    int missing = missing_lost + missing_died;
+    if (recovered) MLOG("pipeline prebuild: recovered %d interrupted pipeline captures in fresh periods (%d recovery rounds)", recovered, g_pkg_last_rounds);
+    if (rejected) MLOG("pipeline prebuild: %d pipelines permanently rejected by Metal (not retried, distinct from compiler-service loss)", rejected);
+    if (missing) {
+        [missing_keys sortUsingSelector:@selector(compare:)];
+        NSMutableArray<NSString *> *sample = [NSMutableArray array];
+        for (NSUInteger i = 0; i < MIN(missing_keys.count, (NSUInteger)8); i++) [sample addObject:[NSString stringWithFormat:@"%016llx", (unsigned long long)missing_keys[i].unsignedLongLongValue]];
+        MLOG("[RED] pipeline prebuild: %d requested pipeline keys still missing from %s after up to %d retries (%d lost from interrupted periods, %d repeated compiler-service failures%s%s)",
+             missing, out.UTF8String, g_arch_pkg_max_retries, missing_lost, missing_died, sample.count ? "; keys: " : "", sample.count ? [sample componentsJoinedByString:@", "].UTF8String : "");
+    }
     NSString *stamp = [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\nlines\t%ld\nfiles\t%d\n%@", DMSH_CHAIN, atomic_load(&g_depth_zero) ? "near=0" : "near=-w", lines, k, arch_os_build()];
     if (k) [stamp writeToFile:[out stringByAppendingPathComponent:@"prewarm.tsv"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     MLOG("pipeline prebuild: %d files (%.1f MB) for the app to bundle in %s", k, bytes / 1048576.0, out.UTF8String);
-    int ok = !bad && !atomic_load(&g_arch_cap_off);
-    if (!ok) MLOG("[RED] pipeline prebuild: the files for the app are incomplete (%d not usable, capturing %s)", bad, atomic_load(&g_arch_cap_off) ? "stopped" : "went on");
+    int ok = !bad && !atomic_load(&g_arch_cap_off) && !missing;
+    if (!ok) MLOG("[RED] pipeline prebuild: the files for the app are incomplete (%d not usable, %d missing keys, capturing %s)", bad, missing, atomic_load(&g_arch_cap_off) ? "stopped" : "went on");
     return ok ? 1 : 2;
 }
 // DM_PSO_PREBUILD=tool: what a first start would build, made ahead with no game, then exit (main.c). The host's other environment as for a run: DM_NVN_SHMAP, DM_MSL_DIR, DM_SAVE or
@@ -13100,7 +13309,7 @@ static int pre_bundle_out(NSString *out, long lines) {
 // pso_offline.py left to the device (rest_pairs.tsv: function constants). Returns 0 when not asked for, 1 done, 2 failed (the bundle form's output incomplete or missing what it needs)
 int mtl_pso_prebuild_tool(void) {
     const char *e = getenv("DM_PSO_PREBUILD"); if (!e || strcmp(e, "tool")) return 0;
-    g_pre_tool = 1;
+    g_pre_tool = 1; arch_pkg_reset();
     const char *w = getenv("DM_PSO_PREBUILD_WARM"), *m = getenv("DM_PSO_MANIFEST"), *oc = getenv("DM_PSO_PREBUILD_OUT"), *ac = getenv("DM_PSO_ARCHIVE");
     int warm = !(w && !strcmp(w, "0")); char *manifest = m ? strdup(m) : NULL;
     if (oc && *oc) {
@@ -13118,7 +13327,10 @@ int mtl_pso_prebuild_tool(void) {
     else if (lists) MLOG("pipeline prebuild: no Metal 4 compiler or no archive to capture into: the prewarm lists are left to the first start");
     MLOG("pipeline prebuild: %d captures found another of the same shader function under way (fn_claim); %d of them waited %d ms in vain and were built without the archive",
          (int)atomic_load(&g_fn_waits), (int)atomic_load(&g_fn_plain), g_fn_wait_ms);
-    if (!g_pre_out) return 1;
+    if (!g_pre_out) {
+        if (g_comp4 && g_arch_cap) (void)arch_pkg_recover();
+        return 1;
+    }
     if (!g_comp4 || !g_arch_cap) { MLOG("[RED] pipeline prebuild: no Metal 4 compiler or pipeline serializer: nothing for the app"); return 2; }
     return pre_bundle_out(g_pre_out, lines);
 }

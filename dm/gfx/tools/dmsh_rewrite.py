@@ -122,15 +122,25 @@ FLOAT_ADD_BOUND = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do
                              r'(?P=ind)        (?P=res) = (?P=seen);\n'
                              r'(?P=ind)    \}\n(?P=ind)    else\n(?P=ind)    \{\n(?P=ind)        (?P=res) = 0u;\n(?P=ind)    \}\n'
                              r'(?P=ind)    uint (?P<found>_\d+) = (?P=res);\n(?P=ind)    (?P=again) = int\((?P=found)\) != as_type<int>\((?P=old)\);\n(?P=ind)\} while \((?P=again)\);\n')
+# Workaround for Apple's AGX3 GPU compiler defect (AIR-NT 32023.922, GitHub issue #2825): on M5 / M5 Pro (applegpu_g17g / g17s, macOS 26.x) and M5 iPad Pro / iPhone 17 (applegpu_g17g /
+# g18p, iOS 26.x), an inline atomic_fetch_add_explicit on a dispatch-uniform device atomic_float* hoists @llvm.agx3.disable.smashing.float into agc.main.constant_program, where GlobalISel
+# aborts MTLCompilerService with "cannot select". Calling atomic_fetch_add_explicit through a noinline leaf helper keeps the intrinsic out of the constant program while keeping hardware float atomics.
+FLOAT_ADD_HELPER = ('#ifndef DM_ATOMIC_ADD_F32\n#define DM_ATOMIC_ADD_F32\n'
+                    'static __attribute__((noinline)) void dm_atomic_add_f32(device atomic_float* p, float v) '
+                    '{ atomic_fetch_add_explicit(p, v, memory_order_relaxed); }\n#endif\n')
 def float_add_msl(msl):
     if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
-    msl = FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
-                        f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
+    out = FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                        f"{m.group('ind')}dm_atomic_add_f32((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')});\n"
                         f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
-    return FLOAT_ADD_BOUND.sub(lambda m: m.group(0) if (m.group('cond1') != m.group('cond2') or m.group('buf1') != m.group('buf2') or m.group('idx1') != m.group('idx2')) else
-                               f"{m.group('ind')}if ({m.group('cond1')})\n{m.group('ind')}{{\n"
-                               f"{m.group('ind')}    atomic_fetch_add_explicit((device atomic_float*)&{m.group('buf1')}[{m.group('idx1')}], {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
-                               f"{m.group('ind')}}}\n{m.group('ind')}bool {m.group('again')} = false;\n", msl)
+    out = FLOAT_ADD_BOUND.sub(lambda m: m.group(0) if (m.group('cond1') != m.group('cond2') or m.group('buf1') != m.group('buf2') or m.group('idx1') != m.group('idx2')) else
+                              f"{m.group('ind')}if ({m.group('cond1')})\n{m.group('ind')}{{\n"
+                              f"{m.group('ind')}    dm_atomic_add_f32((device atomic_float*)&{m.group('buf1')}[{m.group('idx1')}], {m.group('val') or m.group('valp')});\n"
+                              f"{m.group('ind')}}}\n{m.group('ind')}bool {m.group('again')} = false;\n", out)
+    if out == msl or '#define DM_ATOMIC_ADD_F32' in out: return out
+    head = re.search(r'^using namespace metal;\n', out, re.M)
+    if not head: raise ValueError('float_add_msl: no "using namespace metal;" to put dm_atomic_add_f32 after')
+    return out[:head.end()] + FLOAT_ADD_HELPER + out[head.end():]
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time

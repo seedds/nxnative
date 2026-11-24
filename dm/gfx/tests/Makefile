@@ -168,6 +168,8 @@ t_refl: t_refl.m ../nvn/nvn_refl.m ../nvn/nvn_refl.h
 	clang -O1 -g -Wall -I../nvn -fobjc-arc -o $@ t_refl.m ../nvn/nvn_refl.m -framework Metal -framework Foundation
 t_hmap: t_hmap.c ../nvn/nvn_hmap.h
 	clang -O1 -Wall -o $@ t_hmap.c
+t_aniso: t_aniso.c ../nvn/nvn_aniso.h
+	clang -O1 -Wall -Wextra -Werror -o $@ t_aniso.c
 t_pace: t_pace.c ../nvn/nvn_pace.h
 	clang -O1 -Wall -o $@ t_pace.c
 t_timestamp: t_timestamp.c ../nvn/nvn_timestamp.h
@@ -533,6 +535,7 @@ check_t_pso_archive: t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pso_archive
 	MTL_DEBUG_LAYER=1 ./t_pso_archive --active-flush
 	MTL_DEBUG_LAYER=1 ./t_pso_archive --adopt-prebuilt
+	MTL_DEBUG_LAYER=1 ./t_pso_archive --bundle-recovery
 	MTL_DEBUG_LAYER=1 python3 test_pso_archive.py "$(CURDIR)/t_pso_archive"
 t_pso_bundle: t_pso_bundle.m ../tools/pso_offline.py $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_bundle.m $(MTL_T_SRC) $(FW)

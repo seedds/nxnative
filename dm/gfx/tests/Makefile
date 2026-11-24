@@ -751,6 +751,12 @@ check_t_storage_pair: t_storage_pair
 	DM_NVN_RT_RECYCLE=0 MTL_DEBUG_LAYER=1 ./t_storage_pair
 	DM_NVN_STORAGE_ALIAS=0 MTL_DEBUG_LAYER=1 ./t_storage_pair
 # A game's upscaler drawn by MetalFX (any profile; the profile's upscaler shaders, from its shader map, when it has some); with and without the switch, and on the encoding thread
+t_mfx_evict: t_mfx_evict.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mfx_evict.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_mfx_evict
+check_t_mfx_evict: t_mfx_evict
+	DM_NVN_ENC_THREAD=0 ./t_mfx_evict
+	DM_NVN_ENC_THREAD=1 ./t_mfx_evict
 t_upscaler_mfx: t_upscaler_mfx.m t_mfx_passes.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upscaler_mfx.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upscaler_mfx

@@ -14,3 +14,5 @@ extern int test_screen_hz;
 int front_screen_max_fps(void) { return test_screen_hz; }
 extern int test_match_fps;
 void front_screen_match(int fps) { test_match_fps = fps; }   // the rate link_sync asks the screen for
+extern int test_settling;
+int front_screen_settling(void) { return test_settling; }

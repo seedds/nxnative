@@ -593,13 +593,13 @@ static void gpu_storage(void) {
     uint64_t up = 0, reup = 0, up2 = 0, reup2 = 0; mtl_pkg_stats(&up, &reup);
     nvn_ft_poll(); mtl_sub_begin(); id<MTLTexture> host = tex_mtl(td); tex_mtl(tc); tex_mtl(tl); tex_mtl(tp); mtl_wait(mtl_sub_commit(), 5000000000ull); mtl_pkg_stats(&up2, &reup2);
     EXPECT("they stay GPU textures: nothing is uploaded from the storage the host wrote", 1, host && up == up2 && reup == reup2 && mtl_tex_gpu_owned(td->serial) && mtl_tex_gpu_owned(tc->serial) && mtl_tex_gpu_owned(tl->serial)
-           && !tex_cpu_written(td->serial) && !tex_cpu_written(tc->serial) && !tex_cpu_written(tl->serial) && gws_owned((uintptr_t)td->mem, (uintptr_t)td->mem + td->L.size));
+           && !tex_cpu_written(td) && !tex_cpu_written(tc) && !tex_cpu_written(tl) && gws_owned((uintptr_t)td->mem, (uintptr_t)td->mem + td->L.size));
     EXPECT("nothing held once committed", 1, !gsb_held(td->mem, td->L.size) && !gsb_held(tp->mem, tp->L.size));
     memcpy((uint8_t *)mem + 0xa0000, td->mem, td->L.size);
     h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&pool, 0xa0000); EXPECT("moved texture init", 1, h_nvnTextureInitialize(&moved, &tb));
     memset(lin, 0xEE, W * W * 4); h_nvnTextureReadTexels(&moved, NULL, &region, lin); bad = 0; for (int i = 0; i < W * W; i++) bad += memcmp(lin + i * 4, expected, 4) != 0;
     EXPECT("storage moved with memcpy -> a texture there holds the drawing (ReadTexels), every pixel", 0, bad);
-    EXPECT("and is taken from its storage", 1, tex_cpu_written(TX(&moved)->serial));
+    EXPECT("and is taken from its storage", 1, tex_cpu_written(TX(&moved)));
     free(lin);
     h_nvnTextureFinalize(&moved); h_nvnTextureFinalize(&pkc); h_nvnTextureFinalize(&cleared); h_nvnTextureFinalize(&copied); h_nvnTextureFinalize(&drawn);
     mtl_alias_drop_pool(&pool); nvn_dirty_remove_range(mem); mtl_pool_del(mem); mtl_drain(); free(mem);

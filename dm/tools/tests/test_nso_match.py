@@ -16,6 +16,7 @@ import struct
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -144,6 +145,25 @@ class Matching(unittest.TestCase):
         missing = image({0x100: caller(0x100, 0x500)})
         with self.assertRaisesRegex(MatchError, '0 matching'): Image(missing, 0x2000).match(self.rule)
 
+    def test_called_by_identifies_one_of_two_identical_callees(self):
+        leaf = [0x52800020, RET]
+        init = [0x52800080, RET]
+        original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: init})
+        parsed = Image(original, 0x2000)
+        clock: dict[str, object] = dict(size=8, fingerprints=[parsed.fingerprint(0x500)], cuts=[(0, '20008052', '40008052', 'clock')])
+        with self.assertRaisesRegex(MatchError, '2 matching'):
+            parsed.match(dict(clock, name='clock'))
+
+        clock['called_by'] = dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12)
+        startup = dict(size=8, fingerprints=[parsed.fingerprint(0x700)], cuts=[(0, '80008052', '60008052', 'startup')])
+        rule = dict(name='rate', functions=[startup, clock])
+        moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: init})
+        self.assertEqual([cut[0] for cut in Image(moved, 0x2000).match_patch(rule)], [0x1600, 0x1200])
+
+        # A changed callee invalidates the caller fingerprint, so the startup cut is withheld as well.
+        struct.pack_into('<I', moved, 0x1200, 0x52800040)
+        self.assertEqual(resolve(moved, 0x2000, [rule], lambda _: None), [])
+
     def test_original_bytes_still_required(self):
         rule = copy.deepcopy(self.rule); rule['cuts'][0] = (8, '00000000', 'e0124091', 'heap')
         with self.assertRaisesRegex(MatchError, 'original bytes differ'): Image(self.original, 0x2000).match(rule)
@@ -201,6 +221,31 @@ class Matching(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'one frame step'): locate_stub(moved, 0x2000, [stub, dict(stub, name='other')], messages.append)
         with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
         with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
+
+    def test_stub_rule_supports_called_by(self):
+        # MATCH_STUBS / MATCH_FRAME_STEP: called_by disambiguates an identical short callee across relocations, with optional others
+        from nso_match import locate_stub
+        leaf = [0x52800020, RET]
+        wait = [0x52800080, RET]
+        original = image({0x100: caller(0x100, 0x500), 0x500: leaf, 0x600: leaf, 0x700: wait})
+        parsed = Image(original, 0x2000)
+        caller_rule = dict(size=28, fingerprints=[parsed.fingerprint(0x100)], call=12)
+        rule = dict(
+            name='wake', size=8, fingerprints=[parsed.fingerprint(0x500)], stub=lambda ctx: None,
+            called_by=caller_rule,
+            others={'wait': dict(size=8, fingerprints=[parsed.fingerprint(0x700)])},
+        )
+        moved = image({0x800: caller(0x800, 0x1200), 0x1200: leaf, 0x1400: leaf, 0x1600: wait})
+        messages = []
+        self.assertEqual(locate_stub(moved, 0x2000, [rule], messages.append), (rule, 0x1200, {'wait': 0x1600}, None))
+        self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        # Changing the callee invalidates the caller match and installs nothing.
+        struct.pack_into('<I', moved, 0x1200, 0x52800040)
+        messages = []
+        self.assertIsNone(locate_stub(moved, 0x2000, [rule], messages.append))
+        self.assertTrue(messages[0].startswith('[RED] '), messages)
+        for bad in (dict(rule, called_by=dict(size=28)), dict(rule, called_by=dict(caller_rule, call=28))):
+            with self.assertRaises(ValueError): locate_stub(original, 0x2000, [bad], messages.append)
 
     def test_anchored_frame_step_finds_the_one_caller_or_nothing(self):
         # an anchored rule: the one function that calls the import, whatever its size or fingerprint, and what its find returned; find refusing, no caller or two give a red
@@ -364,6 +409,29 @@ class Matching(unittest.TestCase):
                 with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
             self.assertIn("function patch 'heap' skipped", printed.getvalue())
             self.assertNotIn('[RED]', printed.getvalue())
+
+    def test_alias_only_cuts_recorded_for_both_registered_and_matched_rules(self):
+        # ALIAS_CUTS (build-keyed CUTS) and alias_only=True on MATCH_CUTS both feed ALIAS_APPLIED for fixups.tsv
+        with self.assertRaises(ValueError): validate(dict(self.rule, alias_only='yes'))
+        source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')
+        end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
+        code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
+        gid, known = '0100000000000001', 'ab' * 16
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
+            g = root / 'games' / gid; g.mkdir(parents=True)
+            rule = dict(self.rule, alias_only=True)
+            (g / 'patches.py').write_text(
+                f"CUTS = {{{known!r}: [(0x108, 'e00317aa', '1f2003d5', 'alias')]}}\n"
+                f"ALIAS_CUTS = {{{known!r}: [0x108]}}\n"
+                f"MATCH_CUTS = {{'main': [{rule!r}]}}\n")
+            for bid, expected_nb in ((known, '1f2003d5'), ('00' * 16, 'e0124091')):
+                img = bytearray(self.original)
+                ns: dict[str, Any] = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                                          MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / f'out_{bid}'))
+                with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
+                self.assertEqual([(c[0], c[1], c[2]) for c in ns['ALIAS_APPLIED']], [(0x108, 'e00317aa', expected_nb)])
 
 
 class RegionGates(unittest.TestCase):

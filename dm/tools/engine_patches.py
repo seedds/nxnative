@@ -15,8 +15,9 @@ MATCH_CUTS = {'main': [
     # the store: 14 of 14 runs booted and kept presenting (the game's note). The cause is in the engine's code, which the rewriter changes deliberately.
     # Checked 2026-11-09: FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition 1.0.3 (Unity 2018.4.2f1, the registered cuts until then; rewritten byte-identical) and 1.0.0 (the
     # same eight sites 0x25380 earlier, which no cut covered), and Raging Loop 1.0.0 (Unity 2018.3.10f1): the same four functions, instruction for instruction; the fourth calls a log
-    # helper of another body in the other two builds, hence its three fingerprints. Unity 2017.4 (Cuphead,
-    # AI: THE SOMNIUM FILES) has other code there, not reviewed.
+    # helper of another body in the other two builds, hence its three fingerprints.
+    # Checked 2026-11-20: Untitled Goose Game 1.1.2 (Unity 2018.4.1f1): the first three functions match at main+0x182ed20, +0x182f310 and +0x182f650. The fourth
+    # (main+0x182fa50) calls a different log helper and keeps the stlr w25 to +0xd8 and the ldr of +0x40 at +0x168. Unity 2017.4 (Cuphead, AI: THE SOMNIUM FILES) has other code there, not reviewed.
     {'name': 'Unity 2018 ThreadedStreamBuffer: load-acquires after its store-releases', 'functions': [
         # the reader going to sleep (FINAL FANTASY CRYSTAL CHRONICLES 1.0.3 main+0x1e67930)
         {'size': 528, 'fingerprints': ['6b48e9a19281a61d041d534127efd9514bcfd37c971463d342ed1ffe3bde0630'], 'cuts': [
@@ -33,7 +34,8 @@ MATCH_CUTS = {'main': [
             (0x2bc, '080140b9', '08fddf88', 'stream writer: ldr w8,[x8] → ldar ("reader sleeping" after the store-release of the write position)')]},
         # the writer going to sleep (main+0x1e68660; Raging Loop's and FINAL FANTASY CRYSTAL CHRONICLES 1.0.0's call a log helper of another body)
         {'size': 576, 'fingerprints': ['aa8a3dc16b30ea6c510161b632162019a41a95b81a71ccf909d439a08691b1b6', '57a283d159be07dc3178d4158ddecd7c4ebb34e6631a7965111c38c02724b2f2',
-                                     'eb41f41ceeffc7e1428740e81625bc7b8aa12aa6823cf1fd4152e50e752e2d4f'], 'cuts': [
+                                     'eb41f41ceeffc7e1428740e81625bc7b8aa12aa6823cf1fd4152e50e752e2d4f',
+                                     '1ef244e58a3747e8662a00de83267f6eb3add6bdc8bb0f93639f08eada3e74bb'], 'cuts': [
             (0x168, '290140b9', '29fddf88', 'stream writer going to sleep: ldr w9,[x9] → ldar (read position after the store-release of "writer sleeping")')]},
     ]},
 ]}

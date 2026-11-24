@@ -29,8 +29,21 @@ integrated into the base/update shader census, so DLC rendering is unvalidated.
   containing region cannot work. [patches.py](patches.py) changes that arena's
   bump increment, subtraction and capacity together, to 512 MB + 128 KB, and its
   containing region to 4 GB. All changes are gated by main build ID `82d187fe9ef9be921b8e1b1cddf7bd28`,
-  also reported for 2.2.0 below.
+  also reported for 2.2.0 below, and listed in `ALIAS_CUTS`.
   The SDK build takes the existing node-area and large-region alignment cuts.
+- **Resolved on Mac, compact layout exhaustion** ([GitHub issue #3149](https://github.com/seedds/nxnative/issues/3149),
+  [ALIAS_CUTS](../../../docs/reference/memory.md#cuts-that-only-fit-an-iphones-alias-region)):
+  with the 4 GB / 512 MB compact cuts applied on the Mac, the cutscene after the
+  first chapter's mid-scene battle returned null for a 0x217a0-byte allocation
+  (`sig=11 addr=0x8` at `main+0x43060` ← `main+0xbaa58c`); `DM_SVC=1` on M3 Max
+  measured about 4.23 GB of virtual address space used in that region (241–243 MB
+  first arena, 3,924 MB in subsequent windows, and a 64 MB top block). The Mac
+  loader now restores all six `ALIAS_CUTS` at load when the alias region is at
+  least 64 GB, keeping Monolith's 60 GB layout (clearing that cutscene on M3 Max);
+  iOS and smaller `DM_ALIAS_SIZE` runs keep the compact layout.
+  **Open:** the separate handheld-mode Zstd worker crash in issue #3149
+  (`pc=main+0x1266910 lr=main+0x1257cd4 addr=0x7174 x0=0`) still needs a rerun
+  with the restored 60 GB layout before associating it with the same cause.
 - A 40-second diagnostic run with the original arenas had 2,092.4 MB committed:
   about 203 MB in the first arena, about 1.8 GB in subsequent windows, and a 64 MB
   allocation near the end of the reservation. Original-layout opening battle
@@ -205,5 +218,7 @@ During a movie, Plus then a held X skips it. The diagnostic watchdog is off when
 - [Transform feedback captured by a vertex entry point](../../../docs/reference/rendering.md#transform-feedback-captured-by-a-vertex-entry-point): interleaved outputs and geometry capture.
 - [A host lock held across a same-core handoff](../../../docs/reference/threads.md#a-host-lock-held-across-a-same-core-handoff): contended native decoder waits must release a handoff.
 - [oe calls answered without an applet proxy](../../../docs/reference/services.md#oe-calls-answered-without-an-applet-proxy): enabling album-image notifications dereferenced the absent SelfController.
+- [Cuts that only fit an iPhone's alias region](../../../docs/reference/memory.md#cuts-that-only-fit-an-iphones-alias-region): the Mac loader restores the six allocator cuts at load when the alias region is at least 64 GB.
 - [The SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area) and [1 GB alignment of regions of 1 GB and more](../../../docs/reference/memory.md#1-gb-alignment-of-regions-of-1-gb-and-more).
 - [Block-compressed storage the CPU wrote before first use](../../../docs/reference/nvn-objects.md#block-compressed-storage-the-cpu-wrote-before-first-use): uncompressed 3D particle steering fields, taken from their storage too (GitHub issue #1011).
+- [Default language from control data](../../../docs/reference/services.md#default-language-from-control-data): lists British English without American English; direct host runs without `DM_LANG` crashed 2.5 s into boot at `main+0x10141ac` (PR #3147).

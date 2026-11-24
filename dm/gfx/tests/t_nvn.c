@@ -14,6 +14,8 @@ void nvn_present_config(int hz, int display_mode);
 #include <unistd.h>
 #include <sys/wait.h>
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
+static _Atomic uint64_t g_test_focus_in;
+uint64_t dm_focus_in_since(void) { return atomic_load(&g_test_focus_in); }   // overrides nvn_mtl.m's weak stub for fstep_tick settle-alignment tests
 
 static int g_fail, g_n;
 #define EXPECT(name, want, got) do { long long w_ = (long long)(want), g_ = (long long)(got); g_n++;                 \
@@ -371,6 +373,21 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // a page in ticks of 1/120 s (+0x38 120, a FRAME_STEP_120 stub; headless: no window): 40 fps is 3 ticks, 25 ms; 60 and 30 are 2 and 4 ticks
+      uint32_t unit=120;memcpy(state+FSTEP_UNIT_OFF,&unit,4);nvn_present_config(120,0);
+      cap=40;memcpy(state,&cap,4);
+      EXPECT("ticks 40: present cap",40,fps_present_cap());
+      EXPECT("ticks 40: three ticks a frame",3,present_itv(&w));
+      EXPECT("ticks 40: period ns",25000000,present_period(&w));
+      EXPECT("ticks 40: display-link target",40,nvn_game_fps());
+      EXPECT("ticks 40: graphics layer's target (statistics, link)",40,mtl_fps_target());
+      cap=60;memcpy(state,&cap,4);
+      EXPECT("ticks 60: two ticks a frame",2,present_itv(&w));
+      EXPECT("ticks 60: period ns",16666666,present_period(&w));
+      EXPECT("ticks 60: graphics layer's target",60,mtl_fps_target());
+      cap=30;memcpy(state,&cap,4);
+      EXPECT("ticks 30: four ticks a frame",4,present_itv(&w));
+      EXPECT("ticks 30: graphics layer's target",30,mtl_fps_target());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's
@@ -401,6 +418,42 @@ int main(void) {
       nvn_present_config(-1,0);setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
       EXPECT("the cap asked for before the window's first interval: display mode from the environment",30,fps_present_cap());
       unsetenv("DM_PRESENT_INTERVAL");unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
+    }
+    // Frame step settle alignment in fstep_tick: startup focus/window events do not count as stalls, a pause between AcquireTexture and Present lands on the frame whose
+    // [prev, st] span actually crosses the pause (paying back 0 vsyncs), and back-to-back window events across Acquire/Present each land on their own frame
+    {
+      win_t w = {.interval = 1}; _Alignas(8) uint8_t state[64] = {0}; float cap = 60; memcpy(state, &cap, 4);
+      dm_fps_state = state; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      const uint64_t vs = 16666667ull; uint64_t t = 1000000000ull;
+      // Startup events before frame 1's acquire are absorbed without triggering a stall
+      atomic_store(&g_test_focus_in, t - 5000000ull); dm_fstep_settle();
+      g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 1; fstep_tick(&w, 60);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 2; fstep_tick(&w, 60);
+      EXPECT("fstep settle: startup events cause no stall", 0, g_fs.stalls);
+      // Pause between Acquire 3 (t + vs) and Present 3: focus returns before Present 3, while Frame 3's [prev, st] is only 1 vsync
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      atomic_store(&g_test_focus_in, t + 2000000000ull);   // focus returns after 2 s pause, before Present 3 calls fstep_tick
+      w.presents = 3; fstep_tick(&w, 60);
+      EXPECT("fstep settle: mid-frame pause not consumed on prior frame", 0, g_fs.stalls);
+      // Acquire 4 happens after the 2 s pause: Frame 4 spans the pause and drops 100% of its debt
+      t += 2000000000ull + vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 4; fstep_tick(&w, 60);
+      EXPECT("fstep settle: pause frame gets settle (stalls=1)", 1, g_fs.stalls);
+      EXPECT("fstep settle: pause frame pays nothing back", 0, g_fs.paid);
+      EXPECT("fstep settle: pause debt dropped (debt < 1)", 1, g_fs.debt < 1.0 && g_fs.dropped >= 119.0);
+      // Window event before Acquire 5 AND a second event between Acquire 5 and Present 5: both land on their own frames
+      dm_fstep_settle();
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      dm_fstep_settle();
+      w.presents = 5; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event before acquire lands on frame 5", 2, g_fs.stalls);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 6; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event after acquire lands on frame 6", 3, g_fs.stalls);
+      dm_fps_state = NULL; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      atomic_store(&g_test_focus_in, 0); g_fs_start = g_fs_wait = 0;
     }
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
@@ -1368,8 +1421,55 @@ int main(void) {
         P(nvnQueuePresentTexture)(&q, &win, idx[f]);
     }
     EXPECT("swapchain rotates 0,1,0,1", 0x0101, idx[0] << 12 | idx[1] << 8 | idx[2] << 4 | idx[3]);
-    EXPECT("sync signaled after acquire (0)", 0, P(nvnSyncWait)(&s2, 0));
+    NVNsyncWaitResult awr = P(nvnSyncWait)(&s2, UINT64_MAX);
+    EXPECT("blocking wait on deferred acquire sync succeeds (0 or 1)", 1, awr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || awr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    EXPECT("sync already signaled after acquire wait completes (0)", 0, P(nvnSyncWait)(&s2, 0));
     EXPECT("Barrier count = 4 frames × 5", 20, nvn_slot[bi].cnt - barriers0);
+
+    // 6a. Deferred acquire sync edge cases:
+    // (1) Present enqueued for the acquired texture behind an unsignaled GPU event BEFORE CPU nvnSyncWait(s) must not deadlock (Super Mario Bros. Wonder Switch 2 Edition's parallel present thread)
+    // (2) Queue-only nvnQueueWaitSync without CPU nvnSyncWait, followed by next acquire drain
+    // (3) Re-fencing and finalizing a pending deferred acquire sync, and finalizing the window with a pending acquire
+    {
+        NVNeventBuilder eb; NVNevent ev;
+        static uint32_t ev_mem[4096] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder epb; NVNmemoryPool ep;
+        P(nvnMemoryPoolBuilderSetDefaults)(&epb); P(nvnMemoryPoolBuilderSetStorage)(&epb, ev_mem, sizeof ev_mem);
+        P(nvnMemoryPoolInitialize)(&ep, &epb);
+        P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &ep, 0);
+        P(nvnEventInitialize)(&ev, &eb);
+        ev_mem[0] = 0;
+
+        NVNsync s_acq; P(nvnSyncInitialize)(&s_acq, &dev);
+        int aidx = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &aidx);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        NVNcommandHandle h_ev = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+        P(nvnQueuePresentTexture)(&q, &win, aidx);
+        // Queue is now blocked on ev == 1 before aidx's new present can publish; SyncWait must only wait on aidx's PREVIOUS present
+        NVNsyncWaitResult r_par = P(nvnSyncWait)(&s_acq, 5000000000ull);
+        EXPECT("deferred acquire SyncWait does not deadlock on a concurrent present of the same slot", 1, r_par == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_par == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+        P(nvnQueueFinish)(&q);
+
+        // QueueWaitSync without CPU SyncWait, drained by next acquire
+        int qidx0 = -1, qidx1 = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx0);
+        P(nvnQueueWaitSync)(&q, &s_acq);
+        P(nvnQueuePresentTexture)(&q, &win, qidx0);
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx1);
+        // Re-fencing overwrites the pending acquire sync cleanly
+        P(nvnQueueFenceSync)(&q, &s_acq, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        NVNsyncWaitResult r_ref = P(nvnSyncWait)(&s_acq, UINT64_MAX);
+        EXPECT("re-fenced acquire sync waits cleanly", 1, r_ref == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_ref == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnQueueFinish)(&q);
+        P(nvnSyncFinalize)(&s_acq);
+        P(nvnWindowFinalize)(&win);
+        P(nvnEventFinalize)(&ev);
+        P(nvnMemoryPoolFinalize)(&ep);
+    }
 
     // 6b. Readback: pixel (x,y) = {x*16+y, y*16+x, 0x55, 0xAA} (expected values computed directly from the formula)
     {

@@ -1,0 +1,33 @@
+# Re:ZERO -Starting Life in Another World- The Prophecy of the Throne
+# The Forge on Vulkan, SDK 9.5.0, update v131072 (1.0.2).
+
+# ---- Identity ----
+title_id	0100D800117F4000
+program_id	0100D800117F4000
+
+# ---- App ----
+name	Re:ZERO -Starting Life in Another World- The Prophecy of the Throne
+ipa	ReZeroTheProphecyOfTheThrone.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=7dad4f2fdfc6350e6693fe68f5c0841a	subsdk2=7a5e537af42c5847f02410d81096ff0e	sdk=f93ce78898c2583ae08d87d3f2c2e4d6
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# subsdk2 supplies the movie library. The host supplies the Vulkan loader and driver.
+modules	main subsdk2 sdk
+romfs_marker	usound/nx/rezero.bfsar
+zip_store	.arc:.bfsar:.bfstm:.bft:.mo:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource. The Mac boot requested a 3.14 GiB heap within the 3.25 GiB region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_note	Re:ZERO ships SPIR-V for Vulkan

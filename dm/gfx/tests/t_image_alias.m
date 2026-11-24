@@ -26,12 +26,24 @@ static void pixels(id<MTLTexture> t, uint32_t seed) {
     id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     uint32_t *p=b.contents; for (NSUInteger i=0;i<bytes/4;i++) p[i]=seed^(uint32_t)i;
     res_add(b); enc_b_copy_buffer_texture(blit(), b, 0, t.width*4, bytes, MTLSizeMake(t.width,t.height,1), t, 0, 0, MTLOriginMake(0,0,0));
+    fam_mark_valid(t);
     id<MTLBuffer> out=read_image(t); CHECK(!memcmp(out.contents,b.contents,bytes), "every literal pixel survives alternating resolutions"); res_remove(b);
 }
 static void is_zero(id<MTLTexture> t) {
     id<MTLBuffer> b=read_image(t); uint32_t *p=b.contents; int zero=1;
     for (NSUInteger i=0;i<b.length/4;i++) zero &= p[i]==0;
     CHECK(zero, "fresh family is zero, including beyond its first-used small descriptor");
+}
+static void fragment_copy(id<MTLTexture> source, uint32_t seed) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat width:source.width height:source.height mipmapped:NO];
+    d.storageMode=MTLStorageModePrivate; d.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> target=[g_dev newTextureWithDescriptor:d]; res_add(target);
+    NVNcopyRegion r={.width=(int)source.width,.height=(int)source.height,.depth=1};
+    CHECK(copy_t2t_draw(source,target,0,0,0,0,&r,&r,0,0),"heap-backed texture is copied by the fragment pipeline");
+    id<MTLBuffer> out=read_image(target); uint32_t *p=out.contents; int valid=1;
+    for (NSUInteger i=0;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
+    CHECK(valid,"fragment sampling reads every heap-backed texel");
+    res_remove(target);
 }
 static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
@@ -61,7 +73,8 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void bump(texture2d<uint,access::read_write> image [[texture(0)]]) { image.atomic_fetch_add(uint2(0,0),5u); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> ps=lib?[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"bump"] error:&error]:nil;
+    id<MTLFunction> fn=[lib newFunctionWithName:@"bump"];
+    id<MTLComputePipelineState> ps=fn?[g_dev newComputePipelineStateWithFunction:fn error:&error]:nil;
     CHECK(ps!=nil,"native texture-atomic reader compiles"); if (!ps) return;
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
@@ -147,10 +160,12 @@ static void same_cell(pool_t *pool) {
     CHECK(m[0].heap!=m[2].heap,"an offset 16 KB further in the same cell is another family");
     for (int i=0;i<4;i++) mtl_tex_release(&t[i]);
 }
-// A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
+// Resolution-family cross-size safety: with compression on (default), cross-size loads clear to 0 (ASTRAL CHAIN #1935, OoT bloom), cross-size copies/binds return 0 without disturbing
+// the live owner, and combined depth-stencil half-clears initialize both planes. With DM_NVN_FAMILY_NOCOMPRESS=1, raw reads see misplaced texels of the same format
 static void cross_size_read(void) {
-    void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
     pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
     tex_t a[2]; unsigned w[2]={1600,1440}, h[2]={900,810};
     for (int i=0;i<2;i++) { a[i]=image(&pool,993000+i,w[i],h[i]); a[i].d.format=NVN_FORMAT_RGBA16F; a[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&a[i].d,&a[i].L); mtl_tex_init(&a[i]); }
     id<MTLTexture> big=tex_mtl(&a[0]), small=tex_mtl(&a[1]);
@@ -160,16 +175,106 @@ static void cross_size_read(void) {
     ops.h=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
     ops.clear=(p_clear_color){.index=0,.mask=15,.rgba={1,.5f,.25f,1}}; ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
     mtl_exec((const uint8_t *)&ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
-    NSUInteger row=big.width*8, bytes=row*big.height;
-    id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
-    enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
-    mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
-    const uint64_t *p=b.contents, clear=0x3c00340038003c00ull; NSUInteger nclear=0, nzero=0, other=0;
-    for (NSUInteger i=0;i<bytes/8;i++) { if (p[i]==clear) nclear++; else if (!p[i]) nzero++; else other++; }
-    printf("cross-size read: %lu clear, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)nclear,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
-    CHECK(!other && nclear,"another size's writes read back as its texels, misplaced");
+    if (fam_nocomp()) {
+        NSUInteger row=big.width*8, bytes=row*big.height;
+        id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+        enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
+        const uint64_t *p=b.contents, clear=0x3c00340038003c00ull; NSUInteger nclear=0, nzero=0, other=0;
+        for (NSUInteger i=0;i<bytes/8;i++) { if (p[i]==clear) nclear++; else if (!p[i]) nzero++; else other++; }
+        printf("cross-size read (uncompressed): %lu clear, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)nclear,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
+        CHECK(!other && nclear,"another size's writes read back as its texels, misplaced");
+    } else {
+        CHECK(big.allowGPUOptimizedContents && small.allowGPUOptimizedContents,"family textures keep lossless compression by default");
+        CHECK(fam_is_valid(small) && !fam_is_valid(big),"clearing small marks small valid and big invalid");
+        // 1. Cross-size OP_COPY_T2B returns zeros without disturbing the live owner (small).
+        size_t bytes=(size_t)big.width*big.height*8;
+        void *rb=NULL; posix_memalign(&rb,16384,bytes); memset(rb,0x5a,bytes);
+        mtl_pool_add(rb, bytes);
+        struct { op_hdr h; p_copy_b2t cp; op_hdr end; } t2b={0};
+        t2b.h=(op_hdr){OP_COPY_T2B,sizeof(op_hdr)+sizeof(p_copy_b2t)};
+        t2b.cp=(p_copy_b2t){.tex=&a[0], .src=(uint64_t)(uintptr_t)rb, .r={0,0,0,(int)big.width,(int)big.height,1}};
+        t2b.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&t2b); mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+        const uint64_t *rp=(const uint64_t *)rb; NSUInteger bad_t2b=0;
+        for (NSUInteger i=0;i<bytes/8;i++) if (rp[i]!=0) bad_t2b++;
+        CHECK(!bad_t2b,"cross-size texture-to-buffer copy yields zeros, no compressed-block garbage");
+        CHECK(fam_is_valid(small),"cross-size copy leaves the live owner valid");
+        // Small must still hold its exact clear colour.
+        NSUInteger srow=small.width*8, sbytes=srow*small.height;
+        id<MTLBuffer> sb=[g_dev newBufferWithLength:sbytes options:MTLResourceStorageModeShared]; res_add(sb);
+        enc_b_copy_texture_buffer(blit(), small, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(small.width,small.height,1), sb, 0, srow, sbytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(sb); mtl_sub_begin();
+        const uint64_t *sp=sb.contents, clear=0x3c00340038003c00ull; NSUInteger sbad=0;
+        for (NSUInteger i=0;i<sbytes/8;i++) if (sp[i]!=clear) sbad++;
+        CHECK(!sbad,"cross-size copy leaves the live owner's compressed pixels intact");
+        mtl_pool_del(rb); free(rb);
+        // 2. Bindless pool gating: small is live, big is dummy until big becomes valid.
+        mtl_reg_tex(101, &a[1], NULL); mtl_reg_tex(102, &a[0], NULL);
+        int g0=0, l0=0, lr0=0, tr0=0, d0=0;
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t rid_s=pool_entry(0, MTLTextureType2D, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b=pool_entry(0, MTLTextureType2D, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(rid_s!=0 && rid_b==0,"bindless pool exposes the valid family size and masks other sizes as dummy");
+        // 3. Cross-size render-pass Load (ASTRAL CHAIN #1935): load big with no full clear, write only a 16x16 scissor corner.
+        // The cross-size load is rewritten to Clear(0), so every untouched pixel is exact 0.0 and none is non-finite or garbage.
+        uint64_t sg_before=atomic_load(&g_ser_gen);
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&a[0];
+        struct { op_hdr h1; p_scissor sc; op_hdr h2; p_clear_color clear; op_hdr end; } sc_ops={0};
+        sc_ops.h1=(op_hdr){OP_SCISSOR,sizeof(op_hdr)+sizeof(p_scissor)};
+        sc_ops.sc=(p_scissor){0,0,16,16};
+        sc_ops.h2=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
+        sc_ops.clear=(p_clear_color){.index=0,.mask=15,.rgba={0.25f,0.5f,1,1}};
+        sc_ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&sc_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+        CHECK(fam_is_valid(big) && !fam_is_valid(small),"stored cross-size render pass transfers compressed family ownership to big");
+        CHECK(atomic_load(&g_ser_gen)>sg_before,"size switch bumps serial generation for pool-tracked family members");
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t rid_s2=pool_entry(0, MTLTextureType2D, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b2=pool_entry(0, MTLTextureType2D, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(rid_s2==0 && rid_b2!=0,"bindless pool updates to expose big and mask small after size switch");
+        NSUInteger row=big.width*8;
+        id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+        enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
+        const uint64_t *p=b.contents, corner=0x3c003c0038003400ull; NSUInteger ncorner=0, nzero=0, other=0;
+        for (NSUInteger y=0;y<big.height;y++) for (NSUInteger x=0;x<big.width;x++) {
+            uint64_t v=p[y*big.width+x];
+            if (x<16 && y<16) { if (v==corner) ncorner++; else other++; }
+            else { if (!v) nzero++; else other++; }
+        }
+        printf("cross-size pass load (compressed): %lu corner, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)ncorner,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
+        CHECK(!other && ncorner==256 && nzero==big.width*big.height-256,"cross-size render-pass load clears untouched pixels to 0 without compressed-block garbage");
+        // 4. Combined Depth32Float_Stencil8 half-clear across sizes: clear both on 32x32, then clear ONLY depth on 64x64; stencil must load as clean 0 and store valid blocks.
+        tex_t ds[2];
+        for (int i=0;i<2;i++) { ds[i]=image(&pool,993100+i,32u<<i,32u<<i); ds[i].off=12<<20; ds[i].mem=pool.mem+ds[i].off;
+            ds[i].d.format=NVN_FORMAT_DEPTH32F_STENCIL8; nvn_tex_layout(&ds[i].d,&ds[i].L); mtl_tex_init(&ds[i]); }
+        id<MTLTexture> ds0=tex_mtl(&ds[0]), ds1=tex_mtl(&ds[1]);
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.depth=&ds[0];
+        struct { op_hdr h; p_clear_ds clear; op_hdr end; } ds_ops={0};
+        ds_ops.h=(op_hdr){OP_CLEAR_DS,sizeof(op_hdr)+sizeof(p_clear_ds)};
+        ds_ops.clear=(p_clear_ds){.depth=0.5f,.depth_mask=1,.stencil=0x77,.stencil_mask=0xff}; ds_ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&ds_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.depth=&ds[1];
+        ds_ops.clear=(p_clear_ds){.depth=0.25f,.depth_mask=1,.stencil=0,.stencil_mask=0};   // depth clear only, stencil loaded across sizes
+        mtl_exec((const uint8_t *)&ds_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+        CHECK(fam_is_valid(ds1) && ds0.heap==ds1.heap,"combined depth-stencil half-clear transfers ownership to 64x64");
+        id<MTLBuffer> dbuf=[g_dev newBufferWithLength:ds1.width*ds1.height*4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> sbuf=[g_dev newBufferWithLength:ds1.width*ds1.height options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb=q_cb(); id<MTLBlitCommandEncoder> be=[cb blitCommandEncoder];
+        [be copyFromTexture:ds1 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ds1.width,ds1.height,1) toBuffer:dbuf destinationOffset:0 destinationBytesPerRow:ds1.width*4 destinationBytesPerImage:ds1.width*ds1.height*4 options:MTLBlitOptionDepthFromDepthStencil];
+        [be copyFromTexture:ds1 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ds1.width,ds1.height,1) toBuffer:sbuf destinationOffset:0 destinationBytesPerRow:ds1.width destinationBytesPerImage:ds1.width*ds1.height options:MTLBlitOptionStencilFromDepthStencil];
+        [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        const uint32_t *dp=dbuf.contents; const uint8_t *stp=sbuf.contents; int ds_ok=cb.status==MTLCommandBufferStatusCompleted;
+        for (NSUInteger i=0;i<ds1.width*ds1.height;i++) ds_ok &= dp[i]==0x3e800000u && stp[i]==0;
+        CHECK(ds_ok,"combined depth-stencil half-clear stores clean 0 stencil and cleared depth");
+        mtl_reg_tex_gone(101); mtl_reg_tex_gone(102);
+        for (int i=0;i<2;i++) mtl_tex_release(&ds[i]);
+    }
     for (int i=0;i<2;i++) mtl_tex_release(&a[i]);
-    mtl_alias_drop_pool(&pool); free(mem);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
 }
 int main(void) { @autoreleasepool {
     mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
@@ -184,8 +289,8 @@ int main(void) { @autoreleasepool {
     CHECK(small.width==512 && small.height==512,"the first descriptor retains its NVN dimensions");
     CHECK(small.heap!=nil,"live resolution family has physical backing");
     CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"a family texture gets no forced format-view usage");
-    CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
-    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
+    CHECK(small.allowGPUOptimizedContents == !fam_nocomp(),"family textures keep lossless compression by default (DM_NVN_FAMILY_NOCOMPRESS=1 disables it)");
+    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=!fam_nocomp();   // family members are sized with the same compression mode they are made with (image_texture)
     MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
     CHECK(small.heap.size>=max_size.size && small.heap.size<=(sw_on(rh_mode()) ? max_size.size+max_size.size/4 : max_size.size),"heap capacity holds the largest declared size (with the recycled heaps' eighth of headroom)");
     is_zero(small);
@@ -206,12 +311,13 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     same_cell(&pool);
+    fragment_copy(small,0x76543210);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);
     cross_size_read();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
-    CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
+    CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
     CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");
@@ -234,9 +340,10 @@ int main(void) { @autoreleasepool {
     // Finish a second submission: release calls are deferred to the next fence.
     mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
     // GPU completion publishes the fence before its feedback handler drains deferred objects.
-    dispatch_sync(g_feedback_q, ^{}); defer_drain();
+    dispatch_sync(g_feedback_q, ^{}); defer_drain(); res_commit();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
+    res_commit();   // apply descriptor retirements queued while the fixture's autorelease pool drained
     if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
         int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
         CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
@@ -250,8 +357,9 @@ int main(void) { @autoreleasepool {
         CHECK(tex_mtl(&a).heap!=nil,"a recreated family allocates its backing");
         mtl_tex_release(&a); mtl_tex_release(&b); mtl_alias_drop_pool(&pool);
         mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
-        dispatch_sync(g_feedback_q,^{}); defer_drain();
+        dispatch_sync(g_feedback_q,^{}); defer_drain(); res_commit();
     } }
+    res_commit();
     CHECK(g_image_heap_n==0,"repeated destruction leaves no heap owner");
     CHECK(g_dev.currentAllocatedSize<=settled+(3<<20),"repeated families do not retain their old physical allocations");
     free(mem);

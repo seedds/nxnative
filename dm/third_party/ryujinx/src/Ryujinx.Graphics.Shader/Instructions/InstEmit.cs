@@ -201,34 +201,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
             context.TranslatorContext.GpuAccessor.Log("Shader instruction Pret is not implemented.");
         }
 
-        public static void PrmtR(EmitterContext context)
-        {
-            context.GetOp<InstPrmtR>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtR is not implemented.");
-        }
-
-        public static void PrmtI(EmitterContext context)
-        {
-            context.GetOp<InstPrmtI>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtI is not implemented.");
-        }
-
-        public static void PrmtC(EmitterContext context)
-        {
-            context.GetOp<InstPrmtC>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtC is not implemented.");
-        }
-
-        public static void PrmtRc(EmitterContext context)
-        {
-            context.GetOp<InstPrmtRc>();
-
-            context.TranslatorContext.GpuAccessor.Log("Shader instruction PrmtRc is not implemented.");
-        }
-
         public static void R2b(EmitterContext context)
         {
             context.GetOp<InstR2b>();

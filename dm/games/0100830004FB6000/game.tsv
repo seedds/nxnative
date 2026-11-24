@@ -1,0 +1,35 @@
+# L.A. Noire 1.2 (v131072), Nintendo SDK 1.3.1, NVN.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100830004FB6000
+program_id	0100830004FB6000
+
+# ---- App ----
+name	L.A. Noire
+ipa	LANoire.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.2	main=40f973ce3b5ec8d79551bfd61fdd4301	subsdk0=c088cd66c9ca894455dbb31cb9ecb92d	subsdk1=307c150782376a71627df9307a618005	subsdk2=46359884e57ca335974c8c2c3bec549f	sdk=69eb4c1f08de11d8f4e9bbfb596b8472
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# subsdk0 exports GLSLC, subsdk1 NVN and subsdk2 nn::sf.
+modules	main subsdk0 subsdk1 subsdk2 sdk
+romfs_marker	final/nx/populated.bd.big.nx
+zip_store	.nx:.metallib
+
+# ---- Memory ----
+# The Mac boot opens 3.14 GiB of the 3.25 GiB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource, so virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/final/=final
+shader_note	L.A. Noire shaders

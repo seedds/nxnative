@@ -652,32 +652,92 @@ static void reuse_tables_case(void) {
     pool_table_give(b, -1, 0); pool_table_give(c, -1, 0); pool_table_give(d, -1, 0);
     g_done = done0; g_fence = fence0;
 }
-// A cut with earlier work still running stays a boundary for the game's timestamps, and commits only when the GPU has run out; a report after it takes that boundary's time
+// A cut with earlier work up to cut_busy_limit() stays a boundary for the game's timestamps and does not commit until the GPU has room (read from g_q4's shared event, not stale
+// commit feedback); a report after it takes that boundary's time. With the encode thread on, the segment is split on the submit thread and held on the encode thread until the GPU has room
 static void cut_boundary_case(void) {
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
-    // nothing of the cases before this one may still be on its way: a submission the encode thread kept open for the next one (merged submissions) reports back a moment later than
-    // one committed at once, and the case counts g_seg_inflight itself
-    rec_drain(); for (int i = 0; i < 20000 && atomic_load(&g_seg_inflight); i++) usleep(100);
+    rec_drain();
+    for (int i = 0; i < 20000 && (atomic_load(&g_seg_inflight) || atomic_load(&g_rx_fly)); i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
+    int lim = cut_busy_limit();
+    if (!rec_on() || !rx_merge_on()) {
+        state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
+        clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
+        id cb0 = g_cb;
+        mtl_sub_counter((uint64_t)rep.contents, 0x10);
+        if (lim > 0) {
+            atomic_fetch_add(&g_rx_busy_hold, lim);
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            CHECK(g_cb == cb0 && g_seg == 1, "at the busy limit: a boundary, no commit");
+            CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
+            clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+            mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+            atomic_fetch_sub(&g_rx_busy_hold, 1);   // now lim - 1 in flight: room for a commit
+            const char *fbm = getenv("DM_NVN_SUB_IDLE_FB");
+            int fb_only = fbm && !strcmp(fbm, "1");
+            if (!fb_only) atomic_fetch_add(&g_seg_inflight, 1);   // stale feedback must not block the shared-event check
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            if (!fb_only) atomic_fetch_sub(&g_seg_inflight, 1);
+            CHECK(g_cb != cb0 && g_seg == 2, "below the busy limit: a commit (shared event, not stale feedback)");
+            if (lim > 1) atomic_fetch_sub(&g_rx_busy_hold, lim - 1);
+        } else {
+            atomic_fetch_add(&g_rx_busy_hold, 1);
+            g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+            CHECK(g_cb != cb0 && g_seg == 1, "with DM_NVN_CUT_BUSY=0: a commit even while busy");
+            clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+            mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+            atomic_fetch_sub(&g_rx_busy_hold, 1);
+        }
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
+        uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
+        CHECK(r0[1] && r1[1] > r0[1], "two reports across a boundary read two times");
+        return;
+    }
+    // Encode thread with submission merging: sub_cut splits the recorded CB and the encode thread holds it while rx_inflight() >= lim, flushing on RO_END once room opens
+    uint64_t cbs0 = g_rx_cbs;
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
     clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
-    id cb0 = g_cb;
     mtl_sub_counter((uint64_t)rep.contents, 0x10);
-    atomic_fetch_add(&g_seg_inflight, 1);
-    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
-    CHECK(g_cb == cb0 && g_seg == 1, "with work running: a boundary, no commit");
-    CHECK(g_sclk && g_sclk->nb == 2, "and its timestamp slot");
-    clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
-    mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
-    atomic_fetch_sub(&g_seg_inflight, 1);
-    g_stat_draw += (uint64_t)cut_draws(); sub_cut();
-    CHECK(g_cb != cb0 && g_seg == 2, "with nothing running: a commit");
-    clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
+    if (lim > 0) {
+        __block int held_after_cut = -1, held_after_end = -1;
+        __block uint64_t cbs_after_cut = ~0ull, cbs_after_end = ~0ull;
+        dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+        atomic_fetch_add(&g_rx_busy_hold, lim);
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); });
+        g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; held_after_cut = atomic_load(&g_rx_held); cbs_after_cut = g_rx_cbs; atomic_fetch_sub(&g_rx_busy_hold, 1); });
+        clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; held_after_end = atomic_load(&g_rx_held); cbs_after_end = g_rx_cbs; });
+        mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        uint64_t f = mtl_sub_commit();
+        dispatch_semaphore_signal(gate);
+        CHECK(mtl_wait(f, 5000000000ull), "the encode-thread segments completed");
+        rec_drain();
+        if (lim > 1) atomic_fetch_sub(&g_rx_busy_hold, lim - 1);
+        CHECK(held_after_cut == 1 && cbs_after_cut == cbs0, "encode thread: segment at busy limit is held, not committed");
+        CHECK(cbs_after_end == cbs0 + 1 && held_after_end == 0, "encode thread: held segment flushes at the next RO_END once GPU has room");
+    } else {
+        __block uint64_t cbs_after_cut = ~0ull;
+        atomic_fetch_add(&g_rx_busy_hold, 1);
+        g_stat_draw += (uint64_t)cut_draws(); sub_cut();
+        rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) { (void)cb; cbs_after_cut = g_rx_cbs; });
+        clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+        mtl_sub_counter((uint64_t)rep.contents + 16, 0x10);
+        clear(MTLClearColorMake(0, 0, 1, 1)); rp_end();
+        uint64_t f = mtl_sub_commit();
+        CHECK(mtl_wait(f, 5000000000ull), "the encode-thread segments completed");
+        rec_drain();
+        atomic_fetch_sub(&g_rx_busy_hold, 1);
+        CHECK(cbs_after_cut == cbs0 + 1, "encode thread with DM_NVN_CUT_BUSY=0: segment commits immediately");
+    }
     uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
-    CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
+    CHECK(r0[1] && r1[1] > r0[1], "encode thread: two reports across a segment boundary read two times");
 }
 
 // With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer are held and go to the queue in one commit call (nvn_rec.h,
@@ -689,10 +749,11 @@ static void merge_case(void) {
     if (!rec_on()) return;
     tex_t colour; target(&colour, 99820);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
+    int hold_lim = (int)rx_hold_limit();
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
     uint64_t cbs0 = g_rx_cbs, merged0 = g_rx_merged;
     dispatch_semaphore_t gate = dispatch_semaphore_create(0);
-    atomic_fetch_add(&g_rx_busy_hold, 1);
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
     rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
     uint64_t f[3];
     for (int k = 0; k < 3; k++) {
@@ -706,7 +767,7 @@ static void merge_case(void) {
     // (polled, not waited for: a waiter that wakes on the queue's signal completes the records itself, with its own clock for every report: post_early)
     for (int i = 0; i < 50000 && g_done < f[2]; i++) usleep(100);
     CHECK(g_done >= f[2], "three submissions behind running work complete");
-    atomic_fetch_sub(&g_rx_busy_hold, 1);
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
     rec_drain();
     CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one commit");
     CHECK(atomic_load(&g_sub_cmt) >= f[2], "their commit notes are passed");
@@ -716,30 +777,47 @@ static void merge_case(void) {
     // which holds the pass, after it (an upload batch flushed in the middle of a submission is committed before the draws it serves, wherever in the submission they were recorded)
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
     cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1, nb_at_block = -1;
-    atomic_fetch_add(&g_rx_busy_hold, 1);
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
     rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 0, 1)); rp_end(); uint64_t fa = mtl_sub_commit();
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 1, 1, 1)); rp_end();
     rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; nb_at_block = g_rx_last_nb; }); rec_publish();
     clear(MTLClearColorMake(1, 0, 1, 1)); rp_end(); uint64_t fb2 = mtl_sub_commit();
     dispatch_semaphore_signal(gate);
-    atomic_fetch_sub(&g_rx_busy_hold, 1);
     CHECK(mtl_wait(fb2, 5000000000ull), "the submissions around a queue operation complete");
     rec_drain();
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
     CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 >= 1 && fa < fb2, "the held submission was committed before the queue operation ran");
     CHECK(nb_at_block == 1, "and alone: the next submission's pass recorded before the queue operation was not in that commit");
     // the GPU has run out of work but the commit feedback has not reported it yet (its count held up here): the next submission is not held, as the GPU is read through the
     // encode thread's event (DM_NVN_SUB_IDLE_FB=1 reads that count and holds it)
     rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
-    for (int i = 0; i < 20000 && g_rx_ev && g_rx_ev.signaledValue < g_rx_seq; i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
     cbs0 = g_rx_cbs; merged0 = g_rx_merged;
-    atomic_fetch_add(&g_rx_fly, 1);
+    atomic_fetch_add(&g_rx_fly, hold_lim);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 0, 1, 1)); rp_end(); uint64_t fi = mtl_sub_commit();
     for (int i = 0; i < 50000 && g_done < fi; i++) usleep(100);   // (polled: a drain would send it at once either way)
     CHECK(g_done >= fi, "a submission after the GPU's work ended completes");
-    atomic_fetch_sub(&g_rx_fly, 1);
+    atomic_fetch_sub(&g_rx_fly, hold_lim);
     const char *fbm = getenv("DM_NVN_SUB_IDLE_FB");
     if (!(fbm && !strcmp(fbm, "1"))) CHECK(g_rx_merged == merged0 && g_rx_cbs == cbs0 + 1, "the GPU is idle before its feedback reports it: the submission went at once, not held");
+    // A blocking mtl_wait on a held final submission wakes the encode thread's idle wait (rec_wake_for_fence) instead of sitting 450 us while the waiter blocks,
+    // while still letting queued submissions before it merge into one commit
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    for (int i = 0; i < 20000 && rx_inflight(); i++) usleep(100);
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged;
+    atomic_fetch_add(&g_rx_busy_hold, hold_lim);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 1, 1)); rp_end();
+    uint64_t fw = mtl_sub_commit();
+    rec_wake_for_fence(fw);
+    dispatch_semaphore_signal(gate);
+    CHECK(mtl_wait(fw, 5000000000ull), "blocking mtl_wait completes merged final submission behind busy GPU");
+    rec_drain();
+    atomic_fetch_sub(&g_rx_busy_hold, hold_lim);
+    CHECK(g_rx_merged - merged0 == 2 && g_rx_cbs == cbs0 + 1 && atomic_load(&g_rx_need_fence) >= fw, "blocking waiter keeps queued submissions merged in one commit and wakes flush");
 }
 
 // Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps
@@ -949,6 +1027,154 @@ static void pending_clear_case(NvProg *pr) {
     mtl_tex_release(&source);
     printf("snapshot after a waiting clear: %s\n", before == failed ? "PASS" : "FAIL");
 }
+// Bounded depth snapshots (DM_NVN_FB_DEPTH_RECT): tracks tile-aligned dirty rectangles across barriers, skips copies when nothing wrote depth, and falls back to whole copies on untracked writes.
+static void depth_rect_case(NvProg *pr) {
+    int before = failed; NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = 0;
+    tex_t depth = {.magic=MAGIC('T','E','X',0), .serial=99960};
+    depth.d = (nvn_texdesc){.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH32F, .width=64, .height=64, .depth=1, .levels=1, .samples=1};
+    tex_t depth_alias = depth; depth_alias.serial = 99961;
+    tex_t src_depth = depth; src_depth.serial = 99962;
+    id<MTLTexture> dt = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)];
+    id<MTLTexture> sdt = [g_dev newTextureWithDescriptor:tex_desc(&src_depth, 0)];
+    MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:64 height:64 mipmapped:NO];
+    md.textureType = MTLTextureType2DMultisample; md.sampleCount = 4; md.storageMode = MTLStorageModePrivate; md.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> msaa = [g_dev newTextureWithDescriptor:md];
+    CHECK(dt && sdt && msaa, "bounded depth rect textures allocate");
+    if (!dt || !sdt || !msaa) return;
+    res_add(dt); res_add(sdt); res_add(msaa);
+    mtl_tex_init(&depth); serial_put(depth.serial, dt);
+    mtl_tex_init(&depth_alias); serial_put(depth_alias.serial, dt);
+    mtl_tex_init(&src_depth); serial_put(src_depth.serial, sdt);
+    mtl_reg_tex(657, &depth, NULL);
+    const NSUInteger row = 64 * 4, img = row * 64;
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:img * 7 options:MTLResourceStorageModeShared];
+    CHECK(rb != nil, "bounded depth rect readback buffer allocates");
+    if (!rb) { mtl_tex_release(&depth); mtl_tex_release(&depth_alias); mtl_tex_release(&src_depth); return; }
+    res_add(rb);
+    int save_mode = g_fbd_mode, save_any = g_fbd_any;
+    g_fbd_mode = 1;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 0; R.rt.depth = &depth; S.ds.dt = S.ds.dw = 1; S.tex[1][0] = 657;
+    // Initial full clear to 0.75 -> first snapshot must be a whole copy.
+    R.clear_d = 1; R.cd = 0.75; CHECK(rp_begin() != nil, "initial depth pass opens"); rp_end();
+    uint64_t whole0 = g_fbd_whole, rects0 = g_fbd_rects, none0 = g_fbd_none, bytes0 = g_fbd_bytes, dsnaps0 = g_fb_dsnaps;
+    fb_prepare(pr);
+    id<MTLTexture> snap = g_fb_n == 1 ? g_fb_use[0] : nil;
+    CHECK(snap && snap != dt && g_fbd_whole == whole0 + 1 && g_fb_dsnaps == dsnaps0 + 1, "first bounded depth snapshot is a whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, 0, row, img); }
+    // Barrier with no depth write since the snapshot -> skip copy and keep pass open.
+    CHECK(rp_begin() != nil, "load depth pass opens");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_enc != nil && g_fb_n == 1 && g_fb_use[0] == snap && g_fbd_none == none0 + 1 && g_fb_dsnaps == dsnaps0 + 1,
+          "no depth write since snapshot skips copy and leaves pass open");
+    rp_end();
+    // Bounded write via scissored clear_ds_tri on [0,0,16,16) to 0.25 -> copies only that 16x16 tile.
+    R.has_sc = 1; R.sc = (p_scissor){0, 0, 16, 16};
+    p_clear_ds cd = {.depth = 0.25f, .depth_mask = 1};
+    clear_ds_tri(&cd);
+    uint64_t b1 = g_fbd_bytes;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 1 && g_fbd_bytes == b1 + 16 * 16 * 4, "single scissored write copies only its 16x16 tile");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img, row, img); }
+    // Overlapping [8,0,24,16) (snaps to [0,0,32,16)) and disjoint [48,48,64,64) -> merged into 2 disjoint tile-aligned rects.
+    R.sc = (p_scissor){8, 0, 16, 16}; cd.depth = 0.125f; clear_ds_tri(&cd);
+    R.sc = (p_scissor){48, 48, 16, 16}; cd.depth = 0.375f; clear_ds_tri(&cd);
+    fb_cache_t *ent = NULL; for (int i = 0; i < 8; i++) if (g_fbc[i].inc && g_fbc[i].ser == depth.serial) ent = &g_fbc[i];
+    CHECK(ent && ent->nr == 2, "overlapping write snaps and merges cleanly while disjoint tile stays separate");
+    uint64_t b2 = g_fbd_bytes;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 2 && g_fbd_bytes == b2 + (32 * 16 + 16 * 16) * 4, "disjoint tile-aligned rectangles copy only their union");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 2, row, img); }
+    // Aliased tex_t serial sharing the same MTLTexture writes [32,0,48,16) to 0.625 -> tracked via root MTLTexture.
+    R.rt.depth = &depth_alias; R.sc = (p_scissor){32, 0, 16, 16}; cd.depth = 0.625f; clear_ds_tri(&cd);
+    R.rt.depth = &depth; R.has_sc = 0;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fbd_rects == rects0 + 3, "aliased serial write into same MTLTexture is tracked");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 3, row, img); }
+    // Point primitive with small viewport [0,0,8,8] and full scissor [0,0,64,64] must bound by scissor, not viewport +/- 8.
+    CHECK(rp_begin() != nil, "point primitive pass opens");
+    S.has_vp = 1; S.vp[0][0] = 0; S.vp[0][1] = 0; S.vp[0][2] = 8; S.vp[0][3] = 8;
+    fbd_draw_note(pr, MTLPrimitiveTypePoint, (MTLScissorRect){0, 0, 64, 64}, 0);
+    CHECK(ent && ent->nr == 1 && ent->r[0][0] == 0 && ent->r[0][1] == 0 && ent->r[0][2] == 64 && ent->r[0][3] == 64,
+          "point primitive ignores narrow viewport clamp and bounds by full scissor");
+    S.has_vp = 0; if (ent) ent->nr = 0;
+    // Unbounded draw (e.g. mesh-task) forces full-copy fallback.
+    fbd_draw_note(pr, MTLPrimitiveTypeTriangle, (MTLScissorRect){0, 0, 16, 16}, 1);
+    CHECK(ent && ent->dfull == 1, "unbounded draw marks snapshot entry for whole copy");
+    rp_end();
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 2, "unbounded draw falls back to whole copy");
+    // MSAA resolveTexture via enc_r_begin writes dt -> must invalidate and copy whole (0.5).
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+    rp.depthAttachment.texture = msaa; rp.depthAttachment.resolveTexture = dt;
+    rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 0.5;
+    rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+    rp.depthAttachment.depthResolveFilter = MTLMultisampleDepthResolveFilterSample0;
+    enc_r_end(enc_r_begin(rp));
+    CHECK(ent && ent->dfull == 1, "MSAA resolveTexture into depth invalidates incremental snapshot");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 3, "MSAA resolve falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 4, row, img); }
+    // Blit into dt from sdt (0.875) -> must invalidate and copy whole.
+    rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    MTL4RenderPassDescriptor *sp = [MTL4RenderPassDescriptor new];
+    sp.depthAttachment.texture = sdt; sp.depthAttachment.loadAction = MTLLoadActionClear; sp.depthAttachment.clearDepth = 0.875; sp.depthAttachment.storeAction = MTLStoreActionStore;
+    enc_r_end(enc_r_begin(sp));
+    enc_b_copy_texture(blit(), sdt, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), dt, 0, 0, MTLOriginMake(0, 0, 0));
+    CHECK(ent && ent->dfull == 1, "blit into depth texture invalidates incremental snapshot");
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 4, "blit write falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 5, row, img); }
+    // Waiting clear (R.clear_d = 1, no pass open) -> must fall back to whole copy of 0.25.
+    R.clear_d = 1; R.cd = 0.25;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_whole == whole0 + 5 && !R.clear_d, "waiting depth clear falls back to whole copy");
+    if (snap) { blit_barrier(); enc_b_copy_texture_buffer(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(64, 64, 1), rb, img * 6, row, img); }
+    // Switch off (DM_NVN_FB_DEPTH_RECT=0) takes ordinary whole copies and does not bump fbd counters.
+    uint64_t fbd_snaps_before = g_fbd_snaps, dsnaps_before = g_fb_dsnaps;
+    g_fbd_mode = 0; g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(g_fbd_snaps == fbd_snaps_before && g_fb_dsnaps == dsnaps_before + 1, "with DM_NVN_FB_DEPTH_RECT=0 whole copies run as before");
+    R.rt.depth = NULL; S.ds.dt = S.ds.dw = 0; S.tex[1][0] = 0; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "bounded depth rect submission completed under Metal validation");
+    // Verify GPU readback pixels for all 7 snapshots.
+    const uint8_t *base = rb.contents;
+    int ok0 = 1, ok1 = 1, ok2 = 1, ok3 = 1, ok4 = 1, ok5 = 1, ok6 = 1;
+    for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+        size_t o = (size_t)y * row + (size_t)x * 4;
+        float v0 = *(const float *)(base + o), v1 = *(const float *)(base + img + o), v2 = *(const float *)(base + img * 2 + o);
+        float v3 = *(const float *)(base + img * 3 + o), v4 = *(const float *)(base + img * 4 + o), v5 = *(const float *)(base + img * 5 + o), v6 = *(const float *)(base + img * 6 + o);
+        ok0 &= v0 == 0.75f;
+        ok1 &= v1 == ((x < 16 && y < 16) ? 0.25f : 0.75f);
+        float want2 = (x >= 8 && x < 24 && y < 16) ? 0.125f : (x < 8 && y < 16) ? 0.25f : (x >= 48 && y >= 48) ? 0.375f : 0.75f;
+        ok2 &= v2 == want2;
+        float want3 = (x >= 32 && x < 48 && y < 16) ? 0.625f : want2;
+        ok3 &= v3 == want3;
+        ok4 &= v4 == 0.5f;
+        ok5 &= v5 == 0.875f;
+        ok6 &= v6 == 0.25f;
+    }
+    CHECK(ok0, "readback 0: initial whole depth snapshot matches 0.75");
+    CHECK(ok1, "readback 1: single 16x16 dirty tile updated to 0.25 while rest stayed 0.75");
+    CHECK(ok2, "readback 2: merged overlapping tile + disjoint tile updated cleanly");
+    CHECK(ok3, "readback 3: aliased serial tile write updated cleanly");
+    CHECK(ok4, "readback 4: MSAA resolve fallback updated whole snapshot to 0.5");
+    CHECK(ok5, "readback 5: blit fallback updated whole snapshot to 0.875");
+    CHECK(ok6, "readback 6: waiting clear fallback updated whole snapshot to 0.25");
+    (void)bytes0;
+    g_fbd_mode = save_mode; g_fbd_any = save_any;
+    mtl_tex_release(&depth); mtl_tex_release(&depth_alias); mtl_tex_release(&src_depth);
+    printf("bounded depth rect snapshots: %s\n", before == failed ? "PASS" : "FAIL");
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
@@ -985,6 +1211,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int i = 0; i < 3; i++) slot_case(pr, pipeline, slots[i], i);
     reuse_case(pr);
     depth_snap_case(pr);
+    depth_rect_case(pr);
     depth_after_write_case(pr,0); depth_after_write_case(pr,1);
     for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
     pending_clear_case(pr);

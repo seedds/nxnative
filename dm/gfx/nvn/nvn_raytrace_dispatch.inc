@@ -19,8 +19,8 @@ static void rtd_table(const nvn_rt_table *table, const char *name) {
     rtd_range(table->address, table->size, name);
 }
 static uint8_t rtd_image_class(unsigned slot) { // registration lock held
-    int tid = (int)(bound_img(NVN_RT_RESOURCE_STAGE, (int)slot) & 0xfffff);
-    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) return 3;
+    int tid = bound_tex_id(bound_img(NVN_RT_RESOURCE_STAGE, (int)slot));
+    if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) return 3;
     void *view = NULL; if (!tex_fast_rid(tid, &view) || !view) return 3;
     id<MTLTexture> texture = (__bridge id<MTLTexture>)view;
     int dpf = mtl_pf_dpf(texture.pixelFormat);

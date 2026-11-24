@@ -52,6 +52,7 @@
 //   DM_CHEATS_ON=<n>,…      cheats turned on by name at launch (the menu's own toggle states stay what they were)
 //   DM_CHEATS_DEBUG=1       log every applied write (cheat name, where, value)
 #include "dm.h"
+#include "code_write.h"
 #include "dm_input.h"   // dm_cheats_keys, the key mask the type-8 conditional reads
 #include <libkern/OSCacheControl.h>
 #include <sys/mman.h>
@@ -169,30 +170,10 @@ static uint8_t *g_alias;       // the alias mapping of main's image (same layout
                                // cheat reaches is bounds-checked against main's own span first, so the page-rounded
                                // size needs no variable of its own
 
-// Map main's image a second time, writable. Called once a cheat file is actually picked (at init that is before the
-// guest starts, so nothing protects or tracks these pages yet); the mapping stays for the process's lifetime, the
-// loader's per-page protections never change after load. Not on the iPhone: its SDK has no mach_vm.h, and its code pages
-// are the app's signed pages, which no mapping can make writable; cheats write only data there
-#if TARGET_OS_IPHONE
-static void alias_setup(void) { g_alias = NULL; }
-#else
-static void alias_setup(void) {
-    module_t *m = g_main_mod;
-    long pg = sysconf(_SC_PAGESIZE); if (pg <= 0) pg = 0x4000;   // 16 KB on Apple Silicon, a safe floor elsewhere
-    uint64_t size = ((uint64_t)m->size + (uint64_t)pg - 1) & ~((uint64_t)pg - 1);   // mach_vm_remap wants whole pages
-    mach_vm_address_t dst = 0;
-    vm_prot_t cur = 0, mx = 0;
-    kern_return_t kr = mach_vm_remap(mach_task_self(), &dst, size, 0, VM_FLAGS_ANYWHERE,
-                                     mach_task_self(), (mach_vm_address_t)(uintptr_t)m->base, FALSE,
-                                     &cur, &mx, VM_INHERIT_SHARE);
-    if (kr) { g_alias = NULL; return; }
-    // The alias's protections are independent of the original mapping's: make everything writable once. The key page
-    // stays refused by the write path; the alias is only ever used by a check-passing write
-    kr = mach_vm_protect(mach_task_self(), dst, size, 0, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr) { mach_vm_deallocate(mach_task_self(), dst, size); g_alias = NULL; return; }
-    g_alias = (uint8_t *)(uintptr_t)dst;
-}
-#endif
+// Map main's image a second time, writable (code_write.h dm_code_alias_map). Called once a cheat file is actually
+// picked (at init that is before the guest starts, so nothing protects or tracks these pages yet); the mapping stays
+// for the process's lifetime, the loader's per-page protections never change after load. NULL on iOS (signed pages).
+static void alias_setup(void) { g_alias = dm_code_alias_map(g_main_mod); }
 
 // The cheats list, the toggles and one VM pass at a time
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -528,43 +509,14 @@ static int mem_read(uint64_t addr, uint64_t len, uint64_t *out) {
     return 0;
 }
 
-// The rewriter's list of main's text words whose instructions no longer run as the file has them (patch_nso.py
-// <name>.changed.tsv: the words it changed, the windows and spin waits whose copies run instead), as sorted runs of
-// image offsets; read once, when a cheat file is first picked. -1: no list beside the modules (an older rewriter's
-// output) or one of another build, and then no text word can be shown to be the game's own
-static uint32_t (*g_changed)[2];   // {offset, length} runs
-static int g_nchanged, g_changed_state;   // state 0 not read yet, 1 read, -1 missing or wrong
+// The rewriter's list of main's text words whose instructions no longer run as the file has them (code_write.h
+// dm_changed_load, <name>.changed.tsv), read once when a cheat file is first picked. Macros preserve the test-visible
+// state names used by t_cheats.c.
+static dm_changed_t g_changed_tbl;
+#define g_nchanged (g_changed_tbl.n)
+#define g_changed_state (g_changed_tbl.state)
 
-static void changed_load(void) {
-    if (g_changed_state) return;
-    g_changed_state = -1;
-    char p[1100]; snprintf(p, sizeof p, "%s/main.changed.tsv", dm_module_dir());
-    FILE *f = fopen(p, "r");
-    if (!f) { LOG("[RED] cheats: no %s (the modules come from an older rewriter): code writes are refused; rewrite them with dm/tools/patch_nso.py", p); return; }
-    char line[256], bid[40] = ""; int cap = 0; unsigned long off, len;
-    while (fgets(line, sizeof line, f)) {   // NOLINT(clang-analyzer-unix.BlockInCriticalSection): a file load under the cheats lock; the per-frame pass only trylocks it, so a load never stalls a frame
-        if (sscanf(line, "# BUILD_ID %39s", bid) == 1) continue;
-        if (sscanf(line, "%lx %lx", &off, &len) != 2) continue;
-        if (g_nchanged == cap) {
-            cap = cap ? cap * 2 : 1024;
-            uint32_t (*grown)[2] = realloc(g_changed, (size_t)cap * sizeof *g_changed);
-            if (!grown) { fclose(f); g_nchanged = 0; return; }   // state -1: code writes stay refused
-            g_changed = grown;
-        }
-        g_changed[g_nchanged][0] = (uint32_t)off; g_changed[g_nchanged][1] = (uint32_t)len; g_nchanged++;
-    }
-    fclose(f);
-    if (strcasecmp(bid, g_main_mod->build_id)) { LOG("[RED] cheats: %s is for build %s, not main's %s: code writes are refused", p, bid, g_main_mod->build_id); g_nchanged = 0; return; }
-    g_changed_state = 1;
-    LOG("cheats: %d runs of text words the rewriter changed or moved (code writes into them are refused)", g_nchanged);
-}
-
-// The first changed run that [off, off + len) overlaps, or -1 (the runs are sorted and never overlap each other)
-static int changed_hit(uint64_t off, uint64_t len) {
-    int lo = 0, hi = g_nchanged;
-    while (lo < hi) { int mid = (lo + hi) / 2; if ((uint64_t)g_changed[mid][0] + g_changed[mid][1] <= off) lo = mid + 1; else hi = mid; }
-    return lo < g_nchanged && g_changed[lo][0] < off + len ? lo : -1;
-}
+static void changed_load(void) { dm_changed_load(&g_changed_tbl, g_main_mod, dm_module_dir(), "cheats"); }
 
 // Cheats writing into main's image (dmnt's WriteCheatProcessMemoryUnsafe on this host). Only the Switch's own image is
 // a cheat's: [0, key page), text, read-only data, data and bss; the key page, the frame step page and the patch areas
@@ -591,11 +543,11 @@ static int main_write_check(cheat_t *c, uint64_t addr, uint64_t len) {
             cheat_kill(c, "%s", TARGET_OS_IPHONE ? "code writes are not possible on the iPhone (the app's signed code pages)" : "code write without the writable alias of main");
             return -1;
         }
-        int k = g_changed_state == 1 ? changed_hit(off, len) : -2;
+        int k = dm_changed_hit(&g_changed_tbl, off, len);
         if (k == -2) { cheat_kill(c, "code write refused: no rewriter list of changed words (main.changed.tsv) for this build"); return -1; }
         if (k >= 0) {
             cheat_kill(c, "writes main+0x%llX, which the rewriter changed or moved (main+0x%X..+0x%X)", (unsigned long long)off,
-                       g_changed[k][0], g_changed[k][0] + g_changed[k][1]);
+                       g_changed_tbl.run[k][0], g_changed_tbl.run[k][0] + g_changed_tbl.run[k][1]);
             return -1;
         }
     }

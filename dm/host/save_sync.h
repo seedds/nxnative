@@ -34,7 +34,8 @@ int ss_pack(const char *save, const char *title, const char *out, ss_meta *m);
 int ss_read(const char *bundle, const char *into, ss_meta *m);
 typedef enum { SS_KEEP, SS_PULL, SS_PUSH, SS_ASK } ss_way;
 // Which way, from the three hashes ("" for none: no save here, no sync yet, nothing in the cloud). *both = both changed: then SS_ASK when a front end asks the
-// player (`ask`), else the newer one by the times (the same time: this device's)
+// player (`ask`), else the newer one by the times (the same time: this device's). No save in the cloud while this device has a sync base (it synced one there) counts as
+// both changed too: the save may be removed, or not listed yet (iCloud on a folder picked again, after a reinstall), so it is asked about, not sent over at once
 ss_way ss_decide(const char *local, const char *base, const char *remote, int64_t local_saved, int64_t remote_saved, int ask, int *both);
 
 // ---- what a front end asks the player with (docs/frontends.md, The cloud saves folder) ----
@@ -43,6 +44,7 @@ ss_way ss_decide(const char *local, const char *base, const char *remote, int64_
 //   local=<hash|-> saved=<secs> files=<n> size=<bytes> chash=<hash|-> csaved=<secs> cfiles=<n> csize=<bytes> cdevice=<model, e.g. iPhone17,1|-> sametitle=<0|1> conflict=<0|1> pull=<0|1>
 // pull = a pull of the cloud's save did not finish (<save>.pull): what is in place may be half the cloud's, so conflict is 0; the start's mount puts this device's save back first
 // conflict = both changed since the last sync (or this device has never synced and both have a save): the case the front end shows both saves for and answers with
+// (with cloud=0: the cloud shows no save though this device synced one there; the front end asks before this device's is sent, answering local:none)
 // DM_SAVE_SYNC_CHOICE=local:<chash> (local:none with no cloud save) or cloud:<chash>, both naming the cloud's save the player chose against; with no conflict it passes `ask`, and with cloud=-1 `offline` (the mount does not wait again).
 // `save` is the committed save folder (DM_SAVE), `title` the title ID, `folder` the cloud folder as DM_SAVE_SYNC would name it (NULL: DM_SAVE_SYNC itself), and
 // `wait_ms` how long the cloud's file may take to come (<= 0: as long as the mount waits). Blocks that long at most: call it off the main thread.

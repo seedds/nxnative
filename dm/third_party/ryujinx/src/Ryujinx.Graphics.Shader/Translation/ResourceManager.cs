@@ -150,6 +150,20 @@ namespace Ryujinx.Graphics.Shader.Translation
             return HmmaScratchMemoryId;
         }
 
+        // nxnative: a mesh shader's stage input (ISBERD modes 0x30 / 0x34 / 0x38, the payload its task wrote) as a shared memory of its own, when the job keeps it apart from stage_memory
+        // (QueryAmpereStageInputWords). dmsh_meshstage.py backs it with the device buffer the task stored its payload in: Metal holds an object payload to 16 KB and threadgroup memory to 32 KB
+        public int StageInputMemoryId { get; private set; } = -1;
+
+        public int GetStageInputMemoryId(int words)
+        {
+            if (StageInputMemoryId < 0)
+            {
+                StageInputMemoryId = Properties.AddSharedMemory(new MemoryDefinition("dm_stage_in", AggregateType.Array | AggregateType.U32, words));
+            }
+
+            return StageInputMemoryId;
+        }
+
         public void SetVertexAsComputeLocalMemories(ShaderStage stage, InputTopology inputTopology)
         {
             LocalVertexDataMemoryId = AddMemoryDefinition("local_vertex_data", AggregateType.Array | AggregateType.FP32, Reservations.OutputSizePerInvocation);
@@ -407,9 +421,10 @@ namespace Ryujinx.Graphics.Shader.Translation
                 _sbSlotWritten |= 1u << slot;
             }
 
-            // nxnative: a storage buffer whose address is in a game uniform slot (c[3] and up) or was pushed (c[24]) has no size: its accesses are bounded by the host's
-            // length table (TranslationFlags.MetalStorageBounds). NVN's own storage buffer table (c[0]) and the host's pool table (GlobalToStorage.GmemMapCbSlot) are not
-            if (StorageBounds && sbCbSlot >= Constants.NxFirstUniformSlot && sbCbSlot != Optimizations.GlobalToStorage.GmemMapCbSlot && (_sbSlotBounded & (1u << slot)) == 0)
+            // nxnative: every game storage buffer (NVN's own c[0] table, game uniform slots c[3]+, and push constants c[24]) is bounded by the host's
+            // length table (TranslationFlags.MetalStorageBounds), matching Switch's GPU page table when a binding reaches past a sparse pool's mapped run
+            // (out-of-bounds loads return 0, stores/atomics are dropped). Only the host's raw global-memory pool table (GlobalToStorage.GmemMapCbSlot) stays unbounded
+            if (StorageBounds && sbCbSlot != Optimizations.GlobalToStorage.GmemMapCbSlot && (_sbSlotBounded & (1u << slot)) == 0)
             {
                 _sbSlotBounded |= 1u << slot;
                 Properties.AddBoundedStorageBuffer(setAndBinding.Binding, slot);

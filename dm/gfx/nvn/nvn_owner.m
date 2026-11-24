@@ -131,14 +131,18 @@ static void count_one(nvn_hmap *m, const void *o, int d) {
     else if (n > 1) nvn_hm_put(m, &k, (void *)(n - 1));
     else if (n) { nvn_hm_del(m, &k); retire_resume(o); gone_note(o); }   // a slot written past these helpers (a test's table) was never counted: nothing to take away
 }
-// An entry that holds a view holds the textures the view is of as well, and they are counted with it: an sRGB / linear twin's serial holds a view of the shared texture
-// (tex_mtl_), so that texture is in use as long as the twin's entry is. Counted alone, the view left its parent looking unheld: a takeover evicted it under a live twin
-// (alias_take_over), and its retirement took it out of the residency set while pool tables still named the view (GitHub issue #2125). A view's parent never changes, so
-// what an entry adds it takes away
+// An entry that holds a view holds the textures the view is of and any backing pool buffer as well, and they are counted with it: an sRGB / linear twin's serial holds a view of the
+// shared texture (tex_mtl_), and a buffer or linear texture holds its pool's buffer, so neither can leave the residency set while an entry still names it. Counted alone, a view left
+// its parent looking unheld (GitHub issue #2125), and a buffer-backed texture left its replaced sparse-pool run buffer looking unheld (GitHub issue #3229). A texture's parent chain
+// and backing buffer never change, so what an entry adds it takes away
 static void count_add(nvn_hmap *m, const void *o, int d) {
     count_one(m, o, d);
     id t = (__bridge id)o;
-    if (t && [t respondsToSelector:@selector(parentTexture)]) for (id<MTLTexture> p = ((id<MTLTexture>)t).parentTexture; p; p = p.parentTexture) count_one(m, (__bridge void *)p, d);
+    if (t && [t respondsToSelector:@selector(parentTexture)]) {
+        id<MTLTexture> root = (id<MTLTexture>)t;
+        for (id<MTLTexture> p = root.parentTexture; p; p = p.parentTexture) { root = p; count_one(m, (__bridge void *)p, d); }
+        if ([root respondsToSelector:@selector(buffer)] && root.buffer) count_one(m, (__bridge void *)root.buffer, d);
+    }
 }
 static void held_add(const void *o, int d) { count_add(&g_by_serial_held, o, d); }
 static void ghost_held_add(const void *o, int d) { count_add(&g_ghost_held, o, d); }
@@ -165,7 +169,7 @@ static void alias_index(const alias_key *k, int add) {
         if (add) {
             if (v && i < v->n) continue;
             if (!v || v->n == v->cap) {
-                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) abort();
+                uint32_t cap = v ? v->cap * 2 : 4; alias_cell *nv = realloc(v, sizeof *nv + cap * sizeof nv->e[0]); if (!nv) ODIE("no memory for the texture sharing cells (%zu bytes)", sizeof *nv + cap * sizeof nv->e[0]);
                 if (!v) nv->n = 0; nv->cap = cap; v = nv; nvn_hm_put(&g_alias_cells, ck, v);
             }
             v->e[v->n].k = *k; v->e[v->n++].end = end;
@@ -558,20 +562,33 @@ own_dead_stats own_alias_dead_locked(uint32_t now, uint32_t idle, own_use_fn use
 // A submitted descriptor and a queue binding hold the compiled program by its immutable initialization serial. Retaining it must not mint serial aliases:
 // alias churn invalidates texture tables and changes composite-program keys
 typedef struct { unsigned refs, retired; } prog_pin;
-static nvn_hmap g_prog_pins = {.klen = 8};   // protected by the submission lock
+// The pins have a lock of their own: a streamed submission pins on the game's thread without the submission lock (nvn_queue.inc). Release and unpin still run under the
+// submission lock, which serial_del needs; they decide under the pin lock and drop the serial after it
+static nvn_hmap g_prog_pins = {.klen = 8};
+static os_unfair_lock g_prog_pin_lk = OS_UNFAIR_LOCK_INIT;
 void mtl_prog_release(prog_t *p) {
     if (!p->serial) return;
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin) pin->retired = 1; else serial_del(p->serial);
+    if (pin) pin->retired = 1;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (!pin) serial_del(p->serial);
 }
 void mtl_prog_unpin(prog_t *p) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &p->serial);
-    if (pin && !--pin->refs) { nvn_hm_del(&g_prog_pins, &p->serial); if (pin->retired) serial_del(p->serial); free(pin); }
+    if (!pin || --pin->refs) { os_unfair_lock_unlock(&g_prog_pin_lk); return; }
+    nvn_hm_del(&g_prog_pins, &p->serial);
+    os_unfair_lock_unlock(&g_prog_pin_lk);
+    if (pin->retired) serial_del(p->serial);
+    free(pin);
 }
 void own_prog_pin(uint64_t serial) {
+    os_unfair_lock_lock(&g_prog_pin_lk);
     prog_pin *pin = nvn_hm_get(&g_prog_pins, &serial);
     if (!pin) { pin = calloc(1, sizeof *pin); if (!pin) ODIE("program retention allocation failed"); nvn_hm_put(&g_prog_pins, &serial, pin); }
     pin->refs++;
+    os_unfair_lock_unlock(&g_prog_pin_lk);
 }
 
 own_alias_unheld own_alias_unheld_locked(void) {
@@ -599,9 +616,49 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {
         uint64_t k; memcpy(&k, tables[j]->keys + (size_t)i * 8, 8); fn(k, (__bridge id)tables[j]->vals[i], j);
     }
 }
-static void expect_one(CFMutableDictionaryRef want, id o) {   // o, and each texture it is a view of, once more
-    for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil)
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial)) {
+    uint32_t n = 0;
+    for (int j = 0; j < 2; j++) {   // the keys first, then the deletes (a delete moves entries)
+        nvn_hmap *t = j ? &g_ghost : &g_by_serial; uint64_t *ks = NULL; uint32_t nk = 0;
+        for (uint32_t i = 0; i < t->cap; i++) {
+            if (!t->vals[i] || !gone((__bridge id)t->vals[i])) continue;
+            uint64_t *nks = realloc(ks, (nk + 1) * sizeof *ks); if (!nks) ODIE("the dropped serials"); ks = nks; memcpy(&ks[nk++], t->keys + (size_t)i * 8, 8);
+        }
+        for (uint32_t i = 0; i < nk; i++) { if (j) ghost_del_locked(ks[i]); else live_del_locked(ks[i]); if (each) each(ks[i]); }
+        n += nk; free(ks);
+    }
+    return n;
+}
+void own_drop_object(id obj) {
+    if (!obj) return;
+    pthread_mutex_lock(&g_smu);
+    CFMutableSetRef gone = CFSetCreateMutable(NULL, 0, NULL);
+    if (!gone) ODIE("the dropped texture set");
+    CFSetAddValue(gone, (__bridge const void *)obj);
+    uint64_t *sers = NULL; uint32_t nsers = 0;
+    drop_entries_naming_locked(gone, 1, 1, &sers, &nsers);
+    free(sers);
+    CFRelease(gone);
+    uint32_t n = 0; alias_key *ks = NULL;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (g_alias.vals[i] != (__bridge void *)obj) continue;
+        alias_key *nk = realloc(ks, (n + 1) * sizeof *nk); if (!nk) ODIE("the dropped shared keys");
+        ks = nk; memcpy(&ks[n++], g_alias.keys + (size_t)i * g_alias.klen, sizeof *ks);
+    }
+    for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
+    free(ks);
+    pthread_mutex_unlock(&g_smu);
+}
+static void expect_one(CFMutableDictionaryRef want, id o) {   // o, each texture it is a view of, and any backing buffer, once more
+    id last = nil;
+    for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil) {
+        last = o;
         CFDictionarySetValue(want, (__bridge const void *)o, (const void *)((uintptr_t)CFDictionaryGetValue(want, (__bridge const void *)o) + 1));
+    }
+    if (last && [last respondsToSelector:@selector(buffer)]) {
+        id buf = ((id<MTLTexture>)last).buffer;
+        if (buf) CFDictionarySetValue(want, (__bridge const void *)buf, (const void *)((uintptr_t)CFDictionaryGetValue(want, (__bridge const void *)buf) + 1));
+    }
 }
 static int counts_match(const char *what, CFMutableDictionaryRef want, const nvn_hmap *held, char *why, size_t n) {
     for (uint32_t i = 0; i < held->cap; i++) {

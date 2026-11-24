@@ -82,6 +82,7 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.constants(p), {'main0': ('dm_border_off',), 'main0_u': ('dm_border_off', 'spvLinearTextureAlignmentOverride'), 'vs': ()})
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
+            self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -129,6 +130,34 @@ class Plan(unittest.TestCase):
         self.assertEqual(left, {'reflection': 2, 'mesh': 1, 'stage inputs': 1, 'library': 1, 'layer': 1, 'primitive ID': 1, 'entry': 1})
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
+
+    def test_vertex_entry_is_the_name_the_reflection_gives_the_library(self):   # nvn_mtl.m side_entry, as shader_load and pre_desc take it
+        own = {'entry': 'main0', 'entry_z': 'main0_z'}
+        self.assertEqual([po.vertex_entry(own, z) for z in (False, True)], ['main0', 'main0_z'])   # no pulling library: the shader's own, in <key>_b
+        named = dict(own, pull={'entry': 'main0_p', 'entry_z': 'main0_zp', 'slot': 16, 'inputs': [0]})
+        self.assertEqual([po.vertex_entry(named, z) for z in (False, True)], ['main0_p', 'main0_zp'])
+        for pull in ({}, {'entry': 'main0'}, {'entry': '', 'entry_z': None}, {'entry_z': 7}):   # names none for the depth mode: the shader's own (today's libraries repeat it)
+            self.assertEqual(po.vertex_entry(dict(own, pull=pull), True), 'main0_z', pull)
+        self.assertEqual(po.vertex_entry(dict(own, pull={'entry_z': 'main0_zp'}), False), 'main0')
+        self.assertEqual(po.vertex_entry(dict(own, pull=True), False), 'main0')   # not a pulling library's record
+        self.assertEqual(po.vertex_entry({'entry': 'main0', 'pull': {'entry': 'main0_p', 'entry_z': 'main0_zp'}}, True), 'main0_p')   # no near = 0 entry of its own: `entry`, as the host
+        self.assertIsNone(po.vertex_entry({}, False))
+
+    def test_a_pulling_library_with_names_of_its_own(self):   # one compile unit holding a shader's entry points and its pulling ones cannot name both main0
+        vz = [('main0', False), ('main0_z', False)]
+        refl = {'entry_z': 'main0_z', 'vertex_inputs': [{'location': 0}]}
+        self.shader('unit', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': [('main0_p', False), ('main0_zp', ('dm_border_off',))]})
+        self.shader('own', dict(refl, pull={'entry': 'main0', 'entry_z': 'main0_z'}), {'_b': vz, '_bp': vz})   # as dmsh_pull.variant names them today
+        self.shader('stale', dict(refl, pull={'entry': 'main0_p', 'entry_z': 'main0_zp'}), {'_b': vz, '_bp': vz})   # names an entry point its library does not hold: no base
+        self.shader('fs', {}, {'_b': [('main0', False)]})
+        pairs = [('unit', 'fs'), ('own', 'fs'), ('stale', 'fs')]
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, False)
+        self.assertEqual(bases, [('unit_bp', 'main0_p', 'fs_b', 'main0'), ('own_bp', 'main0', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        bases, rest, left = po.plan(self.d, CHAIN, pairs, True)
+        self.assertEqual(bases, [('unit_bp', 'main0_zp', 'fs_b', 'main0'), ('own_bp', 'main0_z', 'fs_b', 'main0')])
+        self.assertEqual((rest, left['entry']), ([], 1))
+        self.assertEqual(po.cut_entries(self.d, bases), {('unit_bp', 'main0_zp')})   # specialized, and not its library's first function: from a library of its own, under that name
 
     def test_border_constant_is_specialized_as_the_host_does(self):   # pre_fn: dm_border_off true, every other constant at its default; a pair with another constant stays on the device
         vz = [('main0', False), ('main0_z', False)]
@@ -493,7 +522,9 @@ class Build(BuildCase):
         profiles = ('01008CF01BAAC000', '010089C01E9CA000', '010056B015FE8000', '01007BB017812000',
                     '01003E601E324000', '010020400E1C2000', '0100429011144000', '010014C011146000',
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
-                    '01006A800016E000')   # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '01006A800016E000',  # Super Smash Bros. Ultimate: a player's start log (its note)
+                    '0400E88025B1A000',  # Star Fox: a Mac app's start log (its note)
+                    '01005CA01580E000')  # Persona 5 Royal: an iPhone app's start log (its note)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -965,7 +996,7 @@ class Prewarm(BuildCase):
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
-    def step(self, python, host_game=None, make_exit=0, **extra):
+    def step(self, python, host_game=None, make_exit=0, selected_python=None, **extra):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
@@ -975,7 +1006,12 @@ class IpaFallback(unittest.TestCase):
             if host_game:
                 host = Path(d) / f'dm/host/gen/{host_game}/dmhost'; host.parent.mkdir(parents=True); host.write_text('#!/bin/sh\nexit 0\n'); host.chmod(0o755)
                 make = Path(d) / 'bin/make'; make.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$W/make.args"\nexit ' + str(make_exit) + '\n'); make.chmod(0o755)
-            env = dict({k: v for k, v in os.environ.items() if k != 'DM_PSO_HOST'}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            env = dict({k: v for k, v in os.environ.items() if k not in ('DM_PSO_HOST', 'DM_PYTHON')}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            if selected_python is not None:
+                selected = Path(d) / 'selected python'
+                selected.write_text('#!/bin/sh\n' + selected_python)
+                selected.chmod(0o755)
+                env['DM_PYTHON'] = str(selected)
             if host_game: env['DM'] = str(Path(d) / 'dm')
             script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\n[ ! -f "$W/make.args" ] || cat "$W/make.args"\necho went on\n'
             return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
@@ -984,6 +1020,13 @@ class IpaFallback(unittest.TestCase):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; echo half; exit 1\n')
         self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
         self.assertNotIn('FAIL', out)
+
+    def test_archive_uses_the_packagers_python(self):
+        out = self.step('echo system Python; exit 1\n',
+                        selected_python='echo selected Python; mkdir -p "$W/build/ios/pso/bundle"\n')
+        self.assertIn('selected Python', out)
+        self.assertIn('folder', out)
+        self.assertNotIn('system Python', out)
 
     def test_prewarm_host(self):   # DM_PSO_HOST names the Mac host the prewarm files are made with; none, or no host of this game in the tree: none, with a line saying how
         out = self.step('echo "ARGS $*"; exit 0\n', DM_PSO_HOST='/x/dmhost')
@@ -1065,6 +1108,64 @@ class Default(unittest.TestCase):
     def test_breath_of_the_wild(self):   # the profile that turns the Metal 4 path on: its app gets the archive
         r = subprocess.run([sys.executable, str(REPO / 'dm/games/game.py'), '01007EF00011E000', 'pso_mtl4', 'off'], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), 'on')
+
+
+class MeshBases(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.d = Path(self.tmp.name)
+        write_refl = lambda k, j: (self.d / f'{k}_b.json').write_text(json.dumps(dict(chain=CHAIN, **j)))
+        write_lib = lambda k, fns: (self.d / f'{k}_b.metallib').write_bytes(metallib(fns))
+        write_refl('ts1', {'entry': 'main0', 'mesh_stage': {'kind': 'ts', 'threads': 32, 'payload': 20, 'task': True}})
+        write_refl('tss', {'entry': 'main0', 'mesh_stage': {'kind': 'ts', 'threads': 32, 'payload': po.abi.MESH_PAYLOAD_MAX + 64, 'task': True}})
+        write_refl('ms1', {'entry': 'main0', 'entry_z': 'main0_z', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 20, 'task': True}})
+        write_refl('mn1', {'entry': 'main0', 'entry_z': 'main0_z', 'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 0, 'task': False}})
+        write_refl('mp1', {'entry': 'main0', 'entry_object': 'main0_o', 'mesh_stage': {'kind': 'ms', 'threads': 32, 'payload': 0, 'task': False, 'prim': 1}})
+        write_refl('fs1', {'entry': 'main0', 'raster': {}})
+        write_refl('fsp', {'entry': 'main0', 'raster': {'primitive_id': 1}})
+        write_refl('fsc', {'entry': 'main0', 'raster': {}})
+        write_lib('ts1', [('main0', False)])
+        write_lib('tss', [('main0', False)])
+        write_lib('ms1', [('main0', False), ('main0_z', ('dm_border_off',))])
+        write_lib('mn1', [('main0', False), ('main0_z', False), ('main0_o', False)])
+        write_lib('mp1', [('main0', False), ('main0_o', False)])
+        write_lib('fs1', [('main0', ('dm_border_off', 'dm_blend_off'))])
+        write_lib('fsp', [('main0', False)])
+        write_lib('fsc', [('main0', ('other_fc',))])
+
+    def test_read_pairs_and_plan_mesh(self):
+        text = b'# mesh triples\nM\tts1\tms1\tfs1\nM\ttss\tms1\tfs1\nM\t-\tmn1\tfs1\nM\t-\tmn1\t-\nM\t-\tmp1\tfs1\nM\t-\tmn1\tfsp\nM\t-\tmn1\tfsc\nmn1\tfs1\n'
+        pairs = po.read_pairs(text)
+        self.assertIn(('M', 'ts1', 'ms1', 'fs1'), pairs)
+        self.assertIn(('mn1', 'fs1'), pairs)
+        meshes, rest, left = po.plan_mesh(self.d, CHAIN, pairs, False)
+        self.assertEqual(meshes, [
+            ('ts1_b', 'main0', 'ms1_b', 'main0', 'fs1_b', 'main0', 32, 32, 32),
+            ('tss_b', 'main0', 'ms1_b', 'main0', 'fs1_b', 'main0', 16, 32, 32),
+            ('mn1_b', 'main0_o', 'mn1_b', 'main0', 'fs1_b', 'main0', 16, 1, 32),
+        ])
+        self.assertEqual(rest, [('M', '-', 'mn1', '-'), ('M', '-', 'mn1', 'fsc')])
+        self.assertEqual(left['primitive data'], 1)
+        self.assertEqual(left['primitive ID'], 1)
+        # near=0 selects entry_z (which triggers needs_cut because main0_z is not ms1_b's first function and declares dm_border_off)
+        meshes_z, _, _ = po.plan_mesh(self.d, CHAIN, [('M', 'ts1', 'ms1', 'fs1')], True)
+        self.assertEqual(meshes_z[0][3], 'main0_z')
+        self.assertEqual(po.cut_entries(self.d, [], meshes=meshes_z), {('ms1_b', 'main0_z')})
+        # script emits mesh_render_pipeline_descriptors with unspecialized color attachments
+        cfg = po.script(self.d, [], meshes=meshes)
+        md = cfg['pipeline_descriptors']['mesh_render_pipeline_descriptors']
+        self.assertEqual(len(md), 3)
+        self.assertEqual(md[0]['payload_memory_length'], 32)
+        self.assertEqual(md[1]['payload_memory_length'], 16)
+        self.assertEqual(md[2]['max_total_threads_per_object_threadgroup'], 1)
+        self.assertEqual(len(md[0]['color_attachments']), 8)
+        self.assertEqual(po.pair_of(meshes[0]), ('M', 'ts1', 'ms1', 'fs1'))
+        self.assertEqual(po.pair_of(meshes[2]), ('M', '-', 'mn1', 'fs1'))
+        # groups_of puts mesh bases in their own m-prefixed batches
+        self.assertEqual([(n, len(x), len(y)) for n, x, y in po.groups_of([], [], 2, 2, meshes=meshes)], [('m00001', 2, 0), ('m00002', 1, 0)])
+        # read_failed / write_failed round-trips mesh base tuples
+        po.write_failed(self.d, 'applegpu_g18p', [meshes[0]], [])
+        self.assertEqual(po.read_failed(self.d, 'applegpu_g18p'), ([meshes[0]], []))
 
 
 if __name__ == '__main__':

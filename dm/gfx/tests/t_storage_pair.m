@@ -118,14 +118,14 @@ static void pair_in_recycled_memory(int ms_first) {
     CHECK(!kept && g_pair_n == before, "the pair's alias visibility goes with its second texture");
     CHECK(heap && waits(heap), "the heap waits for its next texture once both are gone");
 }
-// A single-sample image of a resolution family (uncompressed, image_texture): the 4-sample target joins the family's heap without compression
+// A single-sample image of a resolution family (image_texture): the 4-sample target joins the family's heap with matching compression
 static void pair_in_family(void) { POOLED({
     uint64_t off = 16 << 20;
     tex_t scene = tex(off, 1280, 720, 1, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_COMPRESSIBLE), small = tex(off, 1152, 648, 1, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
     tex_t fx = tex(off, 640, 360, 4, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_COMPRESSIBLE);
     id<MTLTexture> one = tex_mtl(&scene), four = tex_mtl(&fx);
-    CHECK(one.heap && objc_getAssociatedObject(one, &g_image_heap_owner_key) && !one.allowGPUOptimizedContents, "the family's image is uncompressed in the family's heap");
-    CHECK(four.heap == one.heap && !four.allowGPUOptimizedContents && objc_getAssociatedObject(four, &g_image_heap_owner_key), "the 4-sample target joins it, uncompressed, holding the family's heap");
+    CHECK(one.heap && objc_getAssociatedObject(one, &g_image_heap_owner_key) && one.allowGPUOptimizedContents == !fam_nocomp(), "the family's image is in the family's heap with the family's compression");
+    CHECK(four.heap == one.heap && four.allowGPUOptimizedContents == one.allowGPUOptimizedContents && objc_getAssociatedObject(four, &g_image_heap_owner_key), "the 4-sample target joins it with matching compression, holding the family's heap");
     same_samples(one, four, "resolution family");
     CHECK(tex_mtl(&small).heap == one.heap, "the family's other size still shares the heap");
     one = four = nil; mtl_tex_release(&scene); mtl_tex_release(&small); mtl_tex_release(&fx); drop_entry(&scene); drop_entry(&small); drop_entry(&fx);

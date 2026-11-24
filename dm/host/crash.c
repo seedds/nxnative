@@ -96,14 +96,28 @@ static void *watchdog_main(void *arg) {
     }
     return NULL;
 }
+// Format an address for crash dumps: guest module offset, host symbol offset, or (when iOS redacts or omits the symbol) image basename + image offset + raw PC.
+int crash_fmt_addr(char *buf, size_t cap, const char *tag, uint64_t a, const module_t *m, const Dl_info *di) {
+    const char *sep = (tag && *tag) ? "=" : "";
+    if (!tag) tag = "";
+    if (m) return snprintf(buf, cap, " %s%s%s+%#llx", tag, sep, m->name, (unsigned long long)(a - (uint64_t)m->base));
+    if (di && di->dli_sname && strcmp(di->dli_sname, "<redacted>") != 0)
+        return snprintf(buf, cap, " %s%s%s+%#lx", tag, sep, di->dli_sname, (unsigned long)(a - (uint64_t)di->dli_saddr));
+    if (di && di->dli_fname && *di->dli_fname) {
+        const char *slash = strrchr(di->dli_fname, '/');
+        const char *img = (slash && slash[1]) ? slash + 1 : di->dli_fname;
+        return snprintf(buf, cap, " %s%s%s+%#lx(%#llx)", tag, sep, img, (unsigned long)(a - (uint64_t)di->dli_fbase), (unsigned long long)a);
+    }
+    return snprintf(buf, cap, " %s%s%#llx", tag, sep, (unsigned long long)a);
+}
 void crash_off(const char *tag, uint64_t a) {   // Also used by diag.c
 #define off crash_off
-
     module_t *m = module_of((void *)a);
     Dl_info di;
-    if (m) fprintf(stderr, " %s%s%s+%#llx", tag, *tag ? "=" : "", m->name, a - (uint64_t)m->base);
-    else if (dladdr((void *)a, &di) && di.dli_sname) fprintf(stderr, " %s%s%s+%#lx", tag, *tag ? "=" : "", di.dli_sname, (unsigned long)(a - (uint64_t)di.dli_saddr));
-    else fprintf(stderr, " %s%s%#llx", tag, *tag ? "=" : "", a);
+    int have = !m && dladdr((void *)a, &di);
+    char b[256];
+    crash_fmt_addr(b, sizeof b, tag, a, m, have ? &di : NULL);
+    fputs(b, stderr);
 }
 // Frame pointer backtrace: x29 chain [fp]=previous frame's fp, [fp+8]=return address; only 8-byte aligned, monotonically increasing frames are walked.
 // Each frame is read with vm_read_overwrite, which fails instead of faulting: code built without frame pointers keeps data in x29 (STEINS;GATE RE:BOOT's main+0x38921c: x29 = 0x430),

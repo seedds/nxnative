@@ -50,9 +50,8 @@
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
-#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in the forge files' Oodle containers and in the loose ShaderDataNVN.bin) and
-#     versions 25 / 31 (Assassin's Creed: The Ezio Collection, control sections each followed by its code area in Oodle Leviathan / Mermaid blocks), decoded by the game's own decoder in the
-#     Mac host, see forge_jobs, forge_shaders and anvil_shaders
+#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in Oodle containers and loose ShaderDataNVN.bin), versions 25 / 31 (Assassin's
+#     Creed: The Ezio Collection, control sections followed by code areas in Oodle blocks), and version 27 (Assassin's Creed III Remastered, BNSH in LZO1X blocks), see forge_jobs and forge_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
@@ -3433,15 +3432,14 @@ FORGE, FORGE_DATA, ANVIL_CODE = b'scimitar\0', bytes.fromhex('33aafb5799fa0410')
 ANVIL_FORGE = 'Anvil forge'
 
 def forge_entries(f, label):
-    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py): version 28 (Immortals Fenyx Rising) or versions 25 / 31 (The Ezio Collection)."""
+    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py)."""
     import forge
     f.seek(0)
     try: return forge.entries(f.read(), label)
     except ValueError as e: red(str(e))
 
 def forge_jobs(files, parts=64):
-    """Ubisoft Anvil / Scimitar forges (forge.py): version 28 (Immortals Fenyx Rising: GPUCODEONLY records) and versions 25 / 31 (Assassin's Creed: The Ezio Collection: control sections
-    followed by code areas in material templates). Every entry is Oodle-compressed and decoded by the game's own decoder in the Mac host.
+    """Ubisoft Anvil / Scimitar forges (forge.py), split into jobs in index order (offset order for v28).
     → ([(forge path, rel, (ANVIL_FORGE, version, entries)), …] in about equal stored sizes, plus error jobs for unknown-version / damaged forges; the forges taken)"""
     import forge
     from romfs import mmap
@@ -3487,9 +3485,7 @@ def anvil_shaders(d, label):
     return out
 
 def forge_shaders(path, rel, ver, ents, out):
-    """A range of one Ubisoft Anvil / Scimitar forge's entries (forge_jobs), each decoded with the game's Oodle.
-    Version 28 (Immortals Fenyx Rising): GPUCODEONLY records, labels /<forge>#<file ID>#GPUCODEONLY@<offset>.
-    Versions 25 / 31 (The Ezio Collection): control sections each followed by its code area (forge.nvn_shaders), labels /<forge>#SCIMITAR:<entry name>@<offset in its block>"""
+    """Decode a range of Anvil / Scimitar forge entries. V27 stores BNSH in LZO1X blocks. V28 stores GPUCODEONLY records and v25/v31 store adjacent control / code pairs, using Oodle."""
     import forge
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
@@ -3500,6 +3496,22 @@ def forge_shaders(path, rel, ver, ents, out):
                 except ValueError as e: red(str(e))
                 for b in blobs:
                     if ANVIL_CODE in b: out += anvil_shaders(b, label)
+        elif ver == forge.SCIMITAR_LZO_VERSION:
+            for off, size, name in ents:
+                label = f'/{rel}#SCIMITAR:{off:x}:{name}'
+                try: blobs = forge.read(d, off, size, None, label, version=ver)
+                except ValueError as e: red(str(e))
+                for i, blob in enumerate(blobs):
+                    if b'BNSH\0\0\0\0' not in blob: continue
+                    found = []
+                    scan_blob(blob, f'{label}/block{i}', found)
+                    counts = collections.Counter(where for where, _, _, _ in found)
+                    for where, stage, ctl, code in found:
+                        # AC III and Liberation store one stage per BNSH. Only genuine multi-stage variations supply their own pairs.
+                        if '#BNSH@' in where and counts[where] == 1:
+                            source, variation = where.rsplit('#var', 1)
+                            where = f'{source}#stage{variation}'
+                        out.append((where, stage, ctl, code))
         else:
             for off, size, name in ents:
                 label = f'/{rel}#SCIMITAR:{name}'
@@ -4480,7 +4492,7 @@ SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#N
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
 # each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); Blizzard's: Diablo III's SNO assets (d3cpk_shaders) and Diablo II: Resurrected's SHAD containers, a file per stage
-# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v31): Assassin's Creed II binds its vertex and pixel
+# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v27/v31): Assassin's Creed II binds its vertex and pixel
 # programs apart (BindProgram stage bits) and pairs them at draw time, so without the cover 8 pairs failed to link, the Ubisoft logo movie's among them (a black screen with its sound)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw

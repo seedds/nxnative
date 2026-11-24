@@ -43,7 +43,9 @@ static int gpu_sample_2d(id<MTLBuffer> tab, int idx, float out[4]) {
             "kernel void k(constant P& p [[buffer(0)]], constant uint& i [[buffer(1)]], device float4 *o [[buffer(2)]]) { o[0] = (&p.e[0])[min(i, p.n)].read(uint2(0, 0), 0u); }\n";
         NSError *err = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&err];
         if (!lib) { fprintf(stderr, "library: %s\n", err.description.UTF8String); return 0; }
-        ps = [g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"k"] error:&err];
+        id<MTLFunction> fn = [lib newFunctionWithName:@"k"];
+        if (!fn) { fputs("pipeline: missing Metal function k\n", stderr); return 0; }
+        ps = [g_dev newComputePipelineStateWithFunction:fn error:&err];
         if (!ps) { fprintf(stderr, "pipeline: %s\n", err.description.UTF8String); return 0; }
     }
     id<MTLBuffer> ob = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];

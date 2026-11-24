@@ -135,6 +135,8 @@ You can also pass a complete update folder directly, for example `~/Games/Donkey
 
 Use [Discussions](https://github.com/seedds/nxnative/discussions) for questions, ideas and reports on how games run on your Mac or iPhone. File bug reports in [Issues](https://github.com/seedds/nxnative/issues) and include the log. Follow frame rate, resolution and which Macs hold 60 fps in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
 
+Share your game's `pso_user.tsv` in the pinned [prewarm lists discussion](https://github.com/seedds/nxnative/discussions/3291).
+
 ## For developers
 
 [How it works](docs/development.md) · [Game notes](dm/games/README.md#games) · [Bring-up and debugging](docs/agents/README.md) · [Front ends](docs/frontends.md) · [Contributing](CONTRIBUTING.md)

@@ -155,7 +155,7 @@ NVN(nvnDeviceGetProcAddress, PFNNVNGENERICFUNCPTRPROC, const NVNdevice *d, const
 // The table's answer is the X1's: where it and the device both answer (0x2B, 0x2D, 0x38), the table holds the measured values
 enum { DEVINFO_RT = -1 };   // g_devinfo2: an item NVN2 reads from the GPU at run time
 static const int g_devinfo[] = {
-    // API version: 55.15 here, 53.313 for SDK 10 and older (nvn_api below; the profile's device_api overrides): SMBW (SDK 16) requires major == 55 and minor >= 15 (main 0x5a7b48); Super Mario 3D World + Bowser's Fury (SDK 10) requires major == 53 and minor >= 313 (main+0x711c88),
+    // API version: 55.15 here, 53 with an SDK-dependent minor for SDK 10 and older (nvn_api below; the profile's device_api overrides): SMBW (SDK 16) requires major == 55 and minor >= 15 (main 0x5a7b48); Super Mario 3D World + Bowser's Fury (SDK 10) requires major == 53 and minor >= 313 (main+0x711c88),
     // and on a mismatch it creates no device and leaves the device pointer null, which crashes in nnMain right after. DM_NVN_API=major.minor overrides
     [0x00] = 55, [0x01] = 15,
     [0x02] = 14, [0x03] = 65536, [0x04] = 256, [0x05] = 8, [0x06] = 16, [0x07] = 4, [0x08] = 16, [0x09] = 32,
@@ -200,6 +200,7 @@ static const int g_devinfo2[] = {
 // Age of Calamity 9.6, Link's Awakening 8, Odyssey 7.3, Three Houses 6.5); SDK 11 and later take 55.15
 __attribute__((weak)) int dm_sdk_major(void) { return 0; }   // loader.c; graphics unit tests have no loader
 __attribute__((weak)) int dm_sdk_ounce(void) { return 0; }
+__attribute__((weak)) int dm_sdk_nvn1_minor(void) { return -1; }
 __attribute__((weak)) int dm_sdk_nvn2_item(unsigned item, int *out) { (void)item; (void)out; return 0; }
 __attribute__((weak)) int dm_glslc_gpu_code(int *major, int *minor) { *major = *minor = 0; return 0; }   // hle_glslc.c: the game's own GLSLC's GPU code version
 static void nvn_api(int api[2]) {
@@ -210,7 +211,8 @@ static void nvn_api(int api[2]) {
     // only then: Donkey Kong Bananza (SDK 20.5.19) major == 231 and minor >= 30 (main+0x5c61a4), Splatoon Raiders (SDK 21.4.4) minor >= 39 (main+0x31b86b0)
     int m = dm_sdk_major();
     if (dm_sdk_ounce()) { api[0] = 231; if (!dm_sdk_nvn2_item(1, &api[1])) api[1] = g_devinfo2[1]; }
-    else { api[0] = DM_SDK_OLD(m) ? 53 : g_devinfo[0]; api[1] = DM_SDK_OLD(m) ? 313 : g_devinfo[1]; }
+    else if (DM_SDK_OLD(m)) { api[0] = 53; int minor = dm_sdk_nvn1_minor(); api[1] = minor >= 0 ? minor : 313; }
+    else { api[0] = g_devinfo[0]; api[1] = g_devinfo[1]; }
     LOG("[nvn] device API %d.%d (SDK %d%s)", api[0], api[1], m, dm_sdk_ounce() ? ", Switch 2" : "");
 #endif
 }
@@ -283,12 +285,20 @@ static uint8_t *pool_cpu_map(const pool_t *p) {
     return (p->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL)) ? NULL : p->mem;
 }
 static uint8_t *vpool_reserve(pool_t *o); static void vpool_release(pool_t *o); static void vpool_taken(const pool_t *o); static void vshadow_drop_phys(const uint8_t *mem, uint64_t size);   // sparse virtual pools, see MapVirtual
+static void *grow_pool_table(void *table, size_t *cap, size_t elem_size, size_t initial, const char *name) {
+    if (*cap > SIZE_MAX / elem_size / 2) die("%s table capacity overflow", name);
+    size_t next = *cap ? 2 * *cap : initial;
+    void *grown = realloc(table, next * elem_size);
+    if (!grown) die("%s table allocation failed", name);
+    *cap = next;
+    return grown;
+}
 // Host-page-aligned re-backing records for misaligned PHYSICAL|CPU_NO_ACCESS pools (kept out of pool_t so pool_t stays 40 bytes for nvn_capture)
 typedef struct { uint8_t *mem, *orig; size_t alen; } reback_t;
 static reback_t *g_reback; static size_t g_nreback, g_creback; static pthread_mutex_t g_reback_mu = PTHREAD_MUTEX_INITIALIZER;
 static void reback_add(uint8_t *mem, uint8_t *orig, size_t alen) {
     pthread_mutex_lock(&g_reback_mu);
-    if (g_nreback == g_creback && !(g_reback = realloc(g_reback, (g_creback = g_creback ? g_creback * 2 : 16) * sizeof *g_reback))) die("reback allocation failed");
+    if (g_nreback == g_creback) g_reback = grow_pool_table(g_reback, &g_creback, sizeof *g_reback, 16, "reback");
     g_reback[g_nreback++] = (reback_t){mem, orig, alen};
     pthread_mutex_unlock(&g_reback_mu);
 }
@@ -1119,7 +1129,7 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
 typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; uint32_t rec_id; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed); rec_id: the recording that took it
-static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
+static hostseg_t *g_hostseg; static size_t g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
 static _Atomic int g_hostseg_held;   // busy segments with a guest range: 0 lets hostseg_written return without the lock (no game seen so far lends one from its own pool)
 static _Atomic uint32_t g_rec_serial;   // BeginRecording's serials (cmd_t rec_id; one that wraps around to a recording whose segment is still lent only keeps that segment lent)
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1136,23 +1146,23 @@ static uint8_t *hostseg_take(cmd_t *o, size_t n, const uint8_t *anchor, size_t a
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
     int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
-    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
+    for (size_t i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
     if (!in_seg && o && o->recording && cur) {
         uintptr_t own = anchor ? (uintptr_t)anchor : cmd_own(o) && (uintptr_t)cmd_own(o) <= cur ? (uintptr_t)cmd_own(o) : cur < (uintptr_t)o->end ? cur : 0;
         if (own) { lo = own; hi = anchor ? lo + anchor_size : cur > lo ? cur : lo + 1; }
         else { static int once; if (!once++) LOG("[RED] NVN command memory: a recording ran short at the very end of the game's memory with no byte of its own there; the segment the host lends it is never reclaimed"); }
     }
-    for (int i = 0; i < g_nhostseg && !m; i++)
+    for (size_t i = 0; i < g_nhostseg && !m; i++)
         if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi, o ? o->rec_id : 0 }; m = g_hostseg[i].mem; }
     if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
-        if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
+        if (g_nhostseg == g_caphostseg) g_hostseg = grow_pool_table(g_hostseg, &g_caphostseg, sizeof *g_hostseg, 64, "host command segment");
         g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi, o ? o->rec_id : 0 }; g_hostseg_bytes += n;
     }
     if (m && hi > lo) atomic_fetch_add_explicit(&g_hostseg_held, 1, memory_order_relaxed);
-    unsigned t = anchor ? 0 : ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
+    unsigned t = anchor ? 0 : ++total; size_t ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
-    if (t && (t == 1 || t % 1024 == 0)) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %d segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
+    if (t && (t == 1 || t % 1024 == 0)) LOG("[nvn] the game's command memory ran short, the host lends a segment of %zu KB (%u times so far, frame %llu, segment pool %zu segments, %llu KB)", n >> 10, t, (unsigned long long)f, ns, (unsigned long long)(bytes >> 10));
     return m;
 }
 // Recording o wrote records at [p, p + n) (a piece it closes: ctl_chunk_close, cmd_alloc), or tried to write one at p (n = 1: cmd_alloc): segments of other recordings whose guest bytes
@@ -1161,7 +1171,7 @@ static void hostseg_written(const cmd_t *o, const uint8_t *p, uint64_t n) {
     if (!n || !atomic_load_explicit(&g_hostseg_held, memory_order_relaxed)) return;
     uintptr_t lo = (uintptr_t)p, hi = lo + n;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) {
+    for (size_t i = 0; i < g_nhostseg; i++) {
         hostseg_t *s = &g_hostseg[i];
         if (s->busy && s->org_hi > s->org_lo && s->rec_id != o->rec_id && s->org_hi > lo && s->org_lo < hi) { s->busy = 0; atomic_fetch_sub_explicit(&g_hostseg_held, 1, memory_order_relaxed); }
     }
@@ -3429,7 +3439,7 @@ _Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
 enum { VPT_LEAF = 512 };   // a page-table leaf covers 2 MB
 typedef struct { const uint8_t *phys; uint64_t gen; uint32_t live, shadow; uint64_t wst; } vpte;   // live: may still be under a live GPU buffer (vunmap_defer); shadow: per-run copy in reservation (vshadow_map); wst: last copy-change stamp
 struct vshadow { uint64_t voff, size; const uint8_t *src; uint8_t *alias_base, *alias; uint64_t alias_len, stamp; uint8_t **snap; uint32_t np; };   // misaligned physical mapping kept as a per-run copy; alias: host RW vm_remap of physical pages (0 SIGSEGV writebacks); snap: lazy per-host-page snapshot allocated only on GPU-written pages
-struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken, alias_reg; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; struct vshadow *sh; int nsh, csh; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB); alias_reg: counted in resource_vis (mtl_sparse_alias_delta)
+struct vpool { const pool_t *pool; uint8_t *base; uint64_t len, size, top; int nrun, taken, alias_reg; struct vrun { uint64_t lo, hi; } *run; vpte **pt; struct vlog_ent *log; _Atomic uint64_t nlog; struct vshadow *sh; size_t nsh, csh; };   // len: reserved; size: the pool's; top: highest mapped end so far (logged per 128 MB); alias_reg: counted in resource_vis (mtl_sparse_alias_delta)
 struct vlog_ent { uint64_t off, len; };   // a mapping request: the pool's change log (nvn_sparse_log_read), kept once a placement sparse texture asks for it
 enum { VLOG_N = 4096 };
 static struct vpool **g_vp; static int g_nvp, g_cvp;   // the pools with a range of their own, under g_vp_mu
@@ -3475,7 +3485,7 @@ static void vpool_drop(pool_t *o) {   // caller holds g_vp_mu
     munmap(v->base, v->len);
     for (uint64_t l = 0; l < (v->size + (2u << 20) - 1) >> 21; l++) free(v->pt[l]);
     for (int i = 0; i < g_nvp; i++) if (g_vp[i] == v) { g_vp[i] = g_vp[--g_nvp]; break; }
-    for (int k = 0; k < v->nsh; k++) { atomic_fetch_sub(&g_sh_bytes, v->sh[k].size); vshadow_free(&v->sh[k]); }
+    for (size_t k = 0; k < v->nsh; k++) { atomic_fetch_sub(&g_sh_bytes, v->sh[k].size); vshadow_free(&v->sh[k]); }
     free(v->pt); free(v->log); free(v->run); free(v->sh); free(v); o->vp = NULL;
 }
 static void vunmap_run(int all); static int g_nvun;   // the deferred unmaps (below)
@@ -3627,8 +3637,12 @@ static struct vshadow vshadow_slice(const struct vshadow *orig, uint64_t voff, u
     }
     return (struct vshadow){voff, size, src, abase, alias, alen, orig->stamp, snap, np};
 }
+static void vshadow_add(struct vpool *v, struct vshadow entry) {
+    if (v->nsh == v->csh) v->sh = grow_pool_table(v->sh, &v->csh, sizeof *v->sh, 64, "sparse pool copy");
+    v->sh[v->nsh++] = entry;
+}
 static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop or trim shadow entries overlapping [lo, hi)
-    for (int i = 0; i < v->nsh; ) {
+    for (size_t i = 0; i < v->nsh; ) {
         struct vshadow e = v->sh[i]; uint64_t a = e.voff, b = e.voff + e.size;
         if (b <= lo || a >= hi) { i++; continue; }
         v->sh[i] = v->sh[--v->nsh];
@@ -3638,8 +3652,7 @@ static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop o
         if (b > hi) piece[np++] = vshadow_slice(&e, hi, b - hi);
         vshadow_free(&e);
         for (int k = 0; k < np; k++) {
-            if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
-            v->sh[v->nsh++] = piece[k];
+            vshadow_add(v, piece[k]);
             atomic_fetch_add(&g_sh_bytes, piece[k].size);
         }
     }
@@ -3649,7 +3662,7 @@ static void vshadow_drop_phys(const uint8_t *mem, uint64_t size) {   // physical
     uintptr_t plo = (uintptr_t)mem, phi = plo + size;
     pthread_mutex_lock(&g_vp_mu);
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
-        for (int k = 0; k < v->nsh; ) { struct vshadow e = v->sh[k];
+        for (size_t k = 0; k < v->nsh; ) { struct vshadow e = v->sh[k];
             if ((uintptr_t)e.src + e.size <= plo || (uintptr_t)e.src >= phi) { k++; continue; }
             v->sh[k] = v->sh[--v->nsh];
             atomic_fetch_sub(&g_sh_bytes, e.size);
@@ -3671,8 +3684,7 @@ static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) { 
     memcpy(to, src, r->size);
     uint8_t *abase = NULL; uint64_t alen = 0;
     uint8_t *alias = vshadow_phys_alias(src, r->size, &abase, &alen);
-    if (v->nsh == v->csh && !(v->sh = realloc(v->sh, (size_t)(v->csh = v->csh ? 2 * v->csh : 64) * sizeof *v->sh))) die("sparse pool copy table allocation failed");
-    v->sh[v->nsh++] = (struct vshadow){(uint64_t)r->voff, r->size, src, abase, alias, alen, stamp, NULL, vshadow_npages(src, r->size)};
+    vshadow_add(v, (struct vshadow){(uint64_t)r->voff, r->size, src, abase, alias, alen, stamp, NULL, vshadow_npages(src, r->size)});
     for (uint64_t o = 0; o < r->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, (uint64_t)r->voff + o); if (e) e->shadow = 1; }
     vshadow_written(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
@@ -3706,7 +3718,7 @@ int nvn_shadow_arm(uint64_t a, uint64_t n) {
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
         if (!v->nsh || end <= b || a >= b + v->size) continue;
         uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
-        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+        for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
             if (hi <= e->voff || lo >= e->voff + e->size) continue;
             uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
             vshadow_arm_entry(v, e, s0, s1); hit = 1;
@@ -3723,7 +3735,7 @@ static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
         if (!v->nsh || end <= b || a >= b + v->size) continue;
         uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
-        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+        for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
             if (hi <= e->voff || lo >= e->voff + e->size) continue;
             uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
             vshadow_arm_entry(v, e, s0, s1);
@@ -3776,7 +3788,7 @@ void nvn_shadow_sync(void) {
     }
     if (now == seen) { pthread_mutex_unlock(&g_vp_mu); return; }
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
-        for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+        for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
             if (!nvn_dirty_since(e->src, e->size, e->stamp)) continue;
             uint64_t old = e->stamp; e->stamp = nvn_dirty_now(); nvn_dirty_protect(e->src, e->size);
             uintptr_t sbase = (uintptr_t)e->src & ~(uintptr_t)(pg - 1);
@@ -4473,7 +4485,7 @@ void nvn_buffer_write_ranges(uint64_t a, uint64_t n, nvn_buffer_range_fn note) {
         struct vpool *v = g_vp[i]; uint64_t base = (uint64_t)(uintptr_t)v->base;
         if (a >= base && a - base < v->size) { sparse = 1;
             uint64_t lo = a - base, hi = n < v->size - lo ? lo + n : v->size;
-            for (int k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
+            for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
                 if (hi <= e->voff || lo >= e->voff + e->size) continue;
                 vshadow_arm_entry(v, e, lo > e->voff ? lo : e->voff, hi < e->voff + e->size ? hi : e->voff + e->size);
                 sh = 1;

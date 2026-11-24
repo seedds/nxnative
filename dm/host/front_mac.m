@@ -341,8 +341,7 @@ static void pad_keep_system_buttons(GCController *c) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
-// The players' raw HID motion and Pro stick fallback follow the controllers (gone: one just removed, still listed): a Pro Controller's or a DualShock 4's, each model counted on its own
-// (motion_pro_mac.h)
+// The players' raw HID motion and Pro stick fallback follow the controllers (gone: one just removed, still listed): each model in motion_pro_mac.h counted on its own
 static int pro_gc_player(GCController *c) { return g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
 static int pro_gc_sticks(int player, int nz[2]) {
     GCController *c = g_pro_gc;
@@ -362,7 +361,7 @@ static void pads_motion_changed(GCController *gone) {
     for (int m = 0; m < PRO_MODELS; m++) player[m] = -1;
     GCController *pro = nil;
     for (GCController *c in GCController.controllers) {
-        int m = c != gone && c.extendedGamepad && !pad_gc_unread(c) ? pro_model_of_category(c.productCategory.UTF8String) : -1;
+        int m = c != gone && c.extendedGamepad && !pad_gc_unread(c) ? pro_model_of_controller(c.productCategory.UTF8String, c.vendorName.UTF8String) : -1;
         if (m >= 0) { count[m]++; player[m] = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (m == PRO_MODEL_PRO) pro = c; }
     }
     g_pro_gc_prev = g_pro_gc; g_pro_gc = count[PRO_MODEL_PRO] == 1 ? pro : nil; g_pro_gc_gone = gone;
@@ -854,7 +853,9 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
+    static int fill = -1; if (fill < 0) { const char *e = getenv("DM_PICTURE_FIT"); fill = e && !strcmp(e, "fill"); }
+    double a = g_picture_aspect;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT); with Fill it covers the view, edges cropped
+    if ((w / h > a) == !fill) w = h * a; else h = w / a;
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;

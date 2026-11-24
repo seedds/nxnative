@@ -180,6 +180,42 @@ int dm_sdk_ounce(void) {
     return ounce;
 }
 
+// NVN 53's device-info switch in SDK 5.4.0 uses signed word offsets from its table. Case 0 returns the 53 set before the dispatch; case 1 sets the minor and branches to the same epilogue.
+// Read both cases from the mapped SDK without calling its driver. Fall back when the compiler laid the switch out differently.
+int dm_sdk_nvn1_minor(void) {
+    for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) {
+        const module_t *m = &g_mod[i];
+        const uint32_t *text = (const uint32_t *)m->base;
+        int minor = -1;
+        for (size_t p = 0; p + 5 < m->text_end / 4; p++) {
+            const uint32_t *w = text + p;
+            if (w[4] != 0x528006a0 || w[5] != 0xd61f0100 ||    // mov w0, #53; br x8
+                (w[0] & 0x9f00001f) != 0x90000009 || (w[1] & 0xffc003ff) != 0x91000129 ||   // adrp/add x9, table
+                w[2] != 0xb8a87928 || w[3] != 0x8b090108) continue;   // ldrsw x8,[x9,x8,lsl #2]; add x8,x8,x9
+            int64_t page = ((w[0] >> 29) & 3) | (((w[0] >> 5) & 0x7ffff) << 2);
+            if (page & 0x100000) page -= 0x200000;
+            int64_t table = (int64_t)((p * 4) & ~0xfffull) + page * 4096 + ((w[1] >> 10) & 0xfff);
+            if (table < (int64_t)m->ro_off || table + 8 > (int64_t)m->data_off || (table & 3)) continue;
+            int32_t offsets[2];
+            memcpy(offsets, m->base + table, sizeof offsets);
+            int64_t major_pc = table + offsets[0], minor_pc = table + offsets[1];
+            int64_t dispatch_end = (int64_t)(p + 6) * 4;
+            if (major_pc < dispatch_end || minor_pc < dispatch_end || (major_pc & 3) || (minor_pc & 3) ||
+                major_pc + 16 > (int64_t)m->text_end || minor_pc + 8 > (int64_t)m->text_end) continue;
+            const uint32_t *a = text + major_pc / 4, *b = text + minor_pc / 4;
+            if (a[0] != 0xa9427bfd || a[1] != 0xa9414ff4 || a[2] != 0x9100c3ff || a[3] != 0xd65f03c0 ||
+                (b[0] & 0xffe0001f) != 0x52800000 || (b[1] & 0xfc000000) != 0x14000000) continue;
+            int64_t branch = b[1] & 0x03ffffff;
+            if (branch & 0x02000000) branch -= 0x04000000;
+            if (minor_pc + 4 + branch * 4 != major_pc) continue;
+            if (minor >= 0) return -1;
+            minor = (int)((b[0] >> 5) & 0xffff);
+        }
+        return minor;
+    }
+    return -1;
+}
+
 // The constants NVN2's own nvnDeviceGetInteger answers: the driver is compiled into the game's sdk, and its API and GPU code versions move with the SDK (20.5.19: API 231.30, GPU code minor 17;
 // 21.4.4: 231.39 and 20). Games check them: Splatoon Raiders requires minor >= 39 and otherwise creates no graphics system (main+0x31b86b0). The driver's switch over the items loads w0 with the
 // major first, then jumps through a byte table: mov w0, #231 / adr / adrp + add (the table) / ldrb / add, lsl #2 / br, with cmp wN, #<last item> before it. A case that is a constant is mov w0, #v; b.

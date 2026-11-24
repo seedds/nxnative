@@ -409,6 +409,38 @@ int main(int argc, char **argv) { @autoreleasepool {
             EXPECT(m4?"Metal 4: 5:4 crop fills a 5:4 canvas with no bars":"classic: 5:4 crop fills a 5:4 canvas with no bars",0,bad);free(o);res_remove(ot);
         }
         mtl_present_screen(0,0);
+        // Picture Fill on the Mac (present_cover + present_fit): crops sides on 16:10, crops top/bottom on 21:9, leaves equal shapes whole, and clamps extreme ratios.
+        {
+            NSUInteger r[4]={0,0,3840,2160}; present_cover(1920,1080,r,3456,2160);
+            EXPECT("Fill 16:10: left edge",192,(int)r[0]); EXPECT("Fill 16:10: width",3456,(int)r[2]); EXPECT("Fill 16:10: full height",2160,(int)r[3]);
+            NSUInteger t[4]={0,0,3840,2160}; present_cover(1920,1080,t,21,9);
+            EXPECT("Fill 21:9: full width",3840,(int)t[2]); EXPECT("Fill 21:9: height",1646,(int)t[3]); EXPECT("Fill 21:9: top edge",257,(int)t[1]);
+            NSUInteger e[4]={10,20,1920,1080}; present_cover(1920,1080,e,3840,2160);
+            EXPECT("Fill 16:9 on 16:9: unchanged x",10,(int)e[0]); EXPECT("Fill 16:9 on 16:9: unchanged width",1920,(int)e[2]);
+            NSUInteger thin[4]={0,0,10,10}; present_cover(1920,1080,thin,1,10000);
+            EXPECT("Fill extreme narrow: width clamped to at least 1",1,(int)thin[2]);
+            // Real GPU render in both Metal 3 and Metal 4: 320x180 (16:9) with red side bands [0..15] and [304..319] into 288x180 (16:10) with Fill enabled.
+            MTLTextureDescriptor *fd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:320 height:180 mipmapped:NO];
+            fd.storageMode=MTLStorageModeShared; fd.usage=MTLTextureUsageShaderRead;
+            id<MTLTexture> fsrc=[g_dev newTextureWithDescriptor:fd];
+            uint8_t *fp=calloc(320*180,4);
+            for(int y=0;y<180;y++) for(int x=0;x<320;x++) memcpy(fp+4*(y*320+x), (x<16||x>=304)?colors[0]:colors[1], 4);
+            [fsrc replaceRegion:MTLRegionMake2D(0,0,320,180) mipmapLevel:0 withBytes:fp bytesPerRow:320*4]; free(fp);
+            res_add(fsrc); res_commit();
+            int prev_fill=g_present_fill; g_present_fill=1;
+            for(int m4=0;m4<2;m4++) {
+                MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:288 height:180 mipmapped:NO];
+                od.storageMode=MTLStorageModeShared; od.usage=MTLTextureUsageRenderTarget;
+                id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od]; res_add(ot); res_commit();
+                if(m4) EXPECT("Metal 4 Fill present",PRESENT_STANDARD,present_offscreen_wait(fsrc,NULL,ot));
+                else { id<MTLCommandBuffer> cb=[g_q commandBuffer]; EXPECT("classic Fill present",1,present_encode(cb,fsrc,ot,NULL)); [cb commit]; [cb waitUntilCompleted]; }
+                uint8_t *o=malloc(288*180*4); [ot getBytes:o bytesPerRow:288*4 fromRegion:MTLRegionMake2D(0,0,288,180) mipmapLevel:0];
+                int bad=0; for(int i=0;i<288*180;i++) bad+=memcmp(o+4*i,colors[1],4)!=0;
+                EXPECT(m4?"Metal 4 Fill 16:9 on 16:10: side bands cropped, full green":"classic Fill 16:9 on 16:10: side bands cropped, full green",0,bad);
+                free(o); res_remove(ot);
+            }
+            g_present_fill=prev_fill; res_remove(fsrc);
+        }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

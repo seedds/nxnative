@@ -1,6 +1,6 @@
 # Alpha test (the <entry>_a entry points of <key>_bx, dmsh_side.py): NVN's ColorStateSetAlphaTest and SetAlphaRef compare the alpha a pixel shader writes to colour 0 with a reference, before blending, and drop the fragment
 # when the comparison fails (Maxwell's fixed-function alpha test, as in OpenGL's compatibility profile). Metal has none. Foliage, hair, fences and dissolve effects draw with it
-# (Dark Souls Remastered, ASTRAL CHAIN, Animal Crossing's island map). main0 and main0_d (the dual-source entry point dmsh_build.py adds) each get a thin entry point that
+# (Dark Souls Remastered, ASTRAL CHAIN, Animal Crossing's island map). main0 gets a thin entry point that
 # runs the shader's body, then takes the test's function and reference from a constant buffer at fragment buffer DMSH_ALPHA_BUFFER and tests colour 0's alpha. The typed-output entry
 # point main0_u (dmsh_entry.py fs_uint) holds the same test under its function constant DMSH_TYPED_ALPHA_FC (test).
 # The function and reference are data, not part of the code: one pipeline serves every function, and a reference that changes every draw (a dissolve) keeps it. The host takes these

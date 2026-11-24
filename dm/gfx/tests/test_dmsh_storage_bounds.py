@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Storage bounds through the offline translator (TranslationFlags.MetalStorageBounds, GitHub issue #2618): a storage buffer whose address the shader takes from a game uniform slot
-(SBUFU) or the push constants (SBUFQ) has no size, so each access compares its word index with the memory the host bound, from the length table in bank 27 (dmsh_abi.h DMSH_SBLEN_BANK):
-a load gives 0 outside it, a store or an atomic is skipped. NVN's own storage buffer table (c[0], with a size) is left as it was. The reflection gives the table its kind and each
-bounded binding its slot in it. PRAGMATA's GI voxeliser ef4ad01151918469 read its surfel colours past the one run mapped at the base of a sparse pool, and the other memory there washed
-the R53 hangar in colour. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
+"""Storage bounds through the offline translator (TranslationFlags.MetalStorageBounds, GitHub issue #2618): storage buffers bound by address — game uniform slots (SBUFU),
+push constants (SBUFQ), and NVN's own c[0] table (SBUFP / UBOP, which can also be bound past a sparse pool's mapped run) — compare each access's word index with the memory
+the host bound, from the length table in bank 27 (dmsh_abi.h DMSH_SBLEN_BANK): a load gives 0 outside it, a store or an atomic is skipped. The reflection gives the table its
+kind and each bounded binding its slot in it. Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
 import json, os, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
@@ -45,25 +44,27 @@ class StorageBounds(unittest.TestCase):
     def table(self, msl):   # the length table's two words for a storage slot: before, total
         return r'\(\*spvDescriptorSet0\.cp_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK
 
-    def test_a_uniform_address_is_bounded_and_the_driver_table_is_not(self):
+    def test_a_uniform_address_and_driver_table_are_both_bounded(self):
         # R2:R3 = c[3][0x10] + (c[3][4] << 2), a storage buffer in the game's uniform slot 0: read, then written back. R6:R7 = c[0][0x110] + the same, NVN's storage slot 0
         body = (mov_c(1, 3, 0x4), shl_i(1, 1, 2), iadd_c(2, 1, 3, 0x10, cc=True), iadd_c(3, RZ, 3, 0x14, x=True), ldg(4, 2), stg(2, 4),
                 iadd_c(6, 1, 0, 0x110, cc=True), iadd_c(7, RZ, 0, 0x114, x=True), ldg(8, 6), sts(8, 8), EXIT)
         res, msl, binds = self.translate(dict(stage='cs', shared=0x1000), code(*body))
         flags = {(s['cb_slot'], s['cb_offset']): s['flags'] for s in res['sbufs']}
         self.assertEqual(flags.get((3, 0x10 // 4)), 3, flags)   # written, bounded
-        self.assertEqual(flags.get((0, 0x110 // 4)), 0, flags)   # NVN's table: a size of its own, unbounded
+        self.assertEqual(flags.get((0, 0x110 // 4)), 2, flags)   # NVN's c[0] table: read-only, bounded (handles bindings past a sparse pool's mapped run)
         t = self.table(msl)
         # the load: inside, its word, else 0; the store: only inside
         self.assertRegex(msl, r'bool (_\d+) = \(uint\((_\d+)\) \+ %s\) < %s;' % (t, t))
         self.assertRegex(msl, r'(_\d+) \? \(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[\1 \? _\d+ : 0\] : 0u')
         self.assertRegex(msl, r'if \(_\d+\)\s*\{\s*\(\*spvDescriptorSet0\.cp_s\d+\)\._m0\[_\d+ \? _\d+ : 0\] = ')
-        self.assertEqual(len(re.findall(r'< %s' % t, msl)), 2, msl)   # the load and the store; not the driver table's buffer
+        self.assertEqual(len(re.findall(r'< %s' % t, msl)), 3, msl)   # uniform load + uniform store + c[0] load
         kinds = {b['kind'] for b in binds}
         self.assertIn(abi.KIND_SBLEN, kinds)
         ubo = [b for b in binds if b['kind'] == abi.KIND_SBUF_UBO]
+        sbuf = [b for b in binds if b['kind'] == abi.KIND_SBUF]
         self.assertEqual(len(ubo), 1); self.assertIn('sbx', ubo[0])
-        self.assertTrue(all('sbx' not in b for b in binds if b['kind'] == abi.KIND_SBUF))
+        self.assertEqual(len(sbuf), 1); self.assertIn('sbx', sbuf[0])
+        self.assertNotEqual(ubo[0]['sbx'], sbuf[0]['sbx'])
 
     def test_a_pushed_address_load_and_atomic_are_bounded(self):
         # c0 as test_dmsh_nvn2_buffers.py's: push block 1 at 0x10 holds one buffer entry (c[24] + 0x100). A load at the thread's offset from it, and an atomic add at its start

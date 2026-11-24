@@ -94,7 +94,7 @@ void front_web_show(void);
 void front_web_send(const char *msg, size_t n);
 void front_web_close(void);
 void front_web_shot(const char *path);
-// The front end's reports (any thread): a content message from the page (nx.sendMessage); the page ended (exit reason 0 end, 1 back, 3 callback URL; url NULL = none); it could not be loaded
+// The front end's reports (any thread): a content message from the page (nx.sendMessage); the page ended (exit reason 0 end, 1 back, 3 callback URL, 4 window.close; url NULL = none); it could not be loaded
 void dm_web_message(const char *msg, size_t n);
 void dm_web_ended(uint32_t reason, const char *url);
 void dm_web_failed(const char *why);

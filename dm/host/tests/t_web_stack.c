@@ -35,10 +35,12 @@ __asm__(".text\n.p2align 2\n.globl _call_web\n_call_web:\n"
         "    mov sp, x3\n    blr x4\n"
         "    mov sp, x29\n    ldp x29, x30, [sp], #16\n    ret\n");
 static _Alignas(16) uint8_t arg[ARG_SIZE], result[0x1010];
+static uint32_t end_reason;
+static const char *end_url;
 static void *end_page(void *unused) {
     (void)unused;
     while (!atomic_load(&opened)) usleep(1000);
-    dm_web_ended(3, "http://localhost/done");
+    dm_web_ended(end_reason, end_url);
     return NULL;
 }
 int main(void) {
@@ -67,12 +69,21 @@ int main(void) {
 
     // Synchronous Show ignores the hidden boot mode and waits for the fake front end's exit result.
     atomic_store(&opened, 0); expect_hidden = 0; on_host = 0;
+    end_reason = 3; end_url = "http://localhost/done";
     pthread_t thread; assert(!pthread_create(&thread, NULL, end_page, NULL));
     assert(call_web(result, arg, NULL, guest_hi, hle_force_h_web_Offline.fn) == RES_OK);
     assert(!pthread_join(thread, NULL));
     assert(on_host && !held && signals == 2 && closes == 2);
     assert(*(uint64_t *)result == 3 && !strcmp((char *)result + 8, "http://localhost/done"));
     assert(*(uint64_t *)(result + 0x1008) == strlen("http://localhost/done") + 1);
+    // Browser close() ends with exit reason 4 and no last URL.
+    atomic_store(&opened, 0); on_host = 0;
+    end_reason = 4; end_url = NULL;
+    assert(!pthread_create(&thread, NULL, end_page, NULL));
+    assert(call_web(result, arg, NULL, guest_hi, hle_force_h_web_Offline.fn) == RES_OK);
+    assert(!pthread_join(thread, NULL));
+    assert(on_host && !held && signals == 3 && closes == 3);
+    assert(*(uint64_t *)result == 4 && result[8] == 0 && *(uint64_t *)(result + 0x1008) == 0);
     // Missing pages keep the established failure result, including on a small guest stack.
     assert(!unlink(file));
     assert(call_web(result, arg, NULL, guest_hi, hle_force_h_web_Offline.fn) == RES_FAIL);

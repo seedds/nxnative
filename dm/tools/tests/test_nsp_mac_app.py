@@ -58,6 +58,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
     printf("standin host output\n"); fflush(stdout);
+    if (getenv("STANDIN_MISSING")) {   // what the real host does for a shader its library lacks (nvn_mtl.m, t_missing_keys): the red line, and the key in the list the launcher names
+        printf("[dm] [nvn-mtl] [RED] shader %s (pixel) failed to load: build the shaders\n", getenv("STANDIN_MISSING")); fflush(stdout);
+        if (getenv("DM_NVN_MISSING_KEYS")) { FILE *m = fopen(getenv("DM_NVN_MISSING_KEYS"), "a"); if (m) { fprintf(m, "%s\n", getenv("STANDIN_MISSING")); fclose(m); } }
+    }
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -879,7 +883,10 @@ class App(unittest.TestCase):
         self.assertEqual((r['DM_ROMFS'], r['DM_MSL_DIR'], r['DM_NVN_SHMAP'], r['DM_FONT_DIR'], r['DM_AOC_DIR']),
                          (str(res / 'romfs'), str(res / 'msl'), str(res / 'dm/shader_map.tsv'), str(res / 'dm/font'), str(res / 'aoc')))
         self.assertEqual(r['DM_PSO_BUNDLE'], str(res / 'pso'))   # the pipeline archive made offline, as the iOS app's main.m sets it
+        self.assertEqual(r['DM_NVN_MISSING_KEYS'], str(sup / 'shader_missing.txt'))   # beside the save, not in the log folder: the log is renamed at every start
         self.assertEqual((r['DM_SAVE'], r['DM_TEMP'], r['DM_ROOT'], r['cwd']), (str(sup / 'save'), str(sup / 'temp'), str(sup), str(sup)))   # pso_user.tsv goes beside save/
+        self.assertEqual(r['DM_ALBUM_DIR'], str(home / f'Pictures/nxnative/{TID}'))
+        self.assertFalse((home / f'Pictures/nxnative/{TID}').exists())   # created lazily on first SaveScreenshot
         self.assertEqual((r['DM_WINDOW'], r['DM_AUDIO'], r['DM_LANG']), ('1', '1', 'ja'))   # the caller's DM_LANG wins over the packed language
         self.assertEqual((r['DM_BAKED'], r['DM_BOTH']), ('1', 'player'))   # the player's env.txt before the bundle's
         self.assertTrue((sup / 'save').is_dir()); self.assertTrue((sup / 'temp').is_dir())
@@ -887,6 +894,29 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_missing_shader_outlives_the_logs(self):   # issue #1519: a key a session reported is still there for the next --seen-shaders build after two more starts, which replace both logs
+        home, key = self.tmp / 'home', 'a' * 16
+        logs = home / 'Library/Logs/nxnative'
+        (home / f'Library/Application Support/nxnative/{TID}').mkdir(parents=True, exist_ok=True)
+        (home / f'Library/Application Support/nxnative/{TID}/shader_missing.txt').unlink(missing_ok=True)
+        for name in (f'{TID}.log', f'{TID}.prev.log'): (logs / name).unlink(missing_ok=True)
+        table = self.tmp / 'seen-profile'; table.mkdir(exist_ok=True)
+        (table / 'shader_map.tsv').write_text(f'p.bin\t0\tpixel\t{key}\tsrc\np.bin\t1\tpixel\t{"b" * 16}\tsrc\n')
+        (table / 'shader_seen.tsv').write_text(f'{"b" * 16}\tpixel\n')
+        g = types.SimpleNamespace(table=lambda n: table / n)
+
+        def keys():
+            with mock.patch.dict(os.environ, {'HOME': str(home)}), mock.patch.object(nsp, 'say'):
+                work = self.tmp / 'no-such-build-folder'
+                return nsp.seen_keys(g, self.tmp / 'seen-shader', nsp.seen_logs(work, int(TID, 16)), nsp.seen_lists(work, int(TID, 16)))
+
+        for say in (key, None, None):   # the session that reaches the area, then two starts that report nothing
+            p = self.launch(STANDIN_MISSING=say) if say else self.launch(); p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 7)
+        for name in (f'{TID}.log', f'{TID}.prev.log'): self.assertNotIn(key, (logs / name).read_text())   # both logs have moved on
+        shutil.rmtree(self.tmp / 'seen-shader', ignore_errors=True)   # not from the last build's own list
+        self.assertEqual(keys(), [key, 'b' * 16])
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
@@ -1207,7 +1237,7 @@ class Script(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in pso.iterdir()), ['applegpu_g14s.mtl4a'])
 
     def test_prebake_shader_inputs_in_folder_and_image(self):
-        # A profile input (dual_want.tsv) can change the functions without changing the chain or shader keys.
+        # A profile input (bf_want.tsv, shader_facts.tsv) can change the functions without changing the chain or shader keys.
         for packed in (False, True):
             with self.subTest(packed=packed):
                 tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'
@@ -1398,6 +1428,17 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         with mock.patch.dict(os.environ, {'HOME': '/h'}):
             self.assertEqual(nsp.seen_logs(Path('/w'), 0x0400A3A01EE4C000), (Path('/w/run/host.log'), Path('/h/Library/Logs/nxnative/0400A3A01EE4C000.log'), Path('/h/Library/Logs/nxnative/0400A3A01EE4C000.prev.log')))
 
+    def test_lists_read(self):   # the hosts' own lists, which outlast the logs: the run command's and the app's
+        with mock.patch.dict(os.environ, {'HOME': '/h'}):
+            self.assertEqual(nsp.seen_lists(Path('/w'), 0x0400A3A01EE4C000), (Path('/w/run/shader_missing.txt'), Path('/h/Library/Application Support/nxnative/0400A3A01EE4C000/shader_missing.txt')))
+
+    def test_keys_from_the_hosts_lists(self):
+        a, b, c, d = self.keys('a', 'b', 'c', 'd')
+        kept = self.tmp / 'shader_missing.txt'; kept.write_text(f'{b}\n{"e" * 16}\n{c[:7]}\n{d}x\n{c}\n{c[:9]}')   # e: another version's key; half-written lines are none
+        self.assertEqual(nsp.seen_keys(self.g, self.sh, [], [kept, self.tmp / 'no-such-list.txt']), [a, b, c])
+        self.assertTrue(any('2 that earlier runs reported' in m for m in self.said))
+        self.assertEqual(kept.read_text(), f'{b}\n{"e" * 16}\n{c[:7]}\n{d}x\n{c}\n{c[:9]}')   # read only: a host may be appending, and another version's build folder reads it too
+
     def test_partial_library(self):
         a, b = self.keys('a', 'b')
         old = self.sh / 'partial/b-000000000000'; old.mkdir(parents=True); (old / 'old_b.metallib').write_bytes(b'x')   # emptied first: an older chain's, and a key left out now
@@ -1408,6 +1449,7 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             cmd, env = self.ran[0]
             self.assertEqual(cmd[2:], [str(self.sh / 'pkg'), str(self.sh / 'partial'), a, b])
             self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache'), 'mac')); self.assertNotIn('IOSOUT', env)
+            self.assertTrue(Path(env['DMSH_CAS']).is_dir())
             self.assertFalse(old.exists()); self.assertTrue((self.sh / f'partial/b-{self.CHAIN}/k_b.metallib').is_file())
             self.assertFalse((self.sh / f'partial/b-{self.CHAIN}/inputs.tsv').exists()); self.assertFalse((self.tmp / 'c1_full.tsv').exists())   # no stamp: unlisted shaders are not proven safe
             self.assertEqual(self.build([a, b]), self.sh / 'partial'); self.assertEqual(self.ran, [])   # reused
@@ -1431,6 +1473,21 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertTrue(any('building the whole shader map, 4 shaders' in m and '--seen-shaders builds only the 2' in m for m in self.said))
         self.assertFalse((self.sh / 'partial').exists())
 
+    def test_full_build_recovers_partial_cache_written_at_directory_path(self):
+        cache = self.sh / 'cache'
+        name = 'metallib/mac/abcd.metallib'
+        old = nsp.shader_cache.Store(cache)
+        try: old.put(name, b'compiled')
+        finally: old.close()
+
+        with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
+            self.assertEqual(self.build(), cache)
+
+        self.assertFalse((self.sh / 'partial-cache.db').exists())
+        current = nsp.shader_cache.for_chain(cache, self.CHAIN)
+        try: self.assertEqual(current.get(name), b'compiled')
+        finally: current.close()
+
     def test_full_build_of_a_game_without_a_list_says_nothing(self):
         (self.tmp / 'shader_seen.tsv').unlink()
         with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
@@ -1446,6 +1503,14 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         stamp = self.tmp / 'run/pso_archive_partial/prebuilt.tsv'; stamp.parent.mkdir(parents=True); stamp.write_text('chain\n')
         cmd = self.run_cmd(partial=True)
         self.assertTrue(cmd.endswith(f'2>&1 | tee {self.tmp}/run/host.log')); self.assertIn(f'DM_PSO_ARCHIVE={self.tmp}/run/pso_archive_partial', cmd); self.assertFalse(stamp.exists())
+        self.assertIn(f'DM_NVN_MISSING_KEYS={self.tmp}/run/shader_missing.txt', cmd); self.assertNotIn('DM_NVN_MISSING_KEYS', self.run_cmd())
+
+    def test_prebuild_keeps_no_missing_keys(self):   # the tool's loads are not what the game asked for: the next partial build must not take them
+        (self.tmp / 'shader_pairs.tsv').write_text('v\tf\n'); envs = []
+        with mock.patch.object(nsp, 'run', lambda cmd, log, env=None, cwd=None, on_line=None, fatal=True: envs.append(env)):
+            cmd = self.run_cmd(partial=True)
+        self.assertEqual([e['DM_PSO_PREBUILD'] for e in envs], ['tool']); self.assertNotIn('DM_NVN_MISSING_KEYS', envs[0])
+        self.assertIn('DM_NVN_MISSING_KEYS=', cmd)
 
     def test_run_command_passes_the_runtime_compiler(self):
         python = self.tmp / 'python environment' / 'bin/python3'

@@ -1,9 +1,11 @@
 """Provisional memory layouts must leave room for the game's initial heap."""
 import hashlib
 from pathlib import Path
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
@@ -341,6 +343,58 @@ class AddressRegions(unittest.TestCase):
 
     def test_no_table(self):
         self.assertEqual(pg.region_findings('', 0x118000000), [])
+
+
+class Ue3OodlePackages(unittest.TestCase):
+    @staticmethod
+    def pkg(blocks, block=0x40, wide=False):
+        raw = sum(u for _, u in blocks)
+        comp = sum(len(s) for s, _ in blocks)
+        head = (pg.UE3_TAG + bytes(4) if wide else pg.UE3_TAG) + struct.pack('<QQQ' if wide else '<III', block, comp, raw)
+        table = b''.join(struct.pack('<QQ' if wide else '<II', len(s), u) for s, u in blocks)
+        return pg.UE3_TAG + struct.pack('<HH', 864, 0x80e3) + b'summary.' + head + table + b''.join(s for s, _ in blocks)
+
+    def test_detects_narrow_and_wide_oodle_chunks(self):
+        for wide in (False, True):
+            with self.subTest(wide=wide):
+                self.assertTrue(pg.ue3_oodle_package(self.pkg([(b'\x8c\x0a' + b'x' * 10, 0x40), (b'\x8c\x0a' + b'y' * 10, 0x20)], wide=wide)))
+                z = zlib.compressobj(wbits=10)
+                zblk = z.compress(b'TweakvarMap' * 8) + z.flush()
+                self.assertFalse(pg.ue3_oodle_package(self.pkg([(zblk, 88)], block=512, wide=wide)))
+                # A stored uncompressed block whose first byte happens to be 0x8c is not Oodle.
+                self.assertFalse(pg.ue3_oodle_package(self.pkg([(b'\x8c' + b'raw' * 5, 16)], wide=wide)))
+
+    def test_rejects_non_ue3_and_truncated_headers(self):
+        self.assertFalse(pg.ue3_oodle_package(pg.UE3_TAG + b'\0'))
+        self.assertFalse(pg.ue3_oodle_package(pg.UE3_TAG + struct.pack('<i', -7)))
+        self.assertFalse(pg.ue3_oodle_package(pg.UE3_TAG + struct.pack('<HH', 864, 0) + pg.UE3_TAG + bytes(4) + struct.pack('<QQQ', 0, 0, 0)))
+        self.assertFalse(pg.ue3_oodle_package(pg.UE3_TAG + struct.pack('<HH', 864, 0) + pg.UE3_TAG + bytes(4) + struct.pack('<QQQ', 0x40, 0, 0)))
+        wide = self.pkg([(b'\x8c\x0a' + b'x' * 10, 0x40)], wide=True)
+        self.assertFalse(pg.ue3_oodle_package(wide[:28]))
+
+
+class ManifestProvenance(unittest.TestCase):
+    """Multi-program NUP manifests tag sibling rows in an optional fourth column: combined inventory stays whole, while biggest (romfs_marker) stays in the packed program."""
+    def test_sibling_rows_contribute_to_inventory_but_not_biggest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            exefs = root / 'ExeFS'; exefs.mkdir()
+            manifest = root / 'romfs_manifest.tsv'
+            manifest.write_text(
+                '# path\tbytes\tfirst 32 bytes (hex)\n'
+                f'/dummy.bin\t5\t{b"12345".hex()}\n'
+                f'/sound/jp.pck\t916455424\t{b"AKPK".hex()}\tprogram:0\n'
+            )
+            self.assertEqual(list(pg.romfs_files(manifest)), [('/dummy.bin', 5, b'12345'), ('/sound/jp.pck', 916455424, b'AKPK')])
+            rom = pg.facts_of(exefs, manifest)['romfs']
+            self.assertEqual((rom['n'], rom['bytes']), (2, 916455429))
+            self.assertEqual(rom['mags']['Wwise pck'], 1)
+            self.assertEqual(rom['dirs']['sound'], 1)
+            self.assertEqual(rom['biggest'], (5, 'dummy.bin'))
+
+            manifest.write_text(f'# path\tbytes\tfirst 32 bytes (hex)\n/sound/jp.pck\t916455424\t{b"AKPK".hex()}\tprogram:0\n')
+            rom = pg.facts_of(exefs, manifest)['romfs']
+            self.assertEqual((rom['n'], rom['bytes'], rom['biggest']), (1, 916455424, (0, '')))
 
 
 if __name__ == '__main__':

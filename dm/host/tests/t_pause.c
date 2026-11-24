@@ -115,9 +115,9 @@ static req_t *pause_begin(wk_t *w) {
 static int pause_end(req_t *q, int ms, int64_t *rc) {
     int ok = WAIT_UNTIL(atomic_load(&q->done), ms);
     if (!ok) {
-        activity(q->w, 0);
         g_lock(); q->w->t.paused = 1; pthread_cond_broadcast(&q->w->t.pcv); g_unlock();
         WAIT_UNTIL(atomic_load(&q->done), 2000);
+        activity(q->w, 0);
     }
     pthread_join(q->th, NULL);
     *rc = q->rc;
@@ -251,6 +251,140 @@ static int exit_and_close_during_pause(void) {
     return finish(&c);
 }
 
+// 6. Horizon's SetThreadActivity / GetThreadContext3 error contract: Busy (0xF401) for the caller's own thread, InvalidEnumValue (0xF001) for activity outside {0, 1}, and InvalidState
+//    (0xFA01) for a thread that has not started or has exited, a second pause, or a resume without a pause (issue #1855). Each refused call must leave the thread's state as it was
+static int invalid_states(void) {
+    cs_t c = {.name = "invalid_states"};
+    // Self (pseudo-handle and own handle): Busy on both SetThreadActivity and GetThreadContext3
+    uint32_t self_h = cur()->handle;
+    hz_ctx_t ctx;
+    for (int i = 0; i < 2; i++) {
+        uint32_t h = i ? self_h : H_CUR_THREAD;
+        uint64_t r[32] = {h, 1}; svc_thread(0x32, r);
+        if (r[0] != R_BUSY) fail(&c, "pause self (%#x) returned %#llx, want %#x", h, (unsigned long long)r[0], R_BUSY);
+        r[0] = h; r[1] = 0; svc_thread(0x32, r);
+        if (r[0] != R_BUSY) fail(&c, "resume self (%#x) returned %#llx, want %#x", h, (unsigned long long)r[0], R_BUSY);
+        r[0] = (uint64_t)&ctx; r[1] = h; svc_thread(0x33, r);
+        if (r[0] != R_BUSY) fail(&c, "GetThreadContext3 self (%#x) returned %#llx, want %#x", h, (unsigned long long)r[0], R_BUSY);
+    }
+    // A created thread that has not started: registered only, no pthread runs for it
+    thr_t *n = calloc(1, sizeof *n); pthread_cond_init(&n->cv, NULL); pthread_cond_init(&n->pcv, NULL); n->prio = 44; n->core = 1; n->mask = 2;
+    g_lock(); n->handle = h_new(O_THREAD, n); n->all = g_all; g_all = n; g_unlock();
+    uint64_t r[32] = {n->handle, 1}; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "pause before StartThread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    if (atomic_load(&n->pause_req) || n->paused || (atomic_load(&n->svc_state) & 2)) fail(&c, "pause before StartThread left a request behind (pause_req %d, paused %d, svc_state %#x)", atomic_load(&n->pause_req), n->paused, atomic_load(&n->svc_state));
+    r[0] = n->handle; r[1] = 0; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "resume before StartThread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    r[0] = n->handle; r[1] = 2; svc_thread(0x32, r);
+    if (r[0] != R_BAD_ENUM) fail(&c, "invalid activity enum returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_ENUM);
+    n->started = 1; n->exited = 1;   // started and exited: Terminated
+    r[0] = n->handle; r[1] = 1; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "pause of an exited thread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    if (atomic_load(&n->pause_req) || n->paused) fail(&c, "pause of an exited thread left a request behind");
+    r[0] = n->handle; r[1] = 0; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "resume of an exited thread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    r[0] = (uint64_t)&ctx; r[1] = n->handle; svc_thread(0x33, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "GetThreadContext3 of an unpaused exited thread returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    atomic_store(&n->pause_req, 1);   // exited while paused: Horizon answers InvalidState on resume and zeroed success on GetThreadContext3
+    r[0] = n->handle; r[1] = 0; svc_thread(0x32, r);
+    if (r[0] != R_BAD_STATE) fail(&c, "resume of a thread that exited while paused returned %#llx, want %#x", (unsigned long long)r[0], R_BAD_STATE);
+    if (!atomic_load(&n->pause_req)) fail(&c, "refused resume of an exited thread changed pause_req");
+    memset(&ctx, 0xA5, sizeof ctx);
+    r[0] = (uint64_t)&ctx; r[1] = n->handle; svc_thread(0x33, r);
+    if (r[0]) fail(&c, "GetThreadContext3 of a paused exited thread returned %#llx, want 0", (unsigned long long)r[0]);
+    else if (ctx.sp || ctx.pc) fail(&c, "GetThreadContext3 of a paused exited thread did not zero context (sp=%#llx pc=%#llx)", (unsigned long long)ctx.sp, (unsigned long long)ctx.pc);
+    g_lock();
+    for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == n) { *p = n->all; break; }
+    g_h[n->handle - 0x1000].type = O_FREE; g_h[n->handle - 0x1000].obj = NULL;
+    g_unlock();
+    pthread_cond_destroy(&n->cv); pthread_cond_destroy(&n->pcv); free(n);
+
+    // A running thread: a resume with no pause pending fails and the thread keeps running; an invalid enum or second pause fails and the thread stays stopped with its context; a second resume fails
+    wk_t *w = worker_start(M_GUEST);
+    if (!advances(w, 2000)) fail(&c, "worker never ran");
+    int64_t rc = activity(w, 0);
+    if (rc != (int64_t)R_BAD_STATE) fail(&c, "resume of a thread that is not paused returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+    if (!advances(w, 2000)) fail(&c, "worker stopped after the refused resume");
+    if (pause_sync(&c, w, "pause", 2000)) {
+        check_frozen(&c, w, "pause");
+        rc = activity(w, 2);
+        if (rc != (int64_t)R_BAD_ENUM) fail(&c, "invalid activity on a paused thread returned %#llx, want %#x", (unsigned long long)rc, R_BAD_ENUM);
+        check_frozen(&c, w, "invalid activity");
+        rc = activity(w, 1);   // the thread is stopped, so this returns at once whatever it answers
+        if (rc != (int64_t)R_BAD_STATE) fail(&c, "second pause returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+        check_frozen(&c, w, "second pause");
+        check_context(&c, w, "second pause", 1);
+        if (activity(w, 0)) fail(&c, "resume failed after the refused second pause");
+        if (!advances(w, 2000)) fail(&c, "progress did not advance after the resume");
+        rc = activity(w, 0);
+        if (rc != (int64_t)R_BAD_STATE) fail(&c, "second resume returned %#llx, want %#x", (unsigned long long)rc, R_BAD_STATE);
+    }
+    activity(w, 0);
+    worker_end(w);
+    return finish(&c);
+}
+
+// 7. Concurrent SetThreadActivity / GetThreadContext3 on the same target serialize while a pause waits for a thread in host code (Horizon's KThread::m_activity_pause_lock):
+//    a concurrent GetThreadContext3 waits and sees the stopped context; a concurrent resume waits until the pause completes instead of clearing pause_req mid-loop and stranding it
+typedef struct { thr_t t; pthread_t th; wk_t *w; int op; _Atomic int done; int64_t rc; hz_ctx_t ctx; } peer_t;
+static void *peer_main(void *p) {
+    peer_t *q = p;
+    pthread_setspecific(g_keythr, &q->t);
+    if (q->op == 0) q->rc = activity(q->w, 0);
+    else q->rc = context(q->w, &q->ctx);
+    atomic_store(&q->done, 1);
+    return NULL;
+}
+static peer_t *peer_begin(wk_t *w, int op) {
+    peer_t *q = calloc(1, sizeof *q); q->w = w; q->op = op;
+    pthread_cond_init(&q->t.cv, NULL); pthread_cond_init(&q->t.pcv, NULL);
+    q->t.started = 1; q->t.prio = 44; q->t.core = 0; q->t.mask = 1;
+    if (pthread_create(&q->th, NULL, peer_main, q)) { perror("pthread_create"); exit(2); }
+    return q;
+}
+static int act_busy_of(wk_t *w) { g_lock(); int v = w->t.act_busy; g_unlock(); return v; }
+static int act_waiters_of(wk_t *w) { g_lock(); int v = w->t.act_waiters; g_unlock(); return v; }
+static int concurrent_activity_serialized(void) {
+    cs_t c = {.name = "concurrent_activity_serialized"};
+    // 7a: GetThreadContext3 during an in-flight pause waits and reads the real context once the target stops
+    wk_t *w = worker_start(M_HOST_FIRST);
+    if (!advances(w, 2000)) fail(&c, "7a: worker never ran");
+    req_t *p1 = pause_begin(w);
+    if (!WAIT_UNTIL(act_busy_of(w), 2000)) fail(&c, "7a: pause never entered wait");
+    peer_t *gc = peer_begin(w, 1);
+    if (!WAIT_UNTIL(act_waiters_of(w) == 1, 2000)) fail(&c, "7a: GetThreadContext3 did not wait for in-flight pause");
+    if (atomic_load(&gc->done)) fail(&c, "7a: GetThreadContext3 returned before pause completed");
+    atomic_store(&w->enter_go, 1);
+    int64_t rc = -1;
+    if (!pause_end(p1, 2000, &rc) || rc) fail(&c, "7a: pause failed (%#llx)", (unsigned long long)rc);
+    if (!WAIT_UNTIL(atomic_load(&gc->done), 2000)) fail(&c, "7a: GetThreadContext3 did not finish");
+    else if (gc->rc || !gc->ctx.sp) fail(&c, "7a: GetThreadContext3 returned %#llx sp=%#llx", (unsigned long long)gc->rc, (unsigned long long)gc->ctx.sp);
+    pthread_join(gc->th, NULL); pthread_cond_destroy(&gc->t.cv); pthread_cond_destroy(&gc->t.pcv); free(gc);
+    if (activity(w, 0)) fail(&c, "7a: resume failed");
+    atomic_store(&w->release, 1);
+    if (!WAIT_UNTIL(atomic_load(&w->in_spin), 2000) || !advances(w, 2000)) fail(&c, "7a: worker did not run after resume");
+    worker_end(w);
+
+    // 7b: resume during an in-flight pause waits for the pause instead of clearing pause_req and stranding the pauser
+    w = worker_start(M_HOST_FIRST);
+    if (!advances(w, 2000)) fail(&c, "7b: worker never ran");
+    req_t *p2 = pause_begin(w);
+    if (!WAIT_UNTIL(act_busy_of(w), 2000)) fail(&c, "7b: pause never entered wait");
+    peer_t *res = peer_begin(w, 0);
+    if (!WAIT_UNTIL(act_waiters_of(w) == 1, 2000)) fail(&c, "7b: resume did not wait for in-flight pause");
+    if (atomic_load(&res->done)) fail(&c, "7b: resume returned before pause completed");
+    atomic_store(&w->release, 1);
+    atomic_store(&w->enter_go, 1);
+    rc = -1;
+    if (!pause_end(p2, 2000, &rc) || rc) fail(&c, "7b: pause failed or stranded (%#llx)", (unsigned long long)rc);
+    if (!WAIT_UNTIL(atomic_load(&res->done), 2000)) fail(&c, "7b: resume did not finish");
+    else if (res->rc) fail(&c, "7b: resume returned %#llx", (unsigned long long)res->rc);
+    pthread_join(res->th, NULL); pthread_cond_destroy(&res->t.cv); pthread_cond_destroy(&res->t.pcv); free(res);
+    if (!WAIT_UNTIL(atomic_load(&w->in_spin), 2000) || !advances(w, 2000)) fail(&c, "7b: worker did not run after serialized pause+resume");
+    worker_end(w);
+    return finish(&c);
+}
+
 int main(void) {
     alarm(120);   // a bug in the test must not hang the run
     setenv("DM_PREEMPT", "0", 1);
@@ -263,6 +397,8 @@ int main(void) {
     ok &= stale_after_svc_enter_pause();
     ok &= resume_then_pause_while_handler_parked();
     ok &= exit_and_close_during_pause();
+    ok &= invalid_states();
+    ok &= concurrent_activity_serialized();
     printf("%s\n", ok ? "all pause tests passed" : "pause tests FAILED");
     return ok ? 0 : 1;
 }

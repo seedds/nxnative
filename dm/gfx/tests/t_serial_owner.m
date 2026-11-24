@@ -570,6 +570,46 @@ int main(void) { @autoreleasepool {
         }
     }
 
+    {   // Buffer-backed textures and views count their backing MTLBuffer too (issue #3229): a replaced sparse-pool run buffer waits in g_retire_wait until every live/ghost/pinned
+        // texture or view over it is upgraded or dropped, then retire_resume hands the buffer back to own_hook_drop
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (dev) {
+            NSUInteger row = MAX((NSUInteger)64, [dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatRGBA8Unorm]);
+            id<MTLBuffer> buf1 = [dev newBufferWithLength:row * 4 options:MTLResourceStorageModeShared];
+            id<MTLBuffer> buf2 = [dev newBufferWithLength:row * 4 options:MTLResourceStorageModeShared];
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+            d.resourceOptions = buf1.resourceOptions; d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+            id<MTLTexture> t1 = [buf1 newTextureWithDescriptor:d offset:0 bytesPerRow:row];
+            id<MTLTexture> t2 = [buf2 newTextureWithDescriptor:d offset:0 bytesPerRow:row];
+            id<MTLTexture> v1 = [t1 newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+            CHECK(buf1 && buf2 && t1 && t2 && v1 && t1.buffer == buf1 && v1.parentTexture == t1, "two buffer-backed textures and an sRGB view");
+            if (t1 && t2 && v1) {
+                uint64_t s1 = (1ull << 62) + 98001, s2 = 98002, s3 = (1ull << 62) + 98003;
+                share(t1, 1); tex_put(s1, t1); tex_put(s2, v1);   // s1 live on t1, s2 ghost on view v1 of t1
+                CHECK(live_holds(t1) && live_holds(buf1) && holds(buf1), "a buffer-backed texture holds its backing buffer");
+                CHECK(retire(buf1) == 0 && waiting() == 1, "retiring a held backing buffer defers it in g_retire_wait");
+                step("buffer-backed texture held");
+                int before = ndropped(buf1, 0);
+                own_upgrade(t1, t2, s1, t2);
+                CHECK(tex_get(s1) == t2 && live_holds(buf2) && holds(buf1) && waiting() == 1, "upgrading s1 moves it to buf2 while ghost view s2 still keeps buf1 waiting");
+                CHECK(ndropped(buf1, 0) == before, "buf1 is not handed back while s2 still holds v1");
+                step("buffer-backed upgrade with remaining view");
+                CHECK(own_view_drop_stale(s2, v1) == 1 && !holds(buf1) && !waiting() && ndropped(buf1, 0) == before + 1, "dropping the last view releases buf1 from g_retire_wait");
+                step("buffer-backed view dropped");
+                // own_drop_object drops live, ghost, and sharing-table entries naming t2 (or views of it) and releases buf2
+                id<MTLTexture> v2 = [t2 newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB];
+                tex_put(s2, v2); tex_put(s3, t2);
+                CHECK(retire(buf2) == 0 && waiting() == 1, "buf2 waits while t2 and v2 hold it");
+                before = ndropped(buf2, 0);
+                int before_t2 = ndropped(t2, 0);
+                own_drop_object(t2);
+                CHECK(!tex_get(s1) && !tex_get(s2) && !tex_get(s3) && !shared(t2), "own_drop_object removes live, ghost, view, and sharing-table entries");
+                CHECK(!holds(t2) && !holds(buf2) && !waiting() && ndropped(buf2, 0) == before + 1 && ndropped(t2, 0) >= before_t2 + 1, "and retires both t2 and its backing buffer buf2");
+                step("own_drop_object");
+            }
+        }
+    }
+
     printf("serial owner: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

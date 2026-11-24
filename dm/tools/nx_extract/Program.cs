@@ -408,6 +408,19 @@ static class P {
         public string Path; public byte[] Name; public bool Directory, Damaged; public long Size; public ulong A, B;
         public List<ImageEntry> Children = new List<ImageEntry>();
     }
+    static void OpenImageFile(IFileSystem fs, ref UniqueRef<IFile> file, string path) {
+        var name = path.ToU8Span();
+        var result = fs.OpenFile(ref file, name, OpenMode.Read);
+        // LibHac's string overload validates guest paths and rejects the colon in names
+        // such as the literal "D:" directory in a DLC RomFS. The image writer already has
+        // an absolute archive path from enumeration. Read it through the typed overload.
+        if (ResultFs.InvalidCharacter.Includes(result) && fs is RomFsFileSystem) {
+            using var archived = new LibHac.Fs.Path();
+            archived.SetShallowBuffer(name.Value).ThrowIfFailure();
+            result = fs.OpenFile(ref file, in archived, OpenMode.Read);
+        }
+        result.ThrowIfFailure();
+    }
     // Stream the merged, integrity-checked filesystem directly into DMROMFS1. No RomFS directories or per-resource host files are created.
     static void WriteImage(Func<IFileSystem> open, string dst) {
         IFileSystem fs = open?.Invoke();
@@ -438,7 +451,7 @@ static class P {
                     if (e.Directory) continue;
                     e.A = (ulong)output.Position; e.B = (ulong)e.Size; files++; bytes += e.Size;
                     using var f = new UniqueRef<IFile>();
-                    fs.OpenFile(ref f.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                    OpenImageFile(fs, ref f.Ref, e.Path);
                     try { WriteStream(f.Get, output, e.Size, buffer); }
                     catch (HorizonResultException x) when (HashError(x)) {
                         fs = Failed(e.Path, open);
@@ -446,7 +459,7 @@ static class P {
                         e.Damaged = true;
                         g_lenientFs ??= g_lenient();
                         using var lf = new UniqueRef<IFile>();
-                        g_lenientFs.OpenFile(ref lf.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                        OpenImageFile(g_lenientFs, ref lf.Ref, e.Path);
                         output.Position = (long)e.A; output.SetLength(output.Position);
                         WriteStream(lf.Get, output, e.Size, buffer);
                     }

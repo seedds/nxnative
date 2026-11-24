@@ -285,9 +285,11 @@ static int mesh_draw_ok(id<MTLRenderPipelineState> ps, int fragment) {
     uint8_t px[4]; [t getBytes:px bytesPerRow:16 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
     return fragment ? px[0] == 0 && px[1] == 255 && px[2] == 0 && px[3] == 255 : px[0] == 255 && px[1] == 0 && px[2] == 0 && px[3] == 255;
 }
-// Native mesh pipelines (mtk_build) beside the bases: one built through the MTLDevice is compiled into the flush period in the background, written to a p file (no vertex layout), and a later start takes it from
-// that file without compiling, with or without a task shader; a compacting prewarm captures one taken from a plain file again; a depth-only one (no pixel shader) takes the noted
-// empty fragment and goes the same way; one whose function has no Metal 4 descriptor is built through the MTLDevice and not captured
+// Native mesh pipelines (mtk_build) beside the pairs' bases: each is its own base (colour state open) specialized; the base is compiled into the flush period, written to a p file (no vertex
+// layout), and a later start takes it from that file without compiling, with or without a task shader; another colour state specializes the same base, nothing compiled; two threads
+// that ask for one base compile it once; a compacting prewarm captures one taken from a plain file again; a depth-only one (no pixel shader) takes the noted empty fragment and goes the
+// same way; one whose mesh shader hands per-primitive values on (mesh_prim) or whose pixel shader reads the primitive ID is built whole; one whose function has no Metal 4 descriptor
+// is built through the MTLDevice and not captured
 static void mesh_pipelines(void) {
     char mdir[] = "/tmp/t_pso_mesh.XXXXXX"; if (!mkdtemp(mdir)) abort();
     NSString *saved = g_arch_dir; g_arch_dir = @(mdir); g_arch4 = @[]; g_arch4p = @[]; NSError *err = nil;
@@ -301,25 +303,30 @@ static void mesh_pipelines(void) {
         "  out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n"
         "[[mesh]] void mt(Tri out, const object_data PL &pl [[payload]]) { out.set_primitive_count(pl.n); out.set_vertex(0, MV{float4(-1, -1, 0.5, 1)}); out.set_vertex(1, MV{float4(3, -1, 0.5, 1)}); out.set_vertex(2, MV{float4(-1, 3, 0.5, 1)});\n"
         "  out.set_index(0, 0); out.set_index(1, 1); out.set_index(2, 2); }\n"
-        "fragment float4 mf() { return float4(0, 1, 0, 1); }\n";
+        "fragment float4 mf() { return float4(0, 1, 0, 1); }\n"
+        "fragment float4 mfp(uint pid [[primitive_id]]) { return float4(0, pid == 0 ? 1 : 0, 0, 1); }\n";
     id<MTLLibrary> ml = [g_dev newLibraryWithSource:src options:nil error:&err], ul = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// unregistered\n"] options:nil error:&err];
     EXPECT("mesh: fixture library", 1, ml != nil && ul != nil);
     if (!ml || !ul) { g_arch_dir = saved; return; }
-    NvShader *ms = [NvShader new], *mt = [NvShader new], *os = [NvShader new], *fs = [NvShader new], *um = [NvShader new];
+    NvShader *ms = [NvShader new], *mt = [NvShader new], *os = [NvShader new], *fs = [NvShader new], *fp = [NvShader new], *mp = [NvShader new], *um = [NvShader new];
     ms->fn = test_fn(ml, @"ms", 1); ms->stage = 4; ms->mesh_kind = 2; ms->mesh_threads = 1; ms->mesh_notask = 1; ms->mesh_obj = test_fn(ml, @"ob", 1); strlcpy(ms->key, "mesh", sizeof ms->key);
     mt->fn = test_fn(ml, @"mt", 1); mt->stage = 4; mt->mesh_kind = 2; mt->mesh_threads = 1; strlcpy(mt->key, "mesh-task", sizeof mt->key);
     os->fn = test_fn(ml, @"os", 1); os->stage = 3; os->mesh_kind = 1; os->mesh_threads = 1; os->mesh_payload = 4; strlcpy(os->key, "task", sizeof os->key);
     fs->fn = test_fn(ml, @"mf", 1); fs->stage = 1; strlcpy(fs->key, "pixel", sizeof fs->key);
+    fp->fn = test_fn(ml, @"mfp", 1); fp->stage = 1; fp->rf.reads_prim_id = 1; strlcpy(fp->key, "pixel-pid", sizeof fp->key);
+    mp->fn = test_fn(ml, @"ms", 1); mp->stage = 4; mp->mesh_kind = 2; mp->mesh_threads = 1; mp->mesh_notask = 1; mp->mesh_prim = 1; mp->mesh_obj = test_fn(ml, @"ob", 1); strlcpy(mp->key, "mesh-prim", sizeof mp->key);
     um->fn = test_fn(ul, @"ms", 0); um->stage = 4; um->mesh_kind = 2; um->mesh_threads = 1; um->mesh_notask = 1; um->mesh_obj = test_fn(ul, @"ob", 0); strlcpy(um->key, "mesh-u", sizeof um->key);
     pso_key k; memset(&k, 0, sizeof k); k.cfmt[0] = MTLPixelFormatRGBA8Unorm; k.chmask = 0xf; k.samples = 1;
     pso_key kz; memset(&kz, 0, sizeof kz); kz.cfmt[0] = MTLPixelFormatRGBA8Unorm; kz.samples = 1;   // depth only: no pixel shader, no colour written
-    uint64_t built = g_mtk_built, arch = g_mtk_arch, dev = g_mtk_dev; int pending = g_arch_new, got = 0;
+    uint64_t built = g_mtk_built, arch = g_mtk_arch, dev = g_mtk_dev, spec = g_mtk_spec; int pending = g_arch_new, got = 0;
+    mtk_base_forget();
     id<MTLRenderPipelineState> p1 = mtk_build(&k, nil, ms, fs, &err, &got), p2 = mtk_build(&k, os, mt, fs, &err, NULL), p3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
     EXPECT("mesh: pipelines", 1, p1 && p2 && p3);
     EXPECT("mesh: built", built + 3, g_mtk_built);
-    EXPECT("mesh: not from the archive", 0, got);
-    dispatch_sync(arch_harvest_q(), ^{});   // their captures, in the background
-    EXPECT("mesh: captured for the archive", pending + 3, g_arch_new);
+    EXPECT("mesh: not from the archive, its base compiled here", -1, got);
+    EXPECT("mesh: each specialized from its base", spec + 3, g_mtk_spec);
+    EXPECT("mesh: bases captured for the archive", pending + 3, g_arch_new);
+    EXPECT("mesh, the same again: its base is made already", 1, mtk_build(&k, nil, ms, fs, &err, &got) != nil && got == 2 && g_mtk_built == built + 3);
     EXPECT("mesh: its draw writes", 1, mesh_draw_ok(p1, 1));
     EXPECT("mesh with a task shader: its draw writes", 1, mesh_draw_ok(p2, 1));
     EXPECT("mesh, depth only: draws nothing into colour", 1, mesh_draw_ok(p3, 0));
@@ -329,35 +336,53 @@ static void mesh_pipelines(void) {
     EXPECT("mesh: a p file (no vertex layout)", 1, names.count == 1 && [names[0] hasPrefix:@"p"]);
     NSString *first = names.firstObject;
     id<MTL4Archive> file = first ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[NSString stringWithFormat:@"%s/%@", mdir, first]] error:&err] : nil;
-    g_arch4p = file ? @[file] : @[];   // as a new start with that file
+    g_arch4p = file ? @[file] : @[]; mtk_base_forget();   // as a new start with that file
     built = g_mtk_built; pending = g_arch_new;
     id<MTLRenderPipelineState> q1 = mtk_build(&k, nil, ms, fs, &err, &got), q2 = mtk_build(&k, os, mt, fs, &err, NULL), q3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
     EXPECT("mesh again: from the archive", arch + 3, g_mtk_arch);
-    EXPECT("mesh again: reported as archived", 1, got);
+    EXPECT("mesh again: reported as a base that needed no compile", 2, got);
     EXPECT("mesh again: not built", built, g_mtk_built);
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("mesh again: nothing captured", pending, g_arch_new);
     EXPECT("mesh again: its draw writes", 1, mesh_draw_ok(q1, 1));
     EXPECT("mesh again with a task shader: its draw writes", 1, mesh_draw_ok(q2, 1));
     EXPECT("mesh again, depth only: draws nothing into colour", 1, mesh_draw_ok(q3, 0));
-    pso_key kb = k; kb.cfmt[0] = MTLPixelFormatBGRA8Unorm;   // other colour state: another pipeline, not in the file
-    EXPECT("mesh, other colour format: built", 1, mtk_build(&kb, nil, ms, fs, &err, NULL) != nil && g_mtk_built == built + 1);
-    dispatch_sync(arch_harvest_q(), ^{});
+    pso_key kb = k; kb.cfmt[0] = MTLPixelFormatBGRA8Unorm;   // other colour state: specializes the same base, nothing compiled
+    EXPECT("mesh, other colour format: same base specialized", 1, mtk_build(&kb, nil, ms, fs, &err, &got) != nil && got == 2 && g_mtk_built == built);
+    // Two threads asking for the same uncached base compile it once
+    mtk_base_forget(); g_arch4p = @[];
+    built = g_mtk_built; __block int r0 = 0, r1 = 0; __block id<MTLRenderPipelineState> c0 = nil, c1 = nil;
+    dispatch_group_t cg = dispatch_group_create();
+    dispatch_group_async(cg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ c0 = mtk_build(&k, nil, ms, fs, nil, &r0); });
+    dispatch_group_async(cg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ c1 = mtk_build(&k, nil, ms, fs, nil, &r1); });
+    dispatch_group_wait(cg, DISPATCH_TIME_FOREVER);
+    EXPECT("mesh, concurrent: both got pipelines", 1, c0 && c1);
+    EXPECT("mesh, concurrent: base compiled once", built + 1, g_mtk_built);
     arch_flush_wait();
     // the same file as a plain one during a compacting prewarm: captured again from its functions, for the file that replaces the old ones
-    g_arch4p = @[]; g_arch4 = file ? @[file] : @[];
+    mtk_base_forget(); g_arch4p = @[]; g_arch4 = file ? @[file] : @[];
     g_compact_enabled = 1; g_compacted = 0; atomic_store(&g_warm_running, 1); pending = g_arch_new;
     EXPECT("mesh, compaction: a pipeline", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil);
     EXPECT("mesh, compaction: from the archive", arch + 4, g_mtk_arch);
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("mesh, compaction: captured again", 1, g_compacted);
-    g_compact_state = calloc(g_arch4.count + 1, 1); g_compacted = 0;   // a pick that leaves the file it is in: not captured again
+    mtk_base_forget(); g_compact_state = calloc(g_arch4.count + 1, 1); g_compacted = 0;   // a pick that leaves the file it is in: not captured again
     EXPECT("mesh, compaction of other files: a pipeline", 1, mtk_build(&k, nil, ms, fs, &err, NULL) != nil);
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("mesh, compaction of other files: not captured again", 0, g_compacted);
     g_compact_state = NULL;
     EXPECT("mesh, compaction: waits for the flush", pending + 1, g_arch_new);
     atomic_store(&g_warm_running, 0); g_compact_enabled = 0; g_compacted = 0;
+    arch_flush_wait();
+    // Whole-pipeline fallbacks: mesh_prim (per-primitive outputs) and reads_prim_id (fragment [[primitive_id]]) never use a base
+    spec = g_mtk_spec; built = g_mtk_built; g_arch4 = @[]; g_arch4p = @[]; mtk_base_forget();
+    id<MTLRenderPipelineState> wp1 = mtk_build(&k, nil, mp, fs, &err, &got);
+    EXPECT("mesh_prim: built whole, not specialized", 1, wp1 != nil && got == 0 && g_mtk_spec == spec && g_mtk_built == built + 1);
+    EXPECT("mesh_prim: its draw writes", 1, mesh_draw_ok(wp1, 1));
+    id<MTLRenderPipelineState> wp2 = mtk_build(&k, nil, ms, fp, &err, &got);
+    EXPECT("mesh reads_prim_id: built whole, not specialized", 1, wp2 != nil && got == 0 && g_mtk_spec == spec && g_mtk_built == built + 2);
+    EXPECT("mesh reads_prim_id: its draw writes", 1, mesh_draw_ok(wp2, 1));
+    dispatch_sync(arch_harvest_q(), ^{});
     arch_flush_wait();
     // no Metal 4 descriptor: built through the MTLDevice, nothing captured
     pending = g_arch_new; built = g_mtk_built;
@@ -368,7 +393,7 @@ static void mesh_pipelines(void) {
     dispatch_sync(arch_harvest_q(), ^{});
     EXPECT("mesh without a descriptor: not captured", pending, g_arch_new);
     EXPECT("mesh without a descriptor: its draw writes", 1, mesh_draw_ok(up, 1));
-    [NSFileManager.defaultManager removeItemAtPath:@(mdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(mdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[]; mtk_base_forget();
 }
 // Notes whether the compaction marker exists while the serializer writes (issue #342: a flush that does not return leaves it)
 @interface MarkerSerializer : NSObject { @public id<MTL4PipelineDataSetSerializer> ser; int calls, marked; } @end
@@ -801,6 +826,347 @@ static void app_folder_claim(void) {
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
 }
 
+// Injects per-stride compile failures across both the current compiler and fresh compilers created by ep_new().
+@interface StrideFaultCompiler : NSObject {
+@public
+    id<MTL4Compiler> compiler;
+    NSUInteger transient_stride, permanent_stride, reject_stride;
+    _Atomic int transient_left;
+    _Atomic int permanent_calls, reject_calls;
+}
+@end
+@implementation StrideFaultCompiler
+- (id)forwardingTargetForSelector:(SEL)selector { return compiler; }
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    NSUInteger stride = d.vertexDescriptor.layouts[16].stride;
+    if (permanent_stride && stride == permanent_stride) {
+        atomic_fetch_add(&permanent_calls, 1);
+        if (error) *error = compile_error(2);
+        return nil;
+    }
+    if (reject_stride && stride == reject_stride) {
+        atomic_fetch_add(&reject_calls, 1);
+        if (error) *error = compile_error(1);
+        return nil;
+    }
+    if (transient_stride && stride == transient_stride) {
+        int left = atomic_load(&transient_left);
+        while (left > 0 && !atomic_compare_exchange_weak(&transient_left, &left, left - 1)) {}
+        if (left > 0) {
+            if (error) *error = compile_error(2);
+            return nil;
+        }
+    }
+    return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
+}
+@end
+
+@interface StrideFaultDevice : NSObject {
+@public
+    id<MTLDevice> device;
+    StrideFaultCompiler *proto;
+}
+@end
+@implementation StrideFaultDevice
+- (id)forwardingTargetForSelector:(SEL)selector { return device; }
+- (id<MTL4Compiler>)newCompilerWithDescriptor:(MTL4CompilerDescriptor *)d error:(NSError **)error {
+    id<MTL4Compiler> real = [device newCompilerWithDescriptor:d error:error];
+    if (!real) return nil;
+    StrideFaultCompiler *wrap = [StrideFaultCompiler new];
+    wrap->compiler = real;
+    wrap->transient_stride = proto->transient_stride;
+    wrap->permanent_stride = proto->permanent_stride;
+    wrap->reject_stride = proto->reject_stride;
+    atomic_store(&wrap->transient_left, atomic_load(&proto->transient_left));
+    return (id<MTL4Compiler>)wrap;
+}
+@end
+
+static int run_self_bundle_open(NSString *bundle, int count, int with_compute, uint64_t *mask_out, int *usable_out, int *cs_usable_out) {
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:NSProcessInfo.processInfo.arguments[0]];
+    t.arguments = @[@"--bundle-open", bundle, [NSString stringWithFormat:@"%d", count], with_compute ? @"1" : @"0"];
+    NSMutableDictionary *e = [NSProcessInfo.processInfo.environment mutableCopy];
+    e[@"DM_PSO_BUNDLE"] = bundle;
+    e[@"DM_PSO_ARCHIVE"] = @"off";
+    t.environment = e;
+    NSPipe *pipe = [NSPipe pipe];
+    t.standardOutput = pipe;
+    t.standardError = pipe;
+    if (![t launchAndReturnError:nil]) return -1;
+    NSData *out = [pipe.fileHandleForReading readDataToEndOfFile];
+    [t waitUntilExit];
+    NSString *text = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding] ?: @"";
+    int usable = -1, cs_usable = -1; uint64_t mask = 0;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if ([line hasPrefix:@"BUNDLE_USABLE="]) usable = [line substringFromIndex:14].intValue;
+        else if ([line hasPrefix:@"BUNDLE_MASK="]) mask = strtoull([line substringFromIndex:12].UTF8String, NULL, 16);
+        else if ([line hasPrefix:@"BUNDLE_CS_USABLE="]) cs_usable = [line substringFromIndex:17].intValue;
+    }
+    if (usable_out) *usable_out = usable;
+    if (mask_out) *mask_out = mask;
+    if (cs_usable_out) *cs_usable_out = cs_usable;
+    if (t.terminationStatus || usable < 0) fprintf(stderr, "--bundle-open output:\n%s\n", text.UTF8String);
+    return t.terminationStatus;
+}
+
+static MTLRenderPipelineDescriptor *bundle_desc(int i) {
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+    d.vertexDescriptor.layouts[16].stride = 16 * (NSUInteger)(100 + i);
+    return d;
+}
+
+static MTL4ComputePipelineDescriptor *bundle_compute_desc(void) {
+    NSError *err = nil;
+    NSString *ksrc = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void bundle_k(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i ^ 0x5au; }\n";
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:ksrc options:nil error:&err];
+    if (!lib) return nil;
+    lib_tag(lib, @"fixture-bundle-cs.metallib");
+    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"bundle_k"], lib, @"bundle_k", nil);
+    MTL4ComputePipelineDescriptor *cd = [MTL4ComputePipelineDescriptor new];
+    cd.computeFunctionDescriptor = fn4_of(fn);
+    return cd;
+}
+
+static void bundle_open_verify(int count, int with_compute) {
+    pso4_init();
+    int usable = 0; uint64_t mask = 0;
+    for (int i = 0; i < count; i++) {
+        NSError *err = nil;
+        MTLRenderPipelineDescriptor *d = bundle_desc(i);
+        if (pso_build_ex(d, 0, &err, 0) != nil) { usable++; mask |= 1ull << i; }
+    }
+    int cs_usable = 0;
+    if (with_compute) {
+        MTL4ComputePipelineDescriptor *cd = bundle_compute_desc();
+        cs_usable = cd && arch_lookup(cd, 1, NULL) != nil;
+    }
+    printf("BUNDLE_USABLE=%d\nBUNDLE_MASK=%llx\nBUNDLE_CS_USABLE=%d\n", usable, (unsigned long long)mask, cs_usable);
+    fflush(stdout);
+}
+
+// 1. Recoverable interruption: period 2 dies partway through (2 captured + 1 in-flight fallback);
+// recovery recaptures all 3 in a fresh period after the serialization gate is released and publishes a complete bundle.
+static void bundle_recovery_recoverable(void) {
+    char sdir[] = "/tmp/t_pso_bstage.XXXXXX", bdir[] = "/tmp/t_pso_bout.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    for (int i = 0; i < 12; i++) {
+        NSError *err = nil;
+        ArchEpoch *ep = g_ep;
+        ArchiveGateCompiler *gate = nil;
+        if (i == 6) {
+            gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = 2; gate->calls = 1;
+            ep->comp = (id<MTL4Compiler>)gate;
+        }
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        if (gate) ep->comp = gate->compiler;
+        EXPECT("recoverable: pipeline built", 1, ps != nil);
+    }
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 12);
+    EXPECT("recoverable: pre_bundle_out succeeded", 1, pub);
+    EXPECT("recoverable: 12 requested, 12 published", 1, g_pkg_last_requested == 12 && g_pkg_last_published == 12);
+    EXPECT("recoverable: 3 lost keys recovered in 1 round", 1, g_pkg_last_recovered == 3 && g_pkg_last_rounds == 1);
+    EXPECT("recoverable: 0 missing and 0 rejected", 1, g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0 && g_pkg_last_rejected == 0);
+    // Retained descriptors are released once their periods write.
+    int retained = 0;
+    os_unfair_lock_lock(&g_pkg_lock);
+    for (ArchPkgItem *it in g_pkg_items.allValues) retained += it->desc != nil;
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("recoverable: retained descriptors released after publish", 0, retained);
+    // Every published archive file has a matching pipelines script for other GPUs.
+    NSArray<NSString *> *out_files = archive_files(@(bdir));
+    NSArray<NSString *> *scripts = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(bdir) error:nil]
+                                    filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4-json'"]];
+    EXPECT("recoverable: scripts match archive file count", out_files.count, scripts.count);
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("recoverable: fresh open succeeded", 0, rc);
+    EXPECT("recoverable: all 12 keys usable in fresh process", 12, usable);
+    EXPECT("recoverable: exact key mask usable", (1ull << 12) - 1, mask);
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 2. Repeated compiler-death failure with isolation:
+// base 4 enters period 2, base 5 suffers a transient double-death (unconfirmed once), base 6 always kills the compiler service.
+// Recovery rescues base 4 (known-buildable) and base 5 (isolated unconfirmed), bounds retries on base 6, reports it missing, and returns incomplete (2).
+static void bundle_recovery_repeated_failure(void) {
+    char sdir[] = "/tmp/t_pso_brep.XXXXXX", bdir[] = "/tmp/t_pso_brep_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    id<MTLDevice> saved_dev = g_dev; id<MTL4Compiler> saved_comp4 = g_comp4;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    StrideFaultCompiler *proto = [StrideFaultCompiler new];
+    proto->transient_stride = 16 * 105;   // base 5: fails first capture + plain fallback (2 calls), succeeds on recovery
+    atomic_store(&proto->transient_left, 2);
+    proto->permanent_stride = 16 * 106;   // base 6: always kills MTLCompilerService
+
+    StrideFaultDevice *fdev = [StrideFaultDevice new]; fdev->device = saved_dev; fdev->proto = proto;
+    StrideFaultCompiler *fplain = [StrideFaultCompiler new];
+    fplain->compiler = saved_comp4; fplain->transient_stride = proto->transient_stride; fplain->permanent_stride = proto->permanent_stride;
+    atomic_store(&fplain->transient_left, 1);
+
+    g_dev = (id<MTLDevice>)fdev;
+    g_comp4 = (id<MTL4Compiler>)fplain;
+    // Swap current epoch's compiler through the same fault wrapper.
+    ArchEpoch *ep0 = g_ep;
+    StrideFaultCompiler *fep = [StrideFaultCompiler new];
+    fep->compiler = ep0->comp; fep->transient_stride = proto->transient_stride; fep->permanent_stride = proto->permanent_stride;
+    atomic_store(&fep->transient_left, 1);
+    ep0->comp = (id<MTL4Compiler>)fep;
+
+    uint64_t key6 = arch_key(pso_desc4(bundle_desc(6), 1, 0));
+    for (int i = 0; i < 12; i++) {
+        NSError *err = nil;
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        EXPECT("repeated: expected build outcome", (i != 5 && i != 6), ps != nil);
+    }
+    // After the initial pass, clear transient_left on proto so recovery's fresh compilers let base 5 succeed while base 6 keeps dying.
+    atomic_store(&proto->transient_left, 0);
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 12);
+    // Restore device and compilers before fresh-process verification.
+    ep0->comp = fep->compiler;
+    g_comp4 = saved_comp4;
+    g_dev = saved_dev;
+    arch_flush_wait();
+    os_unfair_lock_lock(&g_ep_lock); g_ep = ep_new(); os_unfair_lock_unlock(&g_ep_lock);
+
+    EXPECT("repeated: pre_bundle_out reports incomplete (2)", 2, pub);
+    EXPECT("repeated: 12 requested, 11 published", 1, g_pkg_last_requested == 12 && g_pkg_last_published == 11);
+    EXPECT("repeated: base 4 and base 5 recovered despite poison base 6", 2, g_pkg_last_recovered);
+    EXPECT("repeated: retries bounded at max", g_arch_pkg_max_retries, g_pkg_last_rounds);
+    EXPECT("repeated: exactly 1 repeated compiler-death key missing, 0 rejected", 1, g_pkg_last_missing_died == 1 && g_pkg_last_missing_lost == 0 && g_pkg_last_rejected == 0);
+    int retries6 = -1, state6 = -1;
+    os_unfair_lock_lock(&g_pkg_lock);
+    ArchPkgItem *it6 = g_pkg_items[@(key6)];
+    if (it6) { retries6 = it6->retries; state6 = it6->state; }
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("repeated: poison key hit retry bound as unconfirmed compiler death", 1, retries6 == g_arch_pkg_max_retries && state6 == ARCH_PKG_LOST_UNCONFIRMED);
+
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("repeated: fresh open succeeded", 0, rc);
+    EXPECT("repeated: all 11 innocent keys usable in fresh process", 11, usable);
+    EXPECT("repeated: only base 6 missing from usable mask", ((1ull << 12) - 1) & ~(1ull << 6), mask);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 3. Permanently rejected pipeline vs compiler-death loss:
+// base 12 fails with an ordinary non-compiler-death error on both capture and plain; base 6 triggers a recoverable compiler-death interruption.
+// Base 12 must not be retried, remains classified as permanently rejected, and does not prevent the 12 valid pipelines from publishing cleanly.
+static void bundle_recovery_rejected_vs_lost(void) {
+    char sdir[] = "/tmp/t_pso_brej.XXXXXX", bdir[] = "/tmp/t_pso_brej_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    id<MTL4Compiler> saved_comp4 = g_comp4;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    StrideFaultCompiler *fplain = [StrideFaultCompiler new];
+    fplain->compiler = saved_comp4; fplain->reject_stride = 16 * 112;
+    g_comp4 = (id<MTL4Compiler>)fplain;
+
+    uint64_t key12 = arch_key(pso_desc4(bundle_desc(12), 1, 0));
+    for (int i = 0; i < 13; i++) {
+        NSError *err = nil;
+        ArchEpoch *ep = g_ep;
+        id<MTL4Compiler> orig_ep_comp = ep->comp;
+        if (i == 6) {
+            ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = orig_ep_comp; gate->fail = 2; gate->calls = 1;
+            ep->comp = (id<MTL4Compiler>)gate;
+        } else if (i == 12) {
+            StrideFaultCompiler *rej = [StrideFaultCompiler new]; rej->compiler = orig_ep_comp; rej->reject_stride = 16 * 112;
+            ep->comp = (id<MTL4Compiler>)rej;
+        }
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        ep->comp = orig_ep_comp;
+        EXPECT("rejected vs lost: expected build outcome", i != 12, ps != nil);
+    }
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 13);
+    g_comp4 = saved_comp4;
+
+    EXPECT("rejected vs lost: pre_bundle_out succeeds for all valid keys", 1, pub);
+    EXPECT("rejected vs lost: 13 requested, 12 published, 1 rejected", 1, g_pkg_last_requested == 13 && g_pkg_last_published == 12 && g_pkg_last_rejected == 1);
+    EXPECT("rejected vs lost: 3 lost keys recovered, 0 missing", 1, g_pkg_last_recovered == 3 && g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0);
+    int retries12 = -1, state12 = -1; int has_desc12 = -1;
+    os_unfair_lock_lock(&g_pkg_lock);
+    ArchPkgItem *it12 = g_pkg_items[@(key12)];
+    if (it12) { retries12 = it12->retries; state12 = it12->state; has_desc12 = it12->desc != nil; }
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("rejected vs lost: permanently rejected key never retried and drops descriptor", 1, retries12 == 0 && state12 == ARCH_PKG_REJECTED && has_desc12 == 0);
+
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("rejected vs lost: fresh open succeeded", 0, rc);
+    EXPECT("rejected vs lost: all 12 valid keys usable in fresh process", 12, usable);
+    EXPECT("rejected vs lost: exact valid key mask usable", (1ull << 12) - 1, mask);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 4. Compute pipeline captured via arch_capture_cs in an interrupted period is also recovered and usable in a fresh process.
+static void bundle_recovery_compute(void) {
+    char sdir[] = "/tmp/t_pso_bcs.XXXXXX", bdir[] = "/tmp/t_pso_bcs_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 8;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    MTL4ComputePipelineDescriptor *cd = bundle_compute_desc();
+    EXPECT("compute recovery: descriptor built", 1, cd != nil);
+    NSError *err = nil; int cap = 0;
+    EXPECT("compute recovery: render 0 built", 1, pso_build(bundle_desc(0), 0, &err) != nil);
+    EXPECT("compute recovery: render 1 built", 1, pso_build(bundle_desc(1), 0, &err) != nil);
+    EXPECT("compute recovery: compute captured", 1, arch_capture_cs(cd, &err, &cap) != nil && cap == 1);
+    // Kill the compiler service before this period flushes: all 3 captures (2 render + 1 compute) are discarded.
+    arch_died(compile_error(2));
+    arch_flush_wait();
+    EXPECT("compute recovery: crashed period discarded before publish", 0, archive_files(@(sdir)).count);
+
+    int pub = pre_bundle_out(@(bdir), 3);
+    EXPECT("compute recovery: pre_bundle_out succeeded", 1, pub);
+    EXPECT("compute recovery: all 3 recovered", 1, g_pkg_last_requested == 3 && g_pkg_last_published == 3 && g_pkg_last_recovered == 3 && g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0);
+    int usable = -1, cs_usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 2, 1, &mask, &usable, &cs_usable);
+    EXPECT("compute recovery: fresh open succeeded", 0, rc);
+    EXPECT("compute recovery: both render bases usable", 2, usable);
+    EXPECT("compute recovery: compute pipeline usable in fresh process", 1, cs_usable);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -809,7 +1175,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
-    setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
+    int bundle_open = argc == 5 && !strcmp(argv[1], "--bundle-open");
+    setenv("DM_PSO_ARCHIVE", bundle_open ? "off" : argc == 3 ? argv[2] : dir, 1);
     mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nstruct I { float4 a [[attribute(0)]]; };\n"
         "vertex V vs(I in [[stage_in]], uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, in.a.w); return o; }\n"
@@ -831,6 +1198,20 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
     lib_tag(g_lib, @"fixture.metallib"); lib_tag(g_lib2, @"fixture2.metallib");   // as lib_from_file names the game's: their pipelines have index keys
+    if (bundle_open) {
+        bundle_open_verify(atoi(argv[3]), atoi(argv[4]));
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--bundle-recovery")) {
+        pso4_init();
+        bundle_recovery_recoverable();
+        bundle_recovery_repeated_failure();
+        bundle_recovery_rejected_vs_lost();
+        bundle_recovery_compute();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive bundle recovery: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--compiler-death")) {
         pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
@@ -883,6 +1264,33 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("headless timer wrote the capture", 4, archive_files(@(dir)).count);
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--adopt-prebuilt")) {
+        // Real Metal 4 end-to-end check of arch_adopt_prebuilt(): a no-layout base captured into p*.mtl4a is opened and indexed in the same process,
+        // clears g_pbase_miss, serves compile=0 lookups with zero recompiles, stays out of g_arch_use (arch_sweep), and is idempotent on repeat calls.
+        pso4_init();
+        MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil);
+        nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        EXPECT("adopt: misses before capture", 1, pso_build_ex(nd, 0, &err, 0) == nil);
+        EXPECT("adopt: miss cached in g_pbase_miss", 1, g_pbase_miss.n == 1);
+        MTL4RenderPipelineDescriptor *m4 = pso_desc4(nd, 1, 0);
+        EXPECT("adopt: Metal 4 base descriptor built", 1, m4 != nil);
+        EXPECT("adopt: prebuild capture succeeded", 1, arch_capture(m4, &err, 0, NULL) != nil);
+        arch_flush_wait();
+        EXPECT("adopt: wrote a p*.mtl4a file", 1, archive_files(@(dir)).count == 1 && [archive_files(@(dir))[0] hasPrefix:@"p"]);
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
+        arch_adopt_prebuilt();
+        EXPECT("adopt: indexed into g_arch_ix and g_arch_ixf", 1, g_arch_ix.n == 1 && g_arch_ixf.count == 1);
+        EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
+        EXPECT("adopt: excluded from arch_sweep", 0, g_arch_use.count);
+        EXPECT("adopt: compile=0 lookup finds base in same run", 1, pso_build_ex(nd, 0, &err, 0) != nil);
+        EXPECT("adopt: served from archive via index (1 ask, 0 compiles)", 1, g_pb_archived == arch0 + 1 && g_pb_built == built0 && g_arch_asks == asks0 + 1);
+        arch_adopt_prebuilt();
+        EXPECT("adopt: idempotent on already-opened file", 1, g_arch_ixf.count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive adopt prebuilt: %d checks, %d failed\n", checks, failed);
         return failed != 0;
     }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start

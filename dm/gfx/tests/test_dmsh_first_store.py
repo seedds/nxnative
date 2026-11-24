@@ -36,6 +36,25 @@ class FirstStore(unittest.TestCase):
         src = (BODY % (5, '!=')).replace('= 0u;', '= 0u;\n        (*spvDescriptorSet0.cp_s2)._m0[3] = 7u;')
         self.assertEqual(first_store(src, [32, 1, 1])[1], [('cp_s0', 1, 0), ('cp_s2', 3, 7)])
 
+    def test_bounded_stores(self):
+        bounded = (
+            'bool _80 = (1u + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        if (_80)\n'
+            '        {\n'
+            '            (*spvDescriptorSet0.cp_s0)._m0[_80 ? 1 : 0] = 0u;\n'
+            '        }\n'
+            '        bool _81 = (0u + (*spvDescriptorSet0.cp_c27)._m0[1].z) < (*spvDescriptorSet0.cp_c27)._m0[1].w;\n'
+            '        if (_81)\n'
+            '        {\n'
+            '            (*spvDescriptorSet0.cp_s2)._m0[0] = 7u;\n'
+            '        }'
+        )
+        src = (BODY % (5, '!=')).replace('(*spvDescriptorSet0.cp_s0)._m0[1] = 0u;', bounded)
+        out, stores = first_store(src, [32, 1, 1])
+        self.assertEqual(stores, [('cp_s0', 1, 0), ('cp_s2', 0, 7)])
+        self.assertNotIn('if (!_71)', out)
+        self.assertIn('int _73 = as_type<int>(_61) + _63;', out)
+
     def test_other_shapes_stay(self):
         for src, local in ((BODY % (4, '!='), [32, 1, 1]),   # the shift is not the local size: not one invocation
                            (BODY % (5, '=='), [32, 1, 1]),   # the opposite condition: all but the first

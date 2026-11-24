@@ -1,4 +1,6 @@
 // Memory accounting: when DM_MEMSTAT=<tsv path> is set, one line is logged per second (common to Mac / iOS).
+//   DM_MEMSTAT_WALK=<N>: run the region walk below every N seconds (default 1); lines between walks repeat the last walk's class columns while the totals (task_info) stay per second (between walks, unattributed reflects the footprint delta since the last walk).
+//   The walk is the costly part: vm_region_recurse_64 over the whole address space (~9.4 M cycles/frame on another core in OoT), every second; setting DM_MEMSTAT_WALK=30 cuts the memstat thread's CPU ~25x while keeping per-second totals.
 //   Totals: phys_footprint (task_info TASK_VM_INFO, which the iOS memory limit is based on), os_proc_available_memory (iOS only), Metal currentAllocatedSize
 //   Breakdown: walk this process's VM regions (vm_region_recurse_64, VM_REGION_SUBMAP_INFO_64), classify by region, and for each class record
 //         virtual = address space size (reserved-only counts too), resident = pages_resident, charged = dirty pages + compressed/swapped-out pages, deduplicated by VM object (≈ the part that goes into phys_footprint)
@@ -10,6 +12,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <TargetConditionals.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
 #include <stdatomic.h>
@@ -59,9 +62,26 @@ static void dump_regions(const char *path) {
 // between the lowest and highest address the task may use (TASK_VM_INFO min / max_address) and the thread count. An iPhone without the extended-virtual-addressing entitlement has
 // a few GB of address space (docs/reference/memory.md): a thread's stack, a realloc or a Metal heap that finds no room aborts there with the footprint far below the memory limit
 // (GitHub issue #2444). Regions inside a submap (the dyld shared cache) are "system" here and never a gap. Only mach calls and fprintf: it runs in the signal handler
+static void vm_fmt_size(char *b, size_t n, uint64_t v) {
+    if (v >= (1ull << 30)) snprintf(b, n, "%.2f GB", v / 1073741824.0);
+    else if (v >= (1ull << 20)) snprintf(b, n, "%.2f MB", v / 1048576.0);
+    else if (v >= (1ull << 10)) snprintf(b, n, "%.1f KB", v / 1024.0);
+    else snprintf(b, n, "%llu B", (unsigned long long)v);
+}
+typedef struct { uint64_t addr, size; uint32_t tag, prot; } vm_top_reg_t;
+static void vm_top_add(vm_top_reg_t top[4], uint64_t addr, uint64_t size, uint32_t tag, uint32_t prot) {
+    for (int i = 0; i < 4; i++) {
+        if (size > top[i].size) {
+            for (int j = 3; j > i; j--) top[j] = top[j - 1];
+            top[i] = (vm_top_reg_t){addr, size, tag, prot};
+            return;
+        }
+    }
+}
 void dm_vm_census(FILE *f) {
     enum { C_SYS = NC, NCC };
-    uint64_t virt[NCC] = {0}, gap[3] = {0}, gap_at = 0, prev = 0, lo = 0, hi = 0, nreg = 0, tag[256] = {0};   // tag: "other" by VM user tag
+    uint64_t virt[NCC] = {0}, rcnt[NCC] = {0}, gap[3] = {0}, gap_at = 0, prev = 0, lo = 0, hi = 0, nreg = 0, tag[256] = {0};   // tag: "other" by VM user tag
+    vm_top_reg_t top_file[4] = {{0}}, top_other[4] = {{0}};
     task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS && n >= TASK_VM_INFO_REV2_COUNT) { lo = vi.min_address; hi = vi.max_address; }
     prev = lo;
@@ -76,8 +96,12 @@ void dm_vm_census(FILE *f) {
         }
         if (e > prev) prev = e;
         if (in.is_submap) { if (e > sub_end) sub_end = e; depth++; continue; }
-        int c = s < sub_end ? C_SYS : classify(a, &in); virt[c] += sz; nreg++;
-        if (c == C_OTHER) tag[in.user_tag & 255] += sz;
+        int c = s < sub_end ? C_SYS : classify(a, &in); virt[c] += sz; rcnt[c]++; nreg++;
+        if (c == C_FILE) vm_top_add(top_file, s, (uint64_t)sz, in.user_tag, (uint32_t)in.protection);
+        if (c == C_OTHER) {
+            tag[in.user_tag & 255] += sz;
+            if (in.user_tag != 31) vm_top_add(top_other, s, (uint64_t)sz, in.user_tag, (uint32_t)in.protection);
+        }
         a += sz;
     }
     if (hi > prev) { uint64_t g = hi - prev; if (g > gap[0]) { gap[2] = gap[1]; gap[1] = gap[0]; gap[0] = g; gap_at = prev; } else if (g > gap[1]) { gap[2] = gap[1]; gap[1] = g; } else if (g > gap[2]) gap[2] = g; }
@@ -89,8 +113,9 @@ void dm_vm_census(FILE *f) {
         vm_deallocate(mach_task_self(), (vm_address_t)th, nt * sizeof *th);
     }
     const double G = 1073741824.0;
-    fprintf(f, "[dm] address space: %.2f GB in %llu regions between %#llx and %#llx (%.2f GB); largest free %.2f GB at %#llx, then %.2f and %.2f GB; threads %d\n",
-            used / G, (unsigned long long)nreg, (unsigned long long)lo, (unsigned long long)hi, (hi - lo) / G, gap[0] / G, (unsigned long long)gap_at, gap[1] / G, gap[2] / G, threads);
+    char g0[32], g1[32], g2[32]; vm_fmt_size(g0, sizeof g0, gap[0]); vm_fmt_size(g1, sizeof g1, gap[1]); vm_fmt_size(g2, sizeof g2, gap[2]);
+    fprintf(f, "[dm] address space: %.2f GB in %llu regions between %#llx and %#llx (%.2f GB); largest free %s at %#llx, then %s and %s; threads %d\n",
+            used / G, (unsigned long long)nreg, (unsigned long long)lo, (unsigned long long)hi, (hi - lo) / G, g0, (unsigned long long)gap_at, g1, g2, threads);
     fprintf(f, "[dm] address space by class (GB):");
     for (int c = 0; c < NCC; c++) fprintf(f, " %s %.2f", c == C_SYS ? "system" : k_cls[c], virt[c] / G);
     fprintf(f, "; footprint %.2f GB; other by VM tag:", vi.phys_footprint / G);
@@ -100,32 +125,60 @@ void dm_vm_census(FILE *f) {
         fprintf(f, " %d %.2f", best, tag[best] / G); tag[best] = 0;
     }
     fputc('\n', f);
+    fprintf(f, "[dm] address space regions: malloc %llu, gpu %llu, file %llu, other %llu; top file:",
+            (unsigned long long)rcnt[C_MALLOC], (unsigned long long)rcnt[C_GPU], (unsigned long long)rcnt[C_FILE], (unsigned long long)rcnt[C_OTHER]);
+    for (int i = 0; i < 4 && top_file[i].size; i++) {
+        char sb[32]; vm_fmt_size(sb, sizeof sb, top_file[i].size);
+        uint32_t pr = top_file[i].prot;
+        fprintf(f, " %#llx+%s(%c%c%c)", (unsigned long long)top_file[i].addr, sb,
+                (pr & VM_PROT_READ) ? 'r' : '-', (pr & VM_PROT_WRITE) ? 'w' : '-', (pr & VM_PROT_EXECUTE) ? 'x' : '-');
+    }
+    fprintf(f, "; top other(!31):");
+    for (int i = 0; i < 4 && top_other[i].size; i++) {
+        char sb[32]; vm_fmt_size(sb, sizeof sb, top_other[i].size);
+        uint32_t pr = top_other[i].prot;
+        fprintf(f, " %#llx+%s(tag=%u,%c%c%c)", (unsigned long long)top_other[i].addr, sb, top_other[i].tag,
+                (pr & VM_PROT_READ) ? 'r' : '-', (pr & VM_PROT_WRITE) ? 'w' : '-', (pr & VM_PROT_EXECUTE) ? 'x' : '-');
+    }
+    fputc('\n', f);
 }
 
-static void sample(FILE *f, double t, id<MTLDevice> dev) {
-    task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+int dm_memstat_walk_interval(const char *s) {
+    if (!s || s[0] < '0' || s[0] > '9') return 1;
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v < 1 || v > INT_MAX) return 1;
+    return (int)v;
+}
+
+void dm_memstat_sample(FILE *f, double t, id<MTLDevice> dev, int walk) {
+    task_vm_info_data_t vi = {0}; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     uint64_t fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS ? vi.phys_footprint : 0;
     uint64_t avail = 0;
 #if TARGET_OS_IPHONE
     avail = os_proc_available_memory();
 #endif
-    uint64_t virt[NC] = {0}, res[NC] = {0}, bill[NC] = {0};
-    static uint32_t seen[1 << 16]; static uint32_t gen; gen++; if (!gen) { memset(seen, 0, sizeof seen); gen = 1; }   // Objects already counted in this sample (open addressing)
-    vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; vm_size_t pg = vm_page_size;
-    for (;;) {
-        vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
-        if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
-        if (in.is_submap) { depth++; continue; }
-        int c = classify(a, &in);
-        virt[c] += sz; res[c] += (uint64_t)in.pages_resident * pg;
-        if (!in.external_pager) {                             // File pages are reclaimable and do not count toward footprint
-            static uint64_t key[1 << 16];                     // Key = (object id, offset within the object): the pieces of one object split apart by mprotect cover different pages and must not be merged
-            uint64_t k = (uint64_t)in.object_id << 32 ^ (in.offset >> 14);
-            uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 48), dup = 0;
-            while (seen[h] == gen) { if (key[h] == k) { dup = 1; break; } h = (h + 1) & 0xFFFF; }
-            if (!dup) { seen[h] = gen; key[h] = k; bill[c] += ((uint64_t)in.pages_dirtied + in.pages_swapped_out) * pg; }
+    static uint64_t virt[NC], res[NC], bill[NC];   // kept between walks: a line without a walk repeats the last one's classes
+    if (walk) {
+        memset(virt, 0, sizeof virt); memset(res, 0, sizeof res); memset(bill, 0, sizeof bill);
+        static uint32_t seen[1 << 16]; static uint32_t gen; gen++; if (!gen) { memset(seen, 0, sizeof seen); gen = 1; }   // Objects already counted in this sample (open addressing)
+        vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; vm_size_t pg = vm_page_size;
+        for (;;) {
+            vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+            if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
+            if (in.is_submap) { depth++; continue; }
+            int c = classify(a, &in);
+            virt[c] += sz; res[c] += (uint64_t)in.pages_resident * pg;
+            if (!in.external_pager) {                             // File pages are reclaimable and do not count toward footprint
+                static uint64_t key[1 << 16];                     // Key = (object id, offset within the object): the pieces of one object split apart by mprotect cover different pages and must not be merged
+                uint64_t k = (uint64_t)in.object_id << 32 ^ (in.offset >> 14);
+                uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 48), dup = 0;
+                while (seen[h] == gen) { if (key[h] == k) { dup = 1; break; } h = (h + 1) & 0xFFFF; }
+                if (!dup) { seen[h] = gen; key[h] = k; bill[c] += ((uint64_t)in.pages_dirtied + in.pages_swapped_out) * pg; }
+            }
+            a += sz;
         }
-        a += sz; continue;
     }
     uint64_t sum = 0; for (int c = 0; c < NC; c++) sum += bill[c];
     fprintf(f, "%.0f\t%llu\t%llu\t%llu\t%llu\t%llu\t%lld\t%lld", t, fp >> 20, avail >> 20, (unsigned long long)(dev.currentAllocatedSize >> 20),
@@ -136,28 +189,46 @@ static void sample(FILE *f, double t, id<MTLDevice> dev) {
     fflush(f);
 }
 
-static void *memstat_thread(void *p) {
-    FILE *f = fopen((const char *)p, "w");
-    if (!f) { LOG("memstat: cannot open %s", (const char *)p); return NULL; }
+typedef struct {
+    char *path;
+    int walk_every;
+} memstat_cfg_t;
+
+static void *memstat_thread(void *arg) {
+    memstat_cfg_t *cfg = (memstat_cfg_t *)arg;
+    pthread_setname_np("memstat");   // named, so DM_THRCPU and profiles show its cost
+    FILE *f = fopen(cfg->path, "w");
+    if (!f) { LOG("memstat: cannot open %s", cfg->path); free(cfg->path); free(cfg); return NULL; }
+    LOG("memstat: regions every %d s", cfg->walk_every);
     fprintf(f, "# unit MiB; kernel accounting internal / compressed / graphics ledger / headroom to the limit; class columns = virtual/resident/charged (deduplicated per object); charged total = Σ private charged; unattributed = phys_footprint − charged total\nseconds\tphys_footprint\tavailable\tmetal_alloc\tinternal\tcompressed\tgraphics\theadroom");
     for (int c = 0; c < NC; c++) fprintf(f, "\t%s", k_cls[c]);
     fprintf(f, "\tcharged total\tunattributed\n");
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // The same device object as the graphics backend (the system default device singleton)
     uint64_t t0 = now_ns();
     const char *ds = getenv("DM_MEMSTAT_DUMP"); int dump_at = ds ? atoi(ds) : -1;
-    char dp[1100]; snprintf(dp, sizeof dp, "%s.regions", (const char *)p);
-    for (int sec = 0;; sec++) { sample(f, (now_ns() - t0) / 1e9, dev); if (sec == dump_at) dump_regions(dp); sleep(1); }
+    char dp[1100]; snprintf(dp, sizeof dp, "%s.regions", cfg->path);
+    int walk_every = cfg->walk_every;
+    free(cfg->path); free(cfg);
+    for (int sec = 0;; sec++) { dm_memstat_sample(f, (now_ns() - t0) / 1e9, dev, sec % walk_every == 0); if (sec == dump_at) dump_regions(dp); sleep(1); }
     return NULL;
 }
 
 static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
-    char *path = strdup(p);
+    char *path = NULL;
 #if TARGET_OS_IPHONE
-    if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
+    if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); if (path) snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
+    else
 #endif
-    pthread_t th; pthread_create(&th, NULL, memstat_thread, path); pthread_detach(th);
+    path = strdup(p);
+    memstat_cfg_t *cfg = malloc(sizeof *cfg);
+    if (!cfg || !path) { free(path); free(cfg); return; }
+    cfg->path = path;
+    cfg->walk_every = dm_memstat_walk_interval(getenv("DM_MEMSTAT_WALK"));
+    pthread_t th;
+    if (pthread_create(&th, NULL, memstat_thread, cfg) != 0) { free(cfg->path); free(cfg); return; }
+    pthread_detach(th);
 }
 
 // ---------- Per-thread CPU: DM_THRCPU=<tsv path>[,interval in seconds (default 10)] (common to Mac / iOS; on iOS a relative name → the container's Documents) ----------

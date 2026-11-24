@@ -2594,6 +2594,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - GLSL 1.50 as DOOM 3's renderer writes it: built-ins redeclared as plain varyings (`out vec4 gl_Position;`, `in vec4 gl_FragCoord;`, `out float gl_FragDepth;`) lose the declaration and keep the built-in; `out vec4 gl_FragColor;` becomes a plain output of the shader's own, `dm_FragColor` (Vulkan GLSL has no `gl_FragColor`); the compatibility colour declared as a varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader, which NVIDIA links as GL's fixed pipeline does, becomes one varying, `dm_Color`, matched by name; `sampler` as a name (its helpers take `sampler2D sampler`), a reserved word in Vulkan GLSL, becomes `dm_sampler`. A compatibility built-in the shader does not declare is left alone.
 - **Found on:** [DOOM 3](../../dm/games/010029D00E740000/README.md): all 62 shaders of its title and first level (`test_gl_shaders.py` has a pair written in their form).
 
+### GLSL ES 3.10/3.20 without the `es` profile
+
+- **Symptom:** `gl_shaders.py` fails preprocessing with `glslang -E: ERROR: #version: versions 300, 310, and 320 require specifying the 'es' profile` and exits with `no GLSL shaders translated`.
+- **Cause:** GLSL versions `300`, `310`, and `320` exist only in OpenGL ES (desktop GLSL skips from `150` to `330`). NVIDIA's Switch GLSL compiler accepts `#version 320` without the `es` profile token, while `glslangValidator` rejects it per spec.
+- **Fix:** `translate()` in `gl_shaders.py` inserts ` es` on `#version 310` and `#version 320` lines that have no profile token (preserving trailing comments, line endings, and explicit invalid profiles, and hashing the original unmodified source bytes for the shader table key).
+- **Check:** `test_gl_shaders.py`.
+- **Found on:** FINAL FANTASY VII (`0100A5B00BDC6000`, [issue #3292](https://github.com/seedds/nxnative/issues/3292)): all 17 `.glsl` shaders declare `#version 320` with ES `precision`/`layout` syntax; normalizing to `#version 320 es` lets 17/17 preprocess and 16/17 compile to SPIR-V (the 17th has a separate texel-offset error tracked separately).
+
 ### A GLSL ES 1.00 name that later GLSL takes
 
 - **Symptom:** `gl_shaders.py` reports `does not translate: frag: glslang: ERROR: …: 'texture' : redefinition`, and the scenes those shaders draw are black.

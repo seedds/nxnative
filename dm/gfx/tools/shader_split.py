@@ -1276,17 +1276,22 @@ def rgxd_shaders(d, label):
         _, _, nk, nc = struct.unpack_from('<4I', d, h)
         if h + 16 + nk + nc > len(d): continue
         code, ctl = d[h + 16:h + 16 + nk], d[h + 16 + nk:h + 16 + nk + nc]
-        st = glslc_stage(ctl, code) if ctl[:4] == CTL_MAGIC and len(ctl) >= 0x760 else None
+        st = glslc_stage(ctl, code) if ctl[:4] == CTL_MAGIC and (len(ctl) >= 0x760 or nvn2_ctl(ctl)) else None   # the Switch 2 program's effects: NVN2 sections of 0xe0 bytes
         if st and not check(label, st, ctl, code): out.append((f'{label}#RGXD@{h:#x}', st, ctl, code))
     if len(out) != n: print(f'[RED] {label}: {n} control sections, {len(out)} shader records read; the rest are left out', flush=True)
     return out
+
+def d11_index(path):   # a Double Eleven pack's index file: .pkdswitch → .pkiswitch, and the Switch 2 program's .pkdounce → .pkiounce (Red Dead Redemption 040000B0196AA000); None for other files
+    for plat in ('switch', 'ounce'):
+        if path.endswith('.pkd' + plat): return path[:-len('.pkd' + plat)] + '.pki' + plat
+    return None
 
 def d11_pack_shaders(path, label, out):
     """Double Eleven's resource pack (Red Dead Redemption's d11extra/langselect.pkdswitch, the language selection shown before the game): the data file holds the members one after another, its
     index beside it (.pkiswitch) is u32 version 3, u32 0, u32 member count (22), then per member {u32 length, u32 stored length, u32 offset in the data file, u32 name hash}; a member whose stored
     length differs from its length is one zlib stream. Members 4 and 5 are whole GLSLC outputs, the screen's pixel and vertex shader (98664fb56b9c9fdf, 70d4dd8068044bb5): without them the host
     found no vertex shader for the first program the game draws with. The others are textures ('DFvN') and fonts ('BMF')"""
-    with open(path[:-len('.pkdswitch')] + '.pkiswitch', 'rb') as f: idx = f.read()
+    with open(d11_index(path), 'rb') as f: idx = f.read()
     with open(path, 'rb') as f: d = f.read()
     if len(idx) < 12: red(f'{label}: the pack index is cut short ({len(idx)} bytes)')
     ver, _, n = struct.unpack_from('<3I', idx)
@@ -4789,7 +4794,7 @@ def scan_file_in(args):
     if head[:4] in (TTCZ, TTCN):   # a Telltale .ttarch2 (ttarch2_shaders): only its effect pack holds shaders
         with open(path, 'rb') as f: found += ttarch2_shaders(f.read(), '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if path.endswith('.pkdswitch') and os.path.exists(path[:-len('.pkdswitch')] + '.pkiswitch'):   # Double Eleven's resource pack, read through its index (d11_pack_shaders)
+    if d11_index(path) and os.path.exists(d11_index(path)):   # Double Eleven's resource pack, read through its index (d11_pack_shaders)
         d11_pack_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == UBIART_IPK:   # a UbiArt IPK archive (ipk_shaders): its .fxb effect files, without reading the rest

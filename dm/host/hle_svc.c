@@ -1259,7 +1259,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     case 0x29: {  // GetInfo(out*, id, handle, subid) → x1 = value
         uint64_t id = regs[1], v = 0;
         switch (id) {
-        case I_CoreMask: v = 7; break;
+        // Switch 1 applications run on cores 0..2; a Switch 2 (Ounce) application on cores 0..5. Red Dead Redemption's Switch 2 program (040000B0196AA000) spreads its threads over
+        // core (n mod 6) among GetThreadAvailableCoreMask() & its own mask (main+0xd9fc); with 7, a thread whose mask names only cores 3..5 spun in that loop forever
+        case I_CoreMask: v = dm_sdk_ounce() ? 0x3f : 7; break;
         case I_PriorityMask: v = 0; break;
         case I_AliasAddr: v = (uint64_t)g_alias; break;   case I_AliasSize: v = g_alias_cap; break;
         case I_HeapAddr:  v = (uint64_t)g_heap;  break;   case I_HeapSize:  v = g_heap_cap;  break;

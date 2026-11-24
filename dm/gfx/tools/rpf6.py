@@ -71,18 +71,33 @@ def find_key(nso_path, rpf):
 
 # The key setup's first instructions (1.0.0: main+0x21ec0c, 1.0.4: main+0x145d8c): cmp w1, #0; mov w8, #-3; csel w8, w8, w1, eq; cmn w8, #3; str w8, [x0]
 SETUP = struct.pack('<5I', 0x7100003f, 0x12800048, 0x1a810108, 0x31000d1f, 0xb9000008)
+# The Switch 2 program (040000B0196AA000, v458752) stores w8 before the cmn and builds the eight key words as immediates (mov / movk), stored by stp x at x0+8
+SETUP2 = struct.pack('<5I', 0x7100003f, 0x12800048, 0x1a810108, 0xb9000008, 0x31000d1f)
 
 def key_from_setup(img, text):
     """Candidate keys from each key setup in main's code: after its b.ne, the function stores 64 bytes of 16-byte constants (adrp, then ldr q) at x0+8 (str q / stp q, through
     registers copied from x0 and moved by add); those are the eight key words as big-endian u32s zero-extended to 64 bits (1.0.4). A setup that stores something else gives no candidate.
     The caller keeps only a candidate that opens the archive"""
     ts, tl = text
-    at = img.find(SETUP, ts, ts + tl)
-    while at >= 0:
-        page, ctx, q, mem = {}, {0: 0}, {}, {}
+    ats = sorted(a for pat in (SETUP, SETUP2) for a in _finds(img, pat, ts, ts + tl))
+    for at in ats:
+        page, ctx, q, mem, regs, xw = {}, {0: 0}, {}, {}, {}, {}
         for a in range(at + len(SETUP) + 4, min(at + 0x80, ts + tl), 4):   # past the b.ne
             w = struct.unpack_from('<I', img, a)[0]
             rd, rn = w & 31, (w >> 5) & 31
+            if w & 0xff800000 == 0x52800000:   # mov wd, #imm16, lsl #hw (movz)
+                regs[rd] = ((w >> 5) & 0xffff) << (((w >> 21) & 3) * 16); continue
+            if w & 0xff800000 == 0x72800000 and rd in regs:   # movk wd, #imm16, lsl #hw
+                sh = ((w >> 21) & 3) * 16; regs[rd] = regs[rd] & ~(0xffff << sh) | ((w >> 5) & 0xffff) << sh; continue
+            if w & 0xffc00000 == 0xa9000000 and rn in ctx and rd in regs and (w >> 10) & 31 in regs:   # stp xt, xt2, [xn, #imm]: two words as 64-bit zero-extended
+                o = ctx[rn] + (((w >> 15) & 0x7f) - (0x80 if w & (1 << 21) else 0)) * 8
+                xw[o], xw[o + 8] = regs[rd], regs[(w >> 10) & 31]
+                if all(x in xw for x in range(8, 0x48, 8)):
+                    words = [xw[x] for x in range(8, 0x48, 8)]
+                    if all(v >> 32 == 0 for v in words): yield struct.pack('>8I', *words)
+                    break
+                continue
+            regs.pop(rd, None)
             if w & 0x9f000000 == 0x90000000:   # adrp
                 imm = ((w >> 29) & 3) | (((w >> 5) & 0x7ffff) << 2)
                 page[rd] = (a & ~0xfff) + ((imm - (1 << 21) if imm & (1 << 20) else imm) << 12); ctx.pop(rd, None)
@@ -101,7 +116,11 @@ def key_from_setup(img, text):
         if all(o in mem for o in range(8, 0x48, 16)):
             words = struct.unpack('<8Q', b''.join(mem[o] for o in range(8, 0x48, 16)))
             if all(v >> 32 == 0 for v in words): yield struct.pack('>8I', *words)
-        at = img.find(SETUP, at + 4, ts + tl)
+
+def _finds(img, pat, lo, hi):
+    a = img.find(pat, lo, hi)
+    while a >= 0:
+        yield a; a = img.find(pat, a + 4, hi)
 
 class Rpf:
     def __init__(self, path, key):

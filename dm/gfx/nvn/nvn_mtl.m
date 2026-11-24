@@ -2243,7 +2243,7 @@ static void pm_begin(id e, char kind, MTL4RenderPassDescriptor *d) {   // right 
     g_pm_cur = p; g_pm_i = k; g_pm_e = (__bridge const void *)e; S->n++;
 }
 static void pm_end(id e) {   // right before that encoder ends (gp_end)
-    if (!g_pm_cur || (__bridge const void *)e != g_pm_e) return;
+    if (!g_pm_cur || g_pm_cs < 0 || (__bridge const void *)e != g_pm_e) return;   // g_pm_cur is only set by pm_begin, after it has a slot (g_pm_cs >= 0)
     pm_enc *p = g_pm_cur; int k = g_pm_i; id<MTL4CounterHeap> h = g_pm_heap[g_pm_cs]; g_pm_cur = NULL; g_pm_e = NULL;
     if (p->kind == 'R') { p->draws = (uint32_t)g_stat_draw - p->draws; p->ld_kb = (uint32_t)((g_bw_load - g_gp_bw_l0) >> 10); p->st_kb = (uint32_t)((g_bw_store - g_gp_bw_s0) >> 10);
         [(id<MTL4RenderCommandEncoder>)e writeTimestampWithGranularity:MTL4TimestampGranularityRelaxed afterStage:MTLRenderStageFragment intoHeap:h atIndex:2 * k + 1]; }
@@ -2304,7 +2304,7 @@ static FILE *pm_open(void) {
 }
 static void pm_report(int s) {   // the sampled frame's last command buffer has completed
     pm_slot *S = &g_pm_s[s]; int n = S->n; id<MTL4CounterHeap> h = g_pm_heap[s]; uint64_t frame = S->frame;
-    NSData *r = n ? [h resolveCounterRange:NSMakeRange(0, (NSUInteger)(2 * n))] : nil; const uint64_t *t = r.bytes;
+    NSData *r = n ? [h resolveCounterRange:NSMakeRange(0, 2 * (NSUInteger)n)] : nil; const uint64_t *t = r.bytes;
     if (!t) { MLOG("[RED] DM_NVN_PASSMAP: frame %llu: no timestamps (%d encoders)", (unsigned long long)frame, n); atomic_store(&S->busy, 0); return; }
     double tick = 1e9 / (double)[g_dev queryTimestampFrequency];
     // the scene size: the colour + depth pass with the most draws (or DM_NVN_PASSMAP_SCENE=WxH)

@@ -119,7 +119,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     EXPECT("live key finds warmed pipeline", 1, hm_get_id(&g_pso, &live) != nil);
     uint64_t before = g_pb_spec + g_pb_legacy;
     NvProg *program = [NvProg new]; program->sh[0] = vs; program->sh[1] = fs;
-    id<MTLRenderPipelineState> warmed = pso_get_(program, nil);
+    id<MTLRenderPipelineState> warmed = pso_get(program, nil);
     EXPECT("draw lookup adds no pipeline build", before, g_pb_spec + g_pb_legacy);
     EXPECT("draw lookup returns a pipeline", 1, warmed != nil);
     if (!warmed) { g_pso_lmap = NULL; return; }
@@ -255,16 +255,18 @@ static void native_mesh(NSString *dir) {
     pso_skey_from(&state, live, fragment, 0, NULL, &key); pso_skey_hex(&key, hex);
     NSString *valid = [NSString stringWithFormat:@"M\t-\t%s\n", hex];
     NSString *wrong_stage = [NSString stringWithFormat:@"M\twarm-fs\t%s\n", hex];
+    key.vs_stage = 7; pso_skey_hex(&key, hex);
+    NSString *raw = [NSString stringWithFormat:@"M\t-\t%s\n", hex];
     NSString *manifest = [dir stringByAppendingPathComponent:@"mesh.tsv"];
-    NSString *text = [NSString stringWithFormat:@"%@%@%@", wrong_stage, valid, valid];
+    NSString *text = [NSString stringWithFormat:@"S\twarm-ms\t7\nS\twarm-ms\t4\n%@%@%@%@", wrong_stage, raw, valid, valid];
     EXPECT("mesh manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
-    EXPECT("only the canonical, unique mesh row loads", 1, lines);
-    if (tasks.count != 1) return;
-    warm_load_begin(); warm_task(tasks[0]);
-    EXPECT("mesh warm task publishes a pipeline", 1, g_warm_items.count);
-    if (g_warm_items.count != 1) return;
-    WarmItem *item = g_warm_items[0];
+    EXPECT("one mesh library and one mesh pipeline after normalizing stage aliases", 2, lines);
+    if (tasks.count != 2) return;
+    warm_load_begin(); warm_task(tasks[0]); warm_task(tasks[1]);
+    EXPECT("mesh warm tasks publish the library and the pipeline", 2, g_warm_items.count);
+    if (g_warm_items.count != 2) return;
+    WarmItem *item = g_warm_items[1];
 
     // A live shader loaded while prewarm was in flight has a different object identity.
     g_shcache = @{@"warm-ms": live, @"warm-fs": fragment}.mutableCopy;
@@ -312,6 +314,17 @@ static void native_mesh(NSString *dir) {
     pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
     NSError *error = nil;
     EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error, NULL) != nil);
+    MTLRenderPipelineDescriptor *no_vertex = [MTLRenderPipelineDescriptor new];
+    error = nil;
+    EXPECT("missing vertex function returns an error", 1, dev_rps(no_vertex, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_fragment = [MTLMeshRenderPipelineDescriptor new];
+    no_fragment.meshFunction = live->fn;
+    error = nil;
+    EXPECT("missing mesh fragment function returns an error", 1, dev_mps(no_fragment, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_mesh = [MTLMeshRenderPipelineDescriptor new];
+    no_mesh.fragmentFunction = fragment->fn;
+    error = nil;
+    EXPECT("missing mesh function returns an error", 1, dev_mps(no_mesh, &error) == nil && error.code == 3);
     g_mtk.ms = nil;
     g_warm_t0 = bp_now(); warm_finish();
 }

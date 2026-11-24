@@ -115,10 +115,15 @@ int main(void) { @autoreleasepool {
     CHECK(entry(ca, 16) != dummy(ca) && reads(ca, CA, 16, 9, 0x80 + 72), "a cube array in a cube-array table: a cube array (cube 1, face 3)");
     CHECK(palt(16, C) && palt(16, CA) && entry(c, 16) == prid(16, C) && reads(c, C, 16, 2, 0x80 + 16), "a cube array read as a cube and as a cube array: the cube table's view of it stays");
 
-    // An ID first read through another type later: the existing table takes it in place at the next scan
+    // An ID first read through another type later: the next scan forks the table via copy-on-write and installs the view without mutating the old buffer
     read_mark(11, A);
-    mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan(); os_unfair_lock_unlock(&g_rmu); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
-    CHECK(palt(11, A) && entry(a, 11) == prid(11, A) && reads(a, A, 11, 0, 0x30), "an ID newly read through the 2D-array table: its view goes into that table in place");
+    uint64_t pgen = g_psnap_gen;
+    mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan();
+    id<MTLBuffer> a2 = nil; for (int k = 0; k < POOL_SNAPS; k++) if (g_psnap[k].buf && !g_psnap[k].samp && g_psnap[k].dtt == A && g_psnap[k].dpf == NVN_DPF_FLOAT && !g_psnap[k].base) a2 = g_psnap[k].buf;
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(entry(a, 11) == dummy(a) && a2 && a2 != a && g_psnap_gen > pgen, "the old 2D-array table buffer stays untouched while the scan forks a new one");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
+    CHECK(palt(11, A) && entry(a2, 11) == prid(11, A) && reads(a2, A, 11, 0, 0x30), "an ID newly read through the 2D-array table: its view goes into the new table");
 
     // The view is cached: asked again for the same texture, pool_fit makes no new one
     os_unfair_lock_lock(&g_rmu);

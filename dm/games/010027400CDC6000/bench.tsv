@@ -1,0 +1,6 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS (seconds), window start and length (s), description.
+# Use the opening-ship autosave with TutorialBoxMode=2 in Profile/config.lsx (tutorial popups off).
+# The prepared copy is 010027400CDC6000-work/fps60/save-bench beside the NSPs.
+# Pass --env DM_FOCUS_KEEP=1: the game limits itself to 30 fps when it loses focus.
+# The same one-second walk after warm-up checks game speed independently of presented frame count.
+ship	20:A,24:Down,25:A,62:LRight~1	45	20	Continue into the opening ship; stand, then walk right for one second

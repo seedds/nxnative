@@ -1,0 +1,39 @@
+# Provisional Mac profile of Sam & Max: The Devil's Playhouse (update 1.8.0, v524288).
+# Survey-derived values, checked by a complete Mac shader build and a user playtest; episode completion, save/reload and iOS remain unvalidated. See README.md.
+
+# ---- Identity ----
+title_id	0100D5501857E000
+program_id	0100D5501857E000
+
+# ---- App ----
+name	Sam & Max: The Devil's Playhouse
+ipa	SamMaxTheDevilsPlayhouse.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v524288	1.8.0	main=f7ef9f90e1c79c3b8a6b2d8ca46fba2a	sdk=38873c89d24e5d11020e8d0aafe51cab
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	SM3_nx_Common_compressed.ttarch2
+zip_store	.ttarch2:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Sam & Max: The Devil's Playhouse shaders
+
+# ---- Offline pipeline archive ----
+# Observed nvnDeviceSetDepthMode near=0 on the Mac; offline bases must use main0_z.
+depth_mode	zero

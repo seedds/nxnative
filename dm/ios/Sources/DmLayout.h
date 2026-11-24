@@ -7,6 +7,15 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef struct { CGRect game, controls; BOOL separated, topSafeOnly; } DmLayout;
 
+// Rotation (DM_ROTATION, a launcher and in-game menu setting): auto, landscape or portrait. auto gives `automatic`: every orientation for the view controllers, so the app's own list
+// decides, and for the app (front_ios_app_orientations) its Info.plist list for the device: the phone's two landscapes, the iPad's four. landscape locks the two landscapes, portrait
+// upright (upside down too where the device has it: an iPad, not a Face ID iPhone)
+static inline UIInterfaceOrientationMask dm_rotation_mask(const char *_Nullable value, UIInterfaceOrientationMask automatic) {
+    if (value && !strcmp(value, "landscape")) return UIInterfaceOrientationMaskLandscape;
+    if (value && !strcmp(value, "portrait")) return UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown;
+    return automatic;
+}
+
 static inline UIEdgeInsets dm_game_safe_insets(CGRect bounds, UIEdgeInsets insets, BOOL duo) {
     return duo && bounds.size.height > bounds.size.width ? UIEdgeInsetsMake(insets.top, 0, 0, 0) : insets;
 }

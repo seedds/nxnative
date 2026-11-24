@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-import dmsh_geometry, dmsh_mesh
+import dmsh_chain, dmsh_geometry, dmsh_mesh
 
 RASTER_CHECK = r'''#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -226,7 +226,7 @@ class PassthroughCompiler(unittest.TestCase):
                     self.assertEqual(meta['geometry_stride'], 134)
                     for suffix in ('', '.reader'):
                         spv = work / f'viewport{t}{suffix}.spv'; dmsh_geometry.flatten_sets(spv)
-                        result = subprocess.run([cross, '--msl', '--msl-version', '20300', '--msl-argument-buffers',
+                        result = subprocess.run([cross, '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers',
                                                  '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
                         self.assertEqual(result.returncode, 0, result.stderr)
                         src = result.stdout
@@ -266,7 +266,7 @@ class PassthroughCompiler(unittest.TestCase):
             for t, job in enumerate(jobs):
                 with self.subTest(topology=t):
                     spv = work / f'pass{t}.spv'; dmsh_geometry.flatten_sets(spv)
-                    r = subprocess.run([str(Path(__file__).resolve().parents[1] / 'tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers',
+                    r = subprocess.run([str(Path(__file__).resolve().parents[1] / 'tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers',
                                         '--msl-texture-buffer-native', str(spv)], capture_output=True, text=True)
                     self.assertEqual(r.returncode, 0, r.stderr)
                     src = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(r.stdout))
@@ -447,6 +447,20 @@ class MeshPassthrough(unittest.TestCase):
                 r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stderr[-2000:])
 
+    def test_both_parts_keep_a_guarded_helper(self):   # dmsh_rewrite.UWORD (#ifndef DM_UWORD) in the vertex shader and in the kernel: each namespace gets its own copy
+        import dmsh_rewrite
+        add = lambda s, extra='': s.replace('using namespace metal;', 'using namespace metal;\n' + dmsh_rewrite.UWORD + extra, 1)
+        lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
+        probe = 'static inline uint dm_probe(const constant uint4& v) { return dm_uword(v, 1); }\n'   # a call from the kernel's part
+        src = dmsh_mesh.compose(add(MESH_VS), add(MESH_HEAD, probe) + '\n' + lean, reads)
+        self.assertLess(src.index('#undef DM_UWORD'), src.index('namespace dm_g {'))
+        self.assertEqual(src.count('T dm_uword('), 2)
+        if shutil.which('xcrun') and sys.platform == 'darwin':
+            with tempfile.TemporaryDirectory() as d:
+                Path(d, 'm.metal').write_text(src)
+                r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', '-fmodules-cache-path=' + d + '/modules', str(Path(d, 'm.metal')), '-o', str(Path(d, 'm.air'))], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+
     def test_large_vertices_take_fewer_triangles(self):
         # Donkey Kong Bananza's vertex output: 24 float4 and the point size, 388 bytes; 32 triangles (37,248 bytes) exceed Metal's 32 KB
         self.assertEqual(dmsh_mesh.out_bytes('struct main0_out\n{\n' + ''.join(f'    float4 m_{i} [[user(locn{i})]];\n' for i in range(23)) +
@@ -511,7 +525,7 @@ class MeshPassthrough(unittest.TestCase):
             (work / 'jobs.json').write_text(json.dumps([job]))
             subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), directory], check=True, capture_output=True)
             spv = work / 'pid.spv'; dmsh_geometry.flatten_sets(spv)
-            r = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300',
+            r = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION,
                                 '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
             full = dmsh_geometry.topology_pointer(r.stdout)
             metadata = json.loads((work / 'pid.res.json').read_text())
@@ -568,7 +582,7 @@ class ComputeSplitPrimitiveId(unittest.TestCase):
             sources = []
             for job in jobs:
                 key = job['key']; spv = work / (key + '.spv'); dmsh_geometry.flatten_sets(spv)
-                result = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
+                result = subprocess.run([str(root / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', '--msl-texture-buffer-native', str(spv)], check=True, capture_output=True, text=True)
                 source = dmsh_geometry.capture_input(dmsh_geometry.topology_pointer(result.stdout))
                 # ABI check also runs on CI hosts without a Metal device and
                 # catches a stale translator DLL that omits the primitive base.
@@ -617,7 +631,8 @@ MESH_RUN_VS = MESH_VS.replace('out.gl_Position = in.m_0 * spvDescriptorSet0.c[0]
 
 def mesh_fixture(out):
     lean, reads = dmsh_geometry.lean(LEAN_KERNEL, 134)
-    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n', 'lean': MESH_HEAD + '\n' + lean,
+    keep = '\nfragment void depth_keep(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[buffer(0)]])\n{\n    if (spvDescriptorSet0.c[0].x > 0.5) discard_fragment();\n}\n'   # a fragment shader with a resource: its uniform discards
+    files = {'vertex': MESH_RUN_VS + '\nfragment void depth_only() {}\n' + keep, 'lean': MESH_HEAD + '\n' + lean,
              '7e57000000000a00_7e57000000000b00_m3': dmsh_mesh.compose(MESH_RUN_VS, MESH_HEAD + '\n' + lean, reads)}
     for name, src in files.items():
         path = Path(out, name + '.metal'); path.write_text(src)

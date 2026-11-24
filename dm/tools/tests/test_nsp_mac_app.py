@@ -2,6 +2,7 @@
 runtime; the launcher's environment for the host (the bundle's files, the save, temporary files and log in the player's Library), the previous log kept, environment files, the host's exit
 code returned and SIGTERM forwarded to it, an alert when the game data is missing; the script's options and its pack_app.py command line; --seen-shaders' keys and partial library.
 No game files, keys or Xcode needed: a stand-in host compiled here records what it was given (temporary files only in a temporary folder)."""
+import argparse
 import contextlib
 import errno
 import hashlib
@@ -13,9 +14,11 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -31,6 +34,18 @@ pack_app = importlib.util.module_from_spec(spec); spec.loader.exec_module(pack_a
 TID = '01008CF01BAAC000'
 TEST_ROOT = Path(os.environ.get('NXNATIVE_TEST_ROOT', tempfile.gettempdir()))
 
+def module_with_import(name, defined=False):
+    """Minimal rewritten module with one dynamic symbol for packer capability checks."""
+    image = bytearray(256)
+    struct.pack_into('<I', image, 4, 16)
+    struct.pack_into('<4si', image, 16, b'MOD0', 16)
+    struct.pack_into('<qQqQqQ', image, 32, 6, 80, 5, 128, 0, 0)
+    struct.pack_into('<IBBHQQ', image, 104, 1, 0x10, 0, int(defined), 0, 0)
+    name = name.encode() + b'\0'
+    image[129:129 + len(name)] = name
+    return image
+
+
 HOST_C = r'''#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +58,10 @@ int main(int argc, char **argv) {
     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
     printf("standin host output\n"); fflush(stdout);
+    if (getenv("STANDIN_MISSING")) {   // what the real host does for a shader its library lacks (nvn_mtl.m, t_missing_keys): the red line, and the key in the list the launcher names
+        printf("[dm] [nvn-mtl] [RED] shader %s (pixel) failed to load: build the shaders\n", getenv("STANDIN_MISSING")); fflush(stdout);
+        if (getenv("DM_NVN_MISSING_KEYS")) { FILE *m = fopen(getenv("DM_NVN_MISSING_KEYS"), "a"); if (m) { fprintf(m, "%s\n", getenv("STANDIN_MISSING")); fclose(m); } }
+    }
     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
     return 7;
 }
@@ -120,7 +139,7 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -206,7 +225,7 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'pso/gpu-prewarm-00.mtl4a', 'pso/gpu-prewarm-00.keys', 'pso/prewarm.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
-                 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+                 'tools/nso_syms.py', 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
                  'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
@@ -323,6 +342,198 @@ class PackReuse(unittest.TestCase):
         empty.rename(empty.with_name('renamed')); self.assert_repacked()
         shutil.rmtree(self.args.out); self.assert_repacked()
 
+    def test_data_bundles_reused_only_as_the_last_pack_left_them(self):
+        # a pack that changes the host clones the data bundles with their signatures; one whose files changed since the last pack (its seal in the app is its code hash only) is made again
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}   # what the last pack signed
+        self.pack()
+        app, plugins = Path(self.args.out), Path(self.args.out) / 'Contents/PlugIns'
+        bundles = {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'}
+        self.assertEqual({p.name for p in plugins.iterdir()}, bundles)
+        (self.tmp / 'dmhost').write_bytes(b'other host')
+        out = self.pack()
+        for label in ('game files', 'shader libraries', 'pipeline archive', 'add-on content'): self.assertIn(f'step: {label} (reused, signed)\n', out)
+        self.assertEqual(signed(), {'dmhost', app.name + '.partial'})
+        res = app / 'Contents/Resources'
+        changes = (('romfs/marker', lambda p: p.write_bytes(b'gamf')),   # the same size
+                   ('msl/msl/added.metallib', lambda p: p.write_bytes(b'x')), ('pso/gpu.mtl4a', Path.unlink), ('aoc/1/data', lambda p: p.chmod(0o600)))
+        for name, change in changes:
+            with self.subTest(change=name):
+                change(res / name); out = self.pack()
+                self.assertEqual(len([n for n in signed() if n.endswith('.bundle')]), 1)   # that bundle only
+                self.assertEqual(out.count('(reused, signed)'), 3)
+        self.assertEqual((app / 'Contents/Resources/romfs/marker').read_bytes(), b'game')
+        self.assertFalse((app / 'Contents/Resources/msl/msl/added.metallib').exists())
+        self.assertTrue((app / 'Contents/Resources/pso/gpu.mtl4a').is_file())
+        self.key.unlink(); self.args.name = 'Renamed'   # no record of what the last pack left: nothing is reused
+        self.pack(); self.assertEqual(signed() & bundles, bundles)
+
+    def test_a_change_time_that_moved_alone_reuses_what_has_the_packed_bytes(self):
+        # macOS moves the change time of a cloned bundle's files after the pack that cloned them, so the next pack never found them as recorded and signed the game again (Ocarina of
+        # Time, 36 GB: every second pack). Such a file is read and compared with the digest the key holds: the same bytes are reused, other bytes behind the same size and time are not
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}
+        def moved(paths):   # their change times alone
+            for p in paths:
+                before = p.stat(); time.sleep(0.01); p.chmod(before.st_mode & 0o7777); after = p.stat()
+                self.assertNotEqual(before.st_ctime_ns, after.st_ctime_ns)
+                self.assertEqual((before.st_mode, before.st_size, before.st_mtime_ns), (after.st_mode, after.st_size, after.st_mtime_ns))
+        def same_stat(p, data):   # other bytes, the size and the modification time kept
+            st = p.stat(); p.write_bytes(data); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.pack()
+        app = Path(self.args.out); res = app / 'Contents/Resources'
+        files = lambda: [p for p in (app / 'Contents/PlugIns').rglob('*') if p.is_file()]
+        self.assertEqual(json.loads(self.key.read_text())['seals']['Contents/PlugIns/GameData.bundle/Contents/Resources/romfs/marker'], hashlib.sha256(b'game').hexdigest())
+        moved(files()); self.assert_reused()   # the app as it is
+        self.assertEqual(json.loads(self.key.read_text())['app'], pack_app.inventory(app))   # and its times recorded anew: the next pack reads none of it
+        real, read = pack_app.digest, []
+        with mock.patch.object(pack_app, 'digest', lambda p: (read.append(Path(p)), real(p))[1]): self.assert_reused()
+        self.assertFalse([p for p in read if app in p.parents])
+        moved(files()); (self.tmp / 'dmhost').write_bytes(b'other host'); out = self.pack()   # the bundles, in a pack that changes the host
+        self.assertEqual(out.count('(reused, signed)'), 4); self.assertEqual(signed(), {'dmhost', app.name + '.partial'})
+        same_stat(res / 'romfs/marker', b'gamf'); (self.tmp / 'dmhost').write_bytes(b'third host'); out = self.pack()
+        self.assertEqual(out.count('(reused, signed)'), 3); self.assertIn('GameData.bundle', signed())
+        self.assertEqual((res / 'romfs/marker').read_bytes(), b'game')
+        same_stat(res / 'pso/gpu.mtl4a', b'archivf'); self.assert_repacked()   # with unchanged inputs too
+        self.assertEqual((res / 'pso/gpu.mtl4a').read_bytes(), b'archive')
+        moved([app / 'Contents/PlugIns/GameData.bundle']); self.assert_repacked()   # a folder has no bytes to compare
+        with mock.patch.object(pack_app, 'SEAL_READ', 2):   # a large file takes its digest from its bundle's signature: one that has none there is reused only with its times as recorded
+            self.args.name = 'Large'; self.pack()
+            self.assertNotIn('Contents/PlugIns/GameData.bundle/Contents/Resources/romfs/marker', json.loads(self.key.read_text())['seals'])
+            moved([res / 'romfs/marker']); (self.tmp / 'dmhost').write_bytes(b'fourth host'); out = self.pack()
+            self.assertEqual(out.count('(reused, signed)'), 3); self.assertIn('GameData.bundle', signed())
+        key = json.loads(self.key.read_text()); del key['seals']; self.key.write_text(json.dumps(key))   # a key from before the digests
+        moved(files()); self.assert_repacked()
+        self.assertEqual(signed() & {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'}, {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle', 'AddOnContent.bundle'})
+
+    def test_a_large_input_whose_change_time_alone_moved_is_read_and_taken_as_packed(self):
+        # the system moves the change times of the build folder's large files as well (Ocarina of Time's library image, minutes after its build): the RomFS image, the library image
+        # and the pipeline archive's files are keyed by their times, so each is read once and compared with the SHA-256 the last pack recorded; other bytes pack its bundle again
+        import romfs_image
+        image = self.tmp / 'RomFS.img'; romfs_image.pack(self.tmp / 'romfs', image); self.args.romfs = str(image)
+        lib = self.tmp / 'cache/b-0123456789ab'; lib.mkdir(parents=True)
+        for n, b in (('k_b.metallib', b'library'), ('k_b.json', b'{}'), ('k_b.metal', b'source'), ('inputs.tsv', b'stamp')): (lib / n).write_bytes(b)
+        self.assertTrue(pack_app.shader_lib.pack(str(lib), say=lambda m: None)); self.args.msl = str(lib); library = self.tmp / 'cache/b-0123456789ab.img'
+        archive = self.tmp / 'pso/gpu.mtl4a'
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}
+        def moved(*paths):
+            for p in paths: before = p.stat().st_ctime_ns; time.sleep(0.01); p.chmod(p.stat().st_mode & 0o7777); self.assertNotEqual(p.stat().st_ctime_ns, before)
+        def reads():   # a reuse → the inputs it read whole
+            real, read = pack_app.digest, []
+            with mock.patch.object(pack_app, 'digest', lambda p: (read.append(Path(p)), real(p))[1]): self.assert_reused()
+            return {p for p in read if p in (image, library, archive)}
+        self.pack()
+        sources = json.loads(self.key.read_text())['sources']
+        self.assertEqual({k: v['sha256'] for k, v in sources.items() if Path(k) in (image, library, archive)}, {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (image, library, archive)})
+        self.assertEqual(reads(), set())
+        for p in (image, library, archive):
+            with self.subTest(input=p.name):
+                moved(p); self.assertEqual(reads(), {p}); self.assertEqual(reads(), set())   # read once; the time it has now is in the record
+        moved(image, library, archive); (self.tmp / 'dmhost').write_bytes(b'other host'); out = self.pack()   # and in a pack that changes the host: every bundle cloned
+        self.assertEqual(out.count('(reused, signed)'), 4); self.assertEqual(signed(), {'dmhost', Path(self.args.out).name + '.partial'})
+        self.assertEqual(reads(), set())
+        st = archive.stat(); archive.write_bytes(b'archivf'); os.utime(archive, ns=(st.st_atime_ns, st.st_mtime_ns))   # other bytes behind the same size and time
+        out = self.pack(); self.assertEqual(out.count('(reused, signed)'), 3); self.assertIn('PipelineArchive.bundle', signed())
+        self.assertEqual((Path(self.args.out) / 'Contents/Resources/pso/gpu.mtl4a').read_bytes(), b'archivf')
+        key = json.loads(self.key.read_text()); del key['sources']; self.key.write_text(json.dumps(key))   # no digests in the record: an input is as packed only with its times as recorded,
+        out = self.pack(); self.assertEqual(out.count('(reused, signed)'), 2)   # which the two images, whose change times moved above, no longer have
+        self.assertEqual(signed() & {'GameData.bundle', 'ShaderLibraries.bundle', 'PipelineArchive.bundle'}, {'GameData.bundle', 'ShaderLibraries.bundle'})
+
+    def test_microphone_metadata_matches_the_supported_import(self):
+        module = self.tmp / 'patched/main.patched.bin'
+        cases = (
+            ('_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi', False, False),
+            (pack_app.nso_syms._INPUT_STREAM_OPEN, True, False),
+            (pack_app.nso_syms._INPUT_STREAM_OPEN, False, True),
+        )
+        for name, defined, supported in cases:
+            with self.subTest(name=name, defined=defined):
+                module.write_bytes(module_with_import(name, defined))
+                self.pack()
+                info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+                self.assertEqual('NSMicrophoneUsageDescription' in info, supported)
+
+    def test_a_pack_that_stops_leaves_the_bundles_of_the_app_in_place_reusable(self):
+        # the usual moment a pack is stopped is while it signs: the app is the old one, and its record went with the attempt, so the next pack signed every bundle again (Ocarina of
+        # Time: 36 GB). The record is set aside instead, for the bundles alone
+        def signed(): return {Path(c[-1]).name for c in self.commands if '--sign' in c}
+        self.pack(); app = Path(self.args.out); aside = Path(self.args.out + '.key.replaced')
+        host = (app / 'Contents/MacOS/dmhost').read_bytes()
+        (self.tmp / 'dmhost').write_bytes(b'other host'); self.failed_tool = 'codesign'
+        with self.assertRaisesRegex(SystemExit, 'fixture codesign failed'): self.pack()
+        self.assertFalse(self.key.exists()); self.assertTrue(aside.is_file())
+        self.assertEqual((app / 'Contents/MacOS/dmhost').read_bytes(), host)   # the app in place is the old one
+        with self.assertRaisesRegex(SystemExit, 'fixture codesign failed'): self.pack()   # and again: the record stays aside
+        self.assertFalse(self.key.exists()); self.assertTrue(aside.is_file())
+        (self.tmp / 'dmhost').write_bytes(b'host'); self.failed_tool = None   # the inputs of the pack that finished: still a pack, never "reused" from a record set aside
+        out = self.pack()
+        self.assertNotIn('reused (inputs unchanged)', out); self.assertEqual(out.count('(reused, signed)'), 4)
+        self.assertEqual(signed(), {'dmhost', app.name + '.partial'})
+        self.assertTrue(self.key.is_file()); self.assertFalse(aside.exists())
+        self.assert_reused()
+        self.failed_tool = 'codesign'; self.args.name = 'Renamed'   # a bundle changed in the app since: made again, as from the key
+        with self.assertRaises(SystemExit): self.pack()
+        (app / 'Contents/Resources/romfs/marker').write_bytes(b'gamf'); self.failed_tool = None
+        out = self.pack(); self.assertEqual(out.count('(reused, signed)'), 3); self.assertIn('GameData.bundle', signed())
+
+    def test_large_files_are_not_read_for_the_keys(self):
+        # the shader libraries and the pipeline archive are keyed by stat, as the RomFS: a pack that changes only the host reads none of the game's data
+        self.pack(); (self.tmp / 'dmhost').write_bytes(b'other host')
+        real, read = pack_app.digest, []
+        with mock.patch.object(pack_app, 'digest', lambda p: (read.append(Path(p)), real(p))[1]): self.pack()
+        self.assertIn(self.tmp / 'dmhost', read)
+        self.assertFalse([p for p in read if p.parent in (self.tmp / 'msl', self.tmp / 'pso')])
+
+    def test_programs_in_data_bundles(self):
+        # a game of several programs: each other program's RomFS in a data bundle of its own, its libraries with the first's in ShaderLibraries, reused as the first program's
+        t = self.tmp
+        for d in ('p1/patched', 'p1/romfs', 'p1/msl', 'p1/profile', 'p1/html'): (t / d).mkdir(parents=True)
+        for n, b in (('patched/main.patched.bin', b'code1'), ('patched/main.fixups.tsv', b'f1'), ('romfs/data', b'game1'), ('msl/k.metallib', b'lib1'), ('profile/shader_map.tsv', b'map1'), ('html/index.html', b'page')):
+            (t / 'p1' / n).write_bytes(b)
+        self.args.program = ['\t'.join(['1', *(str(t / 'p1' / d) for d in ('patched', 'romfs', 'msl', 'profile', 'html'))])]
+        self.pack()
+        res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
+        self.assertTrue((res / 'p1/romfs').is_symlink())
+        self.assertEqual((res / 'p1/romfs').resolve(), (plugins / 'GameData1.bundle/Contents/Resources/p1/romfs').resolve())
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game1'); self.assertEqual((res / 'p1/html/index.html').read_bytes(), b'page')
+        self.assertEqual((plugins / 'ShaderLibraries.bundle/Contents/Resources/msl/p1/msl/k.metallib').read_bytes(), b'lib1')
+        self.assertIn('DM_ROMFS=@R@/p1/romfs\tDM_MSL_DIR=@R@/msl/p1', (res / 'dm/programs.tsv').read_text())
+        (t / 'dmhost').write_bytes(b'other host')
+        self.assertEqual(self.pack().count('(reused, signed)'), 5)
+        (t / 'p1/romfs/data').write_bytes(b'game2')
+        out = self.pack()
+        self.assertIn('step: program 1 game files\n', out); self.assertEqual(out.count('(reused, signed)'), 4)
+        self.assertEqual((res / 'p1/romfs/data').read_bytes(), b'game2')
+        (t / 'p1/msl/k.metallib').write_bytes(b'lib2')
+        self.assertIn('step: shader libraries\n', self.pack())
+
+    def test_program_shader_bundle_reuses_canonical_image_name(self):
+        library = self.tmp / 'b-abcdef012345'
+        shutil.copytree(self.tmp / 'msl', library)
+        self.assertTrue(pack_app.shader_lib.pack(library, say=lambda s: None))
+        program = ['1', *(str(self.tmp / p) for p in ('patched', 'romfs')), f'{library}.img', str(self.tmp / 'profile'), str(self.tmp / 'html')]
+        self.args.program = ['\t'.join(program)]
+        self.pack()
+        packed = Path(self.args.out) / 'Contents/PlugIns/ShaderLibraries.bundle/Contents/Resources/msl/p1'
+        self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
+
+        program[3] = str(library)
+        self.args.program = ['\t'.join(program)]
+        self.assertIn('step: shader libraries (reused, signed)\n', self.pack())
+        self.assertEqual([p.name for p in packed.iterdir()], ['b-abcdef012345.img'])
+
+    def test_other_programs_romfs_beside_the_romfs(self):   # a NUP of several programs (scripts/pack_nup.py): romfs_programs/ beside the RomFS, in a data bundle of its own, where the host looks
+        t = self.tmp; (t / 'romfs_programs').mkdir(); (t / 'romfs_programs/0.img').write_bytes(b'switch 1 data')
+        self.pack()
+        res, plugins = Path(self.args.out) / 'Contents/Resources', Path(self.args.out) / 'Contents/PlugIns'
+        self.assertTrue((res / 'romfs_programs').is_symlink())
+        self.assertEqual((res / 'romfs_programs').resolve(), (plugins / 'GameDataPrograms.bundle/Contents/Resources/romfs_programs').resolve())
+        self.assertEqual((res / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+        self.assert_reused()
+        (t / 'romfs_programs/0.img').write_bytes(b'switch 1 data, updated')
+        self.assertIn("step: other programs' game files\n", self.pack())
+        self.assertEqual((res / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+        shutil.rmtree(t / 'romfs_programs'); self.pack()
+        self.assertFalse((res / 'romfs_programs').exists() or (plugins / 'GameDataPrograms.bundle').exists())
+
     def test_unpacked_files_and_unselected_split_pairs_do_not_invalidate(self):
         self.pack()
         for name in ('msl/k.metal', 'msl/_b_build.json', 'msl/analysis/report.txt', 'patched/main.sites.tsv', 'profile/game.tsv',
@@ -423,6 +634,43 @@ class PackReuse(unittest.TestCase):
         self.assert_repacked()
 
 
+class Sign(unittest.TestCase):
+    def setUp(self):
+        self.app = Path(tempfile.mkdtemp(dir=TEST_ROOT)).resolve() / 'Game.app'; self.addCleanup(shutil.rmtree, self.app.parent)
+        (self.app / 'Contents/MacOS').mkdir(parents=True)
+        self.bundles = [self.app / 'Contents/PlugIns' / f'{n}.bundle' for n in ('GameData', 'ShaderLibraries')]
+        for b in self.bundles: b.mkdir(parents=True)
+
+    def test_new_bundles_are_signed_at_once_and_one_codesign_refuses_again_alone(self):
+        # codesign reads a bundle on one core: the new data bundles' runs overlap (Ocarina of Time's shader libraries and pipeline archive: 70 s one after the other, 38 s together);
+        # one refused for a copied file's Finder information is signed again after the others, then the host and the app, in that order
+        calls, lock, together = [], threading.Lock(), threading.Barrier(2, timeout=20)
+        def run(cmd):
+            target = Path(str(cmd[-1])).name
+            if str(cmd[0]) != 'codesign': return ''
+            with lock: calls.append(target); n = calls.count(target)
+            if target.endswith('.bundle') and n == 1:
+                together.wait()   # times out, and fails the test, unless both runs are under way
+                if target == 'ShaderLibraries.bundle': raise SystemExit('codesign failed (1): resource fork, Finder information, or similar detritus not allowed')
+            return ''
+        with mock.patch.object(pack_app, 'run', run), mock.patch.object(pack_app.subprocess, 'run') as cleared:
+            pack_app.sign(self.app, '-', 'codesign', self.bundles)
+        self.assertEqual(sorted(calls[:2]), ['GameData.bundle', 'ShaderLibraries.bundle'])
+        self.assertEqual(calls[2:], ['ShaderLibraries.bundle', 'dmhost', 'Game.app'])
+        self.assertEqual([c.args[0][:2] for c in cleared.call_args_list], [['xattr', '-cr']])   # the attributes cleared once, for the one refused
+
+    def test_another_failure_stops_the_pack(self):
+        def run(cmd):
+            if Path(str(cmd[-1])).name == 'GameData.bundle': raise SystemExit('codesign failed (1): no identity found')
+            return ''
+        with mock.patch.object(pack_app, 'run', run), self.assertRaisesRegex(SystemExit, 'no identity found'): pack_app.sign(self.app, 'X', 'codesign', self.bundles)
+
+    def test_no_new_bundle(self):   # a pack that reused them all: the host, then the app
+        calls = []
+        with mock.patch.object(pack_app, 'run', lambda cmd: calls.append(Path(str(cmd[-1])).name) or ''): pack_app.sign(self.app, '-', 'codesign')
+        self.assertEqual(calls, ['dmhost', 'Game.app'])
+
+
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('codesign'), 'needs macOS (clang, codesign, sips, iconutil)')
 class App(unittest.TestCase):
     @classmethod
@@ -455,6 +703,21 @@ class App(unittest.TestCase):
                                    '--tables', str(t / 'profile'), '--font', str(t / 'font'), '--aoc', str(t / 'aoc'), '--pso', str(t / 'pso'), '--env-file', str(t / 'env.txt'), '--settings', str(t / 'launcher.json'), '--title-id', TID.lower(),
                                    '--name', 'Game: Test', '--version', '1.0.1', '--lang', 'fr', '--marker', 'region_common/audio/edward.bfsar', '--icon', str(t / 'icon.jpg'),
                                    '--category', 'public.app-category.games'])
+        # Bundle variants share the launcher sources. Keep the linker output so each pack can still sign its own copy.
+        build_launcher = pack_app.build_launcher
+        launcher = t / 'launcher-fixture'
+        launcher_inputs = None
+
+        def build_fixture(out, *inputs):
+            nonlocal launcher_inputs
+            if inputs == launcher_inputs:
+                shutil.copy(launcher, out)
+            else:
+                build_launcher(out, *inputs)
+                shutil.copy(out, launcher)
+                launcher_inputs = inputs
+
+        cls.enterClassContext(mock.patch.object(pack_app, 'build_launcher', build_fixture))
         with contextlib.redirect_stdout(io.StringIO()): pack_app.pack(cls.args)
 
     @classmethod
@@ -518,6 +781,22 @@ class App(unittest.TestCase):
         self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
+
+    def test_library_given_as_its_image(self):
+        lib = self.tmp / 'packed/b-0123456789ab'
+        shutil.copytree(self.tmp / 'cache/b-0123456789ab', lib)
+        self.assertTrue(pack_app.shader_lib.pack(lib, say=lambda s: None))
+        self.assertFalse(lib.exists())
+        app = self.tmp / 'Image.app'
+        with contextlib.redirect_stdout(io.StringIO()):
+            pack_app.pack(types.SimpleNamespace(**{**vars(self.args), 'out': str(app), 'msl': f'{lib}.img'}))
+        contents = app / 'Contents'
+        msl = contents / 'Resources/msl'
+        self.assertEqual([p.name for p in msl.iterdir()], ['b-0123456789ab.img'])
+        self.assertEqual(plistlib.loads((contents / 'Info.plist').read_bytes())['DMChain'], '0123456789ab')
+        self.assertTrue(msl.is_symlink())
+        self.assertEqual(msl.resolve(), contents / 'PlugIns/ShaderLibraries.bundle/Contents/Resources/msl')
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', app], check=True, capture_output=True)
 
     def test_packed_language_is_the_lists(self):   # --lang a game lacks: the Game language row's default (settings.py: the game's first), with or without the window
         with tempfile.TemporaryDirectory(dir=TEST_ROOT) as d:
@@ -604,7 +883,10 @@ class App(unittest.TestCase):
         self.assertEqual((r['DM_ROMFS'], r['DM_MSL_DIR'], r['DM_NVN_SHMAP'], r['DM_FONT_DIR'], r['DM_AOC_DIR']),
                          (str(res / 'romfs'), str(res / 'msl'), str(res / 'dm/shader_map.tsv'), str(res / 'dm/font'), str(res / 'aoc')))
         self.assertEqual(r['DM_PSO_BUNDLE'], str(res / 'pso'))   # the pipeline archive made offline, as the iOS app's main.m sets it
+        self.assertEqual(r['DM_NVN_MISSING_KEYS'], str(sup / 'shader_missing.txt'))   # beside the save, not in the log folder: the log is renamed at every start
         self.assertEqual((r['DM_SAVE'], r['DM_TEMP'], r['DM_ROOT'], r['cwd']), (str(sup / 'save'), str(sup / 'temp'), str(sup), str(sup)))   # pso_user.tsv goes beside save/
+        self.assertEqual(r['DM_ALBUM_DIR'], str(home / f'Pictures/nxnative/{TID}'))
+        self.assertFalse((home / f'Pictures/nxnative/{TID}').exists())   # created lazily on first SaveScreenshot
         self.assertEqual((r['DM_WINDOW'], r['DM_AUDIO'], r['DM_LANG']), ('1', '1', 'ja'))   # the caller's DM_LANG wins over the packed language
         self.assertEqual((r['DM_BAKED'], r['DM_BOTH']), ('1', 'player'))   # the player's env.txt before the bundle's
         self.assertTrue((sup / 'save').is_dir()); self.assertTrue((sup / 'temp').is_dir())
@@ -612,6 +894,29 @@ class App(unittest.TestCase):
         p = self.launch(); p.communicate(timeout=30)
         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+
+    def test_missing_shader_outlives_the_logs(self):   # issue #1519: a key a session reported is still there for the next --seen-shaders build after two more starts, which replace both logs
+        home, key = self.tmp / 'home', 'a' * 16
+        logs = home / 'Library/Logs/nxnative'
+        (home / f'Library/Application Support/nxnative/{TID}').mkdir(parents=True, exist_ok=True)
+        (home / f'Library/Application Support/nxnative/{TID}/shader_missing.txt').unlink(missing_ok=True)
+        for name in (f'{TID}.log', f'{TID}.prev.log'): (logs / name).unlink(missing_ok=True)
+        table = self.tmp / 'seen-profile'; table.mkdir(exist_ok=True)
+        (table / 'shader_map.tsv').write_text(f'p.bin\t0\tpixel\t{key}\tsrc\np.bin\t1\tpixel\t{"b" * 16}\tsrc\n')
+        (table / 'shader_seen.tsv').write_text(f'{"b" * 16}\tpixel\n')
+        g = types.SimpleNamespace(table=lambda n: table / n)
+
+        def keys():
+            with mock.patch.dict(os.environ, {'HOME': str(home)}), mock.patch.object(nsp, 'say'):
+                work = self.tmp / 'no-such-build-folder'
+                return nsp.seen_keys(g, self.tmp / 'seen-shader', nsp.seen_logs(work, int(TID, 16)), nsp.seen_lists(work, int(TID, 16)))
+
+        for say in (key, None, None):   # the session that reaches the area, then two starts that report nothing
+            p = self.launch(STANDIN_MISSING=say) if say else self.launch(); p.communicate(timeout=30)
+            self.assertEqual(p.returncode, 7)
+        for name in (f'{TID}.log', f'{TID}.prev.log'): self.assertNotIn(key, (logs / name).read_text())   # both logs have moved on
+        shutil.rmtree(self.tmp / 'seen-shader', ignore_errors=True)   # not from the last build's own list
+        self.assertEqual(keys(), [key, 'b' * 16])
 
     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
         p = self.launch(wait=True)
@@ -625,11 +930,66 @@ class App(unittest.TestCase):
     def test_missing_data(self):
         broken = self.tmp / 'Broken.app'; shutil.rmtree(broken, ignore_errors=True)
         subprocess.run(['/bin/cp', '-R', self.app, broken], check=True)
-        shutil.rmtree(broken / 'Contents/Resources/romfs')
+        r = broken / 'Contents/Resources/romfs'
+        shutil.rmtree(r.resolve() if r.is_symlink() else r)   # the data itself: in its data bundle, behind the link
         (self.tmp / 'home/alert.txt').unlink(missing_ok=True)
         p = subprocess.run([broken / 'Contents/MacOS/nxnative'], env=dict(HOME=str(self.tmp / 'home'), PATH=f'{self.tmp / "bin"}:/usr/bin:/bin'), capture_output=True, text=True, timeout=30)
         self.assertEqual(p.returncode, 1)
         self.assertIn('game data inside this app is missing', (self.tmp / 'home/alert.txt').read_text())
+
+    def test_data_bundles(self):
+        # the game's files sit in signed nested bundles (Contents/PlugIns/<name>.bundle) behind links in Resources, and the app's signature holds them by hash
+        r = Path(self.app) / 'Contents/Resources/romfs'
+        self.assertTrue(r.is_symlink())
+        self.assertEqual(r.resolve(), (Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/Resources/romfs').resolve())
+        self.assertFalse((Path(self.app) / 'Contents/PlugIns/GameData.bundle/Contents/MacOS').exists())   # data only: no executable
+        self.assertEqual(len(json.loads(Path(f'{self.app}.key').read_text())['data']['GameData']), 64)
+        subprocess.run(['codesign', '--verify', '--strict', self.app], check=True, capture_output=True)
+        seal = plistlib.loads((Path(self.app) / 'Contents/_CodeSignature/CodeResources').read_bytes())['files2']
+        self.assertIn('cdhash', seal['PlugIns/GameData.bundle'])
+        self.assertFalse(any(k.startswith('PlugIns/GameData.bundle/') for k in seal))
+
+    def test_data_bundles_repacked(self):
+        # another host: the data bundles are cloned with their signatures; a data file changed in the app since: its bundle is made again. Each result verifies whole (--deep reads every file)
+        out, host = self.tmp / 'Repack.app', self.tmp / 'host-other'
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O1', '-o', host, self.tmp / 'host.c'], check=True)
+        args = argparse.Namespace(**{**vars(self.args), 'out': str(out)})
+        def pack():
+            with contextlib.redirect_stdout(io.StringIO()) as o: pack_app.pack(args)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', out], check=True, capture_output=True)
+            return o.getvalue()
+        pack(); args.host = str(host)
+        self.assertEqual(pack().count('(reused, signed)'), 4)
+        data = out / 'Contents/Resources/romfs/region_common/audio/edward.bfsar'; data.write_bytes(b'snf')
+        self.assertEqual(pack().count('(reused, signed)'), 3)
+        self.assertEqual(data.read_bytes(), b'snd')
+
+    def test_data_bundles_repacked_after_their_change_times_moved(self):
+        # codesign's own record of a large file (CodeResources, files2: its SHA-256) is the digest the key holds for it: after its change time alone moved, as macOS moves a cloned
+        # bundle's, the app is reused as it is and the bundle is cloned again with its signature; with other bytes behind the same size and time it is made again
+        out, host, romfs = self.tmp / 'Moved.app', self.tmp / 'host-moved', self.tmp / 'romfs-large'
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O2', '-o', host, self.tmp / 'host.c'], check=True)
+        shutil.copytree(self.tmp / 'romfs', romfs)
+        large = os.urandom(pack_app.SEAL_READ + 1); (romfs / 'region_common/audio/edward.bfsar').write_bytes(large)
+        args = argparse.Namespace(**{**vars(self.args), 'out': str(out), 'romfs': str(romfs)})
+        def pack():
+            with contextlib.redirect_stdout(io.StringIO()) as o: pack_app.pack(args)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', out], check=True, capture_output=True)
+            return o.getvalue()
+        def moved():
+            for p in (out / 'Contents/PlugIns').rglob('*'):
+                if p.is_file(): p.chmod(p.stat().st_mode & 0o7777)
+        data = out / 'Contents/PlugIns/GameData.bundle/Contents/Resources/romfs/region_common/audio/edward.bfsar'
+        pack()
+        self.assertEqual(json.loads(Path(f'{out}.key').read_text())['seals'][str(data.relative_to(out))], hashlib.sha256(large).hexdigest())
+        with mock.patch.object(pack_app, 'digest', side_effect=pack_app.digest) as read:
+            moved(); self.assertIn('reused (inputs unchanged)', pack())
+        self.assertIn(mock.call(data), read.call_args_list)   # read once, for the comparison
+        moved(); args.host = str(host)
+        self.assertEqual(pack().count('(reused, signed)'), 4)
+        st = data.stat(); data.write_bytes(large[::-1]); os.utime(data, ns=(st.st_atime_ns, st.st_mtime_ns)); args.host = str(self.tmp / 'dmhost')
+        self.assertEqual(pack().count('(reused, signed)'), 3)
+        self.assertEqual(data.read_bytes(), large)
 
     def test_missing_modules(self):
         for missing in (('main.patched.bin',), ('main.fixups.tsv',), ('main.patched.bin', 'main.fixups.tsv')):
@@ -699,7 +1059,7 @@ class App(unittest.TestCase):
         msls = sum(p.stat().st_size for pat in pack_app.MSL_FILES for p in Path(a.msl).glob(pat) if p.is_file() and p.name != '_b_build.json')
         pso = sum(p.stat().st_size for pat in pack_app.PSO_FILES for p in Path(a.pso).glob(pat))
         with mock.patch.object(pack_app, 'can_clone', lambda *a: False), mock.patch.object(pack_app, 'tree_bytes', lambda d: 0), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), contextlib.redirect_stdout(io.StringIO()) as o:
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + msls + pso - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()) as o:
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(o.getvalue(), ''); self.assertFalse(Path(a.out).exists())
 
@@ -711,7 +1071,7 @@ class App(unittest.TestCase):
         lists = sum(p.stat().st_size for d, pats in (('patched', pack_app.MODULE_FILES), ('msl', pack_app.MSL_FILES), ('pso', pack_app.PSO_FILES))
                     for pat in pats for p in (self.tmp / d).glob(pat) if p.is_file() and p.name != '_b_build.json')
         with mock.patch.object(pack_app, 'can_clone', can_clone), mock.patch.object(pack_app, 'tree_bytes', tree_bytes), \
-             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), contextlib.redirect_stdout(io.StringIO()):
+             mock.patch.object(shutil, 'disk_usage', lambda p: types.SimpleNamespace(free=(1 << 30) + lists - 1)), mock.patch.object(pack_app.vol_space, 'important_bytes', lambda p: None), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(SystemExit, 'the app needs'): pack_app.pack(a)
         self.assertEqual(len(probed), 5); self.assertEqual(counted, [(self.tmp / 'aoc').resolve()])
 
@@ -883,6 +1243,46 @@ class Script(unittest.TestCase):
         self.assertNotIn('DM_PSO_PREBUILD_DEPTH', self.tool_env or {})
         (tmp / 'profile/pso_manifest.tsv').write_text('M\t-\t00cc\n')   # other rows (a mesh pipeline alone is enough): again
         self.tool_env = None; self.pack_cmd('nvn', work=tmp, prebake=True); self.assertIsNotNone(self.tool_env)
+
+    def test_prebake_leaves_its_files_in_place(self):
+        # the app's packer keys the archive folder's files by their times, and a link taken away and made again has a new change time: a build that changed nothing packed the app
+        # again and signed its pipeline archive (Ocarina of Time, 5.2 GB: 39 s of a 105 s build)
+        tmp = self.prebake_work(); pso, made = tmp / 'pso/mac', tmp / 'pso/mac-prewarm'
+        self.pack_cmd('nvn', work=tmp, prebake=True, lib_hashes=self.lib_hashes)
+        state = lambda: {p.name: (p.stat().st_ino, p.stat().st_ctime_ns) for p in pso.iterdir() if '-prewarm-' in p.name or p.name == 'prewarm.tsv'}
+        before = state(); self.assertEqual(len(before), 7); time.sleep(0.02)
+        self.tool_env = None; self.pack_cmd('nvn', work=tmp, prebake=True); self.assertIsNone(self.tool_env)
+        self.assertEqual(state(), before)
+        (pso / 'applegpu_g14s-prewarm-07.mtl4a').write_bytes(b'an earlier build')   # one this build does not make: gone
+        other = pso / 'applegpu_g14s-prewarm-01.mtl4a'; other.unlink(); other.write_bytes(b'other')   # other bytes under a name of this build's: its file takes the place
+        copy = pso / 'applegpu_g14s-prewarm-02.keys'; copy.unlink(); shutil.copyfile(made / copy.name, copy); kept = copy.stat().st_ino   # a copy of the same bytes (a volume without links): stays
+        self.pack_cmd('nvn', work=tmp, prebake=True)
+        self.assertFalse((pso / 'applegpu_g14s-prewarm-07.mtl4a').exists())
+        self.assertEqual(other.stat().st_ino, (made / other.name).stat().st_ino)
+        self.assertEqual(copy.stat().st_ino, kept)
+        rest = lambda d: {n: v for n, v in d.items() if n not in (other.name, copy.name)}
+        self.assertEqual(rest(state()), rest(before))
+        (tmp / 'profile/pso_manifest.tsv').write_text('S\tk\t0\n')   # a list without pipelines: none of an earlier build's stay in the app's folder
+        self.pack_cmd('nvn', work=tmp, prebake=True)
+        self.assertEqual(sorted(p.name for p in pso.iterdir()), ['applegpu_g14s.mtl4a'])
+
+    def test_prebake_shader_inputs_in_folder_and_image(self):
+        # A profile input (bf_want.tsv, shader_facts.tsv) can change the functions without changing the chain or shader keys.
+        for packed in (False, True):
+            with self.subTest(packed=packed):
+                tmp = self.prebake_work(); lib = tmp / 'shader/cache/b-0123456789ab'
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tbefore\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)
+                self.tool_env = None
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNone(self.tool_env)   # unchanged inputs reuse the captured pipelines
+                if packed: nsp.shader_lib.expand(lib)
+                (lib / 'inputs.tsv').write_text('game\tfixture\ninputs\tafter\n')
+                if packed: self.assertTrue(nsp.shader_lib.pack(lib, say=lambda _: None))
+                self.pack_cmd('nvn', work=tmp, prebake=True)
+                self.assertIsNotNone(self.tool_env)   # new shader functions need new pipelines in either storage form
 
     def test_prebake_other_gpus(self):   # --gpu naming more GPUs: the tool's pipelines scripts become each of their prewarm archives, through metal-tt
         tmp = self.prebake_work()
@@ -1058,6 +1458,17 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         with mock.patch.dict(os.environ, {'HOME': '/h'}):
             self.assertEqual(nsp.seen_logs(Path('/w'), 0x0400A3A01EE4C000), (Path('/w/run/host.log'), Path('/h/Library/Logs/nxnative/0400A3A01EE4C000.log'), Path('/h/Library/Logs/nxnative/0400A3A01EE4C000.prev.log')))
 
+    def test_lists_read(self):   # the hosts' own lists, which outlast the logs: the run command's and the app's
+        with mock.patch.dict(os.environ, {'HOME': '/h'}):
+            self.assertEqual(nsp.seen_lists(Path('/w'), 0x0400A3A01EE4C000), (Path('/w/run/shader_missing.txt'), Path('/h/Library/Application Support/nxnative/0400A3A01EE4C000/shader_missing.txt')))
+
+    def test_keys_from_the_hosts_lists(self):
+        a, b, c, d = self.keys('a', 'b', 'c', 'd')
+        kept = self.tmp / 'shader_missing.txt'; kept.write_text(f'{b}\n{"e" * 16}\n{c[:7]}\n{d}x\n{c}\n{c[:9]}')   # e: another version's key; half-written lines are none
+        self.assertEqual(nsp.seen_keys(self.g, self.sh, [], [kept, self.tmp / 'no-such-list.txt']), [a, b, c])
+        self.assertTrue(any('2 that earlier runs reported' in m for m in self.said))
+        self.assertEqual(kept.read_text(), f'{b}\n{"e" * 16}\n{c[:7]}\n{d}x\n{c}\n{c[:9]}')   # read only: a host may be appending, and another version's build folder reads it too
+
     def test_partial_library(self):
         a, b = self.keys('a', 'b')
         old = self.sh / 'partial/b-000000000000'; old.mkdir(parents=True); (old / 'old_b.metallib').write_bytes(b'x')   # emptied first: an older chain's, and a key left out now
@@ -1067,7 +1478,8 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
             self.assertEqual(len(self.ran), 1, self.ran)   # own_compilers.py alone
             cmd, env = self.ran[0]
             self.assertEqual(cmd[2:], [str(self.sh / 'pkg'), str(self.sh / 'partial'), a, b])
-            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache/cas.db'), 'mac')); self.assertNotIn('IOSOUT', env)
+            self.assertEqual((env['DMSH_CAS'], env['DMSH_TARGETS']), (str(self.sh / 'cache'), 'mac')); self.assertNotIn('IOSOUT', env)
+            self.assertTrue(Path(env['DMSH_CAS']).is_dir())
             self.assertFalse(old.exists()); self.assertTrue((self.sh / f'partial/b-{self.CHAIN}/k_b.metallib').is_file())
             self.assertFalse((self.sh / f'partial/b-{self.CHAIN}/inputs.tsv').exists()); self.assertFalse((self.tmp / 'c1_full.tsv').exists())   # no stamp: unlisted shaders are not proven safe
             self.assertEqual(self.build([a, b]), self.sh / 'partial'); self.assertEqual(self.ran, [])   # reused
@@ -1091,6 +1503,21 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertTrue(any('building the whole shader map, 4 shaders' in m and '--seen-shaders builds only the 2' in m for m in self.said))
         self.assertFalse((self.sh / 'partial').exists())
 
+    def test_full_build_recovers_partial_cache_written_at_directory_path(self):
+        cache = self.sh / 'cache'
+        name = 'metallib/mac/abcd.metallib'
+        old = nsp.shader_cache.Store(cache)
+        try: old.put(name, b'compiled')
+        finally: old.close()
+
+        with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
+            self.assertEqual(self.build(), cache)
+
+        self.assertFalse((self.sh / 'partial-cache.db').exists())
+        current = nsp.shader_cache.for_chain(cache, self.CHAIN)
+        try: self.assertEqual(current.get(name), b'compiled')
+        finally: current.close()
+
     def test_full_build_of_a_game_without_a_list_says_nothing(self):
         (self.tmp / 'shader_seen.tsv').unlink()
         with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
@@ -1106,6 +1533,21 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         stamp = self.tmp / 'run/pso_archive_partial/prebuilt.tsv'; stamp.parent.mkdir(parents=True); stamp.write_text('chain\n')
         cmd = self.run_cmd(partial=True)
         self.assertTrue(cmd.endswith(f'2>&1 | tee {self.tmp}/run/host.log')); self.assertIn(f'DM_PSO_ARCHIVE={self.tmp}/run/pso_archive_partial', cmd); self.assertFalse(stamp.exists())
+        self.assertIn(f'DM_NVN_MISSING_KEYS={self.tmp}/run/shader_missing.txt', cmd); self.assertNotIn('DM_NVN_MISSING_KEYS', self.run_cmd())
+
+    def test_prebuild_keeps_no_missing_keys(self):   # the tool's loads are not what the game asked for: the next partial build must not take them
+        (self.tmp / 'shader_pairs.tsv').write_text('v\tf\n'); envs = []
+        with mock.patch.object(nsp, 'run', lambda cmd, log, env=None, cwd=None, on_line=None, fatal=True: envs.append(env)):
+            cmd = self.run_cmd(partial=True)
+        self.assertEqual([e['DM_PSO_PREBUILD'] for e in envs], ['tool']); self.assertNotIn('DM_NVN_MISSING_KEYS', envs[0])
+        self.assertIn('DM_NVN_MISSING_KEYS=', cmd)
+
+    def test_run_command_passes_the_runtime_compiler(self):
+        python = self.tmp / 'python environment' / 'bin/python3'
+        compiler = self.tmp / 'source tree' / 'dmsh_live.py'
+        self.assertNotIn('DM_NVN_RUNTIME_COMPILER', self.run_cmd())
+        self.assertIn(f"DM_NVN_RUNTIME_PYTHON='{python}'", self.run_cmd(nvn_runtime=(python, compiler)))
+        self.assertIn(f"DM_NVN_RUNTIME_COMPILER='{compiler}'", self.run_cmd(nvn_runtime=(python, compiler)))
 
     def test_pack_takes_the_partial_folder(self):   # the app and its pipeline archive read b-<chain> of the folder build_shaders returned
         ran = []

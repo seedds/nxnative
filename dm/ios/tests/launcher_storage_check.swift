@@ -91,7 +91,9 @@ import Foundation
         let both = SaveSyncReport(line: "sync=1 cloud=1 local=\(lh) saved=1 files=1 size=1 chash=\(ch) csaved=2 cfiles=1 csize=1 cdevice=iPhone17,1 sametitle=1 conflict=1 pull=0")!
         expect(SaveSyncReport.step(both) == .choose && both.localChoice == "local:" + ch && both.cloudChoice == "cloud:" + ch, "both changed: local:<cloud's hash> and cloud:<cloud's hash>")
         let none = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=0 pull=0")!
-        expect(none.localChoice == "local:none", "no cloud save: local:none")
+        expect(SaveSyncReport.step(none) == .play("ask") && none.localChoice == "local:none", "no cloud save and never synced: ask, local:none")
+        let missing = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=1 pull=0")!
+        expect(SaveSyncReport.step(missing) == .missing && missing.localChoice == "local:none", "no cloud save though previously synced: missing, local:none")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)

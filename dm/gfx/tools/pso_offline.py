@@ -4,7 +4,8 @@
 # The host matches libraries by content, so the archive serves the libraries the app ships (msl/b-<chain>); measurements are in dm/games/01007EF00011E000/README.md.
 # Per pair (vertex key, pixel key) of the profile's shader_pairs.tsv and pso_pairs.tsv, read in that order with repeated lines dropped, as the host reads them:
 #   · the vertex shader's pulling library <key>_bp (a vertex shader without stage inputs: its own <key>_b), entry `entry`, or `entry_z` for the near = 0 depth mode, from its reflection
-#     <key>_b.json; the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour attachment unspecialized
+#     <key>_b.json: the pulling library's under `pull` there (vertex_entry); the pixel shader's <key>_b, entry `entry` (main0); no vertex descriptor, one sample, every colour
+#     attachment unspecialized
 #   · left out as the host leaves them out (to the draws): a reflection of another chain version or none, a vertex shader with stage inputs and no pulling library, a vertex library that
 #     writes the layer (its reflection's layer_out, dmsh_entry.py layer_out: its pipelines take an input primitive class), a pixel shader that reads the primitive ID (its reflection's
 #     raster.primitive_id: the host builds its pipelines whole, since through a base every primitive reads 0), a missing library or entry point
@@ -25,7 +26,9 @@
 #                    it matches and a probe of a few bases finds them in the archive
 #   rest_pairs.tsv   the pairs the device still builds (only when there are any): those whose functions declare other constants, and those whose base metal-tt cannot compile
 #                    (compile_isolating: found by halving the group that failed, left out of the archive with a red line each, so one such base no longer costs the whole archive)
-#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute pipelines (for people and logs; the host does not read it)
+#   archive.tsv      what was built: architectures, OS minimum, toolchain, bases, compute pipelines, prewarm files (for people and logs; the host does not read it)
+#   <arch>-prewarm-<NN>.mtl4a, <arch>-prewarm-<NN>.keys, prewarm.tsv   with --prewarm-host: the prewarm lists' R and M rows' pipelines, one file per flush period of the host's
+#                    prebuild tool with its index, and the tool's stamp (prewarm_host, below); the host opens them with the archive (pso_bundle_open_prewarm)
 # Each archive is made again only when its compiler inputs change (key.<arch> in the work folder): the complete pipeline configuration without library locations,
 # the referenced libraries' bytes, architecture, platform, minimum OS and metal-tt version. Chain/profile stamps are validated and refreshed independently.
 # More bases than --batch-size are compiled in sequential groups (batches.<arch>/<index>/ in the work folder, each cached by its own inputs) and merged with metal-pack: one metal-tt on
@@ -34,6 +37,7 @@
 # reverse. The compute groups are small (COMPUTE_BATCH) and run --jobs at a time: one metal-tt keeps about three cores busy.
 # Usage: pso_offline.py --msl <b-<chain> folder> --out <folder> --work <folder> [--game <id>] [--pairs <shader_pairs.tsv> [--pairs <pso_pairs.tsv>]] [--gpu g18p[,g17p]]
 #          [--depth gl|zero] [--platform ios|macos] [--os-min 27.0] [--script-only] [--batch-size N] [--shader-map <shader_map.tsv>] [--manifest <pso_manifest.tsv>] [--no-compute] [--jobs N]
+#          [--prewarm-host <Mac dmhost>]
 #   --game: the profile (DM_GAMES_DIR as for game.py) whose shader_pairs.tsv and pso_pairs.tsv are the pairs, whose shader_map.tsv and pso_manifest.tsv name the compute shaders, and
 #   whose depth_mode key the depth mode, unless --pairs / --shader-map / --manifest / --depth say; --no-compute: bases only; --jobs: metal-tt runs at a time for compute groups;
 #   --gpu: architectures, with or without the applegpu_ prefix (default g18p); --depth: the game's NVN depth mode (gl = near -w, NVN's default; zero = near 0, which the game sets
@@ -41,17 +45,19 @@
 #   --os-min: the archives' system (default: for iOS the SDK's major version, e.g. 27.0; for macOS the major version this Mac runs, since the Mac app is built for the Mac that builds it).
 #   A device opens only an archive of its own major version (macOS 27.2 refused archives made for 26.0 and 26.6 and opened those for 27.0 and 27.2), and builds the bases itself
 #   otherwise: the SDK's version on a Mac whose system is older than its Xcode's SDK (macOS 26.6 with Xcode 27.1) left that Mac without them (GitHub issue #673)
-import argparse, concurrent.futures, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
+import argparse, concurrent.futures, contextlib, filecmp, hashlib, json, os, shutil, struct, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs, shader_lib   # the libraries may be one file (shader_lib.py), read in place; metal-tt alone needs files of its own (real_libraries)
 import dmsh_abi as abi, dmsh_side
+import vol_space   # the space metal-tt may write, with what APFS frees on demand
 
-# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). A pair whose functions declare another constant is left to the
-# device: the host leaves it at its default, which metal-tt can do too, but no other constant was tried there, and one function metal-tt fails fails its whole group
-HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True)}
+# The function constants the host's prebuild sets in a base's functions (nvn_mtl.m pre_fn), by name: (index, bool value). dm_border_off is true (almost no draw binds a border twin);
+# dm_blend_off is false so one pulling base in the pair archive serves both blend_live = 0 and 1 draws as hybrid stand-ins (hybrid_get), while steady-state pipelines specialize it true
+# when both blend words are 0. A pair whose functions declare another constant is left to the device (rest_pairs.tsv)
+HOST_CONSTANTS = {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_OFF_FC, False)}
 
 BATCH = 1000   # bases per metal-tt run: Odyssey's largest compiler lifetime footprint at this size was 2.065 GiB on an 8 GB M2
 MAX_FAILED = 8   # pipelines of one group metal-tt may fail on before the run counts as failed (compile_isolating)
@@ -72,12 +78,13 @@ def pair_text(paths):
 
 
 def read_pairs(text):
-    """(vertex key, pixel key) per line, in order, without empty lines, comments and repeated lines (pso_prebuild's reading)"""
+    """(vertex key, pixel key) or ('M', task key or '-', mesh key, pixel key or '-') per line, in order, without empty lines, comments and repeated lines (pso_prebuild's reading)"""
     seen, out = set(), []
     for line in text.decode('utf-8').split('\n'):
         if not line or line.startswith('#') or line in seen: continue
         seen.add(line); c = line.split('\t')
-        if len(c) >= 2: out.append((c[0], c[1]))
+        if len(c) >= 4 and c[0] == 'M': out.append(('M', c[1], c[2], c[3]))
+        elif len(c) >= 2: out.append((c[0], c[1]))
     return out
 
 
@@ -138,6 +145,16 @@ def constants(path):
     return dict(zip(names, consts))
 
 
+def vertex_entry(vj, zero):
+    """The entry point a base takes from a vertex shader's library, by its reflection vj: the shader's own (`entry`, or `entry_z` for the near = 0 depth mode) in <key>_b, and in a
+    pulling library <key>_bp the name the reflection's `pull` gives that entry point (dmsh_pull.py), which is the shader's own where `pull` names none. As the host takes it
+    (nvn_mtl.m: side_entry in shader_load and pre_desc)"""
+    z = bool(zero and vj.get('entry_z')); own = vj['entry_z'] if z else vj.get('entry')
+    pull = vj.get('pull')
+    name = pull.get('entry_z' if z else 'entry') if isinstance(pull, dict) else None
+    return name if isinstance(name, str) and name else own
+
+
 def plan(lib_dir, chain, pairs, zero):
     """The bases the archive holds: [(vertex library, vertex entry, pixel library, pixel entry)], the pairs left to the device (function constants), and counts of the pairs left out"""
     lib_dir = romfs.Path(lib_dir); js, fns = {}, {}
@@ -152,11 +169,13 @@ def plan(lib_dir, chain, pairs, zero):
             except (OSError, ValueError): fns[lib] = None
         return fns[lib]
     bases, rest, seen, left = [], [], set(), dict.fromkeys(('reflection', 'mesh', 'stage inputs', 'library', 'layer', 'primitive ID', 'entry'), 0)
-    for vk, fk in pairs:
+    for row in pairs:
+        if len(row) != 2: continue   # 3-column mesh triples go through plan_mesh
+        vk, fk = row
         vj, fj = refl(vk), refl(fk)
         if not vj or not fj or vj.get('chain') != chain or fj.get('chain') != chain: left['reflection'] += 1; continue
-        if vj.get('mesh_stage'): left['mesh'] += 1; continue   # a mesh shader's pair (shader_split.py var_pairs, for its padding): its pipelines are mesh pipelines, built at the draw (nvn_geometry.inc mtk_pso)
-        ventry = vj['entry_z'] if zero and vj.get('entry_z') else vj.get('entry'); fentry = fj.get('entry') or 'main0'
+        if vj.get('mesh_stage'): left['mesh'] += 1; continue   # a mesh shader's pair (shader_split.py var_pairs, for its padding): handled by plan_mesh
+        ventry = vertex_entry(vj, zero); fentry = fj.get('entry') or 'main0'
         pull = isinstance(vj.get('pull'), dict)
         if not pull and vj.get('vertex_inputs'): left['stage inputs'] += 1; continue
         if vj.get('layer_out'): left['layer'] += 1; continue
@@ -167,6 +186,68 @@ def plan(lib_dir, chain, pairs, zero):
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if any(c not in HOST_CONSTANTS for c in vf[ventry] + ff[fentry]): rest.append((vk, fk)); continue   # script specializes HOST_CONSTANTS as the host does
         b = (vl, ventry, fl, fentry)
+        if b not in seen: seen.add(b); bases.append(b)
+    return bases, rest, left
+
+
+def plan_mesh(lib_dir, chain, pairs, zero):
+    """The mesh pipeline bases the archive holds: [(object lib, object entry, mesh lib, mesh entry, pixel lib, pixel entry, payload, othreads, mthreads)],
+    the triples left to the device (depth-only or non-HOST_CONSTANTS), and counts of triples left out. Handles 3-column rows (mesh_pairs.tsv) and taskless 2-column mesh pairs"""
+    lib_dir = romfs.Path(lib_dir); js, fns = {}, {}
+    def refl(key):
+        if key not in js:
+            try: js[key] = json.loads((lib_dir / f'{key}_b.json').read_bytes())
+            except (OSError, ValueError): js[key] = None
+        return js[key]
+    def fn(lib):
+        if lib not in fns:
+            try: fns[lib] = constants(lib_dir / f'{lib}.metallib')
+            except (OSError, ValueError): fns[lib] = None
+        return fns[lib]
+    bases, rest, seen = [], [], set()
+    left = dict.fromkeys(('reflection', 'primitive data', 'primitive ID', 'library', 'entry'), 0)
+    for row in pairs:
+        if len(row) == 4 and row[0] == 'M':
+            _, tk, mk, fk = row
+        elif len(row) == 2:
+            mj = refl(row[0])
+            mst = mj.get('mesh_stage') if isinstance(mj, dict) else None
+            if not (isinstance(mst, dict) and mst.get('kind') == 'ms' and not mst.get('task', True)): continue
+            tk, mk, fk = '-', row[0], row[1]
+        else: continue
+        mj = refl(mk)
+        mst = mj.get('mesh_stage') if isinstance(mj, dict) else None
+        if not mj or mj.get('chain') != chain or not isinstance(mst, dict) or mst.get('kind') != 'ms': left['reflection'] += 1; continue
+        if mst.get('prim'): left['primitive data'] += 1; continue   # Metal 4 specialization zeros per-primitive outputs: built whole (nvn_geometry.inc)
+        if tk == '-':
+            if mst.get('task', True): left['reflection'] += 1; continue
+            ol, oe, othreads, payload = mk + '_b', mj.get('entry_object') or '', 1, 16
+        else:
+            tj = refl(tk)
+            tst = tj.get('mesh_stage') if isinstance(tj, dict) else None
+            if not tj or tj.get('chain') != chain or not isinstance(tst, dict) or tst.get('kind') != 'ts' or not mst.get('task', True): left['reflection'] += 1; continue
+            ol, oe = tk + '_b', tj.get('entry') or 'main0'
+            othreads = int(tst.get('threads') or 0)
+            raw_pay = int(tst.get('payload') or 0)
+            payload = 16 if raw_pay > abi.MESH_PAYLOAD_MAX else (raw_pay + 15) & ~15
+        ml, me = mk + '_b', mj['entry_z'] if zero and mj.get('entry_z') else mj.get('entry') or 'main0'
+        mthreads = int(mst.get('threads') or 0)
+        if not othreads or not mthreads or not oe: left['reflection'] += 1; continue
+        of, mf = fn(ol), fn(ml)
+        if of is None or mf is None: left['library'] += 1; continue
+        if oe not in of or me not in mf: left['entry'] += 1; continue
+        if fk == '-':   # depth-only mesh draw: needs the host's in-memory dm_mesh_nop fragment, built on the device
+            if ('M', tk, mk, '-') not in seen: seen.add(('M', tk, mk, '-')); rest.append(('M', tk, mk, '-'))
+            continue
+        fj = refl(fk)
+        if not fj or fj.get('chain') != chain: left['reflection'] += 1; continue
+        if (fj.get('raster') or {}).get('primitive_id'): left['primitive ID'] += 1; continue
+        fl, fe = fk + '_b', fj.get('entry') or 'main0'
+        ff = fn(fl)
+        if ff is None: left['library'] += 1; continue
+        if fe not in ff: left['entry'] += 1; continue
+        if any(c not in HOST_CONSTANTS for c in of[oe] + mf[me] + ff[fe]): rest.append(('M', tk, mk, fk)); continue
+        b = (ol, oe, ml, me, fl, fe, payload, othreads, mthreads)
         if b not in seen: seen.add(b); bases.append(b)
     return bases, rest, left
 
@@ -200,10 +281,12 @@ def needs_cut(declared, entry):   # declared: constants() of the function's libr
 def cut_name(lib, entry): return f'{lib}@{entry}'
 
 
-def cut_entries(lib_dir, bases, computes=()):
+def cut_entries(lib_dir, bases, computes=(), meshes=()):
     """The functions script specializes from a library of their own (needs_cut): {(library, entry)}"""
-    want, found = {(lib, e) for vl, ve, fl, fe in bases for lib, e in ((vl, ve), (fl, fe))} | set(computes), set()
-    declared = {}
+    want = ({(lib, e) for vl, ve, fl, fe in bases for lib, e in ((vl, ve), (fl, fe))}
+            | {(lib, e) for ol, oe, ml, me, fl, fe, *_ in meshes for lib, e in ((ol, oe), (ml, me), (fl, fe))}
+            | set(computes))
+    found, declared = set(), {}
     for lib, entry in want:
         if lib not in declared:
             try: declared[lib] = constants(romfs.Path(lib_dir) / f'{lib}.metallib')
@@ -212,9 +295,10 @@ def cut_entries(lib_dir, bases, computes=()):
     return found
 
 
-def script(lib_dir, bases, computes=()):
-    """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, and one compute pipeline descriptor per
-    compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no threadgroup size, no indirect command buffers).
+def script(lib_dir, bases, computes=(), meshes=()):
+    """A Metal 4 pipelines script (metal4-pipelines-script(5), the .mtl4-json format metal-tt reads) with one render pipeline descriptor per base, one mesh render pipeline descriptor
+    per mesh base, and one compute pipeline descriptor per compute pipeline (library, entry) that names the function alone, as the host's lookup does (cps_bundle in nvn_mtl.m: no
+    threadgroup size, no indirect command buffers).
     A function that declares constants is named through its specialization by HOST_CONSTANTS (a pair with other constants is not among the bases: plan), from a library of its
     own when it is not its library's first function (needs_cut)"""
     libs, fns, specs, declared, pipes = {}, {}, {}, {}, []
@@ -237,6 +321,12 @@ def script(lib_dir, bases, computes=()):
         pipes.append({'vertex_function_descriptor': fd(vl, ve), 'fragment_function_descriptor': fd(fl, fe),
                       'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]})
     descriptors = {'render_pipeline_descriptors': pipes}
+    if meshes:
+        descriptors['mesh_render_pipeline_descriptors'] = [
+            {'object_function_descriptor': fd(ol, oe), 'mesh_function_descriptor': fd(ml, me), 'fragment_function_descriptor': fd(fl, fe),
+             'max_total_threads_per_object_threadgroup': ot, 'max_total_threads_per_mesh_threadgroup': mt, 'payload_memory_length': pay,
+             'color_attachments': [dict.fromkeys(COLOUR, 'Unspecialized') for _ in range(8)]}
+            for ol, oe, ml, me, fl, fe, pay, ot, mt in meshes]
     if computes: descriptors['compute_pipeline_descriptors'] = [{'compute_function_descriptor': fd(lib, entry)} for lib, entry in computes]   # none: the script of bases alone, as before
     functions_ = {'library_function_descriptors': list(fns.values())}
     if specs: functions_['specialized_function_descriptors'] = list(specs.values())   # none: the script as before, so other games' archive keys hold
@@ -252,15 +342,65 @@ def write_script(path, configuration):
     finally: part.unlink(missing_ok=True)
 
 
-def library_digest(lib_dir, bases, computes=()):
+def write_changed(path, text):
+    """text into path, unless the file holds it already: an unchanged file keeps its times, which the Mac app's packer keys this folder's files by (dm/mac/pack_app.py), so a run that
+    found every archive reused does not make the app's pipeline archive bundle anew (5.2 GB signed again for Ocarina of Time)"""
+    try:
+        if path.read_text() == text: return
+    except (OSError, ValueError): pass
+    path.write_text(text)
+
+
+def run_key(a, archs, text, osmin):
+    """What a run reads, by name and time, for the run that finds nothing to do: the library's one file (its place, size and time), the pair lists, the compute shaders, the chain
+    version, depth mode, architectures, platform and minimum OS, the compiler, the group size and these tools' code. archive_key reads every library the bases name (and plan every
+    reflection) to say the same of an unchanged library: 26 s of each build of Ocarina of Time (33,365 bases, a 10.7 GB library) that changed nothing. None for a library in a
+    folder, whose files have each their own time, and when the compiler cannot be asked: such a run goes through archive_key as before"""
+    image = shader_lib.image_of(a.msl)
+    if os.path.isdir(shader_lib.folder_of(a.msl)) or not os.path.isfile(image): return None
+    try: tv = tool_version(a.platform)
+    except SystemExit: return None
+    st = os.stat(image)
+    here = Path(__file__).resolve().parents[2]   # dm/: this file, and what it imported from the repository (the library readers, the cut, the ABI and its header, the profile reader)
+    loaded = [Path(f).resolve() for f in (getattr(m, '__file__', None) for m in list(sys.modules.values())) if f]
+    code = sorted({str(f) for f in loaded if f.is_relative_to(here)} | {str(Path(abi.HEADER).resolve())})
+    # Replacement and same-sized writes can preserve mtime. As in romfs._resolve, inode and ctime make those go through the content-based archive_key instead of reusing stale GPU code.
+    inputs = {'format': 2, 'image': [os.path.realpath(image), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns], 'pairs': hashlib.sha256(text).hexdigest(),
+              'computes': None if a.no_compute else read_computes(a.shader_map, a.manifest), 'depth': a.depth, 'archs': archs, 'platform': a.platform, 'os_min': osmin, 'toolchain': tv,
+              'batch': a.batch_size, 'code': [[os.path.relpath(f, here), hashlib.sha256(Path(f).read_bytes()).hexdigest()] for f in code]}
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+
+
+def outputs(out, work, archs):
+    """What a run left: each file of the output folder that is its own (not the prewarm pipelines the NSP script links there after it) by size and time, and each architecture's key"""
+    files = {f.name: [f.stat().st_size, f.stat().st_mtime_ns] for f in sorted(out.iterdir()) if f.is_file() and '-prewarm-' not in f.name and f.name != 'prewarm.tsv'}
+    return {'files': files, 'keys': {arch: (work / f'key.{arch}').read_text() if (work / f'key.{arch}').is_file() else None for arch in archs}}
+
+
+def run_reused(work, key, out, archs):
+    """Whether the last run had this key (run_key) and its outputs are as it left them → the note to print for each architecture, or None"""
+    try: last = json.loads((work / 'run.key').read_text())
+    except (OSError, ValueError): return None
+    try:
+        if not key or not isinstance(last, dict) or last.get('key') != key or last.get('outputs') != outputs(out, work, archs): return None
+        if any(k is None for k in last['outputs']['keys'].values()) or any(not (out / f'{arch}.mtl4a').is_file() for arch in archs): return None
+        return [f'pso_offline: {arch}: reused ({(out / f"{arch}.mtl4a").stat().st_size / 2**20:.0f} MB), the library and the lists as at the last run' for arch in archs]
+    except (OSError, KeyError, TypeError, AttributeError): return None
+
+
+def library_digest(lib_dir, bases, computes=(), meshes=()):
     """The bytes metal-tt consumes: a profile/chain stamp does not change when the same shaders are rebuilt by another Metal compiler."""
-    h = hashlib.sha256()
-    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
-        h.update(name.encode() + b'\0')
+    def digest(name):
         lib = hashlib.sha256()
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f:
             while chunk := f.read(1 << 20): lib.update(chunk)
-        h.update(lib.digest())
+        return lib.digest()
+    names = sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)}
+                   | {lib for ol, _, ml, _, fl, _, *_ in meshes for lib in (ol, ml, fl)}
+                   | {lib for lib, _ in computes})
+    h = hashlib.sha256()
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:   # the libraries read and hashed on a few threads, their digests taken in order: the same key
+        for name, d in zip(names, pool.map(digest, names)): h.update(name.encode() + b'\0'); h.update(d)
     return h.hexdigest()
 
 
@@ -311,14 +451,14 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
     """One compiler invocation, with its temporaries on the work volume. Never publish a failed output."""
     part.unlink(missing_ok=True)
     clear_temporaries(work)
-    need, free = space_needed(count), shutil.disk_usage(work).free
+    need, free = space_needed(count), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free on the volume of {work}, metal-tt needs about {need / 2**30:.0f} GB for {count} bases: free some space and run again')
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-tt', '-arch', arch, f'-{platform}-version-min', osmin, str(js), '-o', str(part)]
     log_path = work / f'metal-tt.{arch}.log'
     with log_path.open('w') as log:
         r = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
     if r.returncode or not part.is_file() or not part.stat().st_size:
-        free = shutil.disk_usage(work).free
+        free = shutil.disk_usage(work).free   # what was really left as it failed, not what APFS could still free
         clear_temporaries(work); part.unlink(missing_ok=True)
         text = f'[RED] pso_offline: metal-tt failed for {arch} (exit {r.returncode})'
         if free < 1 << 30: sys.exit(f'{text} ({free / 2**30:.1f} GB free on the volume of {work} when it failed: likely out of disk space): {log_path.read_text()[-2000:]}')
@@ -328,8 +468,10 @@ def compile_archive(js, part, work, arch, platform, osmin, count):
 class CompileFailed(Exception): pass
 
 
-def pair_of(base):   # a base's pair as the pair lists name it: its libraries are <vertex key>_bp or _b and <pixel key>_b
-    return base[0].rsplit('_', 1)[0], base[2].rsplit('_', 1)[0]
+def pair_of(base):   # a base's pair/triple as the pair lists name it: libraries are <key>_bp or _b
+    if len(base) == 4: return base[0].rsplit('_', 1)[0], base[2].rsplit('_', 1)[0]
+    ol, _, ml, _, fl, _, *_ = base
+    return ('M', '-' if ol == ml else ol.rsplit('_', 1)[0], ml.rsplit('_', 1)[0], fl.rsplit('_', 1)[0])
 
 
 def failed_file(work, arch): return Path(work) / f'failed.{arch}.tsv'
@@ -339,65 +481,92 @@ def read_failed(work, arch):
     """The pipelines a compile left out (compile_isolating), kept beside its key so that a reused archive still names them: ([base], [compute pipeline])"""
     f = failed_file(work, arch); bases, computes = [], []
     for row in (ln.split('\t') for ln in f.read_text().splitlines()) if f.is_file() else ():
-        (bases if row[0] == 'base' else computes).append(tuple(row[1:]))
+        if row[0] == 'base': bases.append(tuple(row[1:]))
+        elif row[0] == 'mesh': bases.append((*row[1:7], int(row[7]), int(row[8]), int(row[9])))
+        else: computes.append(tuple(row[1:]))
     return bases, computes
 
 
 def write_failed(work, arch, bases, computes):
     f = failed_file(work, arch)
-    if bases or computes: f.write_text(''.join('\t'.join(('base', *b)) + '\n' for b in bases) + ''.join('\t'.join(('compute', *c)) + '\n' for c in computes))
+    if bases or computes:
+        f.write_text(''.join('\t'.join(('base' if len(b) == 4 else 'mesh', *map(str, b))) + '\n' for b in bases)
+                     + ''.join('\t'.join(('compute', *c)) + '\n' for c in computes))
     else: f.unlink(missing_ok=True)
 
 
-def compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin):
-    """compile_archive on the bases and compute pipelines; when metal-tt fails with room on the volume, the pipelines it cannot compile are found and left out, and the rest
-    compiled. → (bases left out, compute pipelines left out), with their reason printed. One pipeline the GPU compiler stops on ends the whole run (PRAGMATA's pixel shader
+def compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin, meshes=()):
+    """compile_archive on the bases, mesh bases and compute pipelines; when metal-tt fails with room on the volume, the pipelines it cannot compile are found and left out, and the rest
+    compiled. → (bases+meshes left out, compute pipelines left out), with their reason printed. One pipeline the GPU compiler stops on ends the whole run (PRAGMATA's pixel shader
     c4ac3ca598cea32e, in three of its 48,957 bases: "LLVM ERROR: Failed to encode." for every GPU up to applegpu_g17), which cost the app its archive: every base built on
     the device at its first start. Found by halving: a half that compiles is clean, so the other holds a failure; a single pipeline is tried alone before it is named, and a
     run in which nothing compiles, or more than MAX_FAILED pipelines fail, is the tool's failure and stops as before"""
     def run(items):
-        write_script(js, script(real_libraries(lib_dir, [x for k, x in items if k == 'b'], work, [x for k, x in items if k == 'c']), [x for k, x in items if k == 'b'], [x for k, x in items if k == 'c']))
+        bs, ms, cs = [x for k, x in items if k == 'b'], [x for k, x in items if k == 'm'], [x for k, x in items if k == 'c']
+        real = real_libraries(lib_dir, bs, work, cs, ms)
+        write_script(js, script(real, bs, cs, meshes=ms) if ms else script(real, bs, cs))
         try: compile_archive(js, part, work, arch, platform, osmin, len(items)); return None
         except CompileFailed as e: return str(e)
         finally: clear_real_libraries(work)
-    items = [('b', b) for b in bases] + [('c', c) for c in computes]
+    items = [('b', b) for b in bases] + [('m', m) for m in meshes] + [('c', c) for c in computes]
+    try: bad = isolate(items, run)
+    except IsolateFailed as e: sys.exit(str(e))
+    for (kind, x), why in bad:
+        what = (f'the base of {" + ".join(pair_of(x))} ({x[0]}.{x[1]}, {x[2]}.{x[3]})' if kind == 'b'
+                else f'the mesh base of {" + ".join(pair_of(x))} ({x[0]}.{x[1]}, {x[2]}.{x[3]}, {x[4]}.{x[5]})' if kind == 'm'
+                else f'the compute pipeline of {x[0]}.{x[1]}')
+        print(f'[RED] pso_offline: {arch}: metal-tt cannot compile {what} ({compiler_line(why)}): left out of the archive, the device builds it', flush=True)
+    return [x for (k, x), _ in bad if k in ('b', 'm')], [x for (k, x), _ in bad if k == 'c']
+
+
+class IsolateFailed(Exception): pass
+
+
+def compiler_line(why):   # metal-tt's own line of a failure, without compile_archive's lead
+    lines = why.splitlines()
+    return next((ln for ln in lines if 'ERROR' in ln or 'error' in ln), lines[-1] if lines else '').split('): ', 1)[-1].strip()[:200]
+
+
+def isolate(items, run):
+    """The items run(items) cannot compile, [(item, why)], found by halving; run returns None when its items compiled, else why not. A half that compiles is clean, so the other holds
+    a failure; a single item is tried alone before it is named. After it returns, the last run was of every item but those (its output is the compile's). Raises IsolateFailed, its text
+    saying why, when the failure does not repeat on one item alone, when more than MAX_FAILED items fail, or when nothing compiles (metal-tt itself, not a pipeline)"""
     first = run(items)
-    if first is None: return [], []
-    bad, compiled = [], [False]
-    def search(sub, why):   # sub fails as a whole
+    if first is None: return []
+    bad, compiled = [], [False]   # bad: (index, why)
+    def search(sub, why):   # sub (indices) fails as a whole
         if len(sub) == 1:
-            why = run(sub)
-            if why is None: sys.exit(first + '\n[RED] pso_offline: the failure does not repeat on one pipeline alone')
+            why = run([items[sub[0]]])
+            if why is None: raise IsolateFailed(first + '\n[RED] pso_offline: the failure does not repeat on one pipeline alone')
             bad.append((sub[0], why))
-            if len(bad) > MAX_FAILED: sys.exit(first + f'\n[RED] pso_offline: more than {MAX_FAILED} pipelines of one group fail')
+            if len(bad) > MAX_FAILED: raise IsolateFailed(first + f'\n[RED] pso_offline: more than {MAX_FAILED} pipelines of one group fail')
             return
-        mid = len(sub) // 2; left = run(sub[:mid])
+        mid = len(sub) // 2; left = run([items[i] for i in sub[:mid]])
         if left is None: compiled[0] = True; search(sub[mid:], why); return   # the failure is in the other half
         search(sub[:mid], left)
-        right = run(sub[mid:])
+        right = run([items[i] for i in sub[mid:]])
         if right is None: compiled[0] = True
         else: search(sub[mid:], right)
-    if len(items) > 1: search(items, first)
-    if not compiled[0]: sys.exit(first)   # nothing compiled: metal-tt itself, not a pipeline
-    out = {x for x, _ in bad}; keep = [x for x in items if x not in out]
-    for (kind, x), why in bad:
-        line = next((ln for ln in why.splitlines() if 'ERROR' in ln or 'error' in ln), why.splitlines()[-1] if why.splitlines() else '').split('): ', 1)[-1]   # metal-tt's own line, without compile_archive's lead
-        what = f'the base of {" + ".join(pair_of(x))} ({x[0]}.{x[1]}, {x[2]}.{x[3]})' if kind == 'b' else f'the compute pipeline of {x[0]}.{x[1]}'
-        print(f'[RED] pso_offline: {arch}: metal-tt cannot compile {what} ({line.strip()[:200]}): left out of the archive, the device builds it', flush=True)
-    again = run(keep)   # not empty: something compiled
-    if again is not None: sys.exit(again)
-    return [x for (k, x), _ in bad if k == 'b'], [x for (k, x), _ in bad if k == 'c']
+    if len(items) > 1: search(list(range(len(items))), first)
+    if not compiled[0]: raise IsolateFailed(first)
+    out = {i for i, _ in bad}
+    again = run([x for i, x in enumerate(items) if i not in out])   # not empty: something compiled
+    if again is not None: raise IsolateFailed(again)
+    return [(items[i], why) for i, why in bad]
 
 
-def real_libraries(lib_dir, bases, work, computes=()):
+def real_libraries(lib_dir, bases, work, computes=(), meshes=()):
     """Where metal-tt finds the bases' libraries: it takes file paths, so the libraries of one file, and the functions specialized from a library of their own (needs_cut), get a
     temporary folder of what this compile reads, which clear_real_libraries removes after it: a library of a folder is linked there, one of a single file copied.
     An archive whose key still holds compiles nothing and gets none"""
-    cuts = cut_entries(lib_dir, bases, computes)
+    cuts = cut_entries(lib_dir, bases, computes, meshes)
     folder = os.path.isdir(lib_dir)
     if folder and not cuts: return lib_dir
     real = Path(work) / 'libraries'; shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
-    for name in sorted({lib for vl, _, fl, _ in bases for lib in (vl, fl)} | {lib for lib, _ in computes}):
+    names = ({lib for vl, _, fl, _ in bases for lib in (vl, fl)}
+             | {lib for ol, _, ml, _, fl, _, *_ in meshes for lib in (ol, ml, fl)}
+             | {lib for lib, _ in computes})
+    for name in sorted(names):
         if folder: (real / f'{name}.metallib').symlink_to(Path(lib_dir).resolve() / f'{name}.metallib'); continue
         with romfs.open(os.path.join(lib_dir, f'{name}.metallib'), 'rb') as f, open(real / f'{name}.metallib', 'wb') as o: shutil.copyfileobj(f, o)
     for lib, entry in sorted(cuts):   # a function specialized from a library of its own (needs_cut)
@@ -408,35 +577,35 @@ def real_libraries(lib_dir, bases, work, computes=()):
 def clear_real_libraries(work): shutil.rmtree(Path(work) / 'libraries', ignore_errors=True)
 
 
-def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=()):
+def compile_batch(lib_dir, bases, work, arch, platform, osmin, toolchain, computes=(), meshes=()):
     """Cache one bounded group by its actual libraries and descriptors; also used for an isolated pilot. The pipelines it left out are in read_failed(work, arch)"""
     work.mkdir(parents=True, exist_ok=True)
-    configuration = script(lib_dir, bases, computes)
+    configuration = script(lib_dir, bases, computes, meshes=meshes) if meshes else script(lib_dir, bases, computes)
     js = work / 'bases.mtl4-json'; write_script(js, configuration)
-    key = archive_key(configuration, library_digest(lib_dir, bases, computes), arch, platform, osmin, toolchain)
+    key = archive_key(configuration, library_digest(lib_dir, bases, computes, meshes), arch, platform, osmin, toolchain)
     del configuration
     dst, kf = work / f'{arch}.mtl4a', work / f'key.{arch}'
     if dst.is_file() and dst.stat().st_size and kf.is_file() and kf.read_text().strip() == key: return dst, True
     kf.unlink(missing_ok=True)
     part = work / f'{arch}.mtl4a.partial'
-    write_failed(work, arch, *compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin))
+    write_failed(work, arch, *compile_isolating(lib_dir, bases, computes, js, part, work, arch, platform, osmin, meshes))
     os.replace(part, dst); kf.write_text(key + '\n')
     return dst, False
 
 
-def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH):
-    """The groups compile_batches compiles, [(folder name, bases, compute pipelines)]: the bases in groups of batch_size (00001, ...), then the compute pipelines in groups of compute_size
-    of their own (c00001, ...), so that a change to either leaves the other's groups as they are. 0: one group of each"""
+def groups_of(bases, computes, batch_size, compute_size=COMPUTE_BATCH, meshes=()):
+    """The groups compile_batches compiles, [(folder name, bases or mesh bases, compute pipelines)]: the render bases in groups of batch_size (00001, ...), mesh bases in groups of
+    batch_size (m00001, ...), then compute pipelines in groups of compute_size (c00001, ...), so that a change to one leaves the others' groups as they are. 0: one group of each"""
     groups = []
-    for prefix, items, size in (('', bases, batch_size), ('c', computes, compute_size)):
+    for prefix, items, size in (('', bases, batch_size), ('m', meshes, batch_size), ('c', computes, compute_size)):
         size = size or len(items) or 1
         for index, start in enumerate(range(0, len(items), size), 1):
             group = items[start:start + size]
-            groups.append((f'{prefix}{index:05d}', group if not prefix else [], group if prefix else []))
+            groups.append((f'{prefix}{index:05d}', group if prefix != 'c' else [], group if prefix == 'c' else []))
     return groups
 
 
-def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH):
+def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain, batch_size, computes=(), jobs=1, compute_size=COMPUTE_BATCH, meshes=()):
     """Limit compiler input size, then combine every completed group into the usual single archive.
 
     This bounds input count, not memory: a single pipeline can still exceed Apple's compiler resources.
@@ -444,13 +613,15 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
     Other workloads and compiler versions can have different resource use.
     The groups of bases run one after the other, as before; the compute groups, small, jobs at a time, each in its own folder (its TMPDIR).
     """
-    groups = groups_of(bases, computes, batch_size, compute_size); total = len(groups); names = {name for name, _, _ in groups}
+    groups = groups_of(bases, computes, batch_size, compute_size, meshes); total = len(groups); names = {name for name, _, _ in groups}
     failed = ([], [])   # what the groups left out (compile_isolating), returned
-    for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('c[0-9]*')]:   # the groups of a longer list than this one
+    for old in [*(work / f'batches.{arch}').glob('[0-9]*'), *(work / f'batches.{arch}').glob('m[0-9]*'), *(work / f'batches.{arch}').glob('c[0-9]*')]:   # the groups of a longer list than this one
         if old.name not in names: shutil.rmtree(old)
     def one(index, name, group, cgroup):
-        print(f'pso_offline: {arch}: batch {index}/{total}: {f"{len(group)} bases" if group else f"{len(cgroup)} compute pipelines"}, compiling or checking cache', flush=True)
-        piece, reused = compile_batch(lib_dir, group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup)
+        is_mesh = name.startswith('m')
+        label = f'{len(group)} mesh bases' if is_mesh else f'{len(group)} bases' if group else f'{len(cgroup)} compute pipelines'
+        print(f'pso_offline: {arch}: batch {index}/{total}: {label}, compiling or checking cache', flush=True)
+        piece, reused = compile_batch(lib_dir, [] if is_mesh else group, work / f'batches.{arch}' / name, arch, platform, osmin, toolchain, cgroup, group if is_mesh else ())
         print(f'pso_offline: {arch}: batch {index}/{total}: ready ({"reused" if reused else "compiled"})', flush=True)
         fb, fc = read_failed(work / f'batches.{arch}' / name, arch); failed[0].extend(fb); failed[1].extend(fc)
         return piece
@@ -459,7 +630,7 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
         futures = [pool.submit(one, i, *g) for i, g in enumerate(groups, 1) if not g[1]]
         pieces += [f.result() for f in futures]
     part.unlink(missing_ok=True)
-    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), shutil.disk_usage(work).free
+    need, free = max(2 << 30, sum(p.stat().st_size for p in pieces)), vol_space.free_bytes(work)
     if free < need: sys.exit(f'[RED] pso_offline: {free / 2**30:.1f} GB free before merging; need at least {need / 2**30:.1f} GB')
     print(f'pso_offline: {arch}: merging {total} batches', flush=True)
     cmd = ['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)]
@@ -470,6 +641,267 @@ def compile_batches(lib_dir, bases, work, part, arch, platform, osmin, toolchain
         part.unlink(missing_ok=True)
         sys.exit(f'[RED] pso_offline: metal-pack failed for {arch} (exit {r.returncode}): {log_path.read_text()[-2000:]}')
     return failed
+
+
+# The prewarm lists' pipelines (--prewarm-host): the R rows' bases, which have a vertex layout, and the M rows' native task / mesh pipelines (metal-tt takes a mesh pipeline descriptor
+# as it takes a render one; pso_offline.py's own plan leaves the mesh pairs out, as they have no base). The pair archive above holds neither, so a device
+# built every listed one itself, at its first start's prepare step, and kept it in its own archive, which it refuses after an OS update (iPhone 17, iOS 27.2.1: 121 files "not usable
+# (deployment target ... not compatible with current OS)"); a bundled archive made for the OS's major version still opens. A base with a vertex layout depends on the descriptor pso_desc makes
+# from a row's pipeline key and the shader's reflection, which only the host knows, so the host makes them: its prebuild tool in the bundle form (nvn_mtl.m mtl_pso_prebuild_tool,
+# DM_PSO_PREBUILD=tool with DM_PSO_PREBUILD_OUT), on this Mac, from the libraries the app ships (a Mac's Metal loads and compiles a library built for iOS). It writes one archive file per
+# flush period with its index (<this Mac's GPU>-prewarm-<NN>.keys: keys name a library by a digest of its bytes, so a device computes the same ones) and each period as a pipelines script
+# (prewarm-<NN>.mtl4-json, libraries named by the SHA-256 of their bytes), which metal-tt compiles here for each --gpu as <arch>-prewarm-<NN>.mtl4a, with the period's index beside it.
+# The host opens them with the bundle (pso_bundle_open_prewarm): their keys lead the lookup. The tool gets the profile's tables without the pair lists (the pairs are the archive above:
+# the tool would build them all) and a list of the R and M rows alone (the C rows' compute pipelines are in the archive above too; S rows build no pipeline). Both halves are cached:
+# the host's run by its inputs (prewarm/host/key: the host, the rows, the tables, the libraries' stamp, the depth mode, this Mac's system build), each compiled script by its bytes (the
+# libraries are named by content), the architecture, platform, minimum OS and metal-tt version. An optimization: a failure leaves the device to build them, as without the files
+PREWARM_TABLES = ('shader_map.tsv', 'c1_full.tsv', 'cb_extent.tsv')   # what the host reads beside its shader map, less the pair lists and the prewarm list
+PREWARM_ROWS = ('R\t', 'M\t')   # the rows the prewarm files hold
+PIPELINE_KINDS = ('render_pipeline_descriptors', 'mesh_render_pipeline_descriptors', 'tile_render_pipeline_descriptors', 'compute_pipeline_descriptors')
+
+
+class PrewarmFailed(Exception): pass
+
+
+def prewarm_rows(manifests):
+    """The prewarm lists' R and M rows, each line once, in order, as the text of a list: what the host's prebuild tool builds here"""
+    seen, out = set(), []
+    for path in manifests or ():
+        if not path or not Path(path).is_file(): continue
+        for line in Path(path).read_text(encoding='utf-8').split('\n'):
+            line = line.rstrip('\r')
+            if line.startswith(PREWARM_ROWS) and line not in seen: seen.add(line); out.append(line)
+    return ''.join(f'{line}\n' for line in out)
+
+
+def prewarm_tables(shader_map):
+    """The tables the host's tool reads, the shader map first: those of PREWARM_TABLES beside it"""
+    m = Path(shader_map)
+    return [m.with_name(n) for n in PREWARM_TABLES if m.with_name(n).is_file()] if m.is_file() and m.name == 'shader_map.tsv' else []
+
+
+def library_stamp(lib_dir):
+    """The active image and directory files, including reflection. inputs.tsv names shader inputs, not the compiled bytes: another Metal compiler can rebuild them under that same stamp.
+    As in run_key, inode and ctime also catch replacements and same-sized writes preserving mtime, without hashing a multi-GB image on every unchanged build. An image can have a partial
+    directory beside it (shader_lib.view); those overrides count too"""
+    source = Path(str(lib_dir)).resolve(); folder = Path(shader_lib.folder_of(source))
+    files = ([source] if source.is_file() else []) + (sorted(p for p in folder.iterdir() if p.is_file() and p.suffix in ('.metallib', '.json', '.tsv')) if folder.is_dir() else [])
+    rows = []
+    for p in files:
+        st = p.stat(); rows.append([str(p), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns])
+    return json.dumps(rows).encode()
+
+
+def prewarm_host_key(host, rows, tables, lib_dir, zero, os_build):
+    h = hashlib.sha256()
+    for part in (b'prewarm-host-2', Path(host).read_bytes(), rows.encode(), *(Path(t).read_bytes() for t in tables), library_stamp(lib_dir), b'zero' if zero else b'gl', os_build.encode()):
+        h.update(hashlib.sha256(part).digest())
+    return h.hexdigest()
+
+
+def prewarm_host(host, lib_dir, shader_map, rows, work, zero):
+    """The host's prebuild tool on rows (prewarm_rows): → (its output folder, this Mac's architecture as its files name it, reused). The folder holds <arch>-prewarm-<NN>.mtl4a and .keys
+    and prewarm-<NN>.mtl4-json per flush period and prewarm.tsv; it is kept while its key holds, and the tool's work folder (its captures) while an unfinished run's key holds, so a run
+    killed part way goes on from there. Raises PrewarmFailed"""
+    host = Path(host).resolve(); lib_dir = shader_lib.view(Path(str(lib_dir)).resolve())
+    pw = Path(work).resolve() / 'prewarm'; tables, stage, made = pw / 'tables', pw / 'stage', pw / 'host'
+    srcs = prewarm_tables(shader_map)
+    if not srcs: raise PrewarmFailed(f'no shader map at {shader_map}')
+    os_build = subprocess.run(['sysctl', '-n', 'kern.osversion'], capture_output=True, text=True).stdout.strip()
+    key = prewarm_host_key(host, rows, srcs, lib_dir, zero, os_build)
+    def mac(): return sorted({f.name.split('-prewarm-')[0] for f in made.glob('applegpu_*-prewarm-*.keys')})
+    if (made / 'key').is_file() and (made / 'key').read_text().strip() == key and list(made.glob('prewarm-*.mtl4-json')) and len(mac()) == 1: return made, mac()[0], True
+    shutil.rmtree(made, ignore_errors=True)
+    if not ((stage / 'key').is_file() and (stage / 'key').read_text().strip() == key): shutil.rmtree(stage, ignore_errors=True)   # another run's captures: not these inputs'
+    shutil.rmtree(tables, ignore_errors=True); tables.mkdir(parents=True); stage.mkdir(parents=True, exist_ok=True); (stage / 'key').write_text(key + '\n')
+    for s in srcs: shutil.copyfile(s, tables / s.name)
+    (pw / 'rows.tsv').write_text(rows)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('DM_', 'MTL_')) or k == 'DM_PSO_PREBUILD_THREADS'}   # the profile's lists alone, not a player's (DM_SAVE, DM_PSO_USER), no capture layer; DM_PSO_PREBUILD_THREADS: fewer workers on a small Mac
+    env.update(DM_PSO_PREBUILD='tool', DM_PSO_ARCHIVE=str(stage), DM_PSO_PREBUILD_OUT=str(made), DM_PSO_BUNDLE='off', DM_PSO_MANIFEST=str(pw / 'rows.tsv'),
+               DM_MSL_DIR=str(Path(str(lib_dir)).parent), DM_NVN_SHMAP=str(tables / 'shader_map.tsv'))
+    if zero: env['DM_PSO_PREBUILD_DEPTH'] = 'zero'
+    log = pw / 'host.log'
+    try:
+        with log.open('w') as f: r = subprocess.run([str(host)], stdout=f, stderr=subprocess.STDOUT, env=env, cwd=str(pw))
+    except OSError as e: raise PrewarmFailed(f'cannot run the prewarm host {host}: {e}') from e
+    text = log.read_text(errors='replace') if log.is_file() else ''
+    scripts, archives = sorted(made.glob('prewarm-*.mtl4-json')), sorted(made.glob('applegpu_*-prewarm-*.mtl4a'))
+    if r.returncode or not scripts or len(scripts) != len(archives) or len(mac()) != 1:
+        shutil.rmtree(made, ignore_errors=True)
+        raise PrewarmFailed(f'the host\'s prebuild tool made {len(archives)} files and {len(scripts)} scripts (exit {r.returncode}; a host of another chain than the libraries takes none of them; '
+                            f'{log}): ' + '\n'.join(ln for ln in text.splitlines() if 'prebuild' in ln or '[RED]' in ln)[-1500:])
+    for ln in text.splitlines():
+        if 'pipeline prebuild: the prewarm lists' in ln: print('pso_offline: prewarm: ' + ln.split('pipeline prebuild: ', 1)[1], flush=True)
+    (made / 'key').write_text(key + '\n'); shutil.rmtree(stage, ignore_errors=True)   # the tool's work folder is kept only while a run is unfinished
+    return made, mac()[0], False
+
+
+def script_libraries(scripts, lib_dir, real):
+    """Point the libraries the pipelines scripts name at files for metal-tt. The host loads its libraries from memory, so a script names each by the SHA-256 of its bytes (label) with a path
+    Metal marks _Path_not_available_for_lib_from_data_with_UUID_...; the libraries of the shader folder (a folder, or one image file) are hashed until every one the scripts name is found,
+    written to real, and the scripts (rewritten in place) pointed at them. A specialized function that is not its library's first gets a library of its own (needs_cut). Returns real, or
+    raises LookupError naming a library not found"""
+    want, data = set(), {}
+    for js in scripts:
+        data[js] = json.loads(Path(js).read_text())
+        want |= {lib['label'].upper() for lib in data[js].get('libraries', []) if not Path(lib.get('path', '')).is_file()}
+    real = Path(real); shutil.rmtree(real, ignore_errors=True); real.mkdir(parents=True)
+    found = {}
+    for root, _, files in romfs.walk(str(lib_dir)):
+        for f in files:
+            if not f.endswith('.metallib') or len(found) == len(want): continue
+            with romfs.open(os.path.join(root, f), 'rb') as fh: b = fh.read()
+            h = hashlib.sha256(b).hexdigest().upper()
+            if h in want and h not in found: (real / f'{h}.metallib').write_bytes(b); found[h] = real / f'{h}.metallib'
+    missing = want - set(found)
+    if missing: raise LookupError(f'{len(missing)} of the libraries the prewarm scripts name are not in {lib_dir} (one is {sorted(missing)[0]})')
+    cuts = {}
+    for js, d in data.items():
+        for lib in d.get('libraries', []):
+            if lib['label'].upper() in found: lib['path'] = str(found[lib['label'].upper()])
+        fds = d.get('function_descriptors', {})
+        spec = {s['function_descriptor'].removeprefix('fnd:') for s in fds.get('specialized_function_descriptors', [])}
+        for fn in fds.get('library_function_descriptors', []):
+            h = fn.get('library', '').upper()
+            # metal-tt specializes only a library's first function ("cannot find private metadata at offset '8'" for a later one, as main0_z behind main0 of a depth_mode zero game's
+            # <key>_bp): such a function is specialized from a library of its own, cut from its library (needs_cut; reference: Specialized second functions in the offline pipeline archive)
+            if fn['label'] not in spec or h not in found: continue
+            if h not in cuts:
+                try: cuts[h] = constants(found[h])
+                except (OSError, ValueError): cuts[h] = {}
+            if not needs_cut(cuts[h], fn['name']): continue
+            cut = cut_name(h, fn['name']); path = real / f'{cut}.metallib'
+            if not path.exists(): path.write_bytes(dmsh_side.cut(found[h].read_bytes(), {fn['name']})[1])
+            if not any(lib['label'] == cut for lib in d['libraries']): d['libraries'].append({'label': cut, 'path': str(path)})
+            fn['library'] = cut
+        Path(js).write_text(json.dumps(d, indent=1))
+    return real
+
+
+def compile_script(config, dst, work, arch, platform, osmin, batch_size):
+    """A pipelines script (its libraries' paths real) into the archive dst, in groups of at most batch_size pipelines (0: one) merged with metal-pack, as compile_batches bounds the bases;
+    a pipeline metal-tt cannot compile is left out (isolate). → [(kind, its descriptor, why)] left out. Raises PrewarmFailed (nothing published)"""
+    items = [(k, d) for k in PIPELINE_KINDS for d in config.get('pipeline_descriptors', {}).get(k, [])]
+    if not items: raise PrewarmFailed('a script without pipelines')
+    size = batch_size or len(items); work = Path(work); shutil.rmtree(work, ignore_errors=True); work.mkdir(parents=True)
+    pieces, bad = [], []
+    for gi, start in enumerate(range(0, len(items), size)):
+        gdir = work / f'{gi:05d}'; gdir.mkdir(); js, part = gdir / 'pipelines.mtl4-json', gdir / f'{arch}.mtl4a'
+        def run(sub, js=js, part=part, gdir=gdir):
+            pd = {}
+            for k, d in sub: pd.setdefault(k, []).append(d)
+            write_script(js, dict(config, pipeline_descriptors=pd))
+            try: compile_archive(js, part, gdir, arch, platform, osmin, len(sub)); return None
+            except CompileFailed as e: return str(e)
+        try: bad += [(k, d, why) for (k, d), why in isolate(items[start:start + size], run)]
+        except IsolateFailed as e: shutil.rmtree(work, ignore_errors=True); raise PrewarmFailed(str(e)[-2000:]) from e
+        pieces.append(part)
+    part = Path(str(dst) + '.partial'); part.unlink(missing_ok=True)
+    if len(pieces) == 1: os.replace(pieces[0], part)
+    else:
+        log_path = work / f'metal-pack.{arch}.log'
+        with log_path.open('w') as log:
+            r = subprocess.run(['xcrun', '-sdk', sdk(platform), 'metal-pack', '-nthreads', '1', *map(str, pieces), '-o', str(part)], stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, TMPDIR=str(work)))
+        if r.returncode or not part.is_file() or not part.stat().st_size:
+            part.unlink(missing_ok=True); text = log_path.read_text()[-2000:]; shutil.rmtree(work, ignore_errors=True)
+            raise PrewarmFailed(f'metal-pack failed for {arch} (exit {r.returncode}): {text}')
+    os.replace(part, dst); shutil.rmtree(work, ignore_errors=True)
+    return bad
+
+
+def prewarm_script_key(js, arch, platform, osmin, toolchain):
+    h = hashlib.sha256(b'prewarm-script-1'); h.update(hashlib.sha256(Path(js).read_bytes()).digest())
+    for x in (arch, platform, osmin, toolchain): h.update(b'\0' + str(x).encode())
+    return h.hexdigest()
+
+
+def prewarm_compile(made, mac, out, archs, platform, osmin, toolchain, work, lib_dir, batch_size):
+    """The host's scripts (prewarm_host's folder made, its files named for this Mac's architecture mac) compiled for each of archs into out as <arch>-prewarm-<NN>.mtl4a, each with the
+    index of its period (<mac>-prewarm-<NN>.keys: the same pipelines, so the same keys), and the tool's stamp prewarm.tsv. A script already compiled for these inputs is taken from
+    the cache (prewarm/<arch>/). → ({arch: files}, [(arch, script name, kind, why)] of pipelines left out). Raises PrewarmFailed (out then holds no prewarm file)"""
+    pw, out = Path(work) / 'prewarm', Path(out)
+    scripts = sorted(Path(made).glob('prewarm-*.mtl4-json'))
+    todo = []
+    for arch in archs:
+        for js in scripts:
+            cache = pw / arch / f'{js.stem}.mtl4a'; kf = cache.with_suffix('.key'); key = prewarm_script_key(js, arch, platform, osmin, toolchain)
+            if not (cache.is_file() and cache.stat().st_size and kf.is_file() and kf.read_text().strip() == key): todo.append((arch, js, key, cache, kf))
+    if todo:
+        real_js = pw / 'scripts'; shutil.rmtree(real_js, ignore_errors=True); real_js.mkdir(parents=True)
+        for js in dict.fromkeys(js for _, js, _, _, _ in todo): shutil.copyfile(js, real_js / js.name)
+        try: script_libraries(sorted(real_js.iterdir()), lib_dir, pw / 'libraries')
+        except (LookupError, OSError, ValueError) as e: raise PrewarmFailed(str(e)) from e
+        try:
+            for arch, js, key, cache, kf in todo:
+                kf.unlink(missing_ok=True); cache.parent.mkdir(parents=True, exist_ok=True)
+                print(f'pso_offline: prewarm: {arch}: {js.name}, metal-tt ...', flush=True); t0 = time.time()
+                bad = compile_script(json.loads((real_js / js.name).read_text()), cache, pw / arch / f'{js.stem}.work', arch, platform, osmin, batch_size)
+                cache.with_suffix('.failed').write_text(''.join(f'{k}\t{compiler_line(why)}\n' for k, _, why in bad))
+                kf.write_text(key + '\n')
+                print(f'pso_offline: prewarm: {arch}: {js.name}: {cache.stat().st_size / 2**20:.0f} MB in {time.time() - t0:.0f} s' + (f', {len(bad)} pipelines left out' if bad else ''), flush=True)
+        finally: shutil.rmtree(pw / 'libraries', ignore_errors=True); shutil.rmtree(real_js, ignore_errors=True)
+    files, failed, publish = {}, [], {}
+    for arch in archs:
+        for js in scripts:
+            cache = pw / arch / f'{js.stem}.mtl4a'; keys = Path(made) / f'{mac}-{js.stem}.keys'
+            fl = cache.with_suffix('.failed')
+            omitted = fl.read_text().splitlines() if fl.is_file() else []
+            # The host's complete index describes its original capture, including any pipelines metal-tt omitted for this GPU. Such a key would shadow the device's later capture:
+            # indexed lookup asks that one archive only. A partial period is unindexed, so the normal archive search and device index can both find what they actually hold.
+            publish[f'{arch}-{js.stem}.mtl4a'] = cache
+            if not omitted and keys.is_file(): publish[f'{arch}-{js.stem}.keys'] = keys
+            files.setdefault(arch, []).append(out / f'{arch}-{js.stem}.mtl4a')
+            failed += [(arch, js.name, *row.split('\t', 1)) for row in omitted]
+    for arch in [p.name for p in pw.iterdir() if p.is_dir() and p.name.startswith('applegpu_')] if pw.is_dir() else ():   # architectures no longer asked for
+        if arch not in archs: shutil.rmtree(pw / arch)
+    if (Path(made) / 'prewarm.tsv').is_file(): publish['prewarm.tsv'] = Path(made) / 'prewarm.tsv'
+    publish_prewarm(out, publish)
+    return files, failed
+
+
+def publish_prewarm(out, sources):
+    """Publish only changed prewarm files. Both app packers key their inputs by file identity, including ctime: replacing an unchanged link or copy repacks every archive"""
+    out = Path(out); pending = dict(sources)
+    for old in [*out.glob('*-prewarm-*'), out / 'prewarm.tsv']:
+        src = pending.get(old.name)
+        if src and old.is_file() and (os.path.samefile(src, old) or (src.stat().st_size == old.stat().st_size and filecmp.cmp(src, old, shallow=False))): del pending[old.name]
+        else: old.unlink(missing_ok=True)
+    for name, src in pending.items():
+        try: os.link(src, out / name)
+        except OSError: shutil.copyfile(src, out / name)
+
+
+def clear_prewarm(out):
+    for f in Path(out).glob('*-prewarm-*'): f.unlink()
+    (Path(out) / 'prewarm.tsv').unlink(missing_ok=True)
+
+
+def update_prewarm(a, lib_dir, out, work, archs, zero):
+    """Validate the independent prewarm cache even when the pair archive uses its fast path. The Mac packer's separate mac_prebake stage owns its files when no host is supplied here"""
+    if a.platform == 'macos' and not a.prewarm_host: return
+    rows = prewarm_rows(a.manifest) if a.prewarm_host else ''
+    prewarm = 'none (no --prewarm-host)' if not a.prewarm_host else 'none (the prewarm lists have no R or M rows)'
+    if rows and not Path(a.prewarm_host).is_file(): prewarm = f'none (no host at {a.prewarm_host})'; print(f'[RED] pso_offline: prewarm: no host at {a.prewarm_host}: the device builds the prewarm lists\' pipelines')
+    if rows and Path(a.prewarm_host).is_file():
+        try:
+            t1 = time.time(); n = rows.count('\n'); print(f'pso_offline: prewarm: {n} R and M rows, the host\'s prebuild tool (minutes when its inputs changed) ...', flush=True)
+            made, mac, reused = prewarm_host(a.prewarm_host, lib_dir, a.shader_map[0] if a.shader_map else '', rows, work, zero)
+            if reused: print('pso_offline: prewarm: the host\'s files reused (inputs unchanged)')
+            files, pfailed = prewarm_compile(made, mac, out, archs, a.platform, a.os_min or os_min_default(a.platform), tool_version(a.platform), work, lib_dir, a.batch_size)
+            size = sum(f.stat().st_size for fs in files.values() for f in fs)
+            prewarm = f'{sum(map(len, files.values()))} files ({size / 2**20:.0f} MB) from {n} rows, {len(pfailed)} pipelines left out (metal-tt could not compile them: left to the device)'
+            for arch, name, kind, why in pfailed: print(f'[RED] pso_offline: prewarm: {arch}: metal-tt cannot compile a pipeline of {name} ({kind}: {why}): left out, the device builds it', flush=True)
+            print(f'pso_offline: prewarm: {prewarm}, {time.time() - t1:.0f} s', flush=True)
+        except (PrewarmFailed, OSError) as e:
+            clear_prewarm(out); prewarm = 'none (failed)'
+            print(f'[RED] pso_offline: prewarm: {e}\n[RED] pso_offline: prewarm: the app has no prewarm files; the device builds the prewarm lists\' pipelines at its first start', flush=True)
+    else: clear_prewarm(out)
+    return prewarm
+
+
+def save_run(work, quick, out, archs):
+    if quick:
+        with contextlib.suppress(OSError): (work / 'run.key').write_text(json.dumps({'key': quick, 'outputs': outputs(out, work, archs)}, sort_keys=True) + '\n')
 
 
 def main(argv=None):
@@ -489,12 +921,14 @@ def main(argv=None):
     ap.add_argument('--manifest', action='append', help='pso_manifest.tsv: its C rows first (default: the profile\'s)')
     ap.add_argument('--no-compute', action='store_true', help='no compute pipelines, the bases alone')
     ap.add_argument('--jobs', type=int, default=JOBS, help=f'metal-tt runs at a time for the compute pipelines (default {JOBS}, half the logical CPUs)')
+    ap.add_argument('--prewarm-host', help='a Mac host built from this checkout for this profile (make -C dm/host GAME=<id>): its prebuild tool makes the prewarm lists\' R and M rows\' '
+                                           'pipelines from these libraries, and metal-tt compiles them for each --gpu (<arch>-prewarm-<NN>.mtl4a with its index); without it there are none')
     a = ap.parse_args(argv)
     if a.batch_size < 0: ap.error('--batch-size must be zero or positive')
     if a.game:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'games')); import game
         g = game.load(a.game)
-        a.pairs = a.pairs or [str(g.table('shader_pairs.tsv')), str(g.table('pso_pairs.tsv'))]
+        a.pairs = a.pairs or [str(g.table('shader_pairs.tsv')), str(g.table('pso_pairs.tsv')), str(g.table('mesh_pairs.tsv'))]
         a.shader_map = a.shader_map or [str(g.table('shader_map.tsv'))]; a.manifest = a.manifest or [str(g.table('pso_manifest.tsv'))]
         a.depth = a.depth or g.get('depth_mode', 'gl')
         if a.depth not in ('gl', 'zero'): sys.exit(f'[RED] pso_offline: {g.id}: depth_mode must be gl or zero: {a.depth}')
@@ -508,25 +942,40 @@ def main(argv=None):
     if not text: sys.exit(f'[RED] pso_offline: no pair list ({", ".join(a.pairs)})')
     zero = a.depth == 'zero'
     t0 = time.time()
+    quick = None if a.script_only else run_key(a, archs, text, a.os_min or os_min_default(a.platform))
+    if quick and (notes := run_reused(work, quick, out, archs)):
+        print('\n'.join(notes))
+        prewarm = update_prewarm(a, lib_dir, out, work, archs, zero)
+        if prewarm is not None:
+            text = (out / 'archive.tsv').read_text()
+            write_changed(out / 'archive.tsv', ''.join(ln + '\n' for ln in text.splitlines() if not ln.startswith('prewarm\t')) + f'prewarm\t{prewarm}\n')
+        save_run(work, quick, out, archs)
+        return 0
+    (work / 'run.key').unlink(missing_ok=True)   # written again at the end of a run that succeeds
     pairs = read_pairs(text)
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
+    meshes, mrest, mleft = plan_mesh(lib_dir, chain, pairs, zero)
+    rest = list(dict.fromkeys([*rest, *mrest]))
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
     computes, cleft = plan_compute(lib_dir, chain, shaders)
     work.mkdir(parents=True, exist_ok=True); out.mkdir(parents=True, exist_ok=True)
     js = work / 'bases.mtl4-json'   # metal-tt takes the format from the extension: .mtl4-json is Metal 4's (.mtlp-json is the Metal 3 format)
-    configuration = script(lib_dir, bases, computes)
+    configuration = script(lib_dir, bases, computes, meshes=meshes) if meshes else script(lib_dir, bases, computes)
     write_script(js, configuration)
     st = stamp(chain, zero, text)
-    print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(rest)} left to the device (function constants), left out as the host leaves them: '
+    print(f'pso_offline: {len(pairs)} pairs: {len(bases)} bases, {len(meshes)} mesh bases, {len(rest)} left to the device (function constants / depth-only), left out as the host leaves them: '
           + ', '.join(f'{k} {v}' for k, v in left.items()) + f' ({time.time() - t0:.1f} s)')
+    if meshes or mrest or any(mleft.values()):
+        print(f'pso_offline: mesh triples: {len(meshes)} bases, {len(mrest)} left to the device, left out: ' + ', '.join(f'{k} {v}' for k, v in mleft.items()))
     if shaders: print(f'pso_offline: {len(shaders)} compute shaders: {len(computes)} compute pipelines, left out: '
                       + ', '.join(f'{k} {v}' for k, v in cleft.items()))
-    if a.script_only: (out / 'prebuilt.tsv').write_text(st); return 0
-    if pairs and not bases and not rest: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
+    if a.script_only: write_changed(out / 'prebuilt.tsv', st); return 0
+    if pairs and not bases and not meshes and not rest: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
     if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
-    if not bases and not computes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
-    osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases or computes else 'not used (function constants only)'
-    libraries = library_digest(lib_dir, bases, computes)
+    gpus = archs   # the prewarm files' architectures, also when there is no pair archive
+    if not bases and not meshes and not computes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
+    osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases or meshes or computes else 'not used (function constants only)'
+    libraries = library_digest(lib_dir, bases, computes, meshes)
     keys = {arch: archive_key(configuration, libraries, arch, a.platform, osmin, tv) for arch in archs}
     del configuration   # the compiler reads the script from disk
     failed_bases, failed_computes = [], []   # what metal-tt could not compile for some architecture (compile_isolating): those pairs go to the device with rest
@@ -537,24 +986,30 @@ def main(argv=None):
             fb, fc = read_failed(work, arch); failed_bases += fb; failed_computes += fc; continue
         kf.unlink(missing_ok=True); dst.unlink(missing_ok=True)
         part = work / f'{arch}.mtl4a.partial'; part.unlink(missing_ok=True)
-        t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(computes)} compute pipelines (minutes) ...', flush=True)
-        if a.batch_size and len(groups_of(bases, computes, a.batch_size)) > 1:
-            fb, fc = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, computes, a.jobs)
+        t1 = time.time(); print(f'pso_offline: {arch}: metal-tt, {len(bases)} bases, {len(meshes)} mesh bases, {len(computes)} compute pipelines (minutes) ...', flush=True)
+        if a.batch_size and len(groups_of(bases, computes, a.batch_size, meshes=meshes)) > 1:
+            fb, fc = compile_batches(lib_dir, bases, work, part, arch, a.platform, osmin, tv, a.batch_size, computes, a.jobs, meshes=meshes)
         else:
-            fb, fc = compile_isolating(lib_dir, bases, computes, js, part, work, arch, a.platform, osmin)
+            fb, fc = compile_isolating(lib_dir, bases, computes, js, part, work, arch, a.platform, osmin, meshes)
         write_failed(work, arch, fb, fc); failed_bases += fb; failed_computes += fc
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
-    for f in out.glob('*.mtl4a'):   # architectures no longer asked for
-        if f.stem not in archs: f.unlink()
-    (out / 'prebuilt.tsv').write_text(st)
+    for f in out.glob('*.mtl4a'):   # a prewarm-only build has no pair archives, but still has the requested target GPUs; keep their files for publication to reuse
+        keep = f.stem.split('-prewarm-')[0] in gpus if '-prewarm-' in f.name else f.stem in archs
+        if not keep: f.unlink()
+    write_changed(out / 'prebuilt.tsv', st)
+    prewarm = update_prewarm(a, lib_dir, out, work, gpus, zero)
     rest = list(dict.fromkeys([*rest, *map(pair_of, failed_bases)]))   # the pairs the device still builds: those with function constants, then those metal-tt failed on
     rp = out / 'rest_pairs.tsv'
-    if rest: rp.write_text(''.join(f'{v}\t{f}\n' for v, f in rest))
+    if rest: write_changed(rp, ''.join('\t'.join(p) + '\n' for p in rest))
     else: rp.unlink(missing_ok=True)
-    (out / 'archive.tsv').write_text(f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
-                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\nrest\t{len(rest)}\ncompute\t{len(computes)}\n'
-                                     f'failed\t{len(set(failed_bases))} bases, {len(set(failed_computes))} compute pipelines (metal-tt could not compile them: left to the device)\n')
+    write_changed(out / 'archive.tsv', f'# the pipeline archive made offline (dm/gfx/tools/pso_offline.py); the host reads prebuilt.tsv, not this file\narch\t{" ".join(archs)}\n'
+                                     f'platform\t{a.platform}\t{osmin}\ntoolchain\t{tv}\nbases\t{len(bases)}\n'
+                                     + (f'mesh_bases\t{len(meshes)}\n' if meshes else '')
+                                     + f'rest\t{len(rest)}\ncompute\t{len(computes)}\n'
+                                     f'failed\t{len(set(failed_bases))} bases, {len(set(failed_computes))} compute pipelines (metal-tt could not compile them: left to the device)\n'
+                                     + (f'prewarm\t{prewarm}\n' if prewarm is not None else ''))
+    save_run(work, quick, out, archs)
     return 0
 
 

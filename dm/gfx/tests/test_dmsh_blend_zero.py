@@ -54,7 +54,7 @@ fragment main0_out main0(main0_in in [[stage_in]], float4 gl_FragCoord [[positio
     return out;
 }
 '''
-INT_BITS = PLAIN.replace('out.m_81 = float4(_731, 0.0, 0.0, in.m_83.z);', 'out.m_81 = as_type<float4>(uint4(7u));')   # an output written from integer bits: fs_uint gives it main0_u
+INT_BITS = PLAIN.replace('out.m_81 = float4(_731, 0.0, 0.0, in.m_83.z);', 'out.m_81 = as_type<float4>(uint4(7u));')   # an output written from integer bits (fs_uint gives every shader main0_u)
 PARAM = dmsh_rewrite.BLEND_ZERO_PARAM
 CALL = 'dm_blend0(out, dm_blend);'
 
@@ -66,7 +66,7 @@ def fn_text(msl, name):   # an entry point's whole text found by its name alone 
     return msl[m.start():dmsh_side._close(msl, b + 1, '{', '}')]
 
 
-def built(src):   # the build's order (dmsh_build.py finish): blend_zero, then the integer entry points on the shared body
+def built(src):   # the build's order (dmsh_build.py finish): blend_zero, then the typed-output entry point on the shared body
     out, n = blend_zero(src)
     fu = dmsh_entry.fs_uint(out)
     return (dmsh_side.shared_body(out) + fu if fu else out), n, bool(fu)
@@ -112,6 +112,12 @@ class BlendZero(unittest.TestCase):
         self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(thread main0_out& dm_o'))   # the helper takes main0's local output: after its struct, before main0
         self.assertLess(out.index('void dm_blend0('), out.index('fragment main0_out main0('))
 
+    def test_blend_off_constant_returns_before_the_words(self):   # a pipeline specialized dm_blend_off = true reads no word and changes nothing
+        out, _ = blend_zero(PLAIN)
+        self.assertIn(f'constant bool dm_blend_off [[function_constant({dmsh_abi.BLEND_OFF_FC})]];', out)
+        h = out[out.index('void dm_blend0('):]; h = h[:h.index('\n}\n')]
+        self.assertLess(h.index('if (is_function_constant_defined(dm_blend_off) && dm_blend_off) return;'), h.index('dm_s.zero'))
+
     def test_each_float4_colour_by_its_index(self):
         out, _ = blend_zero(PLAIN)
         bits = dmsh_abi.BLEND_ZERO_BITS
@@ -125,16 +131,17 @@ class BlendZero(unittest.TestCase):
         self.assertNotIn('dm_o.m_81', blend_zero(dual)[0])   # a second blend source is a weight, not a colour that is stored
 
     def test_what_fs_uint_reads_is_unchanged(self):
-        # fs_uint tells an integer writer by its stores to out: the guard is a call, so a shader gets the same entry points with it as without
+        # the guard is a call, so a shader gets the same typed-output entry point with it as without (fs_uint reads main0's outputs, which the guard leaves as they are)
         for src in (PLAIN, INT_BITS):
             out, _ = blend_zero(src)
-            self.assertEqual(bool(dmsh_entry.fs_uint(out)), bool(dmsh_entry.fs_uint(src)))
-        self.assertTrue(dmsh_entry.fs_uint(INT_BITS))
+            struct = lambda t: t[:t.index('fragment main0_out_u main0_u(')]   # its constants and outputs; its parameters take the guard's word
+            self.assertEqual(struct(dmsh_entry.fs_uint(out)), struct(dmsh_entry.fs_uint(src)))
+            self.assertTrue(dmsh_entry.fs_uint(src))
 
     def test_every_entry_point_carries_the_guard_and_the_word(self):
         for src in (PLAIN, INT_BITS):
             text, n, shared = built(src)
-            self.assertEqual(shared, src is INT_BITS)
+            self.assertTrue(shared)   # every pixel shader of a known shape has main0_u
             u, info = dmsh_side.unit(text)
             self.assertIsNotNone(u, info)
             f, meta = dmsh_fetch.fold(u, [], om_only_ok=True)
@@ -143,7 +150,7 @@ class BlendZero(unittest.TestCase):
             self.assertEqual(u[b[0]:b[2]].count(CALL), 2)   # in the body, once for each return: every entry point calls the body
             self.assertIn('constant dm_blend_state& dm_blend', u[b[0]:b[1]])
             names = ['main0'] + info['alpha'] + info['logic'] + (['main0_u'] if shared else [])
-            self.assertIn('main0_a', names); self.assertIn('main0_l', names)
+            self.assertIn('main0_a', names); self.assertNotIn('main0_l', names)   # main0_u holds the logic operation
             for name in names:
                 t = fn_text(u, name)
                 self.assertIn(PARAM, t, name)

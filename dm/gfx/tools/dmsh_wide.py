@@ -21,11 +21,12 @@ A buffer whose address came from a game uniform slot or the push constants is bo
 word is read only inside the memory the host bound, from its length table (c[DMSH_SBLEN_BANK], dmsh_abi.h), and gives 0 outside it:
 
     int _96 = int(_49);  bool _100 = (uint(_96) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;
-    float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s0)._m0[_100 ? _96 : 0], _100));   (as dmsh_fetch.select_guards writes it)
+    float _51 = as_type<float>(select(0u, (*spvDescriptorSet0.cp_s0)._m0[_100 ? _96 : 0], _100));   (as dmsh_rewrite.select_guards writes it)
 
 A run of such words is read whole when its first and its last word are both inside (the bound is one interval of word indices), and word by word, each bounded as
 before, when it is not (a run that crosses the end of the memory bound): the same words, the same zeros, and one read in the usual case.
 """
+from collections import Counter, defaultdict
 import re
 
 import dmsh_abi as abi
@@ -42,7 +43,7 @@ _VEC = {2: 'packed_uint2', 3: 'packed_uint3', 4: 'packed_uint4'}
 _SIGNED = re.compile(r'^\s*int (' + _IDENT + r') = int\((' + _IDENT + r')\);\s*$')   # a bounded read's signed copy of its word index
 _TABLE = r'\(\*spvDescriptorSet0\.[a-z]+_c%d\)\._m0\[\d+\]\.[xyzw]' % abi.SBLEN_BANK   # a word of the length table
 _INSIDE = re.compile(r'^\s*bool (' + _IDENT + r') = \(uint\((' + _IDENT + r')\) \+ (' + _TABLE + r')\) < (' + _TABLE + r');\s*$')
-_BLOAD = re.compile(r'select\(0u, \(\*spvDescriptorSet0\.(' + _BUF + r')\)\._m0\[(' + _IDENT + r') \? (' + _IDENT + r') : 0\], \2\)')   # as select_guards writes it (dmsh_fetch.py)
+_BLOAD = re.compile(r'select\(0u, \(\*spvDescriptorSet0\.(' + _BUF + r')\)\._m0\[(' + _IDENT + r') \? (' + _IDENT + r') : 0\], \2\)')   # as select_guards writes it (dmsh_rewrite.py)
 
 
 def _root(v, adds):   # (value, byte offset) the sums lead back to
@@ -106,3 +107,36 @@ def wide_loads(msl):
         indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
         lines[i] = ''.join(indent + d.replace('\n', '\n' + indent) + '\n' for d in pre) + ln
     return '\n'.join(lines)
+
+
+# Metal can keep reads at uniform addresses in constant registers (PR #2889). The argument ID and the host's binding stay the same.
+# Count every mention of each buffer. Only direct word reads and the packed loads emitted by wide_loads can follow a promotion.
+_RO_DECL = re.compile(r'^\s*(const device) ' + _IDENT + r'\* (' + _BUF + r') \[\[id\(\d+\)\]\];', re.M)
+_STORAGE_NAME = re.compile(r'\b' + _BUF + r'\b')
+_WORD_READ = re.compile(r'(?:\*\((?P<cast>const device) packed_uint[234]\*\)(?=&\(\*))?'
+                        r'(?P<address>&\s*(?:\(\s*)*)?\(\*spvDescriptorSet0\.(?P<buf>' + _BUF + r')\)\._m0\[')
+_DEVICE_REFERENCE = re.compile(r'\bdevice\s+[^;{}()]*&')
+
+
+def constant_reads(msl, read_only, mode='fp'):
+    """Promote translator-confirmed read-only slots with no escaping pointer or reference."""
+    if mode in ('0', 'off', '') or not read_only or not _RO.search(msl): return msl
+    # A helper taking a device reference can borrow an array element without an address-of operator.
+    if _DEVICE_REFERENCE.search(msl): return msl
+    stages = {stage.strip() for stage in mode.split(',')}
+    mentions = Counter(_STORAGE_NAME.findall(msl))
+    reads = defaultdict(list)
+    for access in _WORD_READ.finditer(msl):
+        reads[access['buf']].append(access)
+    edits = []
+    for decl in _RO_DECL.finditer(msl):
+        buf = decl[2]
+        if int(buf[4:]) not in read_only or (mode != 'all' and buf[:2] not in stages): continue
+        accesses = reads[buf]
+        if not accesses or len(accesses) + 1 != mentions[buf]: continue
+        if any(access['address'] and not access['cast'] for access in accesses): continue
+        edits.append(decl.span(1))
+        edits.extend(access.span('cast') for access in accesses if access['cast'])
+    for start, end in sorted(edits, reverse=True):
+        msl = msl[:start] + 'constant' + msl[end:]
+    return msl

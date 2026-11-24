@@ -1,0 +1,38 @@
+# CAPTAIN TSUBASA 2: WORLD FIGHTERS, Unreal Engine 5.5.4, SDK 18.3.1, NVN.
+
+# ---- Identity ----
+title_id	01009720213B0000
+program_id	01009720213B0000
+
+# ---- App ----
+name	CAPTAIN TSUBASA 2: WORLD FIGHTERS
+ipa	CaptainTsubasa2WorldFighters.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.0.6	main=63ad5f65431ae17b1bb2304fd3abc521	subsdk0=98be7d979f987d444eed189dee9c3b4e	sdk=ad9ee4518b1d8ca811fbdf35fc4f26d5
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	CaptainTsubasa2WF/Content/Paks/CaptainTsubasa2WF-Switch.ucas
+zip_store	.bk2:.mp4:.pak:.png:.txt:.ucas:.utoc:.metallib
+
+# ---- Memory ----
+# The NPDM declares 20 MB of system resource. The engine and allocator gates fit startup in this layout.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1400000
+
+# ---- NVN ----
+# Match the depth mode selected at startup when building pipeline bases offline.
+depth_mode	zero
+tex_dyn_slots	on
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	CAPTAIN TSUBASA 2: WORLD FIGHTERS shaders

@@ -21092,7 +21092,7 @@ int mtl_display_hz(void) {
 #endif
 }
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
-// Presents of snapshots on a queue of their own (DM_PRESENT_QUEUE, on by default; ab alternates with DM_AB). A present first waits on its queue for the screen to give its
+// Presents of snapshots on a queue of their own (DM_PRESENT_QUEUE=1, off by default: it adds about 6.5 ms from the game's enqueue to the screen on an M3 Max; ab alternates with DM_AB). A present first waits on its queue for the screen to give its
 // drawable back (waitForDrawable), and on g_q4 that wait held back everything committed after it: the link takes a present while the game's next frame is being submitted, so the
 // wait sat in front of that frame's next command buffer whenever the screen still held the drawable (iPhone 17 at the 30 fps cap: frame p90 36.0 → 35.3 ms where it holds 30
 // fps, no change where the GPU or the CPU is the limit; docs/reference/frame-rate.md). On
@@ -22320,7 +22320,7 @@ static uint64_t snap_take(const tex_t *t) {
     if (!g_snap_ev) {
         g_snap_ev = [g_dev newSharedEvent];
         if (!g_snap_ev) MDIE("present snapshots: no shared event");
-        if (g_qpres_mode < 0) g_qpres_mode = sw_mode("DM_PRESENT_QUEUE", 1);
+        if (g_qpres_mode < 0) g_qpres_mode = sw_mode("DM_PRESENT_QUEUE", 0);
         if (g_qpres_mode) {   // (no feedbackQueue in the descriptor: it releases that queue once more when it goes, an over-release)
             NSError *qe = nil; MTL4CommandQueueDescriptor *qd = [MTL4CommandQueueDescriptor new]; qd.label = @"nvn-mtl present queue";
             g_qpres = [g_dev newMTL4CommandQueueWithDescriptor:qd error:&qe]; g_pres_ev = [g_dev newSharedEvent];

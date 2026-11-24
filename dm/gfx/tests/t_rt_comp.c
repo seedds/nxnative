@@ -2,6 +2,7 @@
 // the test a real-time policy: only the thread's CPU clock and the policy calls are replaced. A frame acquired in two calls is measured whole, each acquire thread is measured
 // and declared on itself, an acquire thread that stops acquiring goes back to the standard policy, and DM_RT_COMP / DM_RT=0 keep their meaning. With no argument the test
 // runs itself in its three modes (auto, fixed, off). From PR #2137 (thehobbit85), carried onto the per-thread slots
+#define RT_STALL_NO_TIMER   // the stall timer (t_rt_stall) would change the policy counts here on a loaded machine
 #include <time.h>
 #include <pthread.h>
 #include <spawn.h>

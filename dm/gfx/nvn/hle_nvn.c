@@ -2698,6 +2698,7 @@ typedef struct {
     nvn_rt r; uint64_t cyc;   // the thread's cycles at its last sample
     _Atomic uint64_t period_ns, comp_us;   // the period and computation declared (0: none), read by the thread policy line
     unsigned ndecl; int retired;   // retired: an acquire thread that stopped acquiring, put back on the standard policy (rt_retire); the slot may go to the next acquire thread
+    _Atomic uint64_t seen_ns;   // an acquire thread's last acquire (now_ns), which rt_stall_scan reads: wall time, as the frame count stands still while the only acquire thread is away
     _Atomic int ready, pri, base, pol;   // the thread's priority, base priority and policy at its last sample (thread_info)
     _Atomic uint64_t frames, demoted, cpu_ns, cycles;   // since the last thread policy line: frames sampled, of them declared but below real-time priority (the kernel's fail-safe demotes
                                                         // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
@@ -2708,6 +2709,7 @@ static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire thr
 static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
     t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
     memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
+    atomic_store(&t->seen_ns, 0);
     atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
 }
 static uint64_t rt_self_tid(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return id; }
@@ -2752,6 +2754,12 @@ static void rt_tick(rt_thr *t, uint64_t period_ns) {
         rt_declare(t, period_ns, fx > 0 ? fx : t->r.comp_ms > 0 ? t->r.comp_ms : 2);
     }
 }
+// Back from a time-constraint policy, set from another thread. That policy took the thread's QoS away, which the standard policy does not restore and the thread cannot set again
+// itself (EPERM), so it would run at priority 31 beside guest threads at user-interactive (47). Importance 15 gives it 46; its next time-constraint declaration replaces it
+static void rt_standard(thread_act_t port) {
+    thread_standard_policy_data_t st = {0}; thread_policy_set(port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT);
+    thread_precedence_policy_data_t pr = {15}; thread_policy_set(port, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pr, THREAD_PRECEDENCE_POLICY_COUNT);
+}
 // Under g_rt_mu, on the acquire thread `self`: another acquire thread that has not acquired for a whole window of frames goes back to the standard policy. It no longer carries
 // the frame, and a time-constraint policy left on it would keep the deadline and the computation it declared for whatever it runs now. Its port is used only while it still
 // names that thread (a thread that ended leaves its port name free for reuse). The slot is reused for the next new acquire thread, or by its own thread when it acquires again
@@ -2760,11 +2768,40 @@ static void rt_retire(const rt_thr *self) {
     for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
         if (o == self || !o->acq || o->retired || !atomic_load(&o->ready) || f < o->r.frame + RT_WIN) continue;
         thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
-        if (same && atomic_load(&o->period_ns)) { thread_standard_policy_data_t st = {0}; thread_policy_set(o->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT); }
+        if (same && atomic_load(&o->period_ns)) rt_standard(o->port);
         LOG("[nvn] acquire thread %llu stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, (unsigned long long)(f - o->r.frame), same ? (atomic_load(&o->period_ns) ? ": back to the standard policy" : "") : " and has ended");
         o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
     }
 }
+// An acquire thread that stops acquiring for RT_STALL_NS of wall time (and 8 of its periods) goes back to the standard policy, whether or not another thread acquires.
+// rt_retire counts presented frames and runs on another acquire thread, so it never acts for the only acquire thread: when the game's main thread leaves the frame loop
+// for one long piece of CPU work (Mario Kart World at the end of a race, GitHub issue #1859), no frame is presented and the policy stayed. The kernel's fail-safe demotes a
+// time-constraint thread that computes about 0.9 s without blocking to priority 0 until it blocks, which puts the rest of the work on the efficiency cores. Measured on an M2 Max
+// with a fixed burst: 13-18% of it on performance cores and 2.1-2.7 times its wall time on an idle Mac, and 32.7 s against 3.5 s beside 12 busy user-interactive threads; back
+// on the standard policy, also when that comes after the demotion, 100% and its own time. A timer on a host queue looks every 100 ms, as the thread itself runs guest code.
+// Its next acquire declares at once what it had (rt_acquire). The caller holds no lock
+#define RT_STALL_NS 250000000ull
+static void rt_stall_check(uint64_t now) {
+    pthread_mutex_lock(&g_rt_mu);
+    int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+    for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i]; uint64_t pn = atomic_load(&o->period_ns), seen = atomic_load(&o->seen_ns);
+        if (!o->acq || o->retired || !atomic_load(&o->ready) || !pn || !seen || now < seen + (pn * 8 > RT_STALL_NS ? pn * 8 : RT_STALL_NS)) continue;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
+        if (same) rt_standard(o->port);
+        static int nl; if (nl++ < 8) LOG("[nvn] acquire thread %llu has not acquired for %.0f ms%s", (unsigned long long)o->tid, (now - seen) / 1e6, same ? ": back to the standard policy until it acquires again" : " and has ended");
+        o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
+    }
+    pthread_mutex_unlock(&g_rt_mu);
+}
+#ifndef RT_STALL_NO_TIMER   // t_rt_comp and t_rt_stall drive rt_stall_check themselves: a late timer on a loaded machine would change the policy counts they check
+static void rt_stall_tick(void *unused) { (void)unused; rt_stall_check(now_ns()); }
+static dispatch_source_t g_rt_stall_timer;   // held for good: this file is also built under ARC by tests that include it, where a local would end the timer
+static void rt_stall_init(void *unused) {
+    (void)unused; g_rt_stall_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(g_rt_stall_timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 100 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler_f(g_rt_stall_timer, rt_stall_tick); dispatch_resume(g_rt_stall_timer);
+}
+#endif
 // The acquire threads, every acquire. Each thread that acquires has its own slot: a thread's CPU clock and its policy are its own, so a game that acquires from a new thread
 // (or from two in turn) gets each thread's computation measured on that thread and declared on it, not one thread's clock subtracted from another's and the policy left on the
 // first (PR #2137). Sampling once per presented frame (rt_tick) covers a frame acquired in several calls with its whole work
@@ -2778,9 +2815,12 @@ static void rt_acquire(uint64_t period_ns) {
         int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
         for (int i = 0; i < nt && !t; i++) if (g_rtt[i].acq && g_rtt[i].retired) { t = &g_rtt[i]; rt_init(t, "acquire thread", 1, tid); }
         if (!t && !(t = rt_register("acquire thread", 1)) && !full) { full = 1; LOG("[nvn] [RED] no time-constraint slot is left for another acquire thread (%d slots)", RT_THREADS); }
-    } else if (t->retired) { double c = t->r.comp_ms; memset(&t->r, 0, sizeof t->r); t->r.comp_ms = c; t->retired = 0; }   // acquiring again: a new window, and the computation it had, declared at once
-    if (t) { rt_tick(t, period_ns); rt_retire(t); }
+    } else if (t->retired) { t->r.frame = 0; t->retired = 0; }   // acquiring again: the computation it had, declared at once, and a new baseline, so the time away is no sample. The window stays: a thread away once in every 120 frames would never finish one
+    if (t) { atomic_store(&t->seen_ns, now_ns()); rt_tick(t, period_ns); rt_retire(t); }
     pthread_mutex_unlock(&g_rt_mu);
+#ifndef RT_STALL_NO_TIMER
+    if (rt_on()) { static dispatch_once_t once; dispatch_once_f(&once, NULL, rt_stall_init); }
+#endif
 }
 void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
 void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }

@@ -334,6 +334,13 @@ def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1'); renamed = {}
     v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
+    # 310 and 320 are GLSL ES versions only. NVIDIA's compiler reads one with no profile as ES, and glslang, following the specification, refuses it
+    # ("versions 300, 310, and 320 require specifying the 'es' profile"): FINAL FANTASY VII's 17 shaders say #version 320 (GitHub issue #3292). The line
+    # alone is made ES; the table key stays the hash of the game's own source. 300 is left as it is: glslang takes no ES shader below 310 for SPIR-V
+    if v and v.group(1) in ('310', '320') and not re.match(r'[ \t]*#version[ \t]+\d+[ \t]+\w', v.group(0)):
+        t = t[:v.start()] + f'#version {v.group(1)} es' + ('\n' if v.group(0).endswith('\n') else '') + t[v.end():]
+        src = t.encode('latin1')
+        v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
     desktop_legacy = bool(v and v.group(1) in ('110', '120', '130'))
     legacy = not v or v.group(1) == '100' or desktop_legacy
     if legacy:

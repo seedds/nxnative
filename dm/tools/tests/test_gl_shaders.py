@@ -289,6 +289,17 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
                 self.assertIn('[[user(dm_LegacyTexCoord0)]]', msl)
                 if stage == 'frag': self.assertIn('[[color(0)]]', msl)
 
+    def test_es_versions_with_no_profile_are_es(self):   # FINAL FANTASY VII's shaders say #version 320 with no profile (GitHub issue #3292)
+        frag = b'#version 320\nprecision highp float;\nuniform sampler2D tex;\nin vec2 uv;\nout vec4 color;\nvoid main() { color = texture(tex, uv); }\n'
+        vert = b'#version 310\nlayout(location = 0) in vec4 pos;\nvoid main() { gl_Position = pos; }\n'
+        for src, stage in ((frag, 'frag'), (vert, 'vert')):
+            with self.subTest(stage=stage, version=src[9:12]), tempfile.TemporaryDirectory() as tmp:
+                r = gl_shaders.translate(src, stage, '3292' + 'a' * 12, tmp)
+                self.assertIsInstance(r, tuple, r)
+        with tempfile.TemporaryDirectory() as tmp:   # a profile given is kept: 320 core is no version, and glslang still says so
+            r = gl_shaders.translate(frag.replace(b'#version 320', b'#version 320 core'), 'frag', '3292' + 'b' * 12, tmp)
+            self.assertIsInstance(r, str)
+
     def test_desktop_glsl_120_implicit_conversions_and_texture3d(self):
         frag = (b'#version 120\nvarying vec3 uvw;\nuniform sampler3D lut;\n'
                 b'void main() { float k = 1; gl_FragColor = texture3D(lut, uvw) * k + vec4(0, 0, 0, 1); }\n')

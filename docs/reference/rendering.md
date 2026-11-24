@@ -2351,6 +2351,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `test_sync_names` in `t_gl_imports` (also in its `--cpu` run): on main it aborts at the first delete.
 - **Found on:** NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS (`01005A20190A6000`, no profile), [GitHub issue #2835](https://github.com/seedds/nxnative/issues/2835). That the game's `glDeleteSync` call is what aborted there is inferred from the report's backtrace and log order; the game was not run. Removing this abort does not make the game start: its movie path still needs the interop.
 
+### GLSL ES versions with no profile
+
+- **Symptom:** the NSP script's OpenGL shader step fails with `no GLSL shaders translated`, and `gl_shaders.log` gives every shader `glslang -E: ERROR: #version: versions 300, 310, and 320 require specifying the 'es' profile`.
+- **Cause:** 310 and 320 exist only as GLSL ES versions. NVIDIA's compiler takes `#version 320` with no profile as ES, and glslang, following the specification, refuses it. `translate` in `gl_shaders.py` rewrote only shaders with no version or a legacy one.
+- **Fix:** `translate` makes a `#version 310` or `#version 320` line with no profile ES before glslang reads it. A profile given stays as it is, and the table key is still the hash of the game's own source. `#version 300` is left alone, as glslang takes no ES shader below 310 for SPIR-V.
+- **Check:** `test_es_versions_with_no_profile_are_es` in `dm/tools/tests/test_gl_shaders.py` (a `#version 320` fragment shader and a `#version 310` vertex shader translate; `320 core` is still refused). It fails without the fix.
+- **Found on:** FINAL FANTASY VII (`0100A5B00BDC6000`, no profile), [GitHub issue #3292](https://github.com/seedds/nxnative/issues/3292): all 17 of its shaders say `#version 320`. The reporter measured that, with the line made ES, 16 of them translate. The other fails on a texel offset argument, a separate gap that needs its source. Not run on the game.
+
 ### OpenGL 1.x fixed function
 
 - **Symptom:** the survey reports no graphics API and the host drops OpenGL draws that have no shader program.

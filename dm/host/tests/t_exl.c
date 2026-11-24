@@ -27,6 +27,7 @@ static size_t g_test_rtld_pg;
 static uint64_t g_fake_ticks = 0x123456789abcdef0ull;
 static unsigned g_prep_calls;
 
+int dm_sdk_ounce(void) { return 0; }   // No SDK module is loaded in this fixture.
 const char *dm_module_dir(void) { return g_test_dir; }
 uint8_t *dm_mod_rtld_slot(size_t *page_out) {
     if (page_out) *page_out = g_test_rtld_pg;

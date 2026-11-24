@@ -73,7 +73,8 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void bump(texture2d<uint,access::read_write> image [[texture(0)]]) { image.atomic_fetch_add(uint2(0,0),5u); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> ps=lib?[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"bump"] error:&error]:nil;
+    id<MTLFunction> fn=[lib newFunctionWithName:@"bump"];
+    id<MTLComputePipelineState> ps=fn?[g_dev newComputePipelineStateWithFunction:fn error:&error]:nil;
     CHECK(ps!=nil,"native texture-atomic reader compiles"); if (!ps) return;
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);

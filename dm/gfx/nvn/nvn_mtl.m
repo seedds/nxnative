@@ -1250,20 +1250,25 @@ static int reg_read(uint64_t g, int *id_, int *samp) {   // → 0 when note g is
 // The raw table admits pools noted by address getters (hle_nvn.c pool_mark_addressed) or reached by fixed pointers read before binding (gmem_discover). Other pools stay out, avoiding residency
 // for texture-only storage that Metal keeps in textures of its own. With the original getter-only filter, Ocarina of Time excluded 172 pools of 3,721 MB of the 4,588 MB, its whole 2,432 MB
 // graphics pool among them; with them in, the first scene passed 12 GB of Metal's 12.1 GB working set and took a 16 GB Mac into swap, and once into a kernel panic in IOGPUGroupMemory
-static struct { uintptr_t lo, hi; } *g_addr; static int g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
-static int addr_first(uintptr_t lo) { int a = 0, b = g_naddr; while (a < b) { int m = (a + b) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
-static int addr_meets(uintptr_t lo, uintptr_t hi) { int i = addr_first(lo); return i < g_naddr && g_addr[i].lo < hi; }
+static struct { uintptr_t lo, hi; } *g_addr; static size_t g_naddr, g_addr_cap;   // sorted, disjoint. Under g_mu
+static size_t addr_first(uintptr_t lo) { size_t a = 0, b = g_naddr; while (a < b) { size_t m = a + (b - a) / 2; if (g_addr[m].hi <= lo) a = m + 1; else b = m; } return a; }   // the first range that ends after lo
+static int addr_meets(uintptr_t lo, uintptr_t hi) { size_t i = addr_first(lo); return i < g_naddr && g_addr[i].lo < hi; }
 void mtl_pool_addressed(const void *mem, uint64_t size) {
     uintptr_t lo = (uintptr_t)mem, hi = lo + size;
     pthread_mutex_lock(&g_mu);
-    int i = addr_first(lo);
+    size_t i = addr_first(lo);
     if (i == g_naddr || g_addr[i].lo > lo || g_addr[i].hi < hi) {
         if (i > 0 && g_addr[i - 1].hi == lo) i--;   // touching on the left
-        int j = i;
+        size_t j = i;
         while (j < g_naddr && g_addr[j].lo <= hi) { lo = MIN(lo, g_addr[j].lo); hi = MAX(hi, g_addr[j].hi); j++; }
-        if (i == j && g_naddr == g_addr_cap) { g_addr_cap = g_addr_cap ? g_addr_cap * 2 : 256; g_addr = realloc_or_die(g_addr, (size_t)g_addr_cap * sizeof *g_addr, "the addressed range table"); }
-        if (j != i + 1) memmove(g_addr + i + 1, g_addr + j, (size_t)(g_naddr - j) * sizeof *g_addr);
-        g_naddr += 1 - (j - i); g_addr[i].lo = lo; g_addr[i].hi = hi;
+        if (i == j && g_naddr == g_addr_cap) {
+            if (g_addr_cap > SIZE_MAX / sizeof *g_addr / 2) MDIE("addressed range table capacity overflow");
+            size_t cap = g_addr_cap ? g_addr_cap * 2 : 256;
+            g_addr = realloc_or_die(g_addr, cap * sizeof *g_addr, "the addressed range table"); g_addr_cap = cap;
+        }
+        size_t tail = g_naddr - j;
+        if (tail && j != i + 1) memmove(g_addr + i + 1, g_addr + j, tail * sizeof *g_addr);
+        g_addr[i].lo = lo; g_addr[i].hi = hi; g_naddr = i + 1 + tail;
         atomic_fetch_add(&g_pool_gen, 1);   // the table rebuilds before the next draw that uses it
     }
     pthread_mutex_unlock(&g_mu);
@@ -1931,7 +1936,7 @@ static void up_owner_check(const char *where) {
 // wait for the upload to complete after flushing it, and only then can the old queue read the upload result (mtl_read_texels waited first and flushed afterwards, the readback beat the upload, 4 failures on t_nvn upload content)
 static void up_wait_zero(_Atomic int *v, int site);
 static id<MTLCommandBuffer> q_cb(void) { if (on_sub_thread()) { up_flush(); rec_drain(); up_wait_zero(&g_up_pending, WS_OLDQ); } return cl_cb(); }
-static post_op *g_post; static int g_npost, g_postcap;
+static post_op *g_post; static size_t g_npost, g_postcap;
 enum { B2B_MAX = 4096 };   // Destinations of the current run of buffer copies (b2b_note, b2b_flush)
 static uint64_t g_b2b_lo[B2B_MAX], g_b2b_hi[B2B_MAX]; static int g_b2b_n, g_b2b_over;
 // One autorelease pool per submission: submissions run on a guest thread (long-lived, no run loop, never drains the implicit pool), so objects autoreleased in the Metal replay
@@ -2326,7 +2331,9 @@ int nvn_shadow_arm(uint64_t a, uint64_t n); void nvn_shadow_writeback(uint64_t a
 static void post_shadow_wb(uint64_t a, uint64_t n) {
     if (!n || !nvn_shadow_arm(a, n)) return;
     uint64_t end = n > UINT64_MAX - a ? UINT64_MAX : a + n;
-    for (int i = g_npost - 1; i >= 0 && g_npost - i <= 8; i--) {
+    size_t first = g_npost > 8 ? g_npost - 8 : 0;
+    for (size_t i = g_npost; i > first;) {
+        i--;
         if (g_post[i].kind == POST_SHADOW_WB && a <= g_post[i].copy_end && g_post[i].addr <= end) {
             g_post[i].addr = MIN(g_post[i].addr, a); g_post[i].copy_end = MAX(g_post[i].copy_end, end); return;
         }
@@ -2765,7 +2772,11 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
 }
 
 static void post(post_op o) {
-    if (g_npost == g_postcap) { g_postcap = g_postcap ? g_postcap * 2 : 64; g_post = realloc_or_die(g_post, g_postcap * sizeof *g_post, "the deferred operations"); }
+    if (g_npost == g_postcap) {
+        if (g_postcap > SIZE_MAX / sizeof *g_post / 2) MDIE("deferred operation table capacity overflow");
+        size_t cap = g_postcap ? g_postcap * 2 : 64;
+        g_post = realloc_or_die(g_post, cap * sizeof *g_post, "the deferred operations"); g_postcap = cap;
+    }
     g_post[g_npost++] = o;
 }
 // A submission's visibility buffer, taken from the ring at its first pass that counts samples: most submissions count none (a compute piece, a copy, a piece between two waits),
@@ -3015,7 +3026,7 @@ static void cbs_fly_report(uint64_t fence); static void cbs_fly_put(uint64_t fen
 static void lc_land(void); static void lc_take_rt(void); static int g_nlc;   // lazy clears (lc_push): land / take the waiting ones, and how many wait
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
-typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready; } post_rec;   // t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
+typedef struct { _Atomic uint64_t fence; _Atomic int claimed; size_t n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready; } post_rec;   // t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
 // One record per submission in flight: mtl_sub_begin lets at most ALLOC_MAX allocators of ALLOC_SHARE submissions each stand uncompleted, so the submission that reuses a slot
 // comes after the one that last held it has completed and run its writes (post_complete runs every record up to a fence before it raises g_done). 128 records, sized for one
 // allocator per submission, wrapped once allocators were shared (PR #2090): Super Mario Party's 70-80 submissions a frame overran them two frames behind the feedback (PR #2469)
@@ -3050,9 +3061,9 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
-    int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
+    size_t n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
     uint64_t off = sub_place(r, c0, c1);
-    for (int i = 0; i < n; i++) {
+    for (size_t i = 0; i < n; i++) {
         if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
         else if (ops[i].kind == POST_BUFFER_COPY) { nvn_dirty_gpu_written(ops[i].addr, ops[i].copy_end - ops[i].addr); nvn_shadow_writeback(ops[i].addr, ops[i].copy_end - ops[i].addr); }
         else if (ops[i].kind == POST_SHADOW_WB) nvn_shadow_writeback(ops[i].addr, ops[i].copy_end - ops[i].addr);
@@ -3070,7 +3081,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     while(completed<r->fence && !atomic_compare_exchange_weak_explicit(&g_rc_complete,&completed,r->fence,memory_order_release,memory_order_relaxed)) {}
     // Pass teardown can append mirror readbacks after the recorded signal. They are
     // preceding GPU writes, and must be CPU-visible before this prefix releases its event.
-    for (int i=0;i<n;i++) if(ops[i].kind==1) { nvn_event_publish_gpu(ops[i].val,ops[i].mode,ops[i].v,r->fence); nvn_shadow_writeback((uint64_t)(uintptr_t)ops[i].val, 4); }
+    for (size_t i = 0; i < n; i++) if (ops[i].kind == 1) { nvn_event_publish_gpu(ops[i].val,ops[i].mode,ops[i].v,r->fence); nvn_shadow_writeback((uint64_t)(uintptr_t)ops[i].val, 4); }
     free(ops); seg_clk_put(sc); r->ops = NULL; r->sc = NULL;
     atomic_store(&r->claimed, 1);
     pthread_mutex_unlock(&g_post_mu);
@@ -3133,8 +3144,8 @@ uint64_t mtl_sub_commit(void) {
     gw_commit(fence); rc_commit(fence);
     if (g_vis_ring_i >= 0) g_vis_ring[g_vis_ring_i].fence = fence;
     // CPU-visible effects after completion: copy the op table into the callback
-    int n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
-    if (ws_on()) for (int i = 0; i < n; i++) { if (g_post[i].kind == POST_BUFFER_COPY || g_post[i].kind == POST_SHADOW_WB) continue; int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
+    size_t n = g_npost; post_op *ops = n ? malloc(n * sizeof *ops) : NULL; post_rec *pr = &g_postr[fence % POST_RING];
+    if (ws_on()) for (size_t i = 0; i < n; i++) { if (g_post[i].kind == POST_BUFFER_COPY || g_post[i].kind == POST_SHADOW_WB) continue; int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
     DmCommitFB *o = [DmCommitFB new];

@@ -2091,7 +2091,11 @@ GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
     if (!g_syncs) g_syncs = CFSetCreateMutable(NULL, 0, NULL);
     CFSetAddValue(g_syncs, s); return s;
 }
-GL(glDeleteSync, void, void *s) { if (!s) return; if (!sync_live(s)) { gl_error(GL_INVALID_VALUE); return; } CFSetRemoveValue(g_syncs, s); free(s); }
+GL(glDeleteSync, void, void *s) {   // frees the set's own entry, a block glFenceSync made, never what the caller passed
+    const void *own = NULL; if (!s) return;
+    if (!g_syncs || !CFSetGetValueIfPresent(g_syncs, s, &own)) { gl_error(GL_INVALID_VALUE); return; }
+    CFSetRemoveValue(g_syncs, own); free((void *)own);
+}
 GL(glIsSync, uint32_t, void *s) { return sync_live(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
 // glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads

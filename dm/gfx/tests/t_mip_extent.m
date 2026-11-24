@@ -37,8 +37,8 @@ static void target(recording *r,const tex_t *t,int lv,int slot,const tex_t *othe
 }
 static void finish(recording *r) {
     NVNcommandHandle h=h_nvnCommandBufferEndRecording(&r->cb);state_reset();memset(&R,0,sizeof R);
-    mtl_sub_begin();mtl_exec(nvn_rec_linear(h, NULL));
-    int done=mtl_wait(mtl_sub_commit(),5000000000ull);EXPECT("production GPU done",1,done);if(!done)abort();EXPECT("no error in commit feedback",0,mtl_last_commit_error());
+    uint8_t *lin=nvn_rec_linear(h, NULL);mtl_sub_begin();mtl_exec(lin);
+    int done=mtl_wait(mtl_sub_commit(),5000000000ull);free(lin);   // the linear copy of the records, freed once their work is doneEXPECT("production GPU done",1,done);if(!done)abort();EXPECT("no error in commit feedback",0,mtl_last_commit_error());
     mtl_pool_del(r->mem);free(r->mem);
 }
 static void seed(const tex_t *t) {
@@ -53,7 +53,7 @@ static void seed(const tex_t *t) {
     [cb commit];[cb waitUntilCompleted];EXPECT("standalone Metal seed done",4,cb.status);
 }
 static uint8_t *read_mip(const tex_t *t,int lv,int w,int h,int bpp) {
-    NSUInteger row=(w*bpp+15)&~15u;id<MTLBuffer> buf=[g_dev newBufferWithLength:row*h options:MTLResourceStorageModeShared];
+    NSUInteger row=(w*bpp+15)&~15u;id<MTLBuffer> buf=[g_dev newBufferWithLength:row*h options:MTLResourceStorageModeShared];if(!buf)abort();
     id<MTLCommandBuffer> cb=q_cb();id<MTLBlitCommandEncoder> b=[cb blitCommandEncoder];
     id<MTLTexture> src=tex_mtl(t);MTLBlitOption opt=t->d.format==NVN_FORMAT_DEPTH32F_STENCIL8?(bpp==1?MTLBlitOptionStencilFromDepthStencil:MTLBlitOptionDepthFromDepthStencil):MTLBlitOptionNone;
     [b copyFromTexture:src sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1)
@@ -106,15 +106,14 @@ static void plane_case(const char *name,int stencil,int clear_only) {
         char label[96];snprintf(label,sizeof label,"%s_preserved_depth",name);save(label,l,b,n*4);free(b);}
 }
 int main(int argc,char **argv){@autoreleasepool{
-    setvbuf(stdout,NULL,_IONBF,0);int stencil_only=argc>1&&!strcmp(argv[1],"--stencil-only");setenv("DM_NVN_TBDR",stencil_only?"1":"0",1);mtl_init();NSError *e=nil;
+    setvbuf(stdout,NULL,_IONBF,0);mtl_init();NSError *e=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;struct O{float4 p[[position]];float2 uv[[user(locn0)]];};\n"
       "vertex O v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return {float4(p[n],.25,1),float2((p[n].x+1)/2,(1-p[n].y)/2)};}\n"
       "fragment float4 f(O o[[stage_in]]){return float4(o.uv.x<.4?1:0,o.uv.x<.4?0:1,o.uv.y<.4?0:1,1);}\n" options:nil error:&e];if(!lib){fprintf(stderr,"%s\n",e.localizedDescription.UTF8String);return 2;}
     for(int i=0;i<2;i++){NvProg *p=[NvProg new];p->sh[0]=[NvShader new];p->sh[0]->fn=[lib newFunctionWithName:@"v"];
         if(!i){p->sh[1]=[NvShader new];p->sh[1]->fn=[lib newFunctionWithName:@"f"];p->sh[1]->stage=1;}
         (i?&depth_pg:&colour_pg)->serial=80000+i;serial_put(80000+i,p);}
-    if(stencil_only){plane_case("stencil_only",1,0);EXPECT("existing stencil-only mode",3,g_enc_mode);EXPECT("stencil-only usage disables depth",1,g_pass.hs&&!g_pass.hd);}
-    else if(argc>1&&!strcmp(argv[1],"--default"))colour_case("default",1,0,0,0,0);
+    if(argc>1&&!strcmp(argv[1],"--default"))colour_case("default",1,0,0,0,0);
     else if(argc>1&&!strcmp(argv[1],"--oversized"))colour_case("oversized",1,2,0,0,0);
     else {for(int lv=0;lv<4;lv++){char name[64];snprintf(name,sizeof name,"bounded_L%d",lv);colour_case(name,lv,1,0,0,0);
             snprintf(name,sizeof name,"clear_L%d",lv);colour_case(name,lv,1,1,0,0);}

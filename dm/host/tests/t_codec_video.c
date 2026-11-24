@@ -1,24 +1,72 @@
 // The Switch 2's video decoder API as the host serves it (hle_codec_video.c), without a guest: the buffer protocol, results, sync handles, sync point events and the
 // readback, on synthetic red key frames: 16x16 VP9 and VP8 (the ones t_movie_vpx.c decodes), a 64x64 H.264 baseline frame (ffmpeg's libx264, SEI removed) and a 64x64 AV1 frame
-// (SVT-AV1 through PyAV, preset 12, CRF 30); no game data. The SystemEvent functions are stubs that record each event's state.
+// (SVT-AV1 through PyAV, preset 12, CRF 30); no game data. The SystemEvent functions are stubs that record each event's state and the thread that signalled it last.
+// A submission returns with its packet queued for the decoder's thread: settle() waits for that thread before a check reads what the packet leads to; the checks made
+// without it hold however far the thread has got.
 #include "../hle.h"
 #undef HLE_FORCE
 #define HLE_FORCE(mangled, why, ret, cname, ...) static ret cname(__VA_ARGS__)
+#include <VideoToolbox/VideoToolbox.h>
+static OSStatus vt_test_decode(VTDecompressionSessionRef, CMSampleBufferRef, VTDecodeFrameFlags, void *, VTDecodeInfoFlags *);
+static OSStatus vt_test_create(CFAllocatorRef, CMVideoFormatDescriptionRef, CFDictionaryRef, CFDictionaryRef, const VTDecompressionOutputCallbackRecord *, VTDecompressionSessionRef *);
+#define VTDecompressionSessionDecodeFrame vt_test_decode
+#define VTDecompressionSessionCreate vt_test_create
 #include "../hle_movie.c"
 #include "../hle_codec_video.c"
 #include "../hle_movie_avc.c"
 #include "../hle_movie_av1.c"
+#undef VTDecompressionSessionDecodeFrame
+#undef VTDecompressionSessionCreate
 #include <assert.h>
+#include <unistd.h>
+#include "movie_vt_data.h"
+
+static _Atomic int vt_callback_error, vt_refuse_create, vt_refused;
+static _Atomic int vt_double_loss, vt_initial_failed;
+static _Thread_local OSStatus vt_create_status;
+static mavc *vt_callback_avc; static mav1 *vt_callback_av1;
+static OSStatus vt_test_decode(VTDecompressionSessionRef session, CMSampleBufferRef sample, VTDecodeFrameFlags flags, void *source, VTDecodeInfoFlags *info) {
+    int second = atomic_load(&vt_double_loss);
+    if (second && atomic_load(&vt_initial_failed) &&
+        ((second == 1 && (flags & kVTDecodeFrame_DoNotOutputFrame)) || (second == 2 && !flags))) {
+        atomic_store(&vt_double_loss, 0); VTDecompressionSessionInvalidate(session);
+    }
+    if (atomic_exchange(&vt_callback_error, 0)) {
+        if (vt_callback_avc) on_frame(vt_callback_avc, source, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid);
+        else av1_on_frame(vt_callback_av1, source, kVTInvalidSessionErr, 0, NULL, kCMTimeInvalid, kCMTimeInvalid);
+        return noErr;
+    }
+    OSStatus status = VTDecompressionSessionDecodeFrame(session, sample, flags, source, info);
+    if (status == kVTInvalidSessionErr) atomic_store(&vt_initial_failed, 1);
+    return status;
+}
+static OSStatus vt_test_create(CFAllocatorRef allocator, CMVideoFormatDescriptionRef format, CFDictionaryRef specification, CFDictionaryRef attributes,
+                                const VTDecompressionOutputCallbackRecord *callback, VTDecompressionSessionRef *session) {
+    if (atomic_exchange(&vt_refuse_create, 0)) {
+        *session = NULL; dm_movie_active(0); atomic_store(&vt_refused, 1);
+        return kVTVideoDecoderNotAvailableNowErr;
+    }
+    vt_create_status = VTDecompressionSessionCreate(allocator, format, specification, attributes, callback, session);
+    return vt_create_status;
+}
 
 uint64_t now_ns(void) { return 1; }
 __thread _Atomic int dm_host_work;   // hle_thread.c
-static struct { void *ev; int bound, set; } g_ev[16];
-static int ev_slot(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
-void hle_bind_system_event(void *e, int autoclear) { (void)autoclear; g_ev[ev_slot(e)].bound = 1; }
-void hle_signal_system_event(void *e) { g_ev[ev_slot(e)].set = 1; }
-void hle_clear_system_event(void *e) { g_ev[ev_slot(e)].set = 0; }
-static int ev_set(void *e) { return g_ev[ev_slot(e)].set; }
-static void destroy_ev(void *e) { g_ev[ev_slot(e)].bound = g_ev[ev_slot(e)].set = 0; }   // nn::os::DestroySystemEvent: closing the handle unbinds the event
+void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c: the decoder's thread keeps the default class in the unit test
+static struct { void *ev; int bound, set; pthread_t by; } g_ev[16];   // by: the thread that signalled it last
+static pthread_mutex_t g_ev_mu = PTHREAD_MUTEX_INITIALIZER;   // the decoder's thread signals and clears events too
+static int ev_slot_locked(void *e) { for (int i = 0; i < 16; i++) if (g_ev[i].ev == e) return i; for (int i = 0; i < 16; i++) if (!g_ev[i].ev) { g_ev[i].ev = e; return i; } abort(); }
+static int ev_slot(void *e) { pthread_mutex_lock(&g_ev_mu); int i = ev_slot_locked(e); pthread_mutex_unlock(&g_ev_mu); return i; }
+void hle_bind_system_event(void *e, int autoclear) { (void)autoclear; pthread_mutex_lock(&g_ev_mu); g_ev[ev_slot_locked(e)].bound = 1; pthread_mutex_unlock(&g_ev_mu); }
+void hle_signal_system_event(void *e) { pthread_mutex_lock(&g_ev_mu); int i = ev_slot_locked(e); g_ev[i].set = 1; g_ev[i].by = pthread_self(); pthread_mutex_unlock(&g_ev_mu); }
+void hle_clear_system_event(void *e) { pthread_mutex_lock(&g_ev_mu); g_ev[ev_slot_locked(e)].set = 0; pthread_mutex_unlock(&g_ev_mu); }
+static int ev_set(void *e) { pthread_mutex_lock(&g_ev_mu); int r = g_ev[ev_slot_locked(e)].set; pthread_mutex_unlock(&g_ev_mu); return r; }
+static int ev_by_me(void *e) { pthread_mutex_lock(&g_ev_mu); int r = pthread_equal(g_ev[ev_slot_locked(e)].by, pthread_self()); pthread_mutex_unlock(&g_ev_mu); return r; }
+static void destroy_ev(void *e) { pthread_mutex_lock(&g_ev_mu); int i = ev_slot_locked(e); g_ev[i].bound = g_ev[i].set = 0; pthread_mutex_unlock(&g_ev_mu); }   // nn::os::DestroySystemEvent: closing the handle unbinds the event
+static void settle(void *t) {   // the decoder's thread has decoded every packet it can (all of them, or it waits for room for another picture)
+    cv_dec *d = cv_of(t);
+    for (;;) { pthread_mutex_lock(&d->mu); int idle = !d->busy && (!d->qcount || d->nheld >= CV_HOLD); pthread_mutex_unlock(&d->mu); if (idle) return; usleep(200); }
+}
 void *guest_sym(const char *n) { return !strcmp(n, "_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE") ? (void *)destroy_ev : NULL; }
 static vpx_image_t *black_i420(unsigned w, unsigned h) {
     vpx_image_t *c = vpx_img_alloc(NULL, VPX_IMG_FMT_I420, w, h, 1); if (!c) return NULL;
@@ -48,7 +96,149 @@ static const uint8_t vp9[] = {
     0xff,0xff,0xff,0xf2,0x2a,0xc0,0x00,
 };
 
+static bool vt_av1_available(void) {
+    if (!hw_av1()) return false;
+    // A virtual Mac can advertise hardware AV1 but have no decoder for a real session.
+    mav1 a = {0};
+    size_t n = 0;
+    const uint8_t *seq = find_seq(av1, sizeof av1, &n);
+    assert(seq);
+    vt_create_status = noErr;
+    int opened = av1_open(&a, seq, n);
+    av1_close(&a);
+    if (opened == 1) return true;
+    assert(vt_create_status == kVTCouldNotFindVideoDecoderErr);
+    return false;
+}
+
+// Real VideoToolbox sessions invalidated between packets, as can happen while
+// iOS takes the app out of focus. The decoder must still return every picture.
+static void vt_session_lifecycle(bool test_av1) {
+    mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts;
+    int avc_pictures = 0;
+    for (int i = 0; i < 3; i++) {
+        if (i == 1) { assert(c->vs); VTDecompressionSessionInvalidate(c->vs); }
+        mavc_decode(c, h264, sizeof h264, i * 1000);
+        while (mavc_take(c, 1, nv12, 64, 64, &pts)) avc_pictures++;
+    }
+    mavc_free(c);
+    printf("invalidated VideoToolbox sessions: H.264 %d/3 pictures\n", avc_pictures);
+    assert(avc_pictures == 3);
+    if (test_av1) {
+        mav1 *a = mav1_new(NULL); mav1_picture pic; int av1_pictures = 0;
+        for (int i = 0; i < 3; i++) {
+            if (i == 1) { assert(a->vs && !a->soft); VTDecompressionSessionInvalidate(a->vs); }
+            if (mav1_decode(a, av1, sizeof av1, i * 1000, &pic) == 1) av1_pictures++;
+        }
+        mav1_free(a);
+        printf("invalidated VideoToolbox sessions: AV1 %d/3 pictures\n", av1_pictures);
+        assert(av1_pictures == 3);
+    }
+    fflush(stdout);
+}
+static uint64_t vt_hash(const uint8_t *p, size_t stride, int width, int height) {
+    uint64_t hash = 0;
+    for (int y = 0; y < height; y++) for (int x = 0; x < width; x++) hash = hash * 31 + p[(size_t)y * stride + x];
+    return hash;
+}
+static void vt_reference_recovery(bool test_av1) {
+    uint64_t expected_avc[36], expected_av1[36];
+    for (int loss = -1; loss < 14; loss++) {
+        mavc *c = mavc_new(NULL); uint8_t nv12[64 * 64 * 3 / 2]; int64_t pts; int got = 0;
+        // Three loops without Flush, with PTS restarting at zero. Reordering
+        // can leave pictures from the preceding loop queued at an invalidation.
+        for (int loop = 0; loop < 3; loop++) {
+            for (int i = 0; i < 12; i++) {
+                if ((loss < 12 ? loss : 7) == i && c->vs) {
+                    atomic_store(&vt_initial_failed, 0); atomic_store(&vt_double_loss, loss < 12 ? 0 : loss - 11);
+                    VTDecompressionSessionInvalidate(c->vs);
+                }
+                assert(!mavc_decode(c, vt_avc_data + vt_avc_packets[i].offset, (int)vt_avc_packets[i].size, vt_avc_packets[i].pts * 33333));
+                while (mavc_take(c, 0, nv12, 64, 64, &pts)) {
+                    assert(got < 36 && pts == (got % 12) * 33333);
+                    uint64_t hash = vt_hash(nv12, 64, 64, 96);
+                    if (loss < 0) expected_avc[got] = hash; else assert(expected_avc[got] == hash);
+                    got++;
+                }
+            }
+        }
+        while (mavc_take(c, 1, nv12, 64, 64, &pts)) {
+            assert(got < 36 && pts == (got % 12) * 33333);
+            uint64_t hash = vt_hash(nv12, 64, 64, 96);
+            if (loss < 0) expected_avc[got] = hash; else assert(expected_avc[got] == hash);
+            got++;
+        }
+        assert(got == 36); mavc_drop(c); assert(!c->history.count); mavc_free(c);
+        if (!test_av1) continue;
+        mav1 *a = mav1_new(NULL); mav1_picture pic; got = 0;
+        for (int loop = 0; loop < 3; loop++) for (int i = 0; i < 12; i++) {
+            if ((loss < 12 ? loss : 7) == i && a->vs) {
+                atomic_store(&vt_initial_failed, 0); atomic_store(&vt_double_loss, loss < 12 ? 0 : loss - 11);
+                VTDecompressionSessionInvalidate(a->vs);
+            }
+            assert(mav1_decode(a, vt_av1_data + vt_av1_packets[i].offset, vt_av1_packets[i].size, i * 33333, &pic) == 1);
+            assert(pic.ts == i * 33333);
+            uint64_t hash = vt_hash(pic.y, pic.ystride, pic.w, pic.h) ^ vt_hash(pic.uv, pic.uvstride, pic.w, pic.h / 2);
+            if (loss < 0) expected_av1[got] = hash; else assert(expected_av1[got] == hash);
+            got++;
+        }
+        assert(got == 36 && !a->soft); mav1_reset(a); assert(!a->history.count); mav1_free(a);
+    }
+    puts("VideoToolbox reference recovery: all 36 original pictures and timestamps across three loops, loss at each packet and again during replay/resubmission");
+}
+static void vt_av1_random_access(void) {
+    mav1 a = {0}; size_t n = 0; const uint8_t *seq = find_seq(av1, sizeof av1, &n);
+    assert(seq && n <= sizeof a.seq); memcpy(a.seq, seq, n); a.nseq = n;
+    const uint8_t shown[] = {0x32, 1, 0x10}, hidden[] = {0x32, 1, 0}, inter[] = {0x32, 1, 0x30}, existing[] = {0x32, 1, 0x80};
+    assert(av1_key(&a, shown, sizeof shown));
+    assert(!av1_key(&a, hidden, sizeof hidden));   // a hidden key frame may refresh only selected reference slots
+    assert(!av1_key(&a, inter, sizeof inter) && !av1_key(&a, existing, sizeof existing));
+    assert(!av1_key(&a, seq, n));   // a sequence header alone is no picture
+    a.seq[2] |= 8;   // reduced_still_picture_header implies a shown key frame
+    assert(av1_key(&a, hidden, sizeof hidden));
+}
+static void vt_worker_lifecycle(bool test_av1) {
+    for (int codec = CV_H264; codec <= CV_AV1; codec++) {
+        if (codec == CV_AV1 && !test_av1) continue;
+        for (int action = 0; action < 4; action++) {
+            _Alignas(16) uint8_t dec[0x400] = {0}; uint64_t id;
+            const uint8_t *packet = codec == CV_H264 ? h264 : av1;
+            size_t size = codec == CV_H264 ? sizeof h264 : sizeof av1;
+            assert(!cv_dec_init(dec, codec, 64, 64, 1, 3, NULL, 0));
+            cv_dec *d = cv_of(dec); vt_callback_avc = d->avc; vt_callback_av1 = d->av1;
+            assert(!cv_dec_submit(&id, dec, packet, size, 1000, false)); settle(dec);
+            assert(d->nheld == 1 && d->held_ts[0] == 1000);
+            if (codec == CV_AV1) assert(d->av1->vs && !d->av1->soft);
+            atomic_store(&vt_callback_error, 1);
+            atomic_store(&vt_refused, 0); atomic_store(&vt_refuse_create, 1);
+            assert(!cv_dec_submit(&id, dec, packet, size, 2000, false));
+            alarm(5);   // a lifecycle cancellation deadlock is a test failure
+            while (!atomic_load(&vt_refused)) usleep(200);
+            pthread_mutex_lock(&d->mu); assert(d->busy && d->nheld == 1 && !d->eos_pending); pthread_mutex_unlock(&d->mu);
+            if (action == 3) assert(!cv_dec_fin(dec));   // Finalize must finish while still inactive
+            else {
+                if (action) {   // Flush or Stop cancels the interrupted packet, then a new stream can start
+                    assert(!cv_dec_reset(dec, action == 2)); settle(dec);
+                    assert(!d->nheld && !cv_dec_submit(&id, dec, packet, size, 3000, true));
+                }
+                dm_movie_active(1); settle(dec);
+                assert(d->nheld == (action ? 1 : 2));
+                assert(d->held_ts[action ? 0 : 1] == (action ? 3000 : 2000));
+                assert(!cv_dec_fin(dec));
+            }
+            dm_movie_active(1); alarm(0);
+            vt_callback_avc = NULL; vt_callback_av1 = NULL;
+        }
+    }
+    puts("VideoToolbox workers: callback invalidation, inactive session refusal, resume, Flush, Stop and Finalize");
+}
 int main(void) {
+    bool test_av1 = vt_av1_available();
+    if (!test_av1) puts("VideoToolbox lifecycle: hardware AV1 unavailable; AV1 lifecycle cases skipped");
+    vt_session_lifecycle(test_av1);
+    vt_reference_recovery(test_av1);
+    vt_av1_random_access();
+    vt_worker_lifecycle(test_av1);
     _Alignas(16) static uint8_t dec[0x400], pool[3][0x40], spt[0x80], mem[16 * 16 * 4];
     uint64_t size, align, id; uint32_t idx; cv_sync sync; uint16_t w, h, cw, ch; int64_t ts; bool eos;
 
@@ -58,22 +248,21 @@ int main(void) {
     for (int i = 0; i < 3; i++) assert(!h_cv_pool(pool[i], mem, size, &pref, 1, 0) && pool_of(pool[i]));
 
     // Decoder: the submission-ready event is bound in its type and signalled
-    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3));
+    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3, NULL, 0));
     cv_dec *d = cv_of(dec); assert(d && d->vpx_ok);
     void *ev = NULL; assert(!h_cv_vp9event(&ev, dec) && ev == dec + CV_EVENT_OFF && g_ev[ev_slot(ev)].bound && ev_set(ev));
 
-    // Registering makes a buffer acquirable at once, its sync handle signalled; an empty queue answers 3604
+    // Registering gives each buffer to the decoder and makes it acquirable at once, its sync handle unsignalled until a picture lands; an empty queue answers 3604
     for (uint32_t i = 0; i < 2; i++) assert(!h_cv_vp9reg(dec, i, pool[i], 0));
-    for (uint32_t i = 0; i < 2; i++) { assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == i && sync.magic == CV_SYNC && sync.gen == 0 && h_gs_trywait(&sync)); }
+    cv_sync sync0, sync1;
+    assert(!h_cv_vp9acq(&idx, &sync0, dec) && idx == 0 && sync0.magic == CV_SYNC && sync0.gen == 1 && !h_gs_trywait(&sync0));
+    assert(!h_cv_vp9acq(&idx, &sync1, dec) && idx == 1 && sync1.magic == CV_SYNC && sync1.gen == 1 && !h_gs_trywait(&sync1));
     assert(h_cv_vp9acq(&idx, &sync, dec) == CV_NONE);
     assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
 
-    // Released: acquirable again with a new handle that signals once a picture is in the buffer; the picture's properties and its NV12 / RGBA readback
-    h_cv_vp9rel(dec, 0, sync);
-    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
-    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    // First picture lands directly in registered buffer 0 without a Release; its properties and NV12 / RGBA readback
     assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000, false) && id == 1);
-    assert(h_gs_trywait(&sync));
+    settle(dec); assert(h_gs_trywait(&sync0) && !h_gs_trywait(&sync1));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && w == 16 && h == 16 && cw == 16 && ch == 16 && ts == 1000 && !eos);
     uint32_t cs = 7; w = h = 0;   // SDK 19's form: the same properties, and colour space 0
     assert(!h_cv_vp9props19(&w, &h, &cw, &ch, &cs, &ts, &eos, dec, 0) && w == 16 && h == 16 && ts == 1000 && !eos && cs == 0);
@@ -85,12 +274,24 @@ int main(void) {
     assert(!h_cv_nv12(pool[0], 0, 0, 0, 16, 16, y, 16, 256, uv, 16, 128) && !memcmp(y, nv12, 256) && !memcmp(uv, nv12 + 256, 128));
     assert(!h_cv_rgba(pool[0], 0, 0, 0, 16, 16, rgba, 64, sizeof rgba));
     for (int i = 0; i < 1024; i += 4) assert(rgba[i] >= 250 && rgba[i + 1] <= 5 && rgba[i + 2] <= 5 && rgba[i + 3] == 255);
+    // Second picture fills registered buffer 1; then Release returns buffer 0 with a new handle (gen 2) that signals on the next picture
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1001, false) && id == 2);
+    settle(dec); assert(h_gs_trywait(&sync1) && !d->pcount);
+    h_cv_vp9rel(dec, 0, sync0);
+    assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && sync.gen == 2 && !h_gs_trywait(&sync));
+    assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) == CV_NONE);
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1002, false) && id == 3);
+    settle(dec); assert(h_gs_trywait(&sync) && !d->pcount);
+    assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 0) && ts == 1002);
 
-    // No released buffer: pictures wait; the event goes down at CV_READY, with room left for a client's signal in flight, and packets are refused (3603) at CV_HOLD
+    // No released buffer: pictures wait; the event goes down at CV_READY, with room left for a client's signal in flight, and packets are refused (3603) at CV_HOLD.
+    // A packet not yet decoded counts as the picture it will give: the event and the refusal are the same whether the decoder's thread has got to it or not
     for (int i = 0; i < CV_READY; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
-    assert(d->nheld == CV_READY && !ev_set(ev));
+    assert(!ev_set(ev));
+    settle(dec); assert(d->nheld == CV_READY && !d->qcount && !ev_set(ev));
     for (int i = CV_READY; i < CV_HOLD; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + i, false));
-    assert(d->nheld == CV_HOLD && !ev_set(ev));
+    assert(h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 9999, false) == CV_BUSY && !ev_set(ev));
+    settle(dec); assert(d->nheld == CV_HOLD && !d->qcount && !ev_set(ev));
     assert(h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 9999, false) == CV_BUSY);
     // A release takes the oldest; the event comes back below CV_READY
     for (int i = CV_HOLD; i > CV_READY; i--) { h_cv_vp9rel(dec, 1, sync); assert(d->nheld == i - 1 && !ev_set(ev)); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1); }
@@ -104,45 +305,101 @@ int main(void) {
     hle_clear_system_event(ev);
     h_cv_vp9rel(dec, 1, sync); assert(d->nheld == CV_READY - 2 && !ev_set(ev));
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
-    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + CV_HOLD, false) && d->nheld == CV_READY - 1 && ev_set(ev));
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 2000 + CV_HOLD, false) && ev_set(ev) && ev_by_me(ev));   // signalled by the submission itself, before the packet is decoded
+    settle(dec); assert(d->nheld == CV_READY - 1 && ev_set(ev));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 2000 + CV_HOLD - CV_READY + 1);
 
-    // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer is signalled at once
+    // Sync point event: armed on an unfilled buffer, signalled when the picture lands; one armed on a filled buffer (including a buffer registered while pictures wait) is signalled at once
     assert(!h_spt_create(spt) && g_ev[ev_slot(spt)].bound);
     h_cv_vp9rel(dec, 0, sync);   // buffer 0 takes the next waiting picture at once
     assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0);
     assert(!h_spt_request(spt, &sync) && ev_set(spt) && !SPT(spt)->armed);
-    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2);
-    for (int i = 0; i < 2; i++) { h_cv_vp9rel(dec, (uint32_t)i, sync); assert(!h_cv_vp9acq(&idx, &sync, dec)); }   // the last two waiting pictures go out
-    h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && !h_gs_trywait(&sync));
+    assert(!h_cv_vp9reg(dec, 2, pool[2], 0) && !h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && sync.gen == 1 && h_gs_trywait(&sync));   // takes a waiting picture at register
+    h_cv_vp9rel(dec, 0, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 0 && !d->nheld);   // the last waiting picture goes out
+    h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && sync.gen == 2 && !h_gs_trywait(&sync));
     assert(!h_spt_request(spt, &sync) && !ev_set(spt) && SPT(spt)->armed);
-    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false) && ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 3000, false));
+    settle(dec); assert(ev_set(spt) && !SPT(spt)->armed && h_gs_trywait(&sync));
+    assert(!ev_by_me(spt));   // the picture came from the decoder's thread, not from inside the submission
 
     // End of stream with no data: the next released buffer carries it, with no picture
-    assert(!h_cv_vp9submit(&id, dec, NULL, 0, 0, true) && d->eos_pending);
+    assert(!h_cv_vp9submit(&id, dec, NULL, 0, 0, true));
+    settle(dec); assert(d->eos_pending);
     h_cv_vp9rel(dec, 2, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 2 && h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 2) && eos && w == 0 && h == 0);
 
     // A pool finalized while its buffer is still registered: the buffer keeps working, its picture has nowhere to go (ASan checks no freed pool is written)
     h_cv_poolfin(pool[1]); assert(!pool_of(pool[1]) && d->buf[1].pool == NULL);
     h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1 && !h_gs_trywait(&sync));
-    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 4000, false) && h_gs_trywait(&sync));
+    assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 4000, false));
+    settle(dec); assert(h_gs_trywait(&sync));
     assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 4000 && w == 16);
-    // A flush drops the waiting pictures and restarts the decoder; finalize frees it and destroys its event
-    assert(!h_cv_vp9flush(dec) && d->nheld == 0 && d->vpx_ok && ev_set(ev));
+    // A flush drops the waiting pictures and the packets not yet decoded, wherever the decoder's thread is with them, and restarts the decoder: none of them reaches a buffer
+    // released afterwards, the next key frame does; finalize frees the decoder and destroys its event
+    for (int round = 0; round < 8; round++) {
+        for (int i = 0; i < 6; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 5000 + i, false));
+        if (round & 1) usleep(100u * (unsigned)round);   // some rounds catch the thread inside a packet, some before or after
+        assert(!h_cv_vp9flush(dec) && d->nheld == 0 && !d->qcount && ev_set(ev));
+        settle(dec); assert(d->nheld == 0 && !d->eos_pending);
+        h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1 && !h_gs_trywait(&sync));
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 6000 + round, false));
+        settle(dec); assert(d->vpx_ok && !d->reopen && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dec, 1) && ts == 6000 + round && w == 16 && d->nheld == 0);
+    }
+    // The frame step's movie signal (hle_movie.c dm_movie_hz): times microseconds apart give no rate, and nn::codec does not count a stream without one; two pictures
+    // 1/60 s apart after a gap of a second (the rate is taken anew) make a 60-picture movie, a flush (a seek, a loop) keeps it and a stop ends it at once
+    assert(dm_movie_hz() == 0);
+    for (int k = 0; k < 2; k++) {
+        h_cv_vp9rel(dec, 1, sync); assert(!h_cv_vp9acq(&idx, &sync, dec) && idx == 1);
+        assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 1000000000 + k * 16666667, false));
+        settle(dec); assert(h_gs_trywait(&sync));
+    }
+    assert(dm_movie_hz() == 60);
+    assert(!h_cv_vp9flush(dec) && dm_movie_hz() == 60);
+    assert(!h_cv_vp9stop(dec) && dm_movie_hz() == 0);
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
-    // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew
+    // A decoder initialised again in the same memory, cleared in between (Donkey Kong Bananza's second movie): its event is bound anew.
+    // Finalized with packets it has not decoded: its thread ends first, and they go with it
     memset(dec, 0, sizeof dec);
-    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3) && cv_of(dec) && g_ev[ev_slot(ev)].bound && ev_set(ev));
+    assert(!h_cv_vp9init2(dec, 0x10000, 16, 16, 1, 1, 3, NULL, 0) && cv_of(dec) && g_ev[ev_slot(ev)].bound && ev_set(ev));
+    for (int i = 0; i < 6; i++) assert(!h_cv_vp9submit(&id, dec, vp9, sizeof vp9, 7000 + i, false));
     assert(!h_cv_vp9fin(dec) && !cv_of(dec) && !g_ev[ev_slot(ev)].bound);
     for (int i = 0; i < 3; i += 2) { h_cv_poolfin(pool[i]); assert(!pool_of(pool[i])); }
+    // NintendoSDK_movie's startup sequence (SDK 19-22): RegisterVideoFrame calls Register -> Acquire -> RequestSyncPointEvent and returns; Start runs immediately without a Release.
+    // The event must stay armed until a real picture lands (never fire early and race Start), and releasing an unfilled buffer must not duplicate its pending entry
+    {   _Alignas(16) static uint8_t dk[0x400], pk[0x40], mk[16 * 16 * 4], ek[0x80];
+        assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(pk, mk, size, &pref, 1, 0));
+        assert(!h_cv_vp9init2(dk, 0x10000, 16, 16, 1, 1, 3, NULL, 0)); cv_dec *k = cv_of(dk);
+        assert(!h_spt_create(ek));
+        assert(!h_cv_vp9reg(dk, 0, pk, 0) && k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 1 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        assert(h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) == CV_NONE);
+        assert(!h_cv_vp9start(dk) && !ev_set(ek) && SPT(ek)->armed);
+        assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 5000, false));
+        settle(dk); assert(ev_set(ek) && !SPT(ek)->armed && !ev_by_me(ek) && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && w == 16 && h == 16 && ts == 5000 && !eos && !k->pcount);
+        // Release -> Acquire -> RequestSyncPointEvent -> Submit for the next picture
+        h_cv_vp9rel(dk, 0, sync); assert(k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 2 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        // Releasing an unfilled buffer advances its generation without duplicating it in pend[], and Unregister -> Register keeps generation monotonic
+        h_cv_vp9rel(dk, 0, sync); assert(k->pcount == 1 && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 3 && !h_gs_trywait(&sync));
+        assert(!h_spt_request(ek, &sync) && !ev_set(ek) && SPT(ek)->armed);
+        assert(!h_cv_vp9submit(&id, dk, vp9, sizeof vp9, 6000, false));
+        settle(dk); assert(ev_set(ek) && !SPT(ek)->armed && h_gs_trywait(&sync));
+        assert(!h_cv_vp9props(&w, &h, &cw, &ch, &ts, &eos, dk, 0) && ts == 6000);
+        assert(!h_cv_vp9unreg(dk, 0) && !h_cv_vp9reg(dk, 0, pk, 0) && !h_cv_vp9acq(&idx, &sync, dk) && idx == 0 && sync.gen == 5 && !h_gs_trywait(&sync));
+        h_spt_destroy(ek);
+        assert(!h_cv_vp9fin(dk));
+        h_cv_poolfin(pk);
+    }
     // VP8 (libvpx) and H.264 (VideoToolbox) take the same protocol: one released buffer, one key frame, its picture read back red
     {   _Alignas(16) static uint8_t d8[0x400], p8[0x40], m8[16 * 16 * 4];
         assert(!h_cv_poolsize(&size, &align, &pref, 1) && !h_cv_pool(p8, m8, size, &pref, 1, 0));
-        assert(!h_cv_vp8init2(d8, 0x10000, 16, 16, 1, 1, 3) && cv_of(d8) && cv_of(d8)->codec == CV_VP8 && cv_of(d8)->vpx_ok);
+        assert(!h_cv_vp8init2(d8, 0x10000, 16, 16, 1, 1, 3, NULL, 0) && cv_of(d8) && cv_of(d8)->codec == CV_VP8 && cv_of(d8)->vpx_ok);
         assert(!h_cv_vp8reg(d8, 0, p8, 0) && !h_cv_vp8acq(&idx, &sync, d8) && idx == 0);
         h_cv_vp8rel(d8, 0, sync); assert(!h_cv_vp8acq(&idx, &sync, d8) && !h_gs_trywait(&sync));
-        assert(!h_cv_vp8submit(&id, d8, vp8, sizeof vp8, 7000, false) && h_gs_trywait(&sync));
+        assert(!h_cv_vp8submit(&id, d8, vp8, sizeof vp8, 7000, false));
+        settle(d8); assert(h_gs_trywait(&sync));
         assert(!h_cv_vp8props(&w, &h, &cw, &ch, &ts, &eos, d8, 0) && w == 16 && h == 16 && ts == 7000);
         assert(!h_cv_nv12(p8, 0, 0, 0, 16, 16, nv12, 16, 256, nv12 + 256, 16, 128));
         for (int i = 0; i < 256; i++) assert(abs(nv12[i] - 81) <= 3);
@@ -154,10 +411,11 @@ int main(void) {
     {   _Alignas(16) static uint8_t dh[0x400], ph[0x40], mh[64 * 64 * 4]; static uint8_t yuv[64 * 64 * 3 / 2];
         cv_pref p64 = h_cv_pref(64, 64, 3, 0);
         assert(!h_cv_poolsize(&size, &align, &p64, 1) && !h_cv_pool(ph, mh, size, &p64, 1, 0));
-        assert(!h_cv_h264init2(dh, 0x10000, 64, 64, 1, 1, 3) && cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->avc);
+        assert(!h_cv_h264init2(dh, 0x10000, 64, 64, 1, 1, 3, NULL, 0) && cv_of(dh) && cv_of(dh)->codec == CV_H264 && cv_of(dh)->avc);
         assert(!h_cv_h264reg(dh, 0, ph, 0) && !h_cv_h264acq(&idx, &sync, dh));
         h_cv_h264rel(dh, 0, sync); assert(!h_cv_h264acq(&idx, &sync, dh) && !h_gs_trywait(&sync));
-        assert(!h_cv_h264submit(&id, dh, h264, sizeof h264, 5000000, true) && h_gs_trywait(&sync));   // end of stream: VideoToolbox gives its picture out
+        assert(!h_cv_h264submit(&id, dh, h264, sizeof h264, 5000000, true));   // end of stream: VideoToolbox gives its picture out
+        settle(dh); assert(h_gs_trywait(&sync));
         assert(!h_cv_h264props(&w, &h, &cw, &ch, &ts, &eos, dh, 0) && w == 64 && h == 64 && ts == 5000000 && eos);
         assert(!h_cv_nv12(ph, 0, 0, 0, 64, 64, yuv, 64, 4096, yuv + 4096, 64, 2048));
         for (int i = 0; i < 4096; i++) assert(abs(yuv[i] - 81) <= 4);
@@ -169,7 +427,13 @@ int main(void) {
         assert(!h_cv_av1tm(da, NULL, 0, 0x10000, 0xabcd0080, 0xabcd0040, 1, 3, 2, 2) && cv_of(da) && cv_of(da)->codec == CV_AV1 && cv_of(da)->w == 0x80 && cv_of(da)->h == 0x40);
         assert(h_cv_av1ev22(da) == da + CV_EVENT_OFF && ev_set(da + CV_EVENT_OFF));
         static const uint8_t delimiter[] = {0x12, 0x00};   // a temporal delimiter OBU alone
-        uint64_t n; assert(!h_cv_av1submit(&n, da, delimiter, sizeof delimiter, 0, false) && !cv_of(da)->nheld);
+        uint64_t n; assert(!h_cv_av1submit(&n, da, delimiter, sizeof delimiter, 0, false));
+        settle(da); assert(!cv_of(da)->nheld);
+        // Key frames sent without waiting for their pictures, the last with the end of stream: every picture waits with its own packet's time, in order, and the last one
+        // carries the end of stream, whichever backend decodes and however many frames it holds at once
+        for (int k = 0; k < 7; k++) assert(!h_cv_av1submit(&n, da, av1, sizeof av1, 9000 + k, k == 6));
+        settle(da); assert(cv_of(da)->nheld == 7 && !cv_of(da)->eos_pending);
+        for (int k = 0; k < 7; k++) assert(cv_of(da)->held_ts[k] == 9000 + k && cv_of(da)->held_eos[k] == (k == 6) && cv_of(da)->held[k]->d_w == 64);
         assert(!h_cv_av1fin(da) && !cv_of(da));
         // The av1C record from a sequence header: profile 0, one operating point at level 12 (tier 0), 2560x1440, 8-bit 4:2:0 with chroma position 0, written field by field
         uint8_t obu[32] = {0x0a, 0}; size_t bit = 16;
@@ -194,11 +458,33 @@ int main(void) {
         // The red frame on each backend this Mac has (VideoToolbox where the chip decodes AV1, and dav1d, which DM_AV1_DAV1D=1 picks), as NV12: Y 81, Cb 90, Cr 240 (BT.601, video range)
         for (int soft = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) ? 0 : 1; soft < 2; soft++) {
             setenv("DM_AV1_DAV1D", soft ? "1" : "0", 1);
-            mav1 *a = mav1_new(); assert(!strcmp(mav1_backend(a), soft ? "dav1d" : "VideoToolbox"));
-            mav1_picture pic; assert(mav1_decode(a, av1, sizeof av1, &pic) == 1 && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines
+            mav1 *a = mav1_new(NULL); assert(!strcmp(mav1_backend(a), soft ? "dav1d" : "VideoToolbox"));
+            // dav1d decodes several frames at once: a unit's picture comes with that unit's time, at once or when the frames in flight are asked for (mav1_next's drain).
+            // VideoToolbox gives each unit's picture as it takes the unit
+            mav1_picture pic; int got = mav1_decode(a, av1, sizeof av1, 4242, &pic);
+            if (!got) { assert(!strcmp(mav1_backend(a), "dav1d")); got = mav1_next(a, 1, &pic); }   // dav1d also on the VideoToolbox pass when the session cannot be made (a VM: -12906)
+            assert(got == 1 && pic.ts == 4242 && pic.w == 64 && pic.h == 64 && pic.matrix == 1 && !pic.full_range);   // no matrix in the stream: BT.601 at 64 lines
             for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) assert(abs(pic.y[(size_t)y * pic.ystride + x] - 81) <= 4);
             for (int y = 0; y < 32; y++) for (int x = 0; x < 64; x += 2) { assert(abs(pic.uv[(size_t)y * pic.uvstride + x] - 90) <= 6); assert(abs(pic.uv[(size_t)y * pic.uvstride + x + 1] - 240) <= 6); }
-            mav1_reset(a); assert(mav1_decode(a, delimiter, sizeof delimiter, &pic) == 0);   // a new stream: nothing until its sequence header
+            assert(mav1_next(a, 1, &pic) == 0);   // nothing more inside
+            // Key frames one after the other, with no picture asked for in between beyond what each call gives: every unit's picture comes out once, in order, with its time
+            int64_t want = 100;
+            for (int k = 0; k < 9; k++) {
+                for (int r = mav1_decode(a, av1, sizeof av1, 100 + k, &pic); r == 1; r = mav1_next(a, 0, &pic)) { assert(pic.ts == want && pic.w == 64); want++; }
+                if (k == 4) while (mav1_next(a, 1, &pic) == 1) { assert(pic.ts == want); want++; }   // drained in the middle of the stream: it goes on after
+            }
+            while (mav1_next(a, 1, &pic) == 1) { assert(pic.ts == want && abs(pic.y[0] - 81) <= 4); want++; }
+            assert(want == 109);
+            // Drains at any point of the stream, each to its end, with one, two or three frames in flight: dav1d goes on after each (left halfway, a drain breaks it: dav1d_step)
+            uint32_t rng = 12345; int64_t sent = 1000; want = 1000;
+            for (int k = 0; k < 600; k++) {
+                for (int r = mav1_decode(a, av1, sizeof av1, sent++, &pic); r == 1; r = mav1_next(a, 0, &pic)) { assert(pic.ts == want); want++; }
+                rng = rng * 1664525u + 1013904223u;
+                if ((rng >> 28) < 5) { while (mav1_next(a, 1, &pic) == 1) { assert(pic.ts == want); want++; } assert(want == sent); }
+            }
+            while (mav1_next(a, 1, &pic) == 1) { assert(pic.ts == want); want++; }
+            assert(want == sent);
+            mav1_reset(a); assert(mav1_decode(a, delimiter, sizeof delimiter, 0, &pic) == 0 && mav1_next(a, 1, &pic) == 0);   // a new stream: nothing until its sequence header
             mav1_free(a);
         }
         unsetenv("DM_AV1_DAV1D");

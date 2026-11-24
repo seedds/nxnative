@@ -1,0 +1,37 @@
+# The Binding of Isaac: Rebirth 1.0 (base), SDK 5.5.0, NVN.
+# No game-specific rewriter cuts or host overrides.
+
+# ---- Identity ----
+title_id	01009BC00C38A000
+program_id	01009BC00C38A000
+
+# ---- App ----
+name	The Binding of Isaac: Rebirth
+ipa	TheBindingOfIsaacRebirth.ipa
+app_category	public.app-category.games
+# Left stick moves; the right stick shoots. Face buttons also shoot.
+pad_layout	full
+
+# ---- Versions ----
+build	v0	1.0	main=3b9cf053a86e902e013d72daaa156a94	subsdk0=7a7ca048269ec2e6ed9a2d812a951d9f	subsdk1=66ce9a2e7c75fc6d0a7fe1b5d6d5baee	sdk=5afd9bdf1a579f10081d2ba1c4f9c7ac
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	resources/sfx.zip
+zip_store	.b:.mp4:.ogg:.png:.zip:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource: no virtual address memory, as on Horizon.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/resources/=resources /resources.kr/=resourceskr /resources.jp/=resourcesjp /sce_sys/=scesys
+shader_note	The Binding of Isaac: Rebirth shaders

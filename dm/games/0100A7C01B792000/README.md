@@ -9,7 +9,7 @@ Status: on the Mac (2026-11-06, M4 Pro), from a fresh save: the Xbox Game Studio
 | Setting | Where | Why |
 |---|---|---|
 | `tex_dyn_slots on` | [`game.tsv`](game.tsv) | 2 particle vertex shaders pick a buffer texture at run time; see [Shaders](#shaders) |
-| 64 GB alias region: `mem_reserve 0x1028000000`, `mem_alias 0x1000000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the provisional Mac layout for Unreal: the rewriter's engine-wide rules cut FMallocBinned3's constructor (`dm/tools/ue_malloc.py`) and give the engine region what the alias region has room for (`dm/tools/ue_region.py`), 62 GB here. An iPhone needs a smaller block, as [Octopath Traveler 0](../01005270232F2000/README.md#memory)'s; not measured yet |
+| 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | the layout of every game with virtual address memory: the rewriter's engine-wide rules cut FMallocBinned3's constructor (`dm/tools/ue_malloc.py`) and give the 62 GB engine region what the alias region has room for (`dm/tools/ue_region.py`), 4.06 GB here. Until 2026-11-15 the provisional 64 GB alias region, which an iPhone cannot reserve ([Provisional Unreal profiles asked an iPhone for 64 GB](../../../docs/reference/memory.md#provisional-unreal-profiles-asked-an-iphone-for-64-gb)). With the iPhone's alias region on the Mac (`DM_ALIAS_SIZE=0x118000000`, M4 Pro, 2026-11-15): title, main menu and first control in Escape from Squid Coast, mapped up to +1.51 GB of the 4.38 GB alias region in about 4 minutes, a 2.46 GB footprint at most, 60 fps, no `[RED]` line |
 | `sys_resource 0x1400000` | `game.tsv` | the NPDM declares 20 MB of system resource |
 | `shader_groups ShaderArchive-Global-=global ShaderArchive-=game`, `depth_mode zero` | `game.tsv` | the two shader code archives; the game sets near = 0 depth |
 
@@ -33,6 +33,9 @@ No host or rewriter rule is specific to this game.
 
 ## Found on this game
 
+- [Local account selection, sessions and separate saves](../../../docs/reference/services.md#local-account-selection-sessions-and-separate-saves): host repair landed in [9e6acda6](https://github.com/seedds/nxnative/commit/9e6acda68d5f61f2e75be537b660684f2df3f47c), addressing [PR #2846](https://github.com/seedds/nxnative/pull/2846), and verified with synthetic accounts and saves across two fresh process restarts. The original PR reported about 40 seconds of two-player play on a carried implementation; gameplay and iOS validation of the landed implementation remain [open](#open).
+- [Provisional Unreal profiles asked an iPhone for 64 GB](../../../docs/reference/memory.md#provisional-unreal-profiles-asked-an-iphone-for-64-gb): resolved, the profile takes the 5 GB block (GitHub issue #2278); not yet on an iPhone
+- [Compute dispatches past the pipeline's thread limit](../../../docs/reference/shaders.md#compute-dispatches-past-the-pipelines-thread-limit): resolved, found offline (no M1 or M2 run): compute shader `ce4e9fdf514d0196` (8x8x8) took 124 registers on `applegpu_g13s` / `applegpu_g14g`, which allows 384 threads, so on an M1 or M2 its dispatches ran nothing; 104 with the local size on the kernel. What it draws is not known.
 - [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name): 60 and 120 by `rhi.SyncInterval` alone
 - [Layer frame history](../../../docs/reference/services.md#layer-frame-history)
 - [The offline pages of a sparse base game stop the build as a damaged NSP](../../../docs/reference/packing.md#the-offline-pages-of-a-sparse-base-game-stop-the-build-as-a-damaged-nsp)
@@ -43,5 +46,7 @@ No host or rewriter rule is specific to this game.
 ## Open
 
 - iPhone: no IPA built; the guest block needs measuring for a phone ([What it needs](#what-it-needs)).
+- **Account gameplay after #2846:** explicitly choose or create player 2, verify joining and playing together, then close/rejoin an account. Make different progress for both users, quit and relaunch, and verify that each loads their own committed progress. These checks have not been run in Minecraft on the landed implementation; synthetic host save tests do not establish the game's behavior.
+- **iOS account selection after #2846:** on an actual device, test user selection and cancellation, return to gameplay, and separate progress for both users across relaunches. The host's iOS source compile checks passed; the native selector and saves have not been tested on a device.
 - The prewarm list (`pso_manifest.tsv`) is empty.
-- Only the start of the first level was played: later levels, couch co-op (more controllers), saves across boots and the other languages are untested.
+- Only the start of the first level was played: later levels and the other languages are untested; account/co-op and save checks are listed above.

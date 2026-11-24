@@ -24,7 +24,8 @@ typedef struct s2_pad { s2_pad_state st; char name[48]; struct s2_pad *next; } s
 
 // The front end's side. All calls come on the main queue.
 typedef struct {
-    void (*attach)(s2_pad *p);   // a new pad: take it a player slot (player() then names it, -1 for none)
+    int (*attach)(s2_pad *p);    // a new pad: take it a player slot (player() then names it). 1: kept, with a player or waiting for its first button press (DM_PAD_PRESS_TO_JOIN:
+                                 // player() is -1 until read() gives it one); 0: no free player, and the controller is let go
     void (*detach)(s2_pad *p);   // the pad's last controller went: it is already off the list and is freed after the call
     void (*read)(s2_pad *p);     // the pad's state changed
     int (*player)(s2_pad *p);    // 0-based player, -1 without one

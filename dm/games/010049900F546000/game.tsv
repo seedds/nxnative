@@ -9,8 +9,6 @@ program_id	010049900F546000
 name	Super Mario 3D All-Stars
 ipa	SuperMario3DAllStars.ipa
 app_category	public.app-category.games
-# the menu wraps its clears in conditional rendering (SetRenderEnableConditional): without evaluating it every frame is black
-render_cond	on
 
 # ---- Programs ----
 # One game of four programs, as on the cartridge: this launcher starts the others with oe::ExecuteProgram. Each has its own profile folder; the host is built over all of them (game.py header_multi)

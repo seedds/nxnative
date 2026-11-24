@@ -48,6 +48,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 
 - A base NSZ of this game tagged `[v0]` is 1.1.0 (v65536) by its content meta, as the eShop now serves it: the NSP script names a package's version from its content meta, so that base alone is this profile's `v65536` ([An update is taken for the version in its file name](../../../docs/reference/packing.md#an-update-is-taken-for-the-version-in-its-file-name)).
 - Existing [Function-matched cuts](../../../docs/reference/rewriter.md#function-matched-cuts-for-unregistered-builds) work on this `sdk` build without a row of its own.
+- **Specialized second functions in the offline pipeline archive** (`needs_cut` in `pso_offline.py`): with `depth_mode zero` a pulling vertex shader's base takes its library's second function `main0_z`, which `metal-tt` 32023.922 cannot specialize, so the Mac app's archive step failed and the app had no archive (9,507 bases planned; issue #2337): [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive).
 
 ## Open
 

@@ -14,8 +14,17 @@ threadgroups (nvn_geometry.inc mtk_encode). The task and object functions read t
   INPUT         the payload a mesh shader's task wrote (ISBERD mode 0x38). Its word 0 is the mesh workgroup's number among its task's launches, which the hardware puts there
   outputs       a task's payload (0xb8): its word 1 is the number of mesh workgroups to launch, its records start at +0x10
                 or a mesh shader's attributes (0xf8): all blocks of 32 vertices (the components the SPH's OMAP enables, 0x80 bytes each, a word per vertex), followed by all blocks of 32
-                primitives (the components the per-primitive SPH's OMAP enables, 0x80 bytes each, a word per primitive)
+                primitives (the per-primitive SPH's system values (OMAP 0x34 and 0x35 bits 0..3: primitive id, layer, viewport, ...) before its generic attributes, 0x80 bytes
+                each, a word per primitive). The primitive id is handed to Metal as the primitive's [[primitive_id]] (PRIMITIVE_BUILTINS), which the fragment stage reads as NVN's
+                gl_PrimitiveID. PRAGMATA's mesh shaders (5aab38bb5ba67ef7) write a primitive id (0x35 bit 0): without its room it lay over the primitive count byte, and every
+                workgroup drew nothing
   primitives    a mesh shader's primitive bytes: the count at +3 (0x88), index bytes from +4 (0x80, control +0x5f per primitive: 1 point, 2 line, 3 triangle)
+
+A payload past Metal's (abi.MESH_PAYLOAD_MAX, 16 KB) goes through a device buffer the host binds at abi.MESH_SPILL_SLOT in both stages (payload_spill): word 0 its slice count,
+then a slice of the payload's words (rounded to 4) for each of the draw's task workgroups. The task stores its payload in its threadgroup's slice behind a device-scope fence and
+hands its mesh threadgroups the slice's word offset in Metal's payload; the mesh shader's input is then a shared memory of its own (job stage_input_words, the translator's
+dm_stage_in), read from the slice behind a device-scope fence instead of sitting in the mesh shader's stage memory. Nintendo Switch Sports Resort's sea task shaders hand 21-28 KB
+to their mesh shaders. A task's stage memory has no input area either (a task reads no ISBERD 0x30..0x38): its outputs follow word 0
 """
 import re
 import struct
@@ -27,6 +36,17 @@ TOPOLOGY = {1: 'point', 2: 'line', 3: 'triangle'}
 METAL_MAX_VERTICES, METAL_MAX_PRIMITIVES = 256, 512   # a Metal mesh's limits
 METAL_MAX_GRID = abi.MESH_GRID   # mesh threadgroups an object threadgroup may launch
 METAL_MAX_SHARED = 0x8000   # threadgroup memory of a Metal function
+SPILL_MIN = 6000   # bytes of stage memory from which a mesh shader's array is a device slice (to_stage): measured gain 20-46 % from 6.5 KB, none at 5.3 KB
+
+
+def payload_spill(i):
+    """Whether a task or mesh shader's payload exceeds Metal's object payload limit and goes through a device buffer."""
+    return i['payload'] > abi.MESH_PAYLOAD_MAX
+
+
+def payload_words(i):
+    """Words of one task workgroup's slice in the payload spill buffer (16-byte aligned)."""
+    return (i['payload'] + 15 & ~15) >> 2
 
 
 def is_stage(ctl):
@@ -43,6 +63,12 @@ def sph_outputs(sph):
     return out
 
 
+def sph_system(sph):
+    """The system-value components an SPH's OMAP enables besides the position (byte 0x34, byte 0x35 bits 0..3), lowest bit first."""
+    bits = sph[0x34] | (sph[0x35] & 0xf) << 8
+    return [b for b in range(12) if bits >> b & 1]
+
+
 def info(ctl, area):
     """A task or mesh shader's facts from its control section and its whole code area (the SPH, the instructions, a mesh shader's second SPH): +0x58 its workgroup's threads, +0x5a its
     payload's bytes, +0x5e whether a mesh shader has a task, +0x5f a primitive's vertices, +0x60 / +0x62 a mesh shader's most vertices and primitives, +0x64 the offset of its per-primitive
@@ -54,23 +80,51 @@ def info(ctl, area):
         max_v, max_p = struct.unpack_from('<2H', ctl, 0x60)
         at = struct.unpack_from('<I', ctl, 0x64)[0] if ctl[0x68] & 0x80 else 0
         prim = sph_outputs(area[at:at + 0x80]) if at else []
-        out.update(task=bool(ctl[0x5e]), verts=ctl[0x5f] or 3, max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if isinstance(c[0], int)])
+        out.update(task=bool(ctl[0x5e]), verts=ctl[0x5f] or 3, max_v=max_v, max_p=max_p, vertex=sph_outputs(area[:0x80]), primitive=[c for c in prim if isinstance(c[0], int)],
+                   primitive_system=len(sph_system(area[at:at + 0x80])) if at else 0, primitive_builtins=sph_system(area[at:at + 0x80]) if at else [])
     return out
 
 
 def memory(i):
     """(the stage memory's offsets for the translator: the workgroup's number, the input, the outputs, the primitive bytes; the shared memory's bytes)."""
-    out = INPUT + (i['payload'] + 15 & ~15)
     if i['kind'] == 'ts':
+        out = INPUT   # a task shader reads no ISBERD 0x30..0x38 input: its outputs follow word 0's block
         return [WORKGROUP, INPUT, out, out + i['payload']], out + (i['payload'] + 3 & ~3)
+    out = INPUT if (i['task'] and payload_spill(i)) else INPUT + (i['payload'] + 15 & ~15)
     # The guest's attribute stores: all vertex blocks of 32 vertices first, then all primitive blocks of 32 primitives, each block its own SPH's components (Ocarina of Time's
     # ee4ef51a4fddc28e, 128 vertices of 6 components and 64 primitives of 4, writes vertex v at (v / 32) * 768 + (v % 32) * 4 and primitive p at 3072 + (p / 32) * 512 + (p % 32) * 4)
-    v_blocks = (max(i['max_v'], 1) + BLOCK - 1) // BLOCK
-    p_blocks = (max(i['max_p'], 1) + BLOCK - 1) // BLOCK
-    prim = out + max(v_blocks * len(i['vertex']) + p_blocks * len(i['primitive']), 1) * BLOCK * 4
+    # A primitive block holds the per-primitive SPH's system values first, then its generic attributes (per_primitive)
+    v_blocks, p_blocks = blocks_of(i['max_v']), blocks_of(i['max_p'])
+    # (r9 review) with no per-primitive component this is smaller than r6's blocks_of(max(max_v, max_p)) when max_p > max_v; PRAGMATA's three record meshes (6adf14e9 4fcffc73 c0e44513:
+    # 128/64, 128/128, 128/128) have max_p <= max_v, so their records' base (AosToSoa, words 4..6) is unchanged
+    prim = out + max(v_blocks * len(i['vertex']) + p_blocks * per_primitive(i), 1) * BLOCK * 4
     # The guest writes the index bytes of primitive min(count - 1, lane + 32k) in each of its primitive blocks, and a meshlet count of 0 wraps count - 1, so every lane of every primitive
     # block writes: the bytes are reserved for whole blocks of 32 primitives, a primitive's vertices each (a mesh with max_p 126 wrote past 4 + 3 * 126, into the next workgroup's memory)
-    return [WORKGROUP, INPUT, out, prim], prim + (4 + i.get('verts', 3) * p_blocks * BLOCK + 3 & ~3)
+    # [4..6]: the vertex records the non-skew attribute addresses (ISBEWR / ISBERD .O.ATTR.32, mode 0xb8) name, right after the SoA area: InstEmitAmpereMem.cs AosToSoa
+    # sends each to its SoA word (before, PRAGMATA 6adf14e9 / 4fcffc73 / c0e44513 wrote them over the primitive count and index bytes)
+    n = max(len(i['vertex']), 1)
+    return [WORKGROUP, INPUT, out, prim, prim - out, n, i['max_v'] * 4 * n], prim + (4 + i.get('verts', 3) * p_blocks * BLOCK + 3 & ~3)
+
+
+# The per-primitive system values a Metal mesh hands on, by their OMAP bit (attribute 0x40 + 4 * bit, NAK_ATTR_*): the primitive id (0x60). The fragment stage's [[primitive_id]] then
+# reads the value the mesh shader wrote, as NVN's gl_PrimitiveID does, and a vertex pipeline's fragment function (the same function) still reads Metal's own. The layer (0x64) and the
+# viewport (0x68) keep their room but are not handed on: no game's mesh shader is known to write them, and a layered mesh pass would need the host's layered-pass handling
+PRIMITIVE_BUILTINS = {8: ('dm_pid', 'primitive_id')}
+
+
+def primitive_builtins(i):
+    """[(the member's name, its Metal attribute, its component in a primitive block)] of the per-primitive system values the mesh function hands on."""
+    return [PRIMITIVE_BUILTINS[b] + (k,) for k, b in enumerate(i.get('primitive_builtins', [])) if b in PRIMITIVE_BUILTINS]
+
+
+def blocks_of(n):
+    """Blocks of 32 for n vertices or primitives (at least one)."""
+    return (max(n, 1) + BLOCK - 1) // BLOCK
+
+
+def per_primitive(i):
+    """A mesh shader's per-primitive components: its per-primitive system values, then its per-primitive attributes."""
+    return i.get('primitive_system', 0) + len(i['primitive'])
 
 
 def own_shared(code):
@@ -79,9 +133,13 @@ def own_shared(code):
     return any(struct.unpack_from('<H', code, o)[0] & 0xfff in (0x984, 0x388, 0x988, 0x38c, 0x98c, 0xf8c) for o in range(0, len(code) - 15, 16))
 
 
-# The kernel, its parameters, the thread variables spirv-cross declares ahead of the threadgroup memory (a private variable's initializer: GlobalToStorage.TryGenerateRawStorageOp's last entry,
-# uint _N = 0u;), and its stage memory, the first threadgroup array
-_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{\s*((?:(?!threadgroup\b)[^\n{};]+;\n\s*)*)threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# The kernel's head, through its stage memory array: SPIRV-Cross can declare a private variable's initializer ahead of the array
+# (GlobalToStorage.TryGenerateRawStorageOp's last entry, uint _N = 0u;), so plain declarations before the array are taken along (group 2) and stay at the top of the body.
+# PRAGMATA's 539 mesh shaders all failed here when the array had to follow the brace
+_KERNEL = re.compile(r'kernel\s+void\s+main0\s*\(((?:[^()]|\([^()]*\))*)\)\s*\{[ \t]*\n((?:(?![ \t]*threadgroup\b)[ \t]+[^\n{}]*;[ \t]*\n)*?)'
+                     r'[ \t]*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
+# A payload-spilled mesh shader's input (the translator's dm_stage_in), the threadgroup array that follows the stage memory
+_STAGE_IN = re.compile(r'[ \t]*threadgroup\s+spvUnsafeArray<uint,\s*(\d+)>\s+(\w+);\n')
 _NAME = re.compile(r'(\w+)\s*(?:\[\[.*\]\])?$')
 _THREAD = re.compile(r'(uint3?)\s+(\w+)\s*\[\[(thread_position_in_threadgroup|threadgroup_position_in_grid)\]\]$')
 
@@ -130,6 +188,18 @@ def _type(width):
     return 'float' if width == 1 else f'float{width}'
 
 
+def _device(msl):   # twin of the rewrite at the end of dmsh_build.py tg_spill: keep the two in sync
+    """The text with its threadgroup address space turned to device, as dmsh_build.py tg_spill does a kernel's: the stage array's parameters, the byte store helpers' casts and the barriers (which then
+    order device memory too). The array template's own threadgroup overloads stay."""
+    out = []
+    for ln in msl.split('\n'):
+        if 'operator [] (size_t pos)' not in ln:
+            ln = re.sub(r'\bthreadgroup\b(?=\s)', 'device', ln)
+            ln = re.sub(r'(?<!mem_device \| )mem_flags::mem_threadgroup\b', 'mem_flags::mem_device | mem_flags::mem_threadgroup', ln)
+        out.append(ln)
+    return '\n'.join(out)
+
+
 def to_stage(msl, i, reads=None):
     """The translated kernel as the object function main0 (kind 'ts'), or the mesh functions main0 and main0_z (kind 'ms': the two depth conventions, as dmsh_entry.py vs_depth gives a
     vertex shader, near = -w and near = 0). reads: {user(locnN) location: component mask} of what a mesh shader's paired pixel shaders read (pixel_reads), None when not known.
@@ -141,11 +211,30 @@ def to_stage(msl, i, reads=None):
     params, local, words, mem = _params(m[1]), m[2].strip(), int(m[3]), m[4]
     names = [_name(p) for p in params]
     plain = [re.sub(r'\s*\[\[.*\]\]$', '', p) for p in params]
+    pspill, slice_w, rest = (kind == 'ts' or i.get('task')) and payload_spill(i), payload_words(i), msl[m.end():]
+    # A payload-spilled mesh shader's input: its dm_stage_in array leaves the body, which reads the task's device slice through dm_in_t instead (word 0 its workgroup's number)
+    sin = None
+    if pspill and kind == 'ms':
+        n = _STAGE_IN.match(rest)
+        if n:
+            if int(n[1]) != slice_w: raise ValueError(f'ms: dm_stage_in has {n[1]} words, expected {slice_w}')
+            sin, rest = n[2], rest[n.end():]
+            if re.search(rf'(?<![.\w]){re.escape(sin)}(?!\s*\[)(?=\s*[,)])', rest):
+                raise ValueError('ms: dm_stage_in is passed to a helper function')
+    body_params = plain + [f'threadgroup spvUnsafeArray<uint, {words}>& {mem}'] + ([f'dm_in_t {sin}'] if sin else [])
     # The kernel's body, called with the stage memory the wrapper owns: its early returns (a thread with nothing to write) come back to the wrapper's copy of the outputs. Its thread variables
     # stay in it: one call a thread, as the kernel ran
-    src = (msl[:m.start()] + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(plain + [f"threadgroup spvUnsafeArray<uint, {words}>& {mem}"])})\n{{\n' +
-           (f'    {local}\n' if local else '') + msl[m.end():])
-    call = f'dm_stage_body({", ".join(names + [mem])});'
+    in_t = ('struct dm_in_t { const device uint* p; uint w0; uint operator[](int k) const { return k ? p[k] : w0; } uint operator[](uint k) const { return k ? p[k] : w0; } };\n'
+            if sin else '')
+    src = (msl[:m.start()] + in_t + f'static inline __attribute__((always_inline)) void dm_stage_body({", ".join(body_params)})\n{{\n' +
+           (f'    {local}\n' if local else '') + rest)
+    # A mesh shader's stage array of SPILL_MIN bytes or more leaves threadgroup memory: 5-16 KB a 32-thread group limited how many groups an Apple GPU held at once (about 0.09 ms a KB per
+    # 16k groups on an M3 Pro), and the body ran 20-46 % faster with the array in a per-group device slice (Ocarina of Time's foliage meshes)
+    spill = kind == 'ms' and i['threads'] == 32 and SPILL_MIN <= words * 4 <= abi.MESH_SCRATCH_STRIDE
+    if spill:
+        i['spill'] = 1   # the build writes the reflection's mesh_spill from it: the host binds the scratch buffer at abi.MESH_SCRATCH_SLOT
+        src = _device(src)
+    call = f'dm_stage_body({", ".join(names + [mem] + (["dm_in"] if sin else []))});'
     # The thread's and the threadgroup's numbers: the kernel's parameters where it has them (an attribute may appear once in a function), else parameters of the wrapper's own
     own = {t[3]: t[2] + ('.x' if t[1] == 'uint3' else '') for t in map(_THREAD.match, params) if t}
     lid, tg = own.get('thread_position_in_threadgroup', 'dm_lid'), own.get('threadgroup_position_in_grid', 'dm_tg')
@@ -153,18 +242,56 @@ def to_stage(msl, i, reads=None):
     lay, _ = memory(i)
     thr, pay = i['threads'], i['payload'] + 3 >> 2
     wg, inp, out, prim = lay[0] >> 2, lay[1] >> 2, lay[2] >> 2, lay[3]
-    start = (f'    threadgroup spvUnsafeArray<uint, {words}> {mem};\n'
-             f'    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n'
-             '    threadgroup_barrier(mem_flags::mem_threadgroup);\n')
-    head = f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
-    sig = ', '.join(params + extra)
+    bar = 'mem_flags::mem_device | mem_flags::mem_threadgroup' if spill else 'mem_flags::mem_threadgroup'   # the device slice is ordered by the same barriers
+    fence = '    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);\n'
+    if spill:
+        # The slice (dmsh_abi.h DMSH_MESH_SCRATCH_*): lane 0 takes a ticket and claims the slice at ticket & mask when its flag is free or names a submission that is over, compare-and-swap to
+        # this group's tag (a 32-thread group is one SIMD-group on Apple GPUs: lane 0's atomics, broadcast); a slice another group owns costs a new ticket. The entry clears the flag after its
+        # last read, so a slice is handed out again only once its group finished (GitHub pull request #2308). A group that claims none in MESH_SCRATCH_TRIES tickets counts itself in the
+        # overflow word and draws nothing: it never uses a slice it does not own. The device-scope fences order the previous owner's accesses before this group's and this group's before the
+        # next owner's. The slice starts zero as the threadgroup array did: uint4 stores, then the words the vectors do not cover
+        w4 = words // 4
+        h = '(device atomic_uint*)dm_scr'
+        flag = f'{h} + {abi.MESH_SCRATCH_FLAGS // 4}u + dm_t'
+        start = ('    uint dm_t = ~0u;\n'
+                 f'    if ({lid} == 0u)\n    {{\n'
+                 f'        uint dm_m = atomic_load_explicit({h} + {abi.MESH_SCRATCH_MASK}, memory_order_relaxed), dm_tag = atomic_load_explicit({h} + {abi.MESH_SCRATCH_TAG}, memory_order_relaxed);\n'
+                 f'        uint dm_done = atomic_load_explicit({h} + {abi.MESH_SCRATCH_DONE}, memory_order_relaxed);\n'
+                 f'        for (uint dm_k = 0u; dm_k < {abi.MESH_SCRATCH_TRIES}u; dm_k++)\n        {{\n'
+                 f'            uint dm_s = atomic_fetch_add_explicit({h} + {abi.MESH_SCRATCH_TICKET}, 1u, memory_order_relaxed) & dm_m;\n'
+                 f'            device atomic_uint* dm_f = {h} + {abi.MESH_SCRATCH_FLAGS // 4}u + dm_s;\n'
+                 '            uint dm_v = atomic_load_explicit(dm_f, memory_order_relaxed);\n'
+                 '            if ((dm_v == 0u || int(dm_done - dm_v) >= 0) && atomic_compare_exchange_weak_explicit(dm_f, &dm_v, dm_tag, memory_order_relaxed, memory_order_relaxed)) { dm_t = dm_s; break; }\n'
+                 '        }\n'
+                 f'        if (dm_t == ~0u) atomic_fetch_add_explicit({h} + {abi.MESH_SCRATCH_OVER}, 1u, memory_order_relaxed);\n    }}\n'
+                 '    dm_t = simd_broadcast_first(dm_t);\n'
+                 f'    if (dm_t == ~0u)\n    {{\n        if ({lid} == 0u) dm_out.set_primitive_count(0u);\n        return;\n    }}\n' + fence +
+                 f'    device spvUnsafeArray<uint, {words}>& {mem} = *(device spvUnsafeArray<uint, {words}>*)(dm_scr + {abi.MESH_SCRATCH_HEAD}ul + ulong(dm_t) * {abi.MESH_SCRATCH_STRIDE}ul);\n'
+                 f'    for (uint i = {lid}; i < {w4}u; i += {thr}u) ((device uint4*)&{mem}[0])[i] = uint4(0u);\n' +
+                 (f'    for (uint i = {w4 * 4}u + {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n' if words % 4 else '') +
+                 f'    threadgroup_barrier({bar});\n')
+        release = (f'    threadgroup_barrier({bar});\n' + fence +   # every lane has read its outputs
+                   f'    if ({lid} == 0u) atomic_store_explicit({flag}, 0u, memory_order_relaxed);\n')
+    else:
+        start = (f'    threadgroup spvUnsafeArray<uint, {words}> {mem};\n'
+                 f'    for (uint i = {lid}; i < {words}u; i += {thr}u) {mem}[i] = 0u;\n'
+                 f'    threadgroup_barrier({bar});\n')
+        release = ''
+    head = 'struct dm_payload_t { ulong off; };\n' if pspill else f'struct dm_payload_t {{ uint w[{max(pay, 1)}]; }};\n'
+    sig = ', '.join(params + extra + ([f'{"device" if kind == "ts" else "const device"} uint* dm_spill [[buffer({abi.MESH_SPILL_SLOT})]]'] if pspill and (kind == 'ts' or sin) else []))
     draw = f'constant uint* dm_draw [[buffer({abi.MESH_DRAW_SLOT})]]'   # the draw's {count, first}, which the host binds (nvn_geometry.inc mtk_encode)
+    scr = f', device uchar* dm_scr [[buffer({abi.MESH_SCRATCH_SLOT})]]' if spill else ''   # the scratch buffer the host binds when the reflection says mesh_spill
     if kind == 'ts':
+        store = (f'    if ({tg} >= dm_spill[0]) {{ if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(0u, 1u, 1u)); return; }}\n'
+                 f'    ulong dm_off = 4ul + ulong({tg}) * {slice_w}ul;\n'
+                 '    device uint* dm_slice = dm_spill + dm_off;\n'
+                 f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_slice[i] = {mem}[{out}u + i];\n'
+                 '    threadgroup_barrier(mem_flags::mem_device);\n' + fence +
+                 f'    if ({lid} == 0u) dm_payload.off = dm_off;\n') if pspill else f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
         return src + '\n' + head + (
             f'[[object]] void main0({sig}, object_data dm_payload_t& dm_payload [[payload]], mesh_grid_properties dm_grid, {draw})\n{{\n{start}'
             f'    if ({lid} == 0u) {mem}[{wg}] = dm_draw[1] + {tg};\n'
-            f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
-            f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) dm_payload.w[i] = {mem}[{out}u + i];\n'
+            f'    threadgroup_barrier({bar});\n    {call}\n    threadgroup_barrier({bar});\n' + store +
             f'    if ({lid} == 0u) dm_grid.set_threadgroups_per_grid(uint3(min({mem}[{out + 1}], {METAL_MAX_GRID}u), 1u, 1u));\n}}\n')
     vertex, primitive = i['vertex'], i['primitive']
     max_v, max_p = i['max_v'], i['max_p']
@@ -172,10 +299,14 @@ def to_stage(msl, i, reads=None):
     if verts not in TOPOLOGY: raise ValueError(f'ms: primitive vertex count {verts} is not 1, 2 or 3')
     if max_v > METAL_MAX_VERTICES or max_p > METAL_MAX_PRIMITIVES: raise ValueError(f'ms: {max_v} vertices and {max_p} primitives exceed a Metal mesh')
     v_blocks = max(max(max_v, 1) + BLOCK - 1, 0) // BLOCK
-    v_stride, p_stride = max(len(vertex), 1) * BLOCK, max(len(primitive), 1) * BLOCK   # words of a vertex or primitive attribute block
+    nsys = i.get('primitive_system', 0)   # a primitive block's system values come first
+    v_stride, p_stride = max(len(vertex), 1) * BLOCK, max(per_primitive(i), 1) * BLOCK   # words of a vertex or primitive attribute block
     p_out = out + v_blocks * len(vertex) * BLOCK   # per-primitive blocks follow all vertex blocks
     word = lambda comps: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
-    vm, pm = _members(vertex), _members(primitive)
+    vm, pm = _members(vertex), {n: [c + nsys if c is not None else None for c in v] for n, v in _members(primitive).items()}
+    pb = primitive_builtins(i)
+    if pm or pb:
+        i['prim'] = 1   # the build writes mesh_stage.prim from it: Metal 4 specialization zeros per-primitive outputs, so the host builds this mesh shader's pipelines whole
     # Each output as wide as its pixel shaders can see (_width): what Metal counts against a mesh's 32 KB is the declared outputs, and the float4 of every attribute the SPH names
     # put Ocarina of Time's foliage mesh 626fbf48041cb82b (160 vertices, 26 components written) at 35,840 bytes. A location they read that no SPH enables is padded (0,0,0,1)
     read = (lambda n: reads.get(n, 0)) if reads is not None else (lambda n: None)
@@ -189,32 +320,34 @@ def to_stage(msl, i, reads=None):
              ('    float point_size [[point_size]];\n' if 'psiz' in vm else '') +
              ''.join(f'    {_type(w)} a{n} [[user(locn{n})]];\n' for n, w in vw.items()) +
              ''.join(f'    {_type(w)} dm_pad{n} [[user(locn{n})]];\n' for n, w in mw.items()) + '};\n' +
-             ('struct dm_prim_t {\n' + ''.join(f'    {_type(w)} p{n} [[user(locn{n})]];\n' for n, w in pw.items()) + '};\n' if pm else '') +
-             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm else "void"}, {max_v}, {max_p}, metal::topology::{TOPOLOGY[verts]}>;\n')
+             ('struct dm_prim_t {\n' + ''.join(f'    uint {name} [[{attr}]];\n' for name, attr, _ in pb) + ''.join(f'    {_type(w)} p{n} [[user(locn{n})]];\n' for n, w in pw.items()) + '};\n'
+              if pm or pb else '') +
+             f'using dm_mesh_t = metal::mesh<dm_vertex_t, {"dm_prim_t" if pm or pb else "void"}, {max_v}, {max_p}, metal::topology::{TOPOLOGY[verts]}>;\n')
     v_block = lambda v: f'{out}u + ({v} / {BLOCK}u) * {v_stride}u + {v} % {BLOCK}u'
     p_block = lambda p: f'{p_out}u + ({p} / {BLOCK}u) * {p_stride}u + {p} % {BLOCK}u'
     sets = ''.join(f'        v.point_size = as_type<float>({word(c)[0]});\n' if n == 'psiz' else
                    f'        v.position = {_value(4, word(c))};\n' if n is None else
                    f'        v.a{n} = {_value(vw[n], word(c))};\n' for n, c in vm.items()) + \
         ''.join(f'        v.dm_pad{n} = {_value(w, [None] * 4)};\n' for n, w in mw.items())
-    psets = ''.join(f'        p.p{n} = {_value(pw[n], word(c))};\n' for n, c in pm.items())
+    psets = ''.join(f'        p.{name} = {mem}[b + {k * BLOCK}u];\n' for name, _, k in pb) + ''.join(f'        p.p{n} = {_value(pw[n], word(c))};\n' for n, c in pm.items())
     if None not in vm: raise ValueError('ms: its SPH enables no position component')
 
     def entry(name, gl):
         # With a task the payload is the input, its word 0 the workgroup's number among the task's launches, as the hardware leaves it (+0 is not a word the task writes: it starts at +4)
-        fill = (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
-                '    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
-                f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n') if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
+        fill = ((('' if spill else fence) + (f'    dm_in_t dm_in = {{ dm_spill + dm_payload.off, {tg} }};\n' if sin else '') + f'    if ({lid} == 0u) {mem}[{wg}] = {tg};\n') if pspill else
+                (f'    for (uint i = {lid}; i < {pay}u; i += {thr}u) {mem}[{inp}u + i] = dm_payload.w[i];\n'
+                 f'    threadgroup_barrier({bar});\n'
+                 f'    if ({lid} == 0u) {{ {mem}[{wg}] = {tg}; {mem}[{inp}] = {tg}; }}\n')) if i['task'] else f'    if ({lid} == 0u) {mem}[{wg}] = dm_block.first + {tg};\n'
         return (f'[[mesh]] void {name}({sig}, dm_mesh_t dm_out' + (', const object_data dm_payload_t& dm_payload [[payload]]' if i['task'] else ', const object_data dm_block_t& dm_block [[payload]]') +
-                f')\n{{\n{start}{fill}'
-                f'    threadgroup_barrier(mem_flags::mem_threadgroup);\n    {call}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n'
+                scr + f')\n{{\n{start}{fill}'
+                f'    threadgroup_barrier({bar});\n    {call}\n    threadgroup_barrier({bar});\n'
                 f'    uint np = min({mem}[{prim >> 2}] >> 24, {max_p}u);\n'
                 f'    if ({lid} == 0u) dm_out.set_primitive_count(np);\n'
                 f'    for (uint n = {lid}; n < {max_v}u; n += {thr}u)\n    {{\n        uint b = {v_block("n")};\n        dm_vertex_t v;\n{sets}' +
                 ('        v.position.z = fma(v.position.z, 0.5, v.position.w * 0.5);\n' if gl else '') +
                 '        dm_out.set_vertex(n, v);\n    }\n' +
-                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {p_block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm else '') +
-                f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n}}\n')
+                (f'    for (uint n = {lid}; n < np; n += {thr}u)\n    {{\n        uint b = {p_block("n")};\n        dm_prim_t p;\n{psets}        dm_out.set_primitive(n, p);\n    }}\n' if pm or pb else '') +
+                f'    for (uint n = {lid}; n < np * {verts}u; n += {thr}u)\n    {{\n        uint at = {prim + 4}u + n;\n        dm_out.set_index(n, ({mem}[at >> 2] >> ((at & 3u) * 8u)) & 0xffu);\n    }}\n' + release + '}\n')
     if i['task']: return src + '\n' + head + entry('main0', True) + '\n' + entry('main0_z', False)
     # The object function of a mesh shader with no task: one thread a block of METAL_MAX_GRID workgroups
     head += 'struct dm_block_t { uint first; };\n'

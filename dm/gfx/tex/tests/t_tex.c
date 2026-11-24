@@ -21,7 +21,7 @@ static void dims(const nvn_texdesc *d, unsigned l, uint32_t *rb, uint32_t *rows,
 
 // ---------- A round trip: first write different random data into every level / layer, then decode them all and compare (overlap between levels or between layers, or out-of-bounds, all fail) ----------
 static void roundtrip(const char *tag, int target, int fmt, uint32_t w, uint32_t h, uint32_t depth, uint32_t levels) {
-    nvn_texdesc d = {target, fmt, 0, 0, w, h, depth, levels, 0};
+    nvn_texdesc d = {target, fmt, 0, 0, w, h, depth, levels, 0, 0, 0};
     nvn_texlayout L; nvn_tex_layout(&d, &L);
     size_t guard = 4096; uint8_t *st = malloc(L.size + guard); memset(st, 0, L.size); memset(st + L.size, 0xAB, guard);
     uint8_t *ref[64][16] = {{0}}; uint64_t bytes = 0;
@@ -59,13 +59,13 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
     uint32_t lb = nvn_tex_level_gobs(d, level) * 64;
     if (lb < rb) lb = rb;
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
-        linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset(x, y, z, lb, rows, th, td)];
+        linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset(x, y, z, lb, rows, th, td, nvn_gob_order(d))];
     CHECK(!nvn_deswizzle(d, level, layer, storage, out, pitch) && !memcmp(linear, out, nlin + 32),
           "D read differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
     for (size_t i = 0; i < nlin; i++) linear[i] = rnd();
     memcpy(expected, storage, nst);
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
-        expected[base + nvn_bl_offset(x, y, z, lb, rows, th, td)] = linear[((size_t)z * rows + y) * pitch + x];
+        expected[base + nvn_bl_offset(x, y, z, lb, rows, th, td, nvn_gob_order(d))] = linear[((size_t)z * rows + y) * pitch + x];
     CHECK(!nvn_swizzle(d, level, layer, linear, pitch, storage) && !memcmp(storage, expected, nst),
           "D write differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
     CHECK(nvn_swizzle(d, level, layer, linear, rb - 1, storage) == -1 && !memcmp(storage, expected, nst),
@@ -86,7 +86,7 @@ static void differential_shapes(void) {
         d.width = widths[rnd() % 14]; d.height = 1 + rnd() % 65; d.depth = 1 + rnd() % 9; d.levels = 4;
         if (d.target == 3) d.height = 3;
         if (d.target == 9) d.depth = 12;
-        if ((i / 8) & 1) d.pkg_block_h = 1 + (rnd() % 4) + (d.target == 2 ? (rnd() % 3) * 16 : 0);
+        if ((i / 8) & 1) d.pkg_layout = 1 + (rnd() % 4) + (d.target == 2 ? (rnd() % 3) * 16 : 0);
         if ((i / 16) & 1) d.flags = 0x20;
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         for (unsigned l = 0; l < d.levels; l++) {
@@ -94,7 +94,7 @@ static void differential_shapes(void) {
         }
     }
     // Sparse levels wide enough for padded GOB columns, followed by their mip tails.
-    nvn_texdesc sparse = {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0};
+    nvn_texdesc sparse = {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0, 0};
     for (unsigned l = 0; l < sparse.levels; l++) { differential(&sparse, l, 0); cases++; }
     printf("  D %u layouts: both directions equal byte-address oracle, including pitch padding and tails\n", cases);
 }
@@ -106,7 +106,7 @@ int main(void) {
     {
         // Persona 5 Royal asks for 16x16 RGBA8, flags 0x44, stride 128: 2 KB,
         // including row padding. Treating it as block-linear returned only 1 KB.
-        nvn_texdesc d = {1, 0x25, 0x44, 0, 16, 16, 1, 1, 128, 0};
+        nvn_texdesc d = {1, 0x25, 0x44, 0, 16, 16, 1, 1, 128, 0, 0};
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         CHECK(L.size == 2048 && L.layer_size == 2048 && L.align == 128,
               "L render target storage %llu alignment %u, expected 2048 / 128", (unsigned long long)L.size, L.align);
@@ -151,28 +151,44 @@ int main(void) {
     // x=200 → block column 3: 3×2048 = 6144; GOB within the block = (40%32)/8 = 1 → 512; within the GOB x%64=8, y%8=0 → 8. Total 8192+6144+512+8 = 14856
     B[5].want = 14856; B[5].how = "block height 4: block row 8192 + block column 6144 + GOB within block 512 + within GOB 8";
     for (unsigned i = 0; i < sizeof B / sizeof *B; i++) {
-        uint64_t got = nvn_bl_offset(B[i].x, B[i].y, B[i].z, B[i].rb, B[i].rows, B[i].th, B[i].td);
+        uint64_t got = nvn_bl_offset(B[i].x, B[i].y, B[i].z, B[i].rb, B[i].rows, B[i].th, B[i].td, 0);
         CHECK(got == B[i].want, "B%u got %llu expected %llu", i, (unsigned long long)got, (unsigned long long)B[i].want);
         printf("  B%u (%u,%u,%u) → %llu %s  %s\n", i, B[i].x, B[i].y, B[i].z, (unsigned long long)got, got == B[i].want ? "✓" : "✗", B[i].how);
     }
     // The Switch 2's order inside a GOB (nvn_deswizzle.h): bits 5 and 6 of the offset exchanged, x%32/16 at 64 and y%4/2 at 32. Where only one of the two is set the orders differ
     printf("B2 address formula, the Switch 2's order inside a GOB: (x%%64/32)·256 + (y%%8/4)·128 + (x%%32/16)·64 + (y%%4/2)·32 + (y%%2)·16 + x%%16\n");
     struct { uint32_t x, y; uint64_t want, x1; } B2[] = {{16, 0, 64, 32}, {0, 2, 32, 64}, {21, 5, 213, 181}, {17, 3, 113, 113}, {70, 9, 1558, 1558}};
-    nvn_gob_switch2 = 1;
     for (unsigned i = 0; i < sizeof B2 / sizeof *B2; i++) {
-        uint64_t got = nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0);
+        uint64_t got = nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0, 1);
         CHECK(got == B2[i].want, "B2 (%u,%u) got %llu expected %llu", B2[i].x, B2[i].y, (unsigned long long)got, (unsigned long long)B2[i].want);
         printf("  B2 (%u,%u) → %llu %s (the X1's order: %llu)\n", B2[i].x, B2[i].y, (unsigned long long)got, got == B2[i].want ? "✓" : "✗", (unsigned long long)B2[i].x1);
     }
-    nvn_gob_switch2 = 0;
     for (unsigned i = 0; i < sizeof B2 / sizeof *B2; i++)
-        CHECK(nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0) == B2[i].x1, "B2 (%u,%u) in the X1's order expected %llu", B2[i].x, B2[i].y, (unsigned long long)B2[i].x1);
+        CHECK(nvn_bl_offset(B2[i].x, B2[i].y, 0, 128, 32, 1, 0, 0) == B2[i].x1, "B2 (%u,%u) in the X1's order expected %llu", B2[i].x, B2[i].y, (unsigned long long)B2[i].x1);
+    // Hand-placed 3D markers distinguish the captured orders in both copy directions.
+    {
+        nvn_texdesc lut = {2, 0x25, 0, 0, 16, 16, 16, 1, 0, 0, 0};
+        nvn_texlayout L; nvn_tex_layout(&lut, &L);
+        uint8_t *st = calloc(1, L.size), *lin = calloc(16 * 16 * 16 * 4, 1);
+        // (x byte 16, y 0, z 3): GOB z 3 * 512, plus 32 in X1 order or 64 in Switch 2 order.
+        for (int order = 0; order < 2; order++) {
+            lut.gob_order = (uint16_t)order;
+            st[3 * 512 + 32] = 0xa1; st[3 * 512 + 64] = 0xb2;
+            uint64_t want = 3 * 512 + (order ? 64 : 32);
+            CHECK(!nvn_deswizzle(&lut, 0, 0, st, lin, 64) && lin[3 * 16 * 64 + 16] == (order ? 0xb2 : 0xa1),
+                  "per-texture read GOB order %d", order);
+            memset(st, 0, L.size); memset(lin, 0, 16 * 16 * 16 * 4); lin[3 * 16 * 64 + 16] = 0xc3;
+            CHECK(!nvn_swizzle(&lut, 0, 0, lin, 64, st) && st[want] == 0xc3 && st[3 * 512 + (order ? 32 : 64)] == 0,
+                  "per-texture write GOB order %d", order);
+        }
+        free(st); free(lin);
+    }
 
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------
     // Source of the block height / block depth rule: deko3d dk_image.cpp - for 3D textures block height is fixed at 1 GOB, block depth = pickTileSize(depth + depth/2).
     printf("E hand-built 3D block-linear (markers at hand-calculated addresses, landing points checked after deswizzle)\n");
     {
-        nvn_texdesc d = {2, 0x25, 0, 0, 32, 16, 20, 1, 0, 0};   // 3D RGBA8 32×16×20: row 128 bytes = 2 GOBs wide, 16 rows = 2 GOBs high
+        nvn_texdesc d = {2, 0x25, 0, 0, 32, 16, 20, 1, 0, 0, 0};   // 3D RGBA8 32×16×20: row 128 bytes = 2 GOBs wide, 16 rows = 2 GOBs high
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         // Block depth: 20 + 10 = 30 ≥ 16 → 16 slices (log2 = 4); block = 512 × 16 = 8192 bytes; one block layer = 2 columns × 2 rows × 8192 = 32768; ceil(20/16) = 2 layers → 65536
         CHECK(L.tileH == 0 && L.tileD == 4, "E 32×16×20 block height/depth = %u/%u, expected 0/4", L.tileH, L.tileD);
@@ -196,7 +212,7 @@ int main(void) {
         CHECK(nz == 16, "E nonzero decoded bytes %zu expected 16 (there should be no data outside the markers)", nz);
         free(st); free(lin);
         // Shape of the real color lookup table on the character select screen: 32³ RGBA16F (ser 17 / 16). Block depth 32 + 16 = 48 ≥ 16 → 16 slices; row 256 bytes = 4 GOBs wide, 32 rows = 4 GOBs high, 2 block layers → 4·4·2·8192 = 262144
-        nvn_texdesc lut = {2, 0x29, 0, 0, 32, 32, 32, 1, 0, 0}; nvn_tex_layout(&lut, &L);
+        nvn_texdesc lut = {2, 0x29, 0, 0, 32, 32, 32, 1, 0, 0, 0}; nvn_tex_layout(&lut, &L);
         CHECK(L.tileH == 0 && L.tileD == 4 && L.size == 4 * 4 * 2 * 8192ull, "E 32³ RGBA16F block height/depth %u/%u storage %llu, expected 0/4, 262144", L.tileH, L.tileD, (unsigned long long)L.size);
         printf("  E 32³ RGBA16F (the shape of a 32³ color lookup table) block height/depth %u/%u, storage %llu (expected 0/4, 262144)\n", L.tileH, L.tileD, (unsigned long long)L.size);
     }
@@ -206,13 +222,13 @@ int main(void) {
     // For byte 0x00, the same voxel is at slice 12288 + row 1024 + column 512 + intra-GOB 112 = 13936.
     printf("E packaged 3D block dimensions and mip reductions\n");
     for (unsigned c = 0; c < 2; c++) {
-        nvn_texdesc d = {2, 0x25, 0, 0, 32, 32, 32, 3, 0, c ? 0x13 : 1};
+        nvn_texdesc d = {2, 0x25, 0, 0, 32, 32, 32, 3, 0, c ? 0x13 : 1, 0};
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         CHECK(L.size == 151552, "E packaged storage %llu expected 151552", (unsigned long long)L.size);
         for (unsigned l = 0; l < 3; l++) {
             unsigned th, td; nvn_tex_level_tiles(&d, l, &th, &td);
             CHECK(th == (c ? 2 - l : 0) && td == (c ? 1 : 0),
-                  "E packaged byte %#x mip %u block %u/%u", d.pkg_block_h - 1, l, th, td);
+                  "E packaged byte %#x mip %u block %u/%u", d.pkg_layout - 1, l, th, td);
         }
         CHECK(nvn_tex_level_offset(&d, 1) == 131072 && nvn_tex_level_offset(&d, 2) == 147456,
               "E packaged mip offsets must be 131072 / 147456");
@@ -224,7 +240,7 @@ int main(void) {
         for (unsigned i = 0; i < 3; i++) {
             const uint8_t *p = lin + ((size_t)xyz[i][2] * 32 + xyz[i][1]) * 128 + xyz[i][0] * 4;
             int ok = 1; for (unsigned k = 0; k < 4; k++) ok &= p[k] == (uint8_t)(i * 16 + k + 1);
-            CHECK(ok, "E packaged byte %#x marker %u at %llu decoded at the wrong voxel", d.pkg_block_h - 1, i, (unsigned long long)addr[c][i]);
+            CHECK(ok, "E packaged byte %#x marker %u at %llu decoded at the wrong voxel", d.pkg_layout - 1, i, (unsigned long long)addr[c][i]);
         }
         free(st); free(lin);
     }
@@ -234,7 +250,7 @@ int main(void) {
     // (2,183 unpadded). Level 1 (86 = 22 GOBs → 32, 2 block rows) is 4 tiles; level 2 (43 block columns, less than a tile's 64) starts the mip tail, packed as before; storage in whole tiles
     printf("S sparse layout (64 KB tiles: tiled levels padded to whole tiles, then the mip tail)\n");
     {
-        nvn_texdesc d = {1, 0x8B, 0x20, 0, 1024, 1024, 1, 8, 0, 4}; nvn_texlayout L; nvn_tex_layout(&d, &L);
+        nvn_texdesc d = {1, 0x8B, 0x20, 0, 1024, 1024, 1, 8, 0, 4, 0}; nvn_texlayout L; nvn_tex_layout(&d, &L);
         static const uint64_t off[8] = {0, 0x90000, 0xD0000, 0xDB000, 0xDE000, 0xDEC00, 0xDF000, 0xDF200};
         static const uint32_t gobs[3] = {48, 32, 11};
         for (unsigned l = 0; l < 8; l++) CHECK(nvn_tex_level_offset(&d, l) == off[l], "S level %u offset %#llx expected %#llx", l, (unsigned long long)nvn_tex_level_offset(&d, l), (unsigned long long)off[l]);
@@ -249,11 +265,10 @@ int main(void) {
     // ---------- P pick: every step-th block of every step-th block row (nvn_deswizzle_pick), against the level decoded whole, in both GOB orders ----------
     printf("P pick (every step-th block, against the whole level)\n");
     for (int sw2 = 0; sw2 < 2; sw2++) {
-        nvn_gob_switch2 = sw2;
         static const struct { int target, fmt; uint32_t w, h, depth, levels; unsigned level, layer; uint32_t step; } c[] = {
             {1, 0x4D, 1048, 1088, 1, 1, 0, 0, 17}, {4, 0x50, 524, 544, 3, 1, 0, 2, 9}, {1, 0x42, 256, 256, 1, 9, 1, 0, 4}, {1, 0x25, 64, 40, 1, 1, 0, 0, 2}, {1, 0x25, 200, 320, 1, 3, 2, 0, 3}, {4, 0x4B, 2448, 3056, 2, 1, 0, 1, 48}};
         for (unsigned k = 0; k < sizeof c / sizeof c[0]; k++) {
-            nvn_texdesc d = {c[k].target, c[k].fmt, 0, 0, c[k].w, c[k].h, c[k].depth, c[k].levels, 0, 0};
+            nvn_texdesc d = {c[k].target, c[k].fmt, 0, 0, c[k].w, c[k].h, c[k].depth, c[k].levels, 0, 0, (uint16_t)sw2};
             nvn_texlayout L; nvn_tex_layout(&d, &L);
             uint8_t *st = malloc(L.size); for (uint64_t i = 0; i < L.size; i++) st[i] = rnd();
             uint32_t rb, rows, sl; dims(&d, c[k].level, &rb, &rows, &sl);
@@ -269,10 +284,9 @@ int main(void) {
             free(st); free(lin); free(got);
         }
     }
-    nvn_gob_switch2 = 0;
     {   // refused: a block size that is not 1, 2, 4, 8 or 16 bytes (RGB8), a 3D texture, step 0
         uint8_t st[4096] = {0}, out[64];
-        nvn_texdesc rgb = {1, 0x19, 0, 0, 8, 8, 1, 1, 0, 0}, vol = {2, 0x25, 0, 0, 8, 8, 4, 1, 0, 0}, ok8 = {1, 0x25, 0, 0, 8, 8, 1, 1, 0, 0};
+        nvn_texdesc rgb = {1, 0x19, 0, 0, 8, 8, 1, 1, 0, 0, 0}, vol = {2, 0x25, 0, 0, 8, 8, 4, 1, 0, 0, 0}, ok8 = {1, 0x25, 0, 0, 8, 8, 1, 1, 0, 0, 0};
         int bw, bh; CHECK(nvn_fmt_bpb(0x19, &bw, &bh) == 3, "P format 0x19 (RGB8) is expected to be 3 bytes a texel");
         CHECK(nvn_deswizzle_pick(&rgb, 0, 0, st, 2, out, 4, 4) == -1 && nvn_deswizzle_pick(&vol, 0, 0, st, 2, out, 4, 4) == -1 && nvn_deswizzle_pick(&ok8, 0, 0, st, 0, out, 4, 4) == -1
               && !nvn_deswizzle_pick(&ok8, 0, 0, st, 2, out, 4, 4), "P pick refuses a 3-byte block, a 3D texture and step 0, and takes RGBA8");

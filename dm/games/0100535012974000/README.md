@@ -40,6 +40,8 @@ The layer was written for this game (Super Mario Galaxy extended it later: [0100
 
 - `DM_KEYS="f800:A,f1000:A,f1200:A,f1500:A,f1900:A"` goes through the title and the intro into Tartarus.
 
+- 2026-11-17, MacBook Pro M4 Pro, macOS 27.2.1: full `regress.py check` of the [shared output-route rework](../../../docs/reference/audio.md#stereo-only-on-a-51-system), against main `2925d7af`, PASS on 1.0.38233. The 95 s Tartarus route uses its two-channel AudioOut with `DM_AUDIO=0`; 60.1 to 59.8 fps and 2,435 to 2,438 MB peak, with no new red line. This is a compatibility check, not a surround or audible-output test.
+
 ## Found on this game
 
 General host changes first needed here; each applies to every game:
@@ -48,6 +50,7 @@ General host changes first needed here; each applies to every game:
 - **A host notification event** for `oe::GetNotificationMessageEvent` (`hle_oe.c`), described above.
 - **A network request on hold for its first query only** (`hle_net.c`, `nn::nifm`): [Network requests stay on hold before they settle](../../../docs/reference/services.md#network-requests-stay-on-hold-before-they-settle).
 - **A wait at two yields gets the back-off** (`thr_yield`, `hle_thread.c`): [A wait at two yields is not progress](../../../docs/reference/threads.md#a-wait-at-two-yields-is-not-progress).
+- **1D images are one-row 2D textures** (`hle_vk.m`, `vk_shaders.py`): the game draws into a 512x1 colour target, which Metal's API validation stopped while it was a 1D texture, and `LightAndShadow.frag` samples a 1D shadow map (resolved); [1D images drawn into](../../../docs/reference/rendering.md#1d-images-drawn-into).
 
 ## Open
 

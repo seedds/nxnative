@@ -1,7 +1,6 @@
 """textureGatherOffsets (dmsh_rewrite.py gather_offsets): each call of spirv-cross's spvGatherConstOffsets / spvGatherCompareConstOffsets becomes its four gathers with their offsets written out,
 in plain and array forms, or one gather when the offsets form a 2x2 square (gather_quad). On this Mac's GPU a compute shader's rewritten gathers match texel reads in every lane, on two
 runs, and a square's one gather matches its four gathers bit for bit at positions inside, between and outside the texels, clamped and repeating."""
-import ast
 from pathlib import Path
 import re
 import shutil
@@ -13,9 +12,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
 sys.path.insert(0, str(TOOLS))
 from dmsh_rewrite import gather_offsets, gather_quad   # noqa: E402
-# the Mac compile's flags, from the build's own line (dmsh_build.py runs a build when imported)
-MAC_METAL = next(ast.literal_eval(n.value) for n in ast.parse((TOOLS / 'dmsh_build.py').read_text()).body
-                 if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'MAC_METAL')
+from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 
 HEAD = '''#include <metal_stdlib>
 using namespace metal;
@@ -78,8 +75,9 @@ int main(int ac, char **av) { @autoreleasepool {
 
 class Rewrite(unittest.TestCase):
     def test_no_call_no_change(self):
-        src = HEAD + '\nkernel void k() {}\n'
-        self.assertEqual(gather_offsets(src), src)
+        for head in ('', HEAD, '// spvGatherConstOffsetsExtra(t);\n'):
+            src = head + '\nkernel void k() {}\n'
+            with self.subTest(head=head): self.assertEqual(gather_offsets(src), src)
 
     def test_call_becomes_four_gathers(self):
         out = gather_offsets(HEAD + 'float4 f(texture2d<float> t, sampler s, float2 c) { float4 a = spvGatherConstOffsets(t, s, _8, component::z, select(c, float2(0.0), isnan(c))); return a; }\n')
@@ -104,6 +102,11 @@ class Rewrite(unittest.TestCase):
         self.assertIn('t.gather(s, c, uint(rint(1.0)), int2(2, 0), component::x).w', out)
         self.assertIn('z.gather_compare(s, c, 0.5, int2(0, 2)).w', out)
         self.assertIn('(z.gather_compare(s, c, 0.5, int2(0, 0)).wzxy)', out)
+
+    def test_compare_without_the_plain_wrapper(self):   # a shader that only compares has only that wrapper's name
+        src = 'using namespace metal;\n' + HEAD[HEAD.index('constant spvUnsafeArray<int2, 4> _9'):] + 'float4 f(depth2d<float> z, sampler s, float2 c) { float4 q = spvGatherCompareConstOffsets(z, s, _9, c, 0.5); return q; }\n'
+        self.assertNotIn('spvGatherConstOffsets', src)
+        self.assertIn('float4 q = (z.gather_compare(s, c, 0.5, int2(0, 0)).wzxy);', gather_offsets(src))
 
     def test_offsets_not_constant_refused(self):
         with self.assertRaises(ValueError):

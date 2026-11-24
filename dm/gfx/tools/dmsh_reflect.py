@@ -37,19 +37,41 @@ def has_word(src, text):
         i = src.find(text, i + 1)
     return False
 
+def far_plane(body):
+    """Whether a vertex shader's main function draws on the far plane: the last stores to gl_Position.z and .w are one value (a register or the same constant), with no branches,
+    no store of the whole position or of a swizzle, and the register defined once. z = w puts every vertex at the viewport's far value, the usual way to draw a sky; the host draws
+    these with a depth bias towards that value and depth clamping (nvn_mtl.m draw), because Apple's rasterizer gives such triangles depths up to 2^-23 short of it
+    (docs/reference/rendering.md, Depth on the far plane). The GL convention's z' = z/2 + w/2 (vs_depth) is the last store of main0 and keeps z = w, so it is skipped"""
+    if re.search(r'\b(if|for|while|switch|do)\b', body) or re.search(r'out\.gl_Position(?:\.[xyzw]{2,})?\s*=[^=]', body): return False
+    last = {}
+    for m in re.finditer(r'out\.gl_Position\.([zw])\s*=\s*([^;]+);', body):
+        v = m.group(2).strip()
+        if m.group(1) == 'z' and v == 'fma(out.gl_Position.z, 0.5, out.gl_Position.w * 0.5)': continue
+        last[m.group(1)] = v
+    v = last.get('z')
+    if not v or v != last.get('w') or v in ('0.0', '-0.0'): return False
+    if re.fullmatch(r'_\d+', v): return len(re.findall(r'(?<![\w.])%s\s*=[^=]' % re.escape(v), body)) == 1
+    return re.fullmatch(r'-?\d+\.\d*(?:e[+-]?\d+)?', v) is not None
+
 def raster_facts(stage, src):
     """Static facts needed for the runtime proof that the load can be skipped (full-coverage first draw) (nvn_mtl.m first_draw_covers):
         Vertex: whether position x / y / z are taken unchanged from the .x / .y / .z of one and the same vertex attribute (w is the constant 1 or the same attribute's .w), with no branches and no clip distances in the main function - if so, pos_attr = attribute slot;
         Fragment: whether it may discard (discard_fragment), whether it writes sample_mask, and which color indices it writes. Anything unrecognized is treated as "unprovable" (pos_attr = -1 / discard = 1).
         Also, not for that proof: whether a fragment shader reads the primitive ID, which a specialized Metal 4 pipeline does not give it (nvn_mtl.m pso_build_ex), and a vertex shader's
-        clip → screen varyings (screen, dmsh_fetch.py screen_varyings), the vertex side of the same-pixel proof for a projective sample's tile read (nvn_mtl.m fb_tile_plan)"""
+        clip → screen varyings (screen, dmsh_fetch.py screen_varyings), the vertex side of the same-pixel proof for a projective sample's tile read (nvn_mtl.m fb_tile_plan), and whether it
+        draws on the far plane (far, far_plane)"""
     if stage == 'ps':
         out = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
-        return {'discard': int('discard_fragment' in src), 'sample_mask': int('sample_mask' in (out.group(1) if out else '')), 'primitive_id': int('[[primitive_id]]' in src),
-                'colors': sorted({int(x) for x in re.findall(r'\[\[color\((\d+)\)\]\]', out.group(1) if out else '')})}
+        mem = out.group(1) if out else ''
+        return {'discard': int('discard_fragment' in src), 'sample_mask': int('sample_mask' in mem), 'primitive_id': int('[[primitive_id]]' in src),
+                'colors': sorted({int(x) for x in re.findall(r'\[\[color\((\d+)\)\]\]', mem)}),
+                # the colour outputs main0 declares float, unsigned and signed (bitmaps): a pipeline whose target takes another class takes the typed-output entry point (nvn_mtl.m pso_desc)
+                **{k: sum(1 << int(c) for ty, c in re.findall(r'^\s*(\w+)\s+\w+\s*\[\[color\((\d+)\)[^\]]*\]\];', mem, re.M) if ty.startswith(p))
+                   for k, p in (('float_colors', ('float', 'half')), ('uint_colors', ('uint',)), ('sint_colors', ('int',)))}}
     if stage != 'vs': return {}
-    scr = {'screen': dmsh_fetch.screen_varyings(src)}   # clip → screen varyings (dmsh_fetch.py): the vertex side of a projective sample's tile read
+    scr: dict[str, object] = {'screen': dmsh_fetch.screen_varyings(src)}   # clip → screen varyings (dmsh_fetch.py): the vertex side of a projective sample's tile read
     body = re.search(r'\bvertex\s+\w+\s+\w+\s*\(.*?\)\s*\{(.*)\}\s*$', src, re.S)   # the main function is the last function in the file
+    if body and far_plane(body.group(1)): scr['far'] = 1
     if not body or re.search(r'\b(if|for|while|switch|do)\b|clip_distance|ClipDistance', body.group(1)): return {'pos_attr': -1, **scr}
     b = body.group(1)
     attr = {m.group(2): int(m.group(3)) for m in attributes(src)}
@@ -93,7 +115,7 @@ def decode_tex(name):
     words = [o0] + ([o1] if ty else [])
     if re.match(r'[a-z]+_i', name):   # image
         return next((slot(x, IMG_BASE, tb) for x in words if IMG_BASE <= x * 4 < IMG_BASE + abi.C2_ROW * IMG_SLOTS and slot(x, IMG_BASE, tb) is not None), None), None, ty
-    tw = [o0] if ty == 3 else words
+    tw = [o0] if ty in (2, 3) else words
     t = next((slot(x, TEX_BASE, tb) for x in tw if slot(x, TEX_BASE, tb) is not None and x * 4 < SEPTEX_BASE), None)
     if t is None: t = next((SEPTEX_SLOT0 + slot(x, SEPTEX_BASE, tb) for x in tw if slot(x, SEPTEX_BASE, tb) is not None and x * 4 < SAMP_BASE), None)
     s = next((slot(x, SAMP_BASE, sb) for x in words if x * 4 >= SAMP_BASE and slot(x, SAMP_BASE, sb) is not None), None) if ty != 3 else None
@@ -120,10 +142,36 @@ def decode_ubo_tex(name):
     if not 3 <= tb <= 16 or ty not in (0, 1, 3) or (ty == 1 and sb != 2 and not 3 <= sb <= 16): return None
     return (tb - 3, o0 * 4), (('id', o1) if ty == 3 else ('c2', o1 * 4) if ty and sb == 2 else (sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
+def decode_ubo_samp_id(name):
+    """Handle type 2 (Ryujinx's SeparateSamplerId: the shader ORs the texture word with a second word shifted left by 20) with the texture in the driver table c2 and the second word, the sampler ID
+    itself, in the game's own uniform buffer (its bank the high 16 bits of slots, less one). The Witcher 3: fp_t_cb720898_2000005A, texture at c2 word 0x5A, sampler ID at c[10] word 0.
+    Returns the sampler word's (uniform slot, byte offset), or None. A texture in a uniform buffer with such a sampler, and arrays of them (the handle tables, nvn_mtl.m htab_snap), are
+    not decoded: no game is known to have one"""
+    m = re.fullmatch(r'[a-z]+_t\w*?_cb(\d+)_([0-9A-F]+)', name)
+    if not m: return None
+    slots, h = int(m.group(1)), int(m.group(2), 16)
+    sb = (slots >> 16) - 1
+    return (sb - 3, ((h >> 14) & 0x3fff) * 4) if h >> 28 == 2 and slots & 0xffff == 2 and 3 <= sb <= 16 else None
+
 def decode_ubo_img(name):
     """An image whose handle the game keeps in its own uniform buffer (<stage>_i_cb<n>_<word>_<format>: Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Returns (uniform slot, byte offset)"""
     m = re.match(r'[a-z]+_i\w*?_cb(\d+)_([0-9A-F]+)', name)
     return (int(m.group(1)) - 3, int(m.group(2), 16) * 4) if m and 3 <= int(m.group(1)) <= 16 else None
+
+def buffer_image_bias(name, res):
+    """A buffer image's or buffer texture's index in the offset table (dmsh_abi.h DMSH_TBIAS_BANK), which the translator gives it as "tbx" (TranslationFlags.MetalBufferImageBias),
+    found by the constant buffer slot and the handle its name carries (<stage>_i_cb<slots>_<handle>_<format> for an image, <stage>_t_cb<slots>_<handle> for a texture, <stage>_tb_...
+    for an array of buffer textures, _tcb_<handle> for a handle in no constant buffer) in the translator's images or textures; None for any other binding. An array's is its first
+    element's, the rest following it"""
+    m = re.match(r'[a-z]+_([ti])[a-z0-9]*_(?:cb(\d+)|tcb)_([0-9A-F]+)(?:_|$)', name)
+    if not m: return None
+    slots, h = int(m.group(2)) if m.group(2) else None, int(m.group(3), 16)
+    return next((i['tbx'] for i in res.get('images' if m.group(1) == 'i' else 'textures', ()) if 'tbx' in i and i['handle'] == h and (i['cbuf_slot'] == slots if slots is not None else i['cbuf_slot'] < 0)), None)
+
+def buffer_bias_entries(res):
+    """The offset table's length in entries, as the translator declares it (uint4 data[], ResourceManager.GetBufferImageBiasBinding): every entry given out, an array's one per element"""
+    n = max((i['tbx'] + max(i.get('array', 1), 1) * (2 if i.get('row_bias') else 1) for k in ('textures', 'images') for i in res.get(k, ()) if 'tbx' in i), default=0)
+    return (n + 3) // 4 * 4
 
 def c2_array(name, ty):
     """An array of handles in the driver table c2 that the shader indexes at run time (Ryujinx's texture array from a buffer, here bank 2: <stage>_t<type>_cb<slots>_<handle>, declared
@@ -138,6 +186,14 @@ def c2_array(name, ty):
     if h >> 28 == 1 and slots & 0xffff == 2 and (slots >> 16) - 1 == 2: return (h & 0x3fff) * 4, ((h >> 14) & 0x3fff) * 4
     return None
 
+def pool_fallback(name):
+    """Ryujinx's array for a handle it traced to no slot: <stage>_<t|s|i...>_cb0_40000000, an image's with a trailing format suffix (cp_i3d_cb0_40000000_)"""
+    return re.fullmatch(r'\w+?_cb0_40000000(?:_\w*)?', name) is not None
+
+def pool_image(name):
+    """Whether a pool binding name is a storage image (<stage>_i...; matching reflect()'s image prefix rule), read-only or writable"""
+    return re.match(r'[a-z]+_i', name) is not None
+
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.
@@ -149,6 +205,152 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
     uint b = 1u << (i & 31u);
     if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);
     return i;
+}
+
+"""
+
+def _buffer_pool_operation(src, start, base, index):
+    call = re.match(r'\.(read|write|get_width)\(', src[start:])
+    if not call: raise ValueError(f'{base}: unsupported BUFFER table operation')
+    first, depth, split = start + call.end(), 1, []
+    end = first
+    while depth:
+        if end >= len(src): raise ValueError(f'{base}: unbalanced BUFFER operation')
+        c = src[end]
+        if c == ',' and depth == 1: split.append(end)
+        depth += {'(': 1, ')': -1, '[': 1, ']': -1, '{': 1, '}': -1}.get(c, 0); end += 1
+    if call[1] == 'read':
+        out = f'dm_buffer_read({base}, {index}, {src[first:end - 1]})'
+    elif call[1] == 'get_width':
+        out = f'dm_buffer_width({base}, {index})'
+    else:
+        if len(split) != 1: raise ValueError(f'{base}: unsupported BUFFER write arguments')
+        val, coord = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
+        out = f'dm_buffer_write({base}, {index}, {val}, {coord})'
+    return end, out
+
+
+def _callable_pool_arrays(src, pools):
+    """Convert named constant-array-reference parameters to the existing pool ABI.
+
+    Whole pools may only be forwarded unchanged to matching defined parameters.
+    Other aliases, casts, pointer escapes and address spaces fail explicitly.
+    """
+    code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+                  lambda m: ''.join('\n' if c == '\n' else ' ' for c in m.group()), src, flags=re.S)
+
+    def closing(start, left, right):
+        depth = 1
+        for i in range(start + 1, len(code)):
+            depth += (code[i] == left) - (code[i] == right)
+            if not depth: return i
+        raise ValueError('pool callable: unbalanced delimiters')
+
+    def arguments(start, end, types=False):
+        result, first, stack = [], start, []
+        pairs = {')': '(', ']': '[', '}': '{', **({'>': '<'} if types else {})}
+        for i in range(start, end):
+            c = code[i]
+            if c in '([{' + ('<' if types else ''): stack.append(c)
+            elif c in pairs:
+                if not stack or stack.pop() != pairs[c]: raise ValueError('pool callable: unbalanced argument')
+            elif c == ',' and not stack:
+                result.append((first, i)); first = i + 1
+        if stack: raise ValueError('pool callable: unbalanced argument')
+        if code[first:end].strip(): result.append((first, end))
+        return result
+
+    calls, definitions = [], {}
+    for match in re.finditer(r'\b(\w+)\s*\(', code):
+        if match.group(1) in ('if', 'for', 'while', 'switch', 'sizeof', 'alignof'): continue
+        end = closing(match.end() - 1, '(', ')')
+        following = re.match(r'\s*(.)', code[end + 1:])
+        definition = following is not None and following.group(1) == '{'
+        args = arguments(match.end(), end, types=definition)
+        call = {'name': match.group(1), 'args': args}
+        if definition and following is not None:
+            call['body'] = end + following.end()
+            call['body_end'] = closing(call['body'], '{', '}')
+            call['pools'] = {}
+            definitions.setdefault(call['name'], []).append(call)
+        else: calls.append(call)
+
+    allowed, edits = [], []
+    member = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', code, re.S)
+    if member is None: raise ValueError('pool callable: missing descriptor definition')
+    for name, (element, length, _) in pools.items():
+        pattern = r'constant\s+array<(.+),\s*(\d+)>\s*&\s*' + re.escape(name) + r'\s*$'
+        for functions in definitions.values():
+            for function in functions:
+                for index, (start, end) in enumerate(function['args']):
+                    text = code[start:end].strip()
+                    if not re.search(r'\b' + re.escape(name) + r'\b', text): continue
+                    parameter = re.fullmatch(pattern, text)
+                    if not parameter or re.sub(r'\s', '', parameter.group(1)) != re.sub(r'\s', '', element) or int(parameter.group(2)) != length:
+                        raise ValueError(f'{name}: unsupported callable pool parameter')
+                    if start < member.end(): raise ValueError(f'{name}: pool callable precedes its descriptor definition')
+                    function['pools'][index] = name
+                    allowed.append((start, end))
+                    edits.append((start, end, f'constant spvPool_{name}* {name}'))
+        for match in re.finditer(r'\b' + re.escape(name) + r'\b', code[member.start():member.end()]):
+            allowed.append((member.start() + match.start(), member.start() + match.end()))
+
+    def source_pool(start, end, name):
+        text = code[start:end].strip()
+        if text != name: return bool(re.fullmatch(r'[\w.]+\.' + re.escape(name), text))
+        return any(function['body'] < start < function['body_end'] and name in function['pools'].values()
+                   for functions in definitions.values() for function in functions)
+
+    for call in calls:
+        for index, (start, end) in enumerate(call['args']):
+            for name in pools:
+                if not re.fullmatch(r'(?:[\w.]+\.)?' + re.escape(name), code[start:end].strip()): continue
+                targets = definitions.get(call['name'], [])
+                if len(targets) != 1 or targets[0]['pools'].get(index) != name or len(call['args']) != len(targets[0]['args']) or not source_pool(start, end, name):
+                    raise ValueError(f'{name}: unsupported callable pool forwarding')
+                allowed.append((start, end))
+
+    for name, (_, _, marked) in pools.items():
+        for match in re.finditer(r'\b' + re.escape(name) + r'\b', code):
+            if any(a <= match.start() < b for a, b in allowed): continue
+            prefix = re.search(r'([\w.]+)\.$', code[:match.start()])
+            start = prefix.start() if prefix else match.start()
+            end = match.end()
+            bracket = re.match(r'\s*\[', code[end:])
+            if not bracket or not source_pool(start, end, name):
+                raise ValueError(f'{name}: unsupported callable pool use or alias')
+            if code[:start].rstrip().endswith('&'):
+                raise ValueError(f'{name}: taking a pool element address is unsupported')
+            left = end + bracket.end() - 1
+            right = closing(left, '[', ']')
+            base = src[start:end]
+            index = f'min(uint({src[left + 1:right]}), {base}->n)'
+            use = f'dm_pool_mark({base}, {index})' if marked else index
+            edits.append((start, right + 1, f'(&{base}->e[0])[{use}]'))
+            allowed.append((start, right + 1))
+
+    edits.sort()
+    if any(a[1] > b[0] for a, b in zip(edits, edits[1:])):
+        raise ValueError('pool callable: overlapping uses are unsupported')
+    for start, end, replacement in reversed(edits): src = src[:start] + replacement + src[end:]
+    return src
+
+BUFFER_POOL_READ = """template<typename P> static inline __attribute__((always_inline)) auto dm_buffer_read(constant P* p, uint i, uint c)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    uint m = c + b;
+    return (&p->e[0])[i].read(m < b ? c : m);
+}
+template<typename P, typename V> static inline __attribute__((always_inline)) void dm_buffer_write(constant P* p, uint i, V v, uint c)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    uint m = c + b;
+    (&p->e[0])[i].write(v, m < b ? c : m);
+}
+template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_width(constant P* p, uint i)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    return (&p->e[0])[i].get_width() - b;
 }
 
 """
@@ -170,11 +372,19 @@ def pool_arrays(src):
     if not body: return src
     pools = {}
     def to_pointer(m):
-        if int(m.group(3)) < POOL_MIN or not (m.group(4).endswith('_cb0_40000000') or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
-        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and m.group(4).endswith('_cb0_40000000'))   # element, length, marked (a texture pool's reads)
+        if int(m.group(3)) < POOL_MIN or not (pool_fallback(m.group(4)) or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
+        if pool_image(m.group(4)) and not pool_fallback(m.group(4)): raise ValueError(f'{m.group(4)}: a table of images from a uniform buffer')
+        # element, length, marked (a texture pool's reads; an image pool's are not: the host fills it with every image-flagged texture, nvn_mtl.m img_pool_gpu)
+        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and not pool_image(m.group(4)) and pool_fallback(m.group(4)))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     if not pools: return src
+    callable_pools = any(re.search(r'array<[^;\n]+>\s*&\s*' + re.escape(name) + r'\b', src) for name in pools)
+    if callable_pools:
+        src = _callable_pool_arrays(src, pools)
+        body = re.search(r'struct spvDescriptorSetBuffer0\s*\{(.*?)\};', src, re.S)
+        if body is None: raise ValueError('pool callable: descriptor definition was lost')
+        members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     aid = 0
     def renumber(m):
         nonlocal aid
@@ -183,12 +393,13 @@ def pool_arrays(src):
         aid += int(a.group(1)) if a else 1
         return out
     members = re.sub(r'^(\s*)(.+?)\s+(\w+)\s*\[\[id\((\d+)\)((?:\s*,\s*\w+\(\d+\))*)\]\];', renumber, members, flags=re.M)
-    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n, _) in pools.items())
+    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n' + ('    uint bias;\n' if 'texture_buffer<' in el else '') + f'    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n, _) in pools.items())
+    if any('texture_buffer<' in el for el, _, _ in pools.values()): structs = BUFFER_POOL_READ + structs
     marked = any(mk for _, _, mk in pools.values())
     if marked: structs = POOL_MARK + structs
     i = body.start()
     src = src[:i] + structs + src[i:body.start(1)] + members + src[body.end(1):]
-    for nm in pools:   # base.name[index] → (&base.name->e[0])[min(uint(index), base.name->n)], the index taken with its brackets balanced
+    for nm in (() if callable_pools else pools):   # callable parameters and members were rewritten together above
         out, pos = [], 0
         for m in re.finditer(r'([\w.]+)\.%s\[' % re.escape(nm), src):
             if m.start() < pos: continue
@@ -198,16 +409,30 @@ def pool_arrays(src):
                 depth += {'[': 1, ']': -1}.get(src[j], 0); j += 1
             base = f'{m.group(1)}.{nm}'
             index = f'min(uint({src[m.end():j - 1]}), {base}->n)'
-            out.append(src[pos:m.start()] + f'(&{base}->e[0])[{f"dm_pool_mark({base}, {index})" if pools[nm][2] else index}]'); pos = j
+            selected = f"dm_pool_mark({base}, {index})" if pools[nm][2] else index
+            replacement = f'(&{base}->e[0])[{selected}]'
+            out.append(src[pos:m.start()] + replacement); pos = j
         src = ''.join(out) + src[pos:]
         names = 3 if pools[nm][2] else 2   # each read names it twice, and once more in a mark; the member once (spvPool_<name> is one word)
         left = len(re.findall(r'\b%s\b' % re.escape(nm), src)) - names * len(re.findall(r'\.%s->e\[0\]\)\[' % re.escape(nm), src)) - 1
         if left: raise ValueError(f'{nm}: {left} uses of the pool array the rewrite does not cover')
+    # Work from the last access backwards: a nested read's replacement is
+    # already inside its caller's argument when the outer operation is wrapped.
+    for access in reversed(list(re.finditer(r'\(&([\w.]+)->e\[0\]\)\[', src))):
+        base = access[1]; name = base.rsplit('.', 1)[-1]
+        if name not in pools or 'texture_buffer<' not in pools[name][0]: continue
+        first, end, depth = access.end(), access.end(), 1
+        while depth:
+            if end >= len(src): raise ValueError(f'{name}: unbalanced BUFFER index')
+            depth += {'[': 1, ']': -1}.get(src[end], 0); end += 1
+        index = src[first:end - 1]
+        end, replacement = _buffer_pool_operation(src, end, base, index)
+        src = src[:access.start()] + replacement + src[end:]
     # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
     # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
     # a test before it would get wrong (then it stays late, and only costs the shading)
-    own = src.replace(POOL_MARK, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
-    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+    own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
+    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
         src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 
@@ -222,37 +447,45 @@ def reflect(key, stage, msl, res):
     for m in members:
         ty, nm, aid = m.group(1).strip(), m.group(2), int(m.group(3))
         e = {'msl_name': nm, 'msl_type': ty, 'arg_id': aid}
-        pool = re.search(r'struct spvPool_%s\s*\{\s*uint n;\s*ulong seen;\s*array<(.+), \d+> e;' % re.escape(nm), msl) if ty == f'constant spvPool_{nm}*' else None
+        pool = re.search(r'struct spvPool_%s\s*\{\s*uint n;\s*(?:uint bias;\s*)?ulong seen;\s*array<(.+), \d+> e;' % re.escape(nm), msl) if ty == f'constant spvPool_{nm}*' else None
         if ty == 'sampler' and nm.endswith('Smplr' + abi.BORDER_TWIN):   # a sampler's twin (border_emu): the same sampler, its bit in the block in the order of the twins
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
         elif nm in dmsh_geometry.HELPERS: e.update(kind=abi.KIND_GEOMETRY, reg=dmsh_geometry.HELPERS[nm])
-        elif pool and not nm.endswith('_cb0_40000000'):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
+        elif pool and not pool_fallback(nm):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
             ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
             e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
-        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
+        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_IMG_POOL if pool_image(nm) else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif c := re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(c.group(1))
             if 3 <= n <= 16:   # fixed: the slot's bytes the shader reads at fixed offsets, which the host makes readable (zeros past a shorter binding); the translator's own count (Program.cs)
                 e.update(kind=abi.KIND_CBUF, reg=n - 3, fixed=next((b['fixed'] for b in res['cbufs'] if b['slot'] == n), 0))
             elif n == abi.CBSIZE_BANK: e.update(kind=abi.KIND_CBSIZE)   # the uniform slots' bound sizes, which the translator's reads at computed offsets compare with
+            elif n == abi.TBIAS_BANK: e.update(kind=abi.KIND_TBIAS, n=buffer_bias_entries(res))   # the buffer textures' element offsets, which the translator adds to their coordinates (buffer_image_bias)
+            elif n == abi.SBLEN_BANK: e.update(kind=abi.KIND_SBLEN)   # the bounded storage buffers' lengths, which their accesses compare with (Ryujinx TranslationFlags.MetalStorageBounds)
             else: e.update(kind=abi.KIND_C1 if n == 1 else abi.KIND_DRVCB, bank=n)
         elif sb := re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind=abi.KIND_SBUF, index=int(sb.group(1)))
+        elif ty == 'sampler' and nm.endswith('Smplr') and (si := decode_ubo_samp_id(nm[:-5])):   # a sampler ID itself in a uniform buffer word (handle type 2): the replay shifts it into a handle
+            e.update(kind=abi.KIND_SAMP_UBO, reg=si[0], off=si[1], raw_id=True)
         elif u := decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
             ut, us = u
             other = () if us[0] in ('id', 'c2') or us == ut else (ut, us)   # handle type 1: the word of the other half, which the host ORs in (the compiler puts texture and sampler words in either order)
             if nm.endswith('Smplr') and us[0] == 'c2': e.update(kind=abi.KIND_SAMP_UBO, reg=ut[0], off=ut[1], soff=us[1], sreg=abi.SREG_C2)
             elif nm.endswith('Smplr'): e.update(kind=abi.KIND_SAMP_ID, reg=us[1]) if us[0] == 'id' else e.update(kind=abi.KIND_SAMP_UBO, reg=us[0], off=us[1], **({'soff': ut[1], 'sreg': ut[0]} if other else {}))
-            elif 'texture_buffer' in ty: e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1])
+            elif 'texture_buffer' in ty:
+                e.update(kind=abi.KIND_TBUF_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
+                if not ty.startswith('array<') and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer texture: its index in the offset table (the host binds one texture here)
             else: e.update(kind=abi.KIND_TEX_UBO, reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': us[0]} if other else {}))
         elif decode_ubo_img(nm):
             e.update(kind=abi.KIND_IMG_UBO, reg=decode_ubo_img(nm)[0], off=decode_ubo_img(nm)[1])   # pyright: ignore[reportOptionalSubscript]  (not None: tested above)
+            if (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # as KIND_IMG below
             if has_word(msl, nm + '.atomic_'): e['atomic'] = True   # as KIND_IMG below
         elif c2_array(nm, ty) is not None:   # an array of the driver table's handles (c2_array): the replay fills element k from the slot whose c2 word is at off + 8k
             off, soff = c2_array(nm, ty)   # pyright: ignore[reportGeneralTypeIssues]  (not None: tested above)
             e.update(kind=abi.KIND_SAMP_C2A if nm.endswith('Smplr') else abi.KIND_TEX_C2A, off=off, **({'soff': soff} if soff is not None else {}))
+            if not nm.endswith('Smplr') and 'texture_buffer' in ty and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # an array of buffer textures: its first entry
         elif nm.endswith('Smplr'):   # handle type 0 = texture and sampler combined in one handle: the sampler index is taken from the high bits of that texture slot's handle
             t, s, ty = decode_tex(nm[:-5]); e.update(  # pyright: ignore[reportGeneralTypeIssues]  (a sampler whose name does not decode stops the shader here)
                 kind=abi.KIND_SAMP_ID, reg=const_sampler(nm[:-5])) if ty == 3 else e.update(kind=abi.KIND_SAMP, reg=s) if ty else e.update(kind=abi.KIND_SAMP_TEX, reg=t)
@@ -262,10 +495,15 @@ def reflect(key, stage, msl, res):
             else: e.update(kind=abi.KIND_IMG if re.match(r'[a-z]+_i', nm) else (abi.KIND_TBUF if 'texture_buffer' in ty else abi.KIND_TEX), reg=d[0])
             # native texture atomics (dmsh_atomic.py): Metal allows them only on an R32Uint / R32Sint texture made with the shader-atomic usage, which the host checks for this slot
             if e.get('kind') == abi.KIND_IMG and has_word(msl, nm + '.atomic_'): e['atomic'] = True
+            if e.get('kind') in (abi.KIND_IMG, abi.KIND_TBUF) and (x := buffer_image_bias(nm, res)) is not None: e['tbx'] = x   # a buffer image or texture: its index in the offset table
             # a 1D integer fetch the translator read as 2D rows of 16384 texels (Program.cs RecordTexelFetch1D): the host binds a texture buffer in this slot as such rows (nvn_mtl.m tbuf_as_2d)
             if e.get('kind') == abi.KIND_TEX and e.get('reg') in res.get('fetch1d', ()):
                 e['fetch1d'] = True
                 if has_word(msl, nm + '.get_width('): e['fetch1d_size'] = True   # also size-queried: a texture buffer of more than 16384 elements reports 16384 there
+        if e.get('kind') in (abi.KIND_TEX, abi.KIND_TEX_UBO, abi.KIND_TEX_C2A):
+            if (x := buffer_image_bias(nm, res)) is not None and any(t.get('row_bias') and t.get('tbx') == x for t in res.get('textures', ())):
+                e['tbx'] = x
+                e['fetch1d'] = True
         binds.append(e)
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base SSBO[stage], C0_ROW bytes per slot)
     base = SSBO.get(stage)   # storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported with no slot
@@ -277,26 +515,95 @@ def reflect(key, stage, msl, res):
             if b and b['cb_slot'] == abi.GMEM_MAP_CB_SLOT:   # not a game buffer: for addresses traced to no storage buffer, the host's pool table (offset 0) or the write log (DMSH_GMEM_LOG_CB_OFFSET)
                 if b['cb_offset'] == abi.GMEM_LOG_CB_OFFSET: e.update(kind=abi.KIND_GMEM_LOG, rw=True); continue
                 # rw: one of those accesses writes (the translator notes each one with its operation: Load, Store or an atomic)
-                e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ()))); continue
+                e.update(kind=abi.KIND_GMEM_MAP, rw=any(re.search(r'operation "(Store|Atomic\w*)" traced to no storage buffer', n) for n in res.get('notes', ())), pointers=gptr_sites(stage, res)); continue
             if stage == 'cs' and off is not None and abi.C0_CS_UBO <= off < abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS and (off - abi.C0_CS_UBO) % abi.C0_ROW == 0:
                 e.update(kind=abi.KIND_UBO_PTR, reg=(off - abi.C0_CS_UBO) // abi.C0_ROW)   # compute-stage uniform slot r: address at c0[C0_CS_UBO + 0x10 r], read through global memory (checked against cs_lut_combine_c reading cb10[66])
+            elif b and b['cb_slot'] == abi.PUSH_BANK:   # the address is one the game pushed (c[24]; PRAGMATA's compute buffer entries in push block 1): the host reads it from its push blocks
+                e.update(kind=abi.KIND_SBUF_PUSH, off=b['cb_offset'] * 4)
             elif b and b['cb_slot'] >= 3:   # the address is in the game's own uniform buffer c[n] = uniform slot n - 3 (Monster Hunter Rise's compute shaders: c3 + 0x38); the replay reads it there
                 e.update(kind=abi.KIND_SBUF_UBO, reg=b['cb_slot'] - 3, off=b['cb_offset'] * 4)
             else: e['reg'] = (off - base) // abi.C0_ROW if off is not None and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else None
             e['rw'] = bool(b and b['flags'] & 1)   # BufferUsageFlags.Write; Program.cs serializes the translator enum unchanged (atomics count as writes too)
+            if b and b['flags'] & 2:   # BufferUsageFlags.Bounded: its accesses compare with its entry in the length table (dmsh_abi.h DMSH_SBLEN_BANK), the translator's storage slot
+                if e['kind'] not in (abi.KIND_SBUF, abi.KIND_UBO_PTR, abi.KIND_SBUF_UBO, abi.KIND_SBUF_PUSH) or not 0 <= b['slot'] < abi.SBLEN_SLOTS:
+                    raise ValueError(f"{key}: storage buffer {e['msl_name']} is bounded but is a {e['kind']} binding, slot {b['slot']}")
+                e['sbx'] = b['slot']
+    if any('sbx' in e for e in binds) and not any(e['kind'] == abi.KIND_SBLEN for e in binds):
+        raise ValueError(f'{key}: bounded storage buffers without their length table')
     return binds
+
+_GPTR_SITE = re.compile(r'translator: gptr site (\d+): c(\d+)\[(\d+)\] \+(\d+)$')
+
+def gptr_sites(stage, res):
+    """Fixed pointer words in NVN storage slots, discovered by GlobalToStorage; metadata for the existing raw pool table, not GPU site entries."""
+    sites = {}
+    base = SSBO.get(stage)
+    for note in res.get('notes', ()):
+        m = _GPTR_SITE.match(note)
+        if not m: continue
+        k, cb_slot, cb_word, byte = map(int, m.groups())
+        off = cb_word * 4
+        reg = (off - base) // abi.C0_ROW if cb_slot == 0 and base is not None and 0 <= off - base < abi.C0_ROW * abi.C0_SSBO_SLOTS and (off - base) % abi.C0_ROW == 0 else -1
+        sites[k] = [reg, byte]
+    if sorted(sites) != list(range(len(sites))) or len(sites) > abi.GPTR_MAX: raise ValueError(f'gptr sites {sorted(sites)} are not 0..n-1 within {abi.GPTR_MAX}')
+    return [sites[k] for k in range(len(sites)) if sites[k][0] >= 0]
 
 DRV_FILL = {0: [(b, b + abi.C0_ROW * abi.C0_SSBO_SLOTS) for k, b in sorted(SSBO.items(), key=lambda kv: kv[1]) if k not in ('ts', 'ms')],   # c0: storage buffer address tables (vertex / compute / geometry / pixel; a task or mesh stage's: unfillable())
             2: [(TEX_BASE, SEPTEX_BASE), (IMG_BASE, IMG_BASE + abi.C2_ROW * IMG_SLOTS), (SEPTEX_BASE, SAMP_BASE), (SAMP_BASE, SAMP_BASE + abi.C2_ROW * abi.C2_SEP_SLOTS)]}   # c2: the handle tables above, all filled by the replay layer
 
+INDEX_BUILTINS = {'gl_SampleID': (0, abi.C0_SAMPLE_BYTES - 1)}   # a computed index's inputs known to be bounded: the sample index, below the sample count (at most the table's bytes)
+INDEX_DEF = re.compile(r'^\s*(?:int|uint)\s+(_\d+)\s*=\s*([^;\n]+);', re.M)
+INDEX_SET = re.compile(r'^\s*(_\d+)\s*=', re.M)
+
+def index_range(src, expr):
+    """The range [lo, hi] of a computed vector index in the MSL, or None: an integer expression of literals and bounded builtins (INDEX_BUILTINS), through SPIRV-Cross's
+    single-assignment int / uint temporaries and bit-casts, with + - * & | ^ << >> on non-negative values. Anything else (a float operation, a uniform read, a temporary
+    assigned twice) gives None. PRAGMATA's 156 pixel shaders read the sample position table byte by byte at c0 0x620 + gl_SampleID (a689530d00090ebf: row 98)"""
+    defs, sets = {}, set(INDEX_SET.findall(src))   # a temporary assigned again after its declaration (a loop's phi) has no single value
+    for name, e in INDEX_DEF.findall(src): defs.setdefault(name, []).append(e)
+    float_defs = dict(re.findall(r'^\s*float\s+(_\d+)\s*=\s*as_type<float>\(([\w.]+)\);', src, re.M))   # a bit-cast of a builtin into a float temporary keeps its bits
+    import ast as _ast   # here, so the reflection tests can lift this function alone (test_dmsh_reflect.py builder_unfillable)
+    def ev(n, depth):
+        if depth > 64: return None
+        if isinstance(n, _ast.Constant) and isinstance(n.value, int): return (n.value, n.value)
+        if isinstance(n, _ast.Name):
+            if n.id in INDEX_BUILTINS: return INDEX_BUILTINS[n.id]
+            if n.id in float_defs and float_defs[n.id] in INDEX_BUILTINS and n.id not in sets: return INDEX_BUILTINS[float_defs[n.id]]
+            if len(defs.get(n.id, ())) != 1 or n.id in sets: return None
+            return parse(defs[n.id][0], depth + 1)
+        if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name) and n.func.id == '_c' and len(n.args) == 1 and not n.keywords: return ev(n.args[0], depth + 1)
+        if not isinstance(n, _ast.BinOp): return None
+        a, b = ev(n.left, depth + 1), ev(n.right, depth + 1)
+        if a is None or b is None: return None
+        op = type(n.op)
+        if op is _ast.Add: r = (a[0] + b[0], a[1] + b[1])
+        elif op is _ast.Sub: r = (a[0] - b[1], a[1] - b[0])
+        elif op is _ast.Mult: r = (a[0] * b[0], a[1] * b[1])
+        elif op is _ast.RShift and b[0] == b[1] and b[0] < 32: r = (a[0] >> b[0], a[1] >> b[0])
+        elif op is _ast.LShift and b[0] == b[1] and b[0] < 32: r = (a[0] << b[0], a[1] << b[0])
+        elif op is _ast.BitAnd: r = (0, min(a[1], b[1]))
+        elif op in (_ast.BitOr, _ast.BitXor): r = (0, (1 << max(a[1], b[1]).bit_length()) - 1)
+        else: return None
+        return r if 0 <= r[0] <= r[1] < 1 << 31 else None
+    def parse(e, depth):
+        e = re.sub(r'\b(?:as_type<\s*u?int\s*>|u?int)\s*\(', '_c(', e)   # integer casts and bit-casts keep a non-negative value's bits
+        e = re.sub(r'\b(\d+)u\b', r'\1', e)
+        try: tree = _ast.parse(e, mode='eval')
+        except SyntaxError: return None
+        return ev(tree.body, depth)
+    return parse(expr, 0)
+
 def drv_reads(src):
-    """Reads of driver segments c0 / c2 in the MSL: constant index → byte range; non-constant indices are recorded as dynamic"""
+    """Reads of driver segments c0 / c2 in the MSL: constant index → byte range; a computed index whose range is known (index_range) → the rows it can read;
+    any other non-constant index is recorded as dynamic"""
     out = {}
     for bank in (0, 2):
         offs, dyn = set(), False
         for m in re.finditer(r'fp_c%d\)\._m0\[([^\]]+)\]' % bank, src):
             idx = m.group(1).rstrip('u')
-            if idx.isdigit(): offs.add(int(idx) * 16)
+            if idx.isdigit(): offs.add(int(idx) * 16); continue
+            r = index_range(src, m.group(1))
+            if r and r[1] - r[0] < 16: offs.update(range(r[0] * 16, r[1] * 16 + 16, 16))
             else: dyn = True
         if offs or dyn: out[str(bank)] = {'vec4_offsets': sorted(offs), 'dynamic': dyn}
     return out
@@ -307,6 +614,7 @@ def unfillable(dr, stage):
     bad = []
     for bank, d in dr.items():
         fill = DRV_FILL[int(bank)] + (SAMPLE_ROWS if bank == '0' and stage == 'ps' else []) + ([(SSBO[stage], SSBO[stage] + abi.C0_ROW * abi.C0_SSBO_SLOTS)] if bank == '0' and stage in ('ts', 'ms') else [])
+        if bank == '0' and stage == 'cs': fill = fill + [(abi.C0_CS_UBO, abi.C0_CS_UBO + abi.C0_ROW * abi.C0_CS_UBO_SLOTS)]   # compute's uniform address table, which the host fills
         # a computed index into c2 reads one of its handle tables, which the replay layer fills whole (nvn_mtl.m DRV2: EA SPORTS FC 27's lights read the separate texture words
         # at 0x168 + 8i to test each light's handle); c0 is filled only in its tables and words above, so a computed index there may read what the replay does not write.
         # The one computed c0 index known is GLSLC's sample position lookup in a pixel shader: a byte of the table at 0x620, at an index made of the sample index (PIXLD.MYINDEX)

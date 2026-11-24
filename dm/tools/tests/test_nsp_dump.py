@@ -2,8 +2,10 @@
 The run stops at the prerequisite check; no game files, keys or Xcode needed."""
 import importlib.util
 from pathlib import Path
+import plistlib
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -138,6 +140,9 @@ class Pack(Base):
         nsp.survey_dump(src, survey)
         self.assertEqual((survey / 'control.nacp').read_bytes(), b'edition title')
         self.assertEqual((survey / 'icon.jpg').read_bytes(), b'edition icon')
+        (src / 'control/Acd_1/icon_AmericanEnglish.dat').rename(src / 'control/Acd_1/icon_French.dat')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'edition icon')
 
     def test_control_data_fallback_and_absence(self):
         src = self.dump / f'updates/{VER}'
@@ -203,6 +208,130 @@ class Main(Base):
         self.run_main('--icon', str(self.dump.parent / 'icon.png'))
         with mock.patch.object(nsp, 'ICON', str(self.dump / 'missing.jpg')), self.assertRaisesRegex(nsp.BuildError, 'no such icon file'): self.run_main()
 
+    def test_fallback_icon_never_replaces_the_games_own(self):   # --fallback-icon / FALLBACK_ICON: a front end's stand-in, passed without knowing whether the game carries an icon
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+             mock.patch.object(nsp, 'check_prereqs', side_effect=AssertionError('went on')), self.assertRaisesRegex(nsp.BuildError, r'no such icon file \(--fallback-icon / FALLBACK_ICON\)'):
+            nsp.main(nsp.parse_args([str(self.dump), '--fallback-icon', str(self.dump / 'missing.png')]))
+        with mock.patch.object(nsp, 'FALLBACK_ICON', str(self.dump / 'missing.jpg')), self.assertRaisesRegex(nsp.BuildError, 'no such icon file'): self.run_main()
+        given, spare = self.dump.parent / 'given.png', self.dump.parent / 'spare.png'; given.write_bytes(b'png'); spare.write_bytes(b'png')
+        self.run_main('--fallback-icon', str(spare))
+        game, base = self.dump.parent / 'icons/v', self.dump.parent / 'icons/base'; game.mkdir(parents=True); base.mkdir()
+        self.assertEqual(nsp.app_icon(None, None, game, base), (None, False))
+        self.assertEqual(nsp.app_icon(None, spare, game, base), (spare, True))        # a dump, a NUP without an icon: the stand-in
+        self.assertEqual(nsp.app_icon(given, spare, game, base), (given, False))      # --icon is asked for by name: it wins over both
+        (base / 'icon.jpg').write_bytes(b'base')
+        self.assertEqual(nsp.app_icon(None, spare, game, base), (base / 'icon.jpg', False))   # the game's own icon stays
+        (game / 'icon.jpg').write_bytes(b'game')
+        self.assertEqual(nsp.app_icon(None, spare, game, base), (game / 'icon.jpg', False))   # the packed version's before the base game's
+        self.assertEqual(nsp.app_icon(given, None, game, base), (given, False))
+
+    def test_kept_icon_reads_existing_mac_app_bundle(self):
+        work = self.dump.parent / 'work'; work.mkdir()
+        app = self.dump.parent / 'Game.app'
+        self.assertIsNone(nsp.kept_icon(app, work))   # no app yet
+        (app / 'Contents/Resources').mkdir(parents=True)
+        plist = app / 'Contents/Info.plist'
+        plist.write_bytes(b'<plist><dict><key>broken')   # malformed XML raises ExpatError, not ValueError
+        self.assertIsNone(nsp.kept_icon(app, work))
+        plist.write_bytes(plistlib.dumps(['not', 'a', 'dict']))
+        self.assertIsNone(nsp.kept_icon(app, work))
+        for bad in (123, '', '../escape.icns'):
+            plist.write_bytes(plistlib.dumps({'CFBundleIconFile': bad}))
+            self.assertIsNone(nsp.kept_icon(app, work))
+        plist.write_bytes(plistlib.dumps({'CFBundleIconFile': 'AppIcon'}))
+        self.assertIsNone(nsp.kept_icon(app, work))   # missing .icns
+        icns = app / 'Contents/Resources/AppIcon.icns'; icns.write_bytes(b'icns')
+        calls = []
+        def fake_sips(cmd, **kw):
+            calls.append(cmd)
+            out = Path(cmd[cmd.index('--out') + 1])
+            out.write_bytes(b'png-from-' + Path(cmd[4]).read_bytes())
+            return subprocess.CompletedProcess(cmd, 0)
+        with mock.patch.object(nsp.subprocess, 'run', side_effect=fake_sips):
+            got = nsp.kept_icon(app, work)
+        self.assertEqual(got, work / 'kept-icon.png')
+        self.assertEqual((work / 'kept-icon.png').read_bytes(), b'png-from-icns')
+        self.assertEqual(calls[0][:5], ['sips', '-s', 'format', 'png', str(icns)])
+        # Explicit .icns extension in CFBundleIconFile
+        custom = app / 'Contents/Resources/Custom.icns'; custom.write_bytes(b'custom')
+        plist.write_bytes(plistlib.dumps({'CFBundleIconFile': 'Custom.icns'}))
+        with mock.patch.object(nsp.subprocess, 'run', side_effect=fake_sips):
+            got = nsp.kept_icon(app, work)
+        self.assertEqual(got, work / 'kept-icon.png')
+        self.assertEqual((work / 'kept-icon.png').read_bytes(), b'png-from-custom')
+        # Failed sips must not reuse a stale kept-icon.png from an earlier run
+        with mock.patch.object(nsp.subprocess, 'run', return_value=subprocess.CompletedProcess(['sips'], 1)):
+            self.assertIsNone(nsp.kept_icon(app, work))
+        self.assertFalse((work / 'kept-icon.png').exists())
+        with mock.patch.object(nsp.subprocess, 'run', side_effect=OSError('no sips')):
+            self.assertIsNone(nsp.kept_icon(app, work))
+
+    def test_mac_app_rebuild_in_place_icon_selection(self):
+        out_app = self.dump.parent / 'Game.app'
+        (out_app / 'Contents/Resources').mkdir(parents=True)
+        (out_app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIconFile': 'AppIcon'}))
+        (out_app / 'Contents/Resources/AppIcon.icns').write_bytes(b'old-icns')
+        explicit = self.dump.parent / 'new.png'; explicit.write_bytes(b'new')
+        named_kept = self.dump.parent / 'kept-icon.png'; named_kept.write_bytes(b'spare')
+
+        def run_to_say_game(*opts, game_icon=False, in_programs=None):
+            args = nsp.parse_args([str(self.dump), '--platform', 'mac-app', '-o', str(out_app), *opts])
+            if in_programs is not None: args.in_programs = in_programs
+            said, game_events, kept_calls = [], [], []
+            def fake_extract(ex, ver, src, app):
+                d = ex / ver; (d / 'ExeFS').mkdir(parents=True, exist_ok=True); (d / 'RomFS').mkdir(exist_ok=True)
+                if game_icon: (d / 'icon.jpg').write_bytes(b'game-jpg')
+                else: (d / 'icon.jpg').unlink(missing_ok=True)
+                return d
+            def fake_kept(app_path, work):
+                kept_calls.append(app_path)
+                out = work / 'kept-icon.png'; out.write_bytes(b'kept-png'); return out
+            def fake_say_game(app, name, version, bundle_id, out, icon):
+                game_events.append((out, icon))
+            src_stub = {'graphics': ('vulkan', 'Vulkan'), 'glslc_capture': (False, ''), 'vk_capture': (False, ''),
+                        'gl_capture': (False, ''), 'gl_fixed': (False, ''), 'ue_decode': (False, ''),
+                        'oodle_packs': (False, ''), 'ue_legacy': (False, '')}
+            with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+                 mock.patch.object(nsp, 'PROD_KEYS', ''), mock.patch.object(nsp, 'ICON', ''), mock.patch.object(nsp, 'FALLBACK_ICON', ''), \
+                 mock.patch.object(nsp, 'apple_silicon', return_value=True), mock.patch.object(nsp, 'check_prereqs'), \
+                 mock.patch.object(nsp, 'extract_dump', side_effect=fake_extract), mock.patch.object(nsp, 'check_formats'), \
+                 mock.patch.object(nsp, 'check_versions_aarch64'), mock.patch.object(nsp, 'build_mismatch', return_value=[]), \
+                 mock.patch.object(nsp, 'build_sources', return_value=src_stub), mock.patch.object(nsp, 'extract_aoc', return_value=None), \
+                 mock.patch.object(nsp, 'kept_icon', side_effect=fake_kept), mock.patch.object(nsp, 'say_game', side_effect=fake_say_game), \
+                 mock.patch.object(nsp, 'say', side_effect=said.append), mock.patch.object(nsp, 'rewrite', side_effect=Stop()), \
+                 mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked')):
+                with self.assertRaises(Stop): nsp.main(args)
+            return game_events, said, kept_calls
+
+        # Terminal rebuild in place with no icon option and no game icon keeps the existing app's icon
+        events, said, kept_calls = run_to_say_game()
+        self.assertEqual(kept_calls, [out_app])
+        self.assertEqual(events[0][1].name, 'kept-icon.png')
+        self.assertTrue(any('keeps the icon it has (Game.app)' in s for s in said), said)
+
+        # Rebuild that chooses a different explicit --icon overrides the existing app's icon
+        events, said, kept_calls = run_to_say_game('--icon', str(explicit))
+        self.assertEqual(kept_calls, [])
+        self.assertEqual(events[0][1], explicit)
+        self.assertFalse(any('keeps the icon it has' in s for s in said), said)
+
+        # Rebuild with explicit --fallback-icon overrides the existing app's icon, even if named kept-icon.png
+        events, said, kept_calls = run_to_say_game('--fallback-icon', str(named_kept))
+        self.assertEqual(kept_calls, [])
+        self.assertEqual(events[0][1], named_kept)
+        self.assertTrue(any('takes the fallback icon' in s for s in said), said)
+        self.assertFalse(any('keeps the icon it has' in s for s in said), said)
+
+        # A game with its own extracted icon.jpg uses it instead of the old app's icon
+        events, said, kept_calls = run_to_say_game(game_icon=True)
+        self.assertEqual(kept_calls, [])
+        self.assertEqual(events[0][1].name, 'icon.jpg')
+
+        # Secondary program call in a multi-program build does not extract kept_icon
+        events, said, kept_calls = run_to_say_game(in_programs=True)
+        self.assertEqual(kept_calls, [])
+        self.assertEqual(events, [])
+
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), self.assertRaisesRegex(nsp.BuildError, 'which holds'):
             nsp.main(nsp.parse_args([str(self.dump), '--title-id', '0100000000010000']))
@@ -248,7 +377,7 @@ class Survey(Base):
         d = self.dump.parent / 'alias'; version(d / 'base', main=nso('ab' * 16)); version(d / f'updates/{VER}', main=nso('cd' * 16))
         app, fam = nsp.scan_dump(d)
         seen, prof = [], mock.Mock(id='P', builds=lambda: {'v0': {'main': 'ab' * 16}})
-        games = mock.Mock(by_build=lambda bid: seen.append(bid) or (prof if bid == 'ab' * 16 else None))
+        games = mock.Mock(by_build=lambda bid, skip=(): seen.append(bid) or (prof if bid == 'ab' * 16 else None))
         with mock.patch.dict(sys.modules, {'game': games}), mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'find_nx_extract', side_effect=AssertionError('built nx_extract')):
             self.assertEqual(nsp.same_build(d, app, fam, None, REPO, {}), (prof, 'v0', 'ab' * 16))
             self.assertEqual(seen, ['cd' * 16, 'ab' * 16])

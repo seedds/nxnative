@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include "save_sync.h"
 
+#define MATERIALIZE_S 60   // the longest a fetch waits for a listed iCloud item to download: the launcher's report (SaveSyncReport.waitMs); the host stops waiting sooner at the mount (FETCH_MS)
+
 int front_save_sync_fetch(const char *cloud, const char *local) {
     @autoreleasepool {
         NSFileManager *fm = [NSFileManager new];
@@ -15,7 +17,28 @@ int front_save_sync_fetch(const char *cloud, const char *local) {
         // Not there, not even as the placeholder iCloud lists for a file it has not downloaded (.<name>.icloud): no save in the cloud yet
         NSString *placeholder = [src.URLByDeletingLastPathComponent URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.icloud", src.lastPathComponent]].path;
         if (![fm fileExistsAtPath:src.path] && ![fm fileExistsAtPath:placeholder]) return 0;
-        [fm startDownloadingUbiquitousItemAtURL:src error:nil];   // asked for now; the coordinated read waits for it (save_sync.c gives it a time limit)
+        // Listed but not on this device: asked for, and waited for until the file is here or iCloud says the download failed (offline, say), so a fetch with no
+        // network ends at once instead of at the caller's time limit. The coordinated read below is what Apple's documentation says downloads the item; that it can
+        // come back without it (a first start that played this device's save, a second that brought the cloud's in) is the PR #2180 report, not checked here
+        if (![fm fileExistsAtPath:src.path]) {
+            NSDate *start = [NSDate date];
+            NSError *ask = nil;
+            BOOL asked = [fm startDownloadingUbiquitousItemAtURL:src error:&ask];   // refused: no wait here, the coordinated read is left to download it, as before
+            if (!asked) fprintf(stderr, "[dm] save sync: iCloud did not take the download request (%s); reading the cloud's save as it is\n", ask.localizedDescription.UTF8String ?: "no reason given");
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:MATERIALIZE_S];
+            while (asked && ![fm fileExistsAtPath:src.path]) {
+                NSError *failed = nil;
+                [src removeAllCachedResourceValues];
+                [src getResourceValue:&failed forKey:NSURLUbiquitousItemDownloadingErrorKey error:nil];
+                if (failed || [deadline timeIntervalSinceNow] <= 0) {
+                    fprintf(stderr, "[dm] save sync: the cloud's save did not download in %.0f s%s%s\n", -[start timeIntervalSinceNow],
+                            failed ? ": " : "", failed ? (failed.localizedDescription.UTF8String ?: "no reason given") : "");
+                    return -1;
+                }
+                usleep(150 * 1000);
+            }
+            if (asked) fprintf(stderr, "[dm] save sync: the cloud's save downloaded in %.1f s\n", -[start timeIntervalSinceNow]);
+        }
         __block int r = -1;
         NSError *error = nil;
         [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateReadingItemAtURL:src options:0 error:&error byAccessor:^(NSURL *u) {

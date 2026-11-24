@@ -1,0 +1,39 @@
+# Trails into Reverie, NIS America v1.0.4 (v262144), PhyreEngine, SDK 14.3.0.
+
+# ---- Identity ----
+title_id	01008CB0156BC000
+program_id	01008CB0156BC000
+
+# ---- App ----
+name	The Legend of Heroes: Trails into Reverie
+ipa	TheLegendOfHeroesTrailsIntoReverie.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.0.4	main=7735c8dd89d145f27c5db81d9e2e783c	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk1 (GLSLC)
+modules	main subsdk0 sdk
+romfs_marker	data/asset/nx/assets.pka
+zip_store	.itf:.opus:.pka:.vfs:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 99 MB of bss (counted as used memory): a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	The Legend of Heroes: Trails into Reverie shaders
+
+# ---- Graphics ----
+
+# The game sets the NVN depth near plane to zero. Match it in the offline pipeline archive.
+depth_mode	zero

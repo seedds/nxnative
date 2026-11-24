@@ -13,8 +13,6 @@ void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; u
 static int blanks_live, blank_w, blank_h; static uint32_t blank_next = 0x80000000u;
 uint32_t dm_native_image_blank(uint32_t w, uint32_t h) { blanks_live++; blank_w = (int)w; blank_h = (int)h; return ++blank_next; }
 void dm_native_image_blank_free(uint32_t handle) { if (handle >> 31) blanks_live--; }
-// The big-stack take-overs' stubs (HLE_FORCE_BIG) jump here with the implementation in x16; off a guest stack the real entry calls it straight
-__asm__(".text\n.p2align 2\n.globl _dm_bigstack_enter\n_dm_bigstack_enter:\n    br x16\n");
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {
@@ -30,6 +28,18 @@ static void *hook(const char *name) {
     return count == 1 ? fn : NULL;
 }
 int main(void) {
+    // Resolve the exact public SDK symbols: missing the getter let the guest open stpl:u from its input loop even after the Initialize takeover.
+    void (*set_features)(uint32_t) = hook("_ZN2nn10streamplay25SetSupportedHidFeatureSetENS_4util10BitFlagSetILi32ENS0_13HidFeatureTagEEE");
+    uint32_t (*get_features)(void) = hook("_ZN2nn10streamplay25GetSupportedHidFeatureSetEv");
+    if (set_features && get_features) {
+        CHECK(get_features() == 0, "no guest HID features configured initially");
+        const uint32_t masks[] = {8, 1, 0, 0x80000000u, 0xffffffffu, 0};
+        for (size_t i = 0; i < sizeof masks / sizeof *masks; i++) {
+            set_features(masks[i]);
+            CHECK(get_features() == masks[i], "HID feature mask round-trips, including clearing and high bits");
+        }
+        CHECK(unexpected == 0, "streamplay feature queries need no guest service or event");
+    }
     // bool arguments are widened as hle.h requires (only the low 8 bits count); the returns are bools in w0, not nn::Result
     unsigned (*check)(unsigned) = hook("_ZN2nn4pctl32CheckFreeCommunicationPermissionEb");
     unsigned (*begin)(unsigned) = hook("_ZN2nn4pctl25TryBeginFreeCommunicationEb");

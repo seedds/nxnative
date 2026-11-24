@@ -9,8 +9,9 @@ A Switch 2 game: update v327680 (1.1.1) over the base game, SDK 20.5.17 built fo
 | `mem_alias 0x500000000`, `mem_reserve 0x650000000` | [`game.tsv`](game.tsv) | `nninitStartup` asks `StandardAllocator` for 16 GB of address space, and this SDK keeps its 1 GB node area (no node-area cut matches it): with a 16 GB alias region `CentralHeap::Init` aborted (`sdk+0x13f698`) |
 | `mem_stack 0x10000000`, `app_pool 0x240000000` | `game.tsv` | Splatoon Raiders' values, the Switch 2's 9 GB, not measured here |
 | `sys_resource 0x2000000` | `game.tsv` | the NPDM declares 32 MB, so virtual address memory is on |
-| `render_cond on` | `game.tsv` | as the console does. Off, a rally looks the same and takes about 0.7 of 9.5 ms more GPU (one run each, with another job on the Mac) and logs a red line |
 | `pad_layout full` | `game.tsv` | the game asks for most of the controller |
+
+Render conditions, which the host evaluates for every game ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay); until 2026-11-12 the profile key `render_cond`): as the console does. Off, a rally looks the same and takes about 0.7 of 9.5 ms more GPU (one run each, with another job on the Mac) and logs a red line.
 
 The NRO and the archive need no key: the NSP script captures one and `shader_split.py` reads the other (below).
 
@@ -22,6 +23,8 @@ The NRO and the archive need no key: the NSP script captures one and `shader_spl
 - Movies: VP9 WebM with Vorbis, up to 2560x1440 at 60 fps; the title movie is 368 MB. The game reads them itself from the archive and feeds the SDK's extractor (`AppendMediaSourceData`).
 
 ## Shaders
+
+- **Resolved: duplicate representative labels (2026-11-18, [issue #2924](https://github.com/seedds/nxnative/issues/2924#issuecomment-6950980547)).** A fresh macOS split of the registered v327680 dump and its captured `nro0.nro` changes 36 map rows from BNSH blocks at `0x176e000` and `0x1793000` (22 source labels, plus 14 rows with only a package index change). All 96 embedded occurrences reduce to 40 keys with byte-identical complete controls and code within each key. All 35,045 package records match the prior split byte for byte by key. Shader facts and both pair tables match the profile. A full Mac shader build and host rebuild on macOS 27.2.1 with Xcode 27.2 pass on chain `cf3be507e0eb`. The library stamp matches the refreshed profile. Gameplay and iPhone verification remain open for this refresh.
 
 35,045 in [`shader_map.tsv`](shader_map.tsv): 26,096 from models (one FSHA each), 5,331 from `ssg_system`, 3,316 from effects, 138 from `shader/`, 124 from layouts, 40 in the NRO's data. All translate. A full build takes about an hour on an M4 Pro with another job running (not timed from an empty cache in one go). [`pso_manifest.tsv`](pso_manifest.tsv) (1,351 lines) is one Mac session: boot, the movie, the menus, a match.
 
@@ -49,10 +52,12 @@ The work folder `0400D4201C6EA000-work` beside the dump has `run/boot.sh <log> <
 
 ## Found on this game
 
+- [The split shader tables differ from a game profile's](../../../docs/reference/packing.md#the-split-shader-tables-differ-from-a-game-profiles).
 - [A game that decodes its code at run time](../../../docs/reference/services.md#a-game-that-decodes-its-code-at-run-time) and [NRR version 1](../../../docs/reference/services.md#nrr-version-1).
 - [One scrambled archive indexed by the NRO](../../../docs/reference/shaders.md#one-scrambled-archive-indexed-by-the-nro).
-- [A shared font larger than the game's font engine memory](../../../docs/reference/services.md#a-shared-font-larger-than-the-games-font-engine-memory): a null pointer in `nn::font` at boot.
+- [Shared font stand-ins sized for the game's font engines](../../../docs/reference/services.md#shared-font-stand-ins-sized-for-the-games-font-engines): a null pointer in `nn::font` at boot (resolved: the host's fonts load in the game's own 50 KB engine).
 - [A thread's arguments in slots its starter reuses after connecting to a service](../../../docs/reference/threads.md#a-threads-arguments-in-slots-its-starter-reuses-after-connecting-to-a-service): a crash at boot about once in a dozen runs.
 - [The submission-ready event counted as packets](../../../docs/reference/movies.md#the-submission-ready-event-counted-as-packets): black movies, then corrupt frames.
 - [A passthrough geometry shader that writes the layer](../../../docs/reference/shaders.md#a-passthrough-geometry-shader-that-writes-the-layer): a blue wash over every 3D scene with atmosphere.
 - [Null vertex buffers bound past stream 15](../../../docs/reference/rendering.md#null-vertex-buffers-bound-past-stream-15).
+- [One libvpx setup for both decoder paths](../../../docs/reference/movies.md#one-libvpx-setup-for-both-decoder-paths): chopped sound in the opening movie, gone before the decoder had its own thread and not run since; one or two short gaps near its start are open.

@@ -21,6 +21,10 @@ MAGIC = b'DMROMFS1'
 HEAD = struct.Struct('<8sQQQ')
 ENT = struct.Struct('<QQIHBB')
 GUEST_NAME = 'org.d2rmobile.guest-name'
+# Files a dump tool leaves in every folder of the game's tree, which are not game files: an FTP dump keeps the server's listing as .listing (as the NUP spec's §6.3 says a producer
+# may). Packed, a game that lists a folder sees one more entry: Nintendo Switch Sports Resort cuts each name at its first '.', loaded "Parameter/<folder>/" with an empty name, got
+# no resource and crashed at main+0x9d7c60. A folder's artifacts are left out of the image (and out of a NUP's, pack_nup.py), as they are of the survey's file list
+ARTIFACTS = {b'.listing'}
 
 
 def guest(parent, name):
@@ -33,7 +37,8 @@ def children(path):
     out = []
     with os.scandir(path) as it:
         for e in it:
-            out.append((guest(path, e.name).encode(), e.path, e.is_dir(follow_symlinks=True)))
+            name, isdir = guest(path, e.name).encode(), e.is_dir(follow_symlinks=True)
+            if isdir or name not in ARTIFACTS: out.append((name, e.path, isdir))
     out.sort()
     return out
 
@@ -110,6 +115,20 @@ def copy_file(path, out):
     with open(path, 'rb') as f:
         while b := f.read(8 << 20): out.write(b); n += len(b)
     return n
+
+
+def replace_file(image, key, data):
+    """Replace a file in a private copy of a RomFS image. Keep every other file at its original offset."""
+    _, _, name, length, kind, flags = image.entry(key)
+    if not kind or flags:
+        raise ValueError('RomFS replacement needs an intact file')
+    index = bytearray(image.index)
+    end = image.stat.st_size - len(index)
+    # Relocate the entry so the header/index identity also differs from the stock image.
+    ENT.pack_into(index, key * ENT.size, end, len(data), name, length, kind, flags)
+    with open(image.path, 'r+b') as out:
+        out.seek(end); out.write(data); out.write(index)
+        out.seek(0); out.write(HEAD.pack(MAGIC, end + len(data), len(index), image.count))
 
 
 def pack(src, dst, reuse=False):

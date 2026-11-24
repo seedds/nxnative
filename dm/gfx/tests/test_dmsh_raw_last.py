@@ -3,7 +3,6 @@
 through an address it cannot trace share one zero-initialized word, the helper tries that entry before the hint and the search and records a new choice; and on this Mac's GPU the translated helper reads
 what the pool table names on a run of addresses that hit, leave and come back to pools: adjacent pools, a gap, an address above 4 GiB, a hinted chunk, one lookup after another in each lane.
 Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import ast
 import os
 from pathlib import Path
 import re
@@ -18,23 +17,21 @@ from test_dmsh_ampere_mem import EXIT, Translated, inst   # noqa: E402
 from test_dmsh_ampere_alu import STORE, waiting, s2r_tid   # noqa: E402
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
-tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
-scope = {}
-exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n, ast.Assign) and any(getattr(t, 'id', None) == 'MAC_METAL' for t in n.targets)], type_ignores=[]),
-             str(TOOLS / 'dmsh_build.py'), 'exec'), scope)
-MAC_METAL = scope['MAC_METAL']
+sys.path.insert(0, str(TOOLS))
+from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
+from dmsh_rewrite import raw_noinline   # noqa: E402
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
 HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
 
-# The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, 0}, sorted by start,
+# The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, span}, sorted by start,
 # entry 0 empty, unused entries starting at ~0. Pools A and B are adjacent, C lies past a gap and above 4 GiB, and its 2 MiB chunk has a hint naming it (the only pool there; the gap after it is in
 # the chunk too, so the hint's entry does not hold that address)
 RUNNER = '''#import <Metal/Metal.h>
 #include <stdio.h>
 #include <string.h>
-enum { POOLS = 3, WORDS = 1024, LANES = 64, STEPS = 16 };
-static const uint64_t GUEST[POOLS] = {0x10000000ull, 0x10001000ull, 0x200040000ull};
+enum { POOLS = 4, WORDS = 1024, LANES = 64, STEPS = 20 };
+static const uint64_t GUEST[POOLS] = {0x10000000ull, 0x10001000ull, 0x200040000ull, 0x3fffff800ull};
 static uint32_t value(int p, uint64_t off) { return (uint32_t)(p + 1) << 24 | (uint32_t)(off / 4); }
 static int expect(uint64_t a, int64_t *pool) { for (int p = 0; p < POOLS; p++) if (a >= GUEST[p] && a < GUEST[p] + WORDS * 4) { *pool = p; return (int)value(p, a - GUEST[p]); } *pool = -1; return 0; }
 int main(int ac, char **av) { @autoreleasepool {
@@ -46,10 +43,11 @@ int main(int ac, char **av) { @autoreleasepool {
     for (int p = 0; p < POOLS; p++) {
         pool[p] = [d newBufferWithLength:WORDS * 4 options:MTLResourceStorageModeShared]; uint32_t *w = pool[p].contents; for (int i = 0; i < WORDS; i++) w[i] = value(p, i * 4);
         uint64_t s = GUEST[p], end = s + WORDS * 4, delta = pool[p].gpuAddress - s, *ent = (uint64_t *)(t + (p + 1) * 8); ent[0] = s; ent[1] = end; ent[2] = delta;
+        if ((s >> 32) == ((end - 1) >> 32)) t[(p + 1) * 8 + 7] = WORDS * 4;
     }
     uint32_t chunk = (uint32_t)(GUEST[2] >> 32) << 11 | (uint32_t)GUEST[2] >> 21; t[(chunk & 8191) * 8 + 6] = 3 | chunk << 13;   // C's chunk: entry 3
-    // each lane: a word walk in A, B right after A, back to A, a gap, C above 4 GiB (through the hint), the gap after C in its chunk, C again, B, entry 0's range, A
-    static const int64_t SEQ[STEPS][2] = {{0, 0}, {0, 4}, {0, 8}, {1, 0}, {1, 4}, {0, 12}, {-1, 0x10002000}, {2, 0}, {2, 4}, {-1, 0x200041000}, {2, 8}, {1, 8}, {-1, 0}, {-1, 0xfff}, {0, 16}, {0, 20}};
+    // D straddles a 4 GiB boundary, so its repeated loads must use the full range. Also try the same low word as A in a different window.
+    static const int64_t SEQ[STEPS][2] = {{0, 0}, {0, 4}, {0, 8}, {1, 0}, {1, 4}, {0, 12}, {-1, 0x10002000}, {2, 0}, {2, 4}, {-1, 0x200041000}, {2, 8}, {1, 8}, {-1, 0}, {-1, 0xfff}, {0, 16}, {0, 20}, {-1, 0x110000000}, {3, 0}, {3, 0x800}, {-1, 0x400000800}};
     id<MTLBuffer> addr = [d newBufferWithLength:LANES * STEPS * 8 options:MTLResourceStorageModeShared], out = [d newBufferWithLength:LANES * STEPS * 4 options:MTLResourceStorageModeShared];
     uint64_t *a = addr.contents; int want[LANES * STEPS];
     for (int lane = 0; lane < LANES; lane++) for (int s = 0; s < STEPS; s++) {
@@ -84,7 +82,9 @@ class RawLast(Translated):
         calls = re.findall(name + r'\([^;]*, (_\d+)\);', main)
         self.assertEqual(calls, [word.group(1)] * 2)
         helper = msl[m.end():msl.index('\n}\n', m.end())]
-        self.assertLess(helper.index(last), helper.index('>> uint(21)'))   # the last entry first, then the 2 MiB chunk's hint
+        self.assertLess(helper.index(last), helper.index('dmsh_raw_find('))   # the last entry first, then the search, one function for every access
+        find = msl[msl.index('dmsh_raw_find('):msl.index(name + '(')]
+        self.assertIn('>> uint(21)', find)   # which tries the 2 MiB chunk's hint first
         self.assertRegex(helper, re.escape(last) + r' = uint\(_\d+\);')   # a hint or search records its choice
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
@@ -93,18 +93,21 @@ class RawLast(Translated):
         m = HELPER.search(msl)
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
-                  f'        out[id * 16 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
-        with tempfile.TemporaryDirectory() as w:
-            w = Path(w)
-            (w / 'k.metal').write_text(kernel)
-            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
-            (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
-            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+                  '{\n    uint last = 0u;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
+                  f'        out[id * 20 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
+        noinline = raw_noinline(kernel)
+        self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
+        for form, kernel in (('inline', kernel), ('noinline', noinline)):   # as spirv-cross writes it, and with the search built once (dmsh_rewrite.raw_noinline)
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(kernel)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertIn('bad 0 of 1280', out.stdout, form + ': ' + out.stdout + out.stderr)
 
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
@@ -164,19 +167,22 @@ class RawVector(Translated):
         # each step's word 0 when words 1..3 are the next three of its pool (value() counts words), 0 where it reads no pool; the runner's addresses keep all four in one pool
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 16; s++)\n    {\n        int lo = int(addr[id * 16 + s].x), hi = int(addr[id * 16 + s].y);\n'
+                  '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
                   f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, map, last, vec);\n'   # a miss must not leave them as they were
-                  '        out[id * 16 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
-        with tempfile.TemporaryDirectory() as w:
-            w = Path(w)
-            (w / 'k.metal').write_text(kernel)
-            r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr[-3000:])
-            subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
-            (w / 'r.m').write_text(RUNNER)
-            subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
-            out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
-            self.assertIn('bad 0 of 1024', out.stdout, out.stdout + out.stderr)
+                  '        out[id * 20 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
+        noinline = raw_noinline(kernel)
+        self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
+        for form, kernel in (('inline', kernel), ('noinline', noinline)):   # as spirv-cross writes it, and with the search built once (dmsh_rewrite.raw_noinline)
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(kernel)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(RUNNER)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertIn('bad 0 of 1280', out.stdout, form + ': ' + out.stdout + out.stderr)
 
 
 

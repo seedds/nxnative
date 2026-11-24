@@ -2,12 +2,17 @@
 """Ampere ALU instructions through the offline translator (dmsh_xlate, arch sm86), on registers the translator cannot fold, their result stored to shared memory so
 that it is kept: BREV, and HADD2 / HMUL2 with an immediate (test_dmsh_ampere_mem.py's Pokopia class has those two on constants, a negative immediate's sign, F2FP.MERGE_C,
 F2I from a half, UP2UR, MEMBAR and ERRBAR). Needs DMSH_TEST_XLATE (the translator) like the other translator tests."""
-import re, sys, unittest
+import re, shutil, sys, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_ampere_mem import EXIT, Translated, inst
 
 STORE = (0x000fe8000000c800, 0x0000080609008388)   # STS.U32 [R9 * 16 + 8], R6 (Mario Kart World f94552a2a2bff505): the sink, R9 the thread index
+
+
+# The 64-bit address of storage buffer 0 in R8:R9, as agl's analysis shaders and Bananza's muck normal pass take theirs
+ULDC_SB0 = (0x000fe20000000a00, 0x0000040000047ab9)   # ULDC.64 UR4, c[0][0x10]: storage entry 0 of an NVN2 compute c0 with one storage slot
+MOV_R8_UR4, MOV_R9_UR5 = (0x000fe20008000000, 0x0000000400087c02), (0x000fe20008000000, 0x0000000500097c02)
 
 
 def waiting(i): return (i[0] | 0x3f << 52, i[1])   # the instruction waits on every scoreboard (control bits 116..121): it reads what an S2R before it wrote
@@ -24,13 +29,59 @@ class Alu(Translated):
 
 class FloatRed(Translated):
     """RED.F32.FTZ.RN (0x98e, type 3 at bits 73..76, add): agl's scene analysis sums luminance with it (Ocarina of Time's probe_analyze 6e28359aa3558f61). Dropped with a log line, the exposure the CPU
-    reads back from those buffers was several times too bright. A compare-and-swap loop on the word"""
+    reads back from those buffers was several times too bright. A compare-and-swap loop on the word. On a storage buffer, dmsh_rewrite.float_add_msl makes the loop one native
+    atomic add: test_storage_add_is_one_native_add fails when the translator or spirv-cross changes the loop's shape so that the rewrite no longer finds it (PR #1930)"""
     RED = (0x000fe20000000000 | 3 << 9, 0x0000000608ff098e)   # RED.F32.FTZ.RN [R8], R6: (control and type, opcode and registers)
+    RED_E = (RED[0] | 1 << 8, RED[1])   # RED.E.F32.FTZ.RN [R8.64], R6: the 64-bit address of that storage buffer, as agl's analysis shaders add into theirs
 
     def test_adds_in_a_loop(self):
         msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
         self.assertIn('atomic_compare_exchange_weak_explicit', msl)
         self.assertNotIn('atomic_fetch_add', msl)
+
+    def test_storage_add_is_one_native_add(self):
+        import dmsh_rewrite
+        code = b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5)) + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), self.RED_E)) + inst(*EXIT)
+        for reduced in (True, False):   # dmsh_build's default (an add) and XLATE_REDUCED=0 (spvFAdd)
+            with self.subTest(reduced=reduced):
+                msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0], reduced=reduced)
+                self.assertIn('cp_s0', msl)   # traced to the storage buffer, not the memory pool table
+                out = dmsh_rewrite.float_add_msl(msl)
+                self.assertIn('static __attribute__((noinline)) void dm_atomic_add_f32', out)
+                self.assertRegex(out, r'dm_atomic_add_f32\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+\);')
+                self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
+
+
+class HalfRed(Translated):
+    """RED.E.ADD.F16x2.FTZ.RN (0x98e, type 4 at bits 73..75): Donkey Kong Bananza's muck normal pass (be71d8f78b52e62f, e5f7ed151822e560) adds each face normal into its vertices'
+    half4 normal, two halves per word. Dropped with a log line, the normals stayed the zeros the mesh pass writes, and normalizing them made NaN: black blots in the scene"""
+    RED = (FloatRed.RED[0] & ~(7 << 9) | 4 << 9, FloatRed.RED[1])   # RED.F16x2.FTZ.RN [R8], R6
+
+    RED_E_PT = (RED[0] | 1 << 8, RED[1] | 7 << 12)   # RED.E.F16x2.FTZ.RN [R8.64], R6, unpredicated (PT)
+
+    def test_adds_in_a_loop(self):
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in (s2r_tid(6), s2r_tid(8), s2r_tid(9), self.RED)) + inst(*EXIT))
+        self.assertNotIn('Invalid reduction type', ' '.join(self.res.get('notes', [])))
+        self.assertIn('atomic_compare_exchange_weak_explicit', msl)
+
+    LDG_R6 = (0x000fe2200c1e1900, 0x0000043f08067981)   # LDG.E R6, [R8.64 + 4]: the value from the word after the sum, so the GPU unpacks it (an immediate would be folded)
+
+    def on_gpu(self, value, word, threads):
+        """The translator's own kernel on this Mac's GPU: threads each add the half pair value (read from storage word 1) into storage word 0, which starts at word; word 0 after"""
+        import metal_kernel
+        code = b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5, self.LDG_R6)) + inst(*waiting(self.RED_E_PT)) + inst(*EXIT)
+        msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0])
+        self.assertNotIn('if (false)', msl)
+        return metal_kernel.run(msl, 'main0', [word, value], threads, argument_buffer=True)[0]
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs Metal')
+    def test_sums_on_gpu(self):   # 1,024 threads each add (1.0, 0.5): exactly (1024.0, 512.0)
+        self.assertEqual(self.on_gpu(0x38003c00, 0, 1024), 0x60006400)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('xcrun'), 'needs Metal')
+    def test_rounds_to_nearest_even_on_gpu(self):
+        # (2048.0, 2048.0) + (3.0, 1.5): 2051 is a tie between 2050 and 2052, the even one is 2052 (0x6802); 2049.5 rounds to 2050 (0x6801). Toward zero would give 2050 and 2048
+        self.assertEqual(self.on_gpu(0x3e004200, 0x68006800, 1), 0x68016802)
 
 
 class DeadChannel(Translated):
@@ -122,6 +173,41 @@ class HalfImmediate(Alu):
         msl = self.kept(self.HMUL2, srcs=(6,))
         self.assertIn('spvFMul', msl)
         self.assertRegex(msl, r'\b2\.0\b')
+
+
+class HalfFmaAlias(Alu):
+    """HFMA2.MMA shares decoding and result modifiers with ordinary HFMA2.
+    These are synthetic translation checks, including forms absent from the Orin recording."""
+    R2UR = (0x000fe200000e0000, 0x00000000130473c2)   # R2UR UR4, R19
+
+    def test_all_operand_forms_and_result_modifiers(self):
+        for form in range(1, 8):
+            slot32 = (21 << 32 if form == 1 else 0x3c003c00 << 32 if form in (2, 4) else
+                      (3 << 54 | 0x10 << 38) if form in (3, 5) else 4 << 32)
+            lo = 0x031 | form << 9 | 7 << 12 | 6 << 16 | 19 << 24 | slot32
+            for modifier in (0, 1 << (77 - 64), 1 << (78 - 64), 1 << (79 - 64), 1 << (80 - 64)):
+                with self.subTest(form=form, modifier=modifier):
+                    hi = 0x000fe20000000014 | modifier   # the register in the 64-bit slot is R20
+                    normal = self.kept(self.R2UR, (hi, lo), srcs=(19, 20, 21))
+                    if modifier == 1 << (78 - 64):
+                        self.assertNotIn('fma(half(', normal)
+                    else:
+                        self.assertIn('fma(half(', normal)
+                    normal_info = self.res
+                    mma = self.kept(self.R2UR, (hi, lo | 4), srcs=(19, 20, 21))
+                    self.assertEqual(mma, normal)
+                    self.assertEqual(self.res, normal_info)
+
+    def test_f32_source_in_each_slot_uses_float_fma(self):
+        lo = 0x0000001513067231
+        hi = 0x000fe20000000014
+        for source, words in (('A', (hi | 1 << (74 - 64), lo)),
+                              ('B', (hi, lo | 1 << 60)),
+                              ('C', (hi | 1 << (81 - 64), lo))):
+            with self.subTest(source=source):
+                msl = self.kept(words, srcs=(19, 20, 21))
+                self.assertIn('fma(', msl)
+                self.assertNotIn('fma(half(', msl)
 
 
 class GlobalMemory(Alu):
@@ -240,6 +326,36 @@ class DirectedRounding(Alu):
         self.assertNotIn('& 65535', self.kept(self.F2F_RN, srcs=(19,)))
 
 
+class Frnd(Alu):
+    """FRND rounds a float to an integer value; FRND.F16 does so on a half (PRAGMATA: 65 shaders did not translate). The half is rounded in 32 bits and packed, which is
+    exact. PRAGMATA's encodings (000ff000001008000000000400057307 and, with .FLOOR, 000e2600001048000000000c00257307) with the registers of this file"""
+    F16 = (0x000fe20000100800, 0x0000001300067307)        # FRND.F16 R6, R19
+    F16_FLOOR = (0x000fe20000104800, 0x0000001300067307)  # FRND.F16.FLOOR R6, R19
+    F32 = (0x000fe20000201000, 0x0000001300067307)        # FRND R6, R19
+
+    def test_a_half_is_unpacked_rounded_and_packed(self):
+        msl = self.kept(self.F16, srcs=(19,))
+        self.assertRegex(msl, r'float2\(as_type<half2>\(as_type<uint>\(_\d+\)\)\)\.x')
+        self.assertRegex(msl, r'half2\(float2\(_\d+, 0\.0\)\)')
+        self.assertIn('rint(', msl)
+
+    def test_a_half_floor(self):
+        self.assertIn('floor(', self.kept(self.F16_FLOOR, srcs=(19,)))
+
+    def test_a_float_stays_a_float(self):
+        msl = self.kept(self.F32, srcs=(19,))
+        self.assertIn('rint(', msl); self.assertNotIn('half2', msl)
+
+
+class I2fImmediate(Alu):
+    """I2F of an immediate (form 4): bits 32..63 are the value, so 60..62 select no byte. PRAGMATA's I2F.F16.S32 of -2 (000e620000200c00fffffffe000f7906, 3 compute
+    shaders) was refused as a byte select of a 32-bit source"""
+    I2F_F16_M2 = (0x000fe20000200c00, 0xfffffffe00067906)   # I2F.F16.S32 R6, -2
+
+    def test_translates(self):
+        self.kept(self.I2F_F16_M2)
+
+
 class CompareFtz(Alu):
     """FSETP / FSET .FTZ (bit 80): a denormal operand compares as zero, as on NVIDIA; Apple's GPUs keep denormals. Mario Kart World's deferred lighting 635061c90d75a8d1
     normalises its four depth-weighted samples by 1 / sum only where FSETP.NEU.FTZ says sum != 0: a denormal sum passed, its reciprocal overflowed, and the NaN came out
@@ -284,6 +400,37 @@ class Vote(Alu):
 
     def test_vote_writes_the_lane_predicate(self):
         self.assertIn('simd_any', self.kept(self.FSETP, self.VOTE, self.MOV_P0, srcs=(6, 19, 20)))
+
+
+class SingleInstructionSemantics(Alu):
+    """Constant inputs the translator folds, the result stored (R6). From uncraftablexd's offline per-instruction tester (PR #1800: single instructions with nvdisasm-checked
+    encodings run on the GPU against an interpreter on Mesa NAK's folds).
+    - SETP's two results: Pd1 reads the accumulator P as it was, also when Pd0 is P (Pd1 was computed after Pd0 had been written).
+    - IMAD has no negation of B: bit 63 (B a register, constant or uniform register) and bit 75 (B the 64-slot register of forms 2, 3, 7) are not printed
+      by nvdisasm and are not modifiers; B was negated."""
+    SEL_P0 = (0x000fc200040000ff, 0x00000001ff067807)   # SEL R6, RZ, 0x1, !P0: R6 = P0 ? 1 : 0
+    P2_TRUE = (0x000fc20003f42070, 0x000000ffff00720c)  # ISETP.EQ.U32.AND P2, PT, RZ, RZ, PT: P2 = true
+    MOV_R5_3 = (0x000fc20000000fff, 0x00000003ff057802)  # MOV R5, 0x3
+
+    def stored(self, *code):
+        m = re.findall(r'\] = (\w+);', self.kept(*code))
+        return m[-1] if m else None
+
+    def test_isetp_second_result_reads_the_old_accumulator(self):
+        isetp = (0x000fc2000104507f, 0x000000ffffff720c)   # ISETP.NE.U32.AND P2, P0, RZ, RZ, P2: P2 = false AND P2, P0 = true AND the old P2 (true)
+        self.assertEqual(self.stored(self.P2_TRUE, isetp, self.SEL_P0), '1u')
+
+    def test_fsetp_second_result_reads_the_old_accumulator(self):
+        fsetp = (0x000fc200010450ff, 0x000000ffffff720b)   # FSETP.NE.AND P2, P0, RZ, RZ, P2
+        self.assertEqual(self.stored(self.P2_TRUE, fsetp, self.SEL_P0), '1u')
+
+    def test_imad_bit_63_is_no_negation(self):
+        imad = (0x000fc200078e02ff, 0x8000000505067224)    # IMAD R6, R5, R5, RZ with bit 63 set: 9, not -9
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '9u')
+
+    def test_imad_bit_75_of_the_c_slot_forms_is_no_negation(self):
+        imad = (0x000fc200078e0a05, 0x0000000105067424)    # IMAD R6, R5, R5, 0x1 (form 2) with bit 75 set: 10, not -8
+        self.assertEqual(self.stored(self.MOV_R5_3, imad), '10u')
 
 
 if __name__ == '__main__':

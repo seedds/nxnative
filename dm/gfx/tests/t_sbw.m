@@ -37,6 +37,16 @@ int main(void){@autoreleasepool{
     uint64_t done=g_done;gw_commit(done+1000);
     CHECK("a running submission's wide write is seen by the next",gw_live(base+0x41000,base+0x41010));
     CHECK("and not elsewhere",!gw_live(ub,ub+0x100));
+    // The commit reads the pages this submission noted, not the whole page set (Ocarina of Time commits about 30 submissions a frame): a GPU page goes into the running writes,
+    // a page only a report wrote does not (the report counts by its own 16 bytes), and a page of an earlier submission is not met again
+    pend_reset();{const uint64_t a=0x7300000000ull,b=0x7300100000ull,r=0x7300200000ull;
+    sbw_note(a,16,SBW_GPU);sbw_note(b+0x10,0x1800,SBW_GPU);sbw_note(r,16,SBW_REPORT);sbw_note(a+8,8,SBW_GPU);
+    CHECK("the submission lists each page it noted once",g_nsbw==4&&g_sbwp[g_sbw_list[0]].page==a>>12&&g_sbwp[g_sbw_list[1]].page==b>>12&&g_sbwp[g_sbw_list[2]].page==(b>>12)+1&&g_sbwp[g_sbw_list[3]].page==r>>12);
+    gw_commit(done+900);
+    CHECK("its GPU pages are running writes",gw_live(a+0x800,a+0x810)&&gw_live(b+0x1000,b+0x1010));
+    CHECK("a page only a report wrote is not",!gw_live_in(g_gwx,GW_BITS,r+0x100,r+0x110));
+    pend_reset();sbw_note(ub+0x3000,16,SBW_GPU);
+    CHECK("the next submission lists only its own pages",g_nsbw==1&&g_sbwp[g_sbw_list[0]].page==(ub+0x3000)>>12);}
     // A write of 16 MB or more is kept whole: a uniform block elsewhere stays readable, and the same range coming back takes no new slot
     pend_reset();uint64_t wide=0x7100000000ull,big=0x2000000;
     sbw_note(wide,big,SBW_GPU);gw_commit(done+1001);
@@ -52,7 +62,10 @@ int main(void){@autoreleasepool{
     for(uint64_t i=0;i<9000;i++)rc_note(0x7100000000ull+i*16,2);
     rc_note((uint64_t)&rec[0],1);
     CHECK("a timestamp report after 9000 query reports counts as 0",rc_value((uint64_t)&rec[0],&x)&&x==0);
-    CHECK("a record with no report reads memory",rc_value((uint64_t)&rec[1],&x)&&x==0);
+    CHECK("a record with no report is unknown while a GPU write anywhere still runs (above)",!rc_value((uint64_t)&rec[1],&x));
+    uint64_t was=g_done;g_done=done+100000;   // every write above has landed
+    CHECK("once nothing that could write it runs, a record with no report reads memory",rc_value((uint64_t)&rec[1],&x)&&x==0);
+    g_done=was;
     CHECK("a query's report stays unknown",!rc_value(0x7100000000ull+8999*16,&x)&&!rc_value(0x7100000000ull,&x));
     (void)q;for(uint64_t i=0;i<300;i++)rc_note((uint64_t)&big+0x1000+i,1);
     CHECK("more timestamp reports than the first table held",rc_value((uint64_t)&big+0x1000,&x)&&x==0);
@@ -81,6 +94,49 @@ int main(void){@autoreleasepool{
     rc_note((uint64_t)rec,1);
     CHECK("a later timestamp restores known zero after the opaque writer",rc_value((uint64_t)rec,&x)&&x==0);
     rc_forget();atomic_store(&g_rc_complete,completed);}
+    pend_reset();
+    // Set-associative running-write table: up to GW_WAYS distinct pages hashing to the same set must not falsely taint another page in that set,
+    // and an overflow (> GW_WAYS live pages in one set) must expire once its own fence completes rather than latching forever onto later single-page writes.
+    {static uint64_t victim[2]={1,0};
+    uint64_t vaddr=(uint64_t)(uintptr_t)&victim[1], vpg=vaddr>>12; unsigned vslot=gw_slot(vpg);
+    uint64_t coll[GW_WAYS+1]; int nc=0;
+    for(uint64_t pg=0x7400000ull; nc<GW_WAYS+1; pg++) if(pg!=vpg && gw_slot(pg)==vslot) coll[nc++]=pg;
+    uint64_t was_done=g_done, was_all=g_gw_all; g_gw_all=0; memset(g_gwx,0,sizeof g_gwx);
+    uint64_t f0=was_done+100;
+    for(int i=0;i<GW_WAYS;i++) gw_put(coll[i]<<12,(coll[i]<<12)+64,f0,was_done);
+    int all_coll_live=1; for(int i=0;i<GW_WAYS;i++) all_coll_live&=gw_live(coll[i]<<12,(coll[i]<<12)+64);
+    uint64_t x=~0ull;
+    CHECK("GW_WAYS colliding live pages are all tracked",all_coll_live);
+    CHECK("an unrelated page in the same set is not tainted by GW_WAYS collisions",!gw_live(vaddr,vaddr+8)&&rc_value(vaddr,&x)&&x==0);
+    // Overflow the set with an (GW_WAYS+1)-th live page at f0, then keep writing one page at f0+1 before f0 completes.
+    gw_put(coll[GW_WAYS]<<12,(coll[GW_WAYS]<<12)+64,f0,was_done);
+    CHECK("more than GW_WAYS live pages in one set conservatively taint the set",gw_live(vaddr,vaddr+8));
+    gw_put(coll[0]<<12,(coll[0]<<12)+64,f0+1,was_done);
+    g_done=f0;
+    CHECK("overflow fence expires once f0 completes even while one page stays live at f0+1",!gw_live(vaddr,vaddr+8)&&gw_live(coll[0]<<12,(coll[0]<<12)+64)&&rc_value(vaddr,&x)&&x==0);
+    g_done=was_done; g_gw_all=was_all; memset(g_gwx,0,sizeof g_gwx);}
+    pend_reset();
+    // An inline update remembered in g_um is live for gw_live (including rc_source) without entering g_gwx (which would refuse partial uniform shadows).
+    {static uint64_t rec[2]={1,0}; uint8_t payload[8]={9,8,7,6,5,4,3,2};
+    uint64_t addr=(uint64_t)(uintptr_t)&rec[1], was_done=g_done, was_all=g_gw_all, x=~0ull;
+    g_gw_all=0; memset(g_gwx,0,sizeof g_gwx);
+    um_put(addr,addr+8,payload,was_done+150,was_done);
+    CHECK("an inline update in g_um is live for gw_live and rc_value",gw_live(addr,addr+8)&&!rc_value(addr,&x));
+    CHECK("an inline update in g_um does not taint g_gwx",!gw_live_in(g_gwx,GW_BITS,addr,addr+8));
+    g_done=was_done+150;
+    CHECK("once its fence completes, the g_um page is no longer live",!gw_live(addr,addr+8)&&rc_value(addr,&x)&&x==0);
+    g_done=was_done; g_gw_all=was_all; memset(g_gwx,0,sizeof g_gwx); if(g_um) memset(g_um,0,UM_N*sizeof *g_um);}
+    pend_reset();
+    // Large scenes with thousands of small writable SSBOs (e.g. ~7,500 15 KB terrain chunks in Donkey Kong Bananza's 3D overview map) touch >16,384 unique 4 KB pages in one submission.
+    // g_sbwp grows dynamically while keeping load <= 50% and preserves g_sbw_list for gw_commit.
+    {uint64_t arena=0x8140000000ull, other=0x8021f3e100ull, was_done=g_done, was_all=g_gw_all;
+    g_gw_all=0; memset(g_gwx,0,sizeof g_gwx);
+    for(int i=0;i<6000;i++) sbw_note(arena+(uint64_t)i*0x4000ull,0x3a98,SBW_GPU);   // 24,000 distinct 4 KB pages
+    CHECK("24,000 distinct written pages in one submission grow g_sbwp without overflow",!g_sbw_over&&g_nsbw==24000&&g_sbw_cap>=48000);
+    CHECK("written chunk pages are tracked while an unrelated uniform block is clean",sbw_hits(arena,arena+64)&&sbw_hits(arena+5999ull*0x4000ull,arena+5999ull*0x4000ull+64)&&!sbw_hits(other,other+0x70));
+    gw_commit(was_done+200);
+    CHECK("committing 24,000 written pages does not taint g_gw_all",g_gw_all==0&&gw_live(arena,arena+64)&&gw_live(arena+5999ull*0x4000ull,arena+5999ull*0x4000ull+64));
+    g_done=was_done; g_gw_all=was_all; memset(g_gwx,0,sizeof g_gwx);}
     pend_reset();
     printf("t_sbw: %d checks, %d failed\n",checks,failed);return failed!=0;
 }}

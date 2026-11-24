@@ -1,6 +1,6 @@
 // Texture storage against shapes the original NVN driver gives (digitalhivehub ran Tears of the Kingdom's driver under emulation, nxnative PR #11; MacNativeGames 3c482a7):
 // cube array depth counts layer-faces, packaged byte 0 = block height (low nibble) and block depth (high nibble), linear storage (LINEAR or LINEAR_RENDER_TARGET alone)
-// counts pixel rows, also for BC. pkg is byte 0 + 1 (0 = automatic), as nvn_texdesc stores it. The MINIMAL_LAYOUT shapes (flag 0x200) are the driver's from PR #11's t_tex,
+// counts pixel rows, also for BC. pkg is the first 12 layout bits + 1 (0 = automatic), as nvn_texdesc stores it. The MINIMAL_LAYOUT shapes (flag 0x200) are the driver's from PR #11's t_tex,
 // the array and packaged ones from TotK 1.2.1's driver (sdk b9046c31, GitHub issue #183): automatic blocks only when they add no padding to the layer, else 1 GOB. The sparse (flag 0x20) shapes are block heights read off a game's guest bytes instead: a sparse texture at least one 64 KB tile wide and high
 // takes its tile's block height (384x384 DXT5, 1350x270 BGRA8), a smaller one keeps the automatic one (192x160 DXT5 and 384x384 DXT1, Yoshi's Crafted World)
 #include <stdio.h>
@@ -8,6 +8,12 @@
 
 typedef struct { const char *what; int target, format, flags; unsigned w, h, depth, levels, stride; int pkg; uint64_t size, layer, off1; unsigned align, th, td; } shape_t;
 static const shape_t driver[] = {
+    // Original Bayonetta Origins SDK arithmetic oracle: H3/D0/W4, no SPARSE flag.
+    {"packaged ASTC6x6 W4 paper", 1,0x7d,4,2052,1026,1,1,0,0x404,0x120000,0x120000,0,512,3,0},
+    {"packaged ASTC6x6 W0 negative control", 1,0x7d,4,2052,1026,1,1,0,4,0x102000,0x102000,0,512,3,0},
+    {"packaged ASTC6x6 W4 mip tail", 1,0x7d,4,2052,1026,1,8,0,0x404,0x19dc00,0x19dc00,0x120000,512,3,0},
+    {"packaged ASTC6x6 W4 cube tail alignment", 8,0x7d,4,1024,1024,6,8,0,0x404,0x540000,0xe0000,0x90000,512,3,0},
+    {"packaged ASTC6x6 W4 array tail alignment", 4,0x7d,4,2052,1026,3,8,0,0x404,0x4e0000,0x1a0000,0x120000,512,3,0},
     {"cube array RGBA8 4x4 depth 6",                9, 0x25, 0,    4, 4, 6, 1, 0, 0,         3072, 512, 0, 512, 0, 0},
     {"cube array RGBA8 64x64 depth 12, 7 levels",   9, 0x25, 0,    64, 64, 12, 7, 0, 0,      294912, 24576, 16384, 512, 3, 0},
     {"packaged 3D BC4 64^3, 7 levels, byte 0x40",   2, 0x49, 0,    64, 64, 64, 7, 0, 0x41,   163328, 163328, 131072, 512, 0, 4},
@@ -36,7 +42,7 @@ int main(void) {
     int fail = 0, n = (int)(sizeof driver / sizeof *driver);
     for (int i = 0; i < n; i++) {
         const shape_t *c = &driver[i];
-        nvn_texdesc d = {.target = c->target, .format = c->format, .flags = c->flags, .width = c->w, .height = c->h, .depth = c->depth, .levels = c->levels, .stride = c->stride, .pkg_block_h = c->pkg};
+        nvn_texdesc d = {.target = c->target, .format = c->format, .flags = c->flags, .width = c->w, .height = c->h, .depth = c->depth, .levels = c->levels, .stride = c->stride, .pkg_layout = c->pkg};
         nvn_texlayout l; nvn_tex_layout(&d, &l);
         uint64_t off1 = c->levels > 1 ? nvn_tex_level_offset(&d, 1) : 0;
         if (l.size != c->size || l.layer_size != c->layer || off1 != c->off1 || l.align != c->align || l.tileH != c->th || l.tileD != c->td) {

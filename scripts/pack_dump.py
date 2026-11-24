@@ -108,10 +108,11 @@ def control_sources(src):
     except (OSError, Error): edition = False
     variant = ctrl / 'Acd_1' if edition and (ctrl / 'Acd_1/control.nacp').is_file() else ctrl
     nacp = next((p for p in (variant / 'control.nacp', ctrl / 'control.nacp', src / 'control.nacp') if p.is_file()), None)
-    icons = (variant / 'icon_AmericanEnglish.dat', ctrl / 'icon_AmericanEnglish.dat')
-    icon = next((p for p in icons if p.is_file()), None)
-    if icon is None:
-        icon = next((p for d in (variant, ctrl) if d.is_dir() for p in sorted(d.glob('icon_*.dat')) if p.is_file()), None)
+    icon = None
+    for directory in dict.fromkeys((variant, ctrl)):
+        preferred = directory / 'icon_AmericanEnglish.dat'
+        icon = preferred if preferred.is_file() else next((p for p in sorted(directory.glob('icon_*.dat')) if p.is_file()), None)
+        if icon is not None: break
     if icon is None and (src / 'icon.jpg').is_file(): icon = src / 'icon.jpg'
     return {'control.nacp': nacp, 'icon.jpg': icon}
 

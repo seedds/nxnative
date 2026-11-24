@@ -2,7 +2,7 @@
 # Format: see dm/games/README.md
 # Nintendo's sead / agl / gsys engine on SDK 15.3.0 with NVN, the SDK's movie library (subsdk0) for its H.264 / AAC cutscenes (Movie/*.mp4 through movie::Extractor), and an AudioOut of its own for their sound.
 # The shaders are BNSH / BAHS in RomFS (zstd .zs files) and main, as in the other EPD-style games. Input is the pad only (main imports no touch screen); the provisional profile's guesses held,
-# with render_cond added and two host changes in the movie decoder (hle_movie.c: at most 32 audio outputs, one AAC frame per output)
+# with two host changes in the movie decoder (hle_movie.c: at most 32 audio outputs, one AAC frame per output)
 
 # ---- Identity ----
 title_id	0100B99019412000
@@ -35,10 +35,6 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 # the NPDM declares no system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon
 sys_resource	0x0
-
-# ---- Graphics ----
-# the game skips clears under render conditions (SetRenderEnableConditional): without evaluating them every level was black behind its HUD
-render_cond	on
 
 # ---- Shader split (shader_split.py; BNSH / BAHS) ----
 shader_groups	/Model/=model /Pack/=pack /Sequence/=sequence /Banc/=banc /Scene/=scene /Effect/=effect /Sound/=sound /Layout/=layout /Tex/=tex /ViewPlaneIntroSequence/=viewplaneintrose /Env/=env /AI/=ai /Mals/=mals /Lib/=lib /Movie/=movie /RSDB/=rsdb /CameraSequence/=camerasequence /UI/=ui /Lua/=lua /System/=system /Component/=component /Font/=font /GameData/=gamedata /GameParameter/=gameparameter

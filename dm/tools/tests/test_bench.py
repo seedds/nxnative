@@ -25,6 +25,25 @@ class Bench(unittest.TestCase):
             self.assertEqual(s['fps'], 100.0); self.assertEqual(s['frame_p50'], 10.0); self.assertEqual(s['frame_p99'], 10.0); self.assertEqual(s['frame_max'], 50.0)
             self.assertEqual(s['over_budget'], 1)   # only the 50 ms frame is longer than 1.5 × 8.33 ms
 
+    def test_submit_metrics(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'frames.tsv'
+            rows = ['# kind: nvn-per-frame', 'frame\tname\tvalue']
+            for i in range(10):
+                t = 10.0 + i * 0.1
+                draws = 1000 if i < 5 else 2000
+                cpu = 2.0 if i < 5 else 6.0   # 2.0 us/draw then 3.0 us/draw
+                instr = 20_000_000 if i < 5 else 60_000_000   # 20k then 30k instr/draw
+                rows += [f'{i}\t@t_s\t{t:.3f}', f'{i}\t@draws\t{draws}', f'{i}\t@sub_cpu_ms\t{cpu}', f'{i}\t@sub_instr\t{instr}']
+            f.write_text('\n'.join(rows) + '\n')
+            m = bench.submit_metrics(f, 10.5, 11.0)   # frames 5..9
+            self.assertEqual(m['draws_p50'], 2000)
+            self.assertEqual(m['sub_cpu_p50'], 6.0)
+            self.assertEqual(m['sub_us_draw'], 3.0)
+            self.assertEqual(m['sub_minstr_p50'], 60.0)
+            self.assertEqual(m['sub_kinstr_draw'], 30.0)
+            self.assertEqual(bench.submit_metrics(f, 20.0, 21.0), {})
+
     def test_percentile(self):
         xs = list(range(1, 101))
         self.assertEqual(bench.pct(xs, 50), 50); self.assertEqual(bench.pct(xs, 99), 99); self.assertEqual(bench.pct(xs, 100), 100); self.assertIsNone(bench.pct([], 50))
@@ -94,6 +113,24 @@ pathlib.Path('paths.json').write_text(json.dumps(paths))
             with self.assertRaises(FileNotFoundError):
                 bench.run_one(a, '01007EF00011E000', build, {'host': str(root / 'missing-host')}, {'keys': '0:A', 'from': 0, 'secs': 1}, root / 'out', lock)
             self.assertFalse(lock.exists(), 'a failed launch must not block the next benchmark')
+
+    def test_cloud_saves_off(self):   # an inherited DM_SAVE_SYNC would sync the run's scratch save with the player's cloud save (docs/reference/services.md)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); build = root / 'build'; (build / 'patched_v0').mkdir(parents=True); (build / 'extract/v0/RomFS').mkdir(parents=True)
+            save = root / 'source-save'; save.mkdir()
+            a = argparse.Namespace(save=save, pso_archive=None, fps=None, scale=None, env=[], no_hud=True, shots=None)
+            seen = {}
+            def popen(cmd, env, **kw): seen.update(env); raise FileNotFoundError(cmd[0])
+            route = {'keys': '0:A', 'from': 0, 'secs': 1}
+            with mock.patch.dict(os.environ, DM_SAVE_SYNC=str(root / 'cloud'), DM_SAVE_SYNC_CHOICE='cloud'), mock.patch.object(bench.subprocess, 'Popen', popen):
+                with self.assertRaises(FileNotFoundError): bench.run_one(a, '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
+                self.assertEqual(seen['DM_SAVE_SYNC'], '0'); self.assertNotIn('DM_SAVE_SYNC_CHOICE', seen)
+                with contextlib.redirect_stderr(io.StringIO()):
+                    for var, env in (({'host': str(root / 'host'), 'DM_SAVE_SYNC': str(root / 'cloud')}, []), ({'host': str(root / 'host')}, [f'DM_SAVE_SYNC={root}/cloud'])):
+                        with self.assertRaises(SystemExit): bench.run_one(argparse.Namespace(**{**vars(a), 'env': env}), '01007EF00011E000', build, var, route, root / 'out', None)
+                seen.clear()
+                with self.assertRaises(FileNotFoundError): bench.run_one(argparse.Namespace(**{**vars(a), 'env': ['DM_SAVE_SYNC=0']}), '01007EF00011E000', build, {'host': str(root / 'host')}, route, root / 'out', None)
+                self.assertEqual(seen['DM_SAVE_SYNC'], '0')
 
 
 if __name__ == '__main__':

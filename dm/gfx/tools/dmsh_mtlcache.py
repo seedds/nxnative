@@ -9,13 +9,19 @@
 # A fresh compile of two shaders per stage also checks their bytes. Each folder is read once per compiler identity (filled.json remembers its number of libraries).
 # Not part of the chain version (dmsh_chain.py): the cache never changes an output, it only skips recompiling one. Change FORMAT when what it stores changes.
 import os, re, sys, json, shutil, ctypes, hashlib, threading, subprocess, collections
+from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
-import romfs, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
+import romfs, shader_cache, shader_lib   # the libraries of an earlier build may be one file (shader_lib.py), read in place
 STAMPS = 'metallib/filled.json'   # the earlier builds' folders already read
 
 FORMAT = b'dmsh_mtlcache 2'   # earlier prefill could misclassify an unsampled library from another compiler
 OUTPUT = re.compile(r'[0-9a-f]{16}_b\.metal')   # a shader's MSL in dmsh_build.py's outputs: <key>_b.metal
 _clonefile = getattr(ctypes.CDLL(None, use_errno=True), 'clonefile', None)   # APFS copy-on-write copy (no data written); elsewhere a plain copy
+
+
+def cut_from_unit(stem, names):
+    """A side library can indicate that the base was cut from another source. Check vertex reflection too, since iOS packing can omit the pulling library."""
+    return any(stem + c + '.metallib' in names for c in 'xfpv')
 
 
 def clone(src, dst):
@@ -31,8 +37,8 @@ def compiler_id(sdk):
 
 
 class Cache:
-    def __init__(self, store, targets, work):
-        """store: shader_cache.Store; targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files"""
+    def __init__(self, store: 'shader_cache.Store | shader_cache.Remote', targets, work):
+        """store: the compile cache (in a worker process of dmsh_build.py, its Remote); targets: {name: (sdk, record, compile)}, compile(msl, air, lib) as ios_metal.compile; work: a folder for temporary .air files"""
         self.store, self.targets, self.work = store, targets, work
         self.ident = {t: hashlib.sha256(FORMAT + b'\0' + rec.encode() + b'\0' + compiler_id(sdk).encode()).digest() for t, (sdk, rec, _) in targets.items()}
         self.stats, self.lock = collections.Counter(), threading.Lock()
@@ -41,7 +47,7 @@ class Cache:
         d = hashlib.sha256(self.ident[target] + b'\0' + src).hexdigest()
         return f'metallib/{target}/{d}.metallib'
 
-    def with_compiler(self, target, refl):
+    def with_compiler(self, target, refl) -> dict[str, Any]:
         return dict(refl, chain_metal=self.targets[target][1], chain_compiler=self.ident[target].hex())
 
     def count(self, what, n=1):
@@ -85,13 +91,16 @@ class Cache:
         self.count((target, 'compiled'))
 
     def _check(self, target, d, stems, mac_dir):
-        """None if folder d was built with the current convention and compiler, else why not"""
+        """Return the standalone libraries in d and any reason to reject the folder."""
         rec, picks = self.targets[target][1], collections.defaultdict(list)
+        eligible = set()
         for stem in stems:
             try: j = json.loads(romfs.open(os.path.join(d, stem + '.json'), 'rb').read())
-            except (OSError, ValueError): return f'no readable {stem}.json'
-            if j.get('chain_metal') != rec: return f'built with "{j.get("chain_metal")}"'
-            if j.get('chain_compiler') != self.ident[target].hex(): return f'{stem} has a different or unrecorded Metal compiler'
+            except (OSError, ValueError): return set(), f'no readable {stem}.json'
+            if j.get('chain_metal_cut'): continue   # the source on disk is only the standalone MSL
+            if j.get('chain_metal') != rec: return set(), f'built with "{j.get("chain_metal")}"'
+            if j.get('chain_compiler') != self.ident[target].hex(): return set(), f'{stem} has a different or unrecorded Metal compiler'
+            eligible.add(stem)
             if len(picks[j.get('stage')]) < 2: picks[j.get('stage')].append(stem)
         for stem in (s for v in picks.values() for s in v):
             tmp = os.path.join(self.work, f'mtlcache-check-{target}.metallib')
@@ -101,12 +110,12 @@ class Cache:
                 with romfs.open(msl, 'rb') as f, open(os.path.join(self.work, f'mtlcache-check-{stem}.metal'), 'wb') as o: shutil.copyfileobj(f, o)
                 msl = os.path.join(self.work, f'mtlcache-check-{stem}.metal')
             try: self._compile(target, msl, tmp)
-            except subprocess.CalledProcessError: return f'{stem}.metal does not compile now'
+            except subprocess.CalledProcessError: return set(), f'{stem}.metal does not compile now'
             finally:
                 if inside: os.unlink(msl)
             same = open(tmp, 'rb').read() == romfs.open(os.path.join(d, stem + '.metallib'), 'rb').read(); os.unlink(tmp)
-            if not same: return f'a fresh compile of {stem}.metal differs from its library'
-        return None
+            if not same: return set(), f'a fresh compile of {stem}.metal differs from its library'
+        return eligible, None
 
     def fill(self, mac_dir, ios_dir=None, targets=None):
         """Takes the libraries of an earlier build: mac_dir = its Mac b-<chain>/ folder, ios_dir = the iOS folder of the same chain (or None). Returns the lines to print"""
@@ -114,18 +123,18 @@ class Cache:
         if not romfs.os.path.isdir(mac_dir): return []   # a stopped pack's .part beside the libraries
         try: stamps = json.loads(self.store.get(STAMPS) or b'{}')
         except ValueError: stamps = {}
-        names = set(romfs.os.listdir(mac_dir))   # a library with a side or readable-tile library was cut from another source than its .metal (compile_split, dmsh_side.py), and a compile of that source is never asked for
-        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and n[:-6] + 'x.metallib' not in names and n[:-6] + 'f.metallib' not in names)   # not an AppleDouble ._<name> (exFAT / FAT drives)
+        names = set(romfs.os.listdir(mac_dir))
+        stems = sorted(n[:-6] for n in names if OUTPUT.fullmatch(n) and not cut_from_unit(n[:-6], names))   # not an AppleDouble ._<name> (exFAT / FAT drives)
         todo, notes = {}, []
         for target, d in (('mac', mac_dir), ('ios', ios_dir)):
             if targets is not None and target not in targets: continue   # checking an earlier build compiles samples too
             if target not in self.targets or not d or not romfs.os.path.isdir(d): continue
             libs = names if d == mac_dir else set(romfs.os.listdir(d))
-            have = [s for s in stems if s + '.metallib' in libs]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
+            have = [s for s in stems if s + '.metallib' in libs and not cut_from_unit(s, libs)]; key = self.ident[target].hex() + ':' + os.path.realpath(d)
             if not have or stamps.get(key) == len(have): continue
-            why = self._check(target, d, have, mac_dir)
+            eligible, why = self._check(target, d, have, mac_dir)
             if why: notes.append(f'Metal cache: not filled from {d}: {why}')
-            else: todo[target] = (d, set(have))
+            elif eligible: todo[target] = (d, eligible)
             stamps[key] = len(have)
         added = collections.Counter()
         for stem in stems:

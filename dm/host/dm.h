@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <TargetConditionals.h>
+#include <unistd.h>
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 // Explicit host work does not occupy a guest core (Metal submission, or a blocked native codec lock). A contended host mutex must count as blocked: a signal's same-core handoff
@@ -27,9 +29,44 @@ static inline int dm_host_thread_join(pthread_t thread, void **result) {
     return r;
 }
 
-// The message and its newline under one stream lock: written apart, another thread's line could land between them and two messages share a log line
-#define LOG(...) do { flockfile(stderr); fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } while (0)
+// One log line: the message and its newline under one stream lock (written apart, another thread's line could land between them and two messages share a log line).
+// The host's dm_log (hle_bigstack.c) writes it on the thread's big host stack when the caller is on a guest stack: formatting one line takes about 2.7 KB of stack, and a take-over
+// runs on the stack of the game thread that calls it, which can have less left (memory.md, Log lines on small guest stacks). The definition here is a weak one that writes on the
+// caller's stack, for the programs that do not link hle_bigstack.c (unit tests, whose stacks are host stacks); the host's replaces it at link time
+__attribute__((format(printf, 1, 2))) void dm_log(const char *fmt, ...);
+#ifndef DM_LOG_IMPL
+#include <stdarg.h>
+__attribute__((weak)) void dm_log(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    flockfile(stderr); vfprintf(stderr, fmt, ap); fputc('\n', stderr); funlockfile(stderr);
+    va_end(ap);
+}
+#endif
+#define LOG(...) dm_log("[dm] " __VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
+
+#define DM_SWITCH_ALIAS  UINT64_C(0x1000000000)   // a Switch's alias region: 64 GB
+#define DM_SWITCH2_ALIAS UINT64_C(0x2000000000)   // a Switch 2's alias region on Mac: 128 GB (holds two 60 GB reservations, e.g. Xenoblade Chronicles 2 Switch 2 Edition)
+// The alias region this run gets: on the Mac, at least the console's alias region (64 GB for Switch 1, 128 GB for Switch 2 when ounce is set);
+// on an iPhone, the profile's mem_alias; or DM_ALIAS_SIZE when set.
+// Shared by mem_init_once (hle_svc.c, with ounce = dm_sdk_ounce() after sdk loads) and the Mac loader's undo_alias_cuts (loader.c, which runs before sdk loads and compares against DM_SWITCH_ALIAS).
+static inline size_t dm_alias_size_for(int ounce) {
+    size_t pg = (size_t)getpagesize();
+#if TARGET_OS_IPHONE
+    (void)ounce;
+    size_t alias = DM_GAME_MEM_ALIAS;
+#else
+    size_t floor = ounce ? DM_SWITCH2_ALIAS : DM_SWITCH_ALIAS;
+    size_t alias = DM_GAME_MEM_ALIAS > floor ? DM_GAME_MEM_ALIAS : floor;
+#endif
+    const char *as = getenv("DM_ALIAS_SIZE");
+    if (as && *as) {
+        alias = (size_t)strtoull(as, NULL, 0);
+        if (alias < 0x10000000 || (alias & (pg - 1))) die("DM_ALIAS_SIZE %s: at least 256 MB, in whole host pages", as);
+    }
+    return alias;
+}
+static inline size_t dm_alias_size(void) { return dm_alias_size_for(0); }
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
 typedef struct { int64_t d_tag; union { uint64_t d_val, d_ptr; } d_un; } Elf64_Dyn;
@@ -46,8 +83,12 @@ enum { STB_LOCAL = 0, STB_WEAK = 2, STV_DEFAULT = 0 };
 // Run-time state of one NSO module
 typedef struct {
     char name[16];
+    const char *dir;           // the folder its rewritten files are in: the module folder, or a mod's prepared exefs (hle_exl.c dm_exl_mod_modules)
     uint8_t *base;             // Start address of the image (including the patch area) in the host address space
     size_t size;
+    size_t guest_size;         // Horizon module span through MOD0's page-aligned bss end, excluding rewriter pages
+    uint8_t *span_slot;        // Mac contiguous startup reservation slot (start of pre-base patch area + image); NULL for JIT-placed or NRO modules
+    size_t span_len;
     uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // From the rewriter fixups header
     uint64_t ue_malloc_vt;     // Unreal's FMallocBinned3 vtable, found by the rewriter (patch_nso.py, ue_malloc.py; hle_uemalloc.c); 0 = none
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
@@ -55,6 +96,10 @@ typedef struct {
     int n_ue_cvar;
     uint64_t fps_target_ptr;   // a target frame rate the game steps by, an int32 at [main + fps_target_ptr] + fps_target_field (patch_nso.py, fps_target.py; hle_fpslock.c); 0 = none
     uint32_t fps_target_field;
+    uint64_t monolith_interval; // Monolith's native frame interval, an int32 at main + this (monolith_fps.py); 0 = not found
+    struct { uint64_t off; uint8_t len, orig[16], cut[16]; } alias_cut[32];   // iOS-only alias cuts (patch_nso.py ALIAS_CUT rows), undone at load on Mac when alias >= DM_SWITCH_ALIAS
+    int n_alias_cut;
+    int native_fps_blocked;    // a required timing correction did not match: retain this main's own engine frame limits
     uint64_t ue_fixed_ptr;     // Unreal's GEngine (main's offset of the global) and UEngine::FixedFrameRate in it, a float (patch_nso.py, ue_fixed_rate.py; hle_fpslock.c); 0 = none
     uint32_t ue_fixed_field;
     uint32_t ue_fixed_flag;    // bUseFixedFrameRate in UEngine: byte offset << 8 | bit mask; the rate is written only while it is set
@@ -62,7 +107,10 @@ typedef struct {
     uint64_t unity_qs_ptr;     // Unity's QualitySettings (main's offset of the global pointer); the current level's vSyncCount, an int32, is at
     uint32_t unity_qs_idx, unity_qs_arr, unity_qs_size, unity_qs_vsync;   // [obj + arr] + (int32)[obj + idx] * size + vsync; 0 = none
     uint64_t fps_state_off;    // frame step state page (patch_nso.py FRAME_STEP: Tears of the Kingdom 1.4.3 and Breath of the Wild 1.9.0 main); 0 = none
+    uint32_t step_max;         // the largest step the frame step stubs give the game (the fixups table's STEP_MAX, patch_nso.py ctx.step_max); 0 = FSTEP_MAX
     uint32_t render_scale_max; // a render-scale stub's largest scale (the fixups table's RENDER_SCALE, patch_nso.py): DM_RENDER_SCALE is held to it; 0 = no such stub
+    int fstep_t120;            // the frame step stub takes its step in ticks of 1/120 s (the FRAME_STEP_120 capability: state +0x38 120, and 40 fps)
+    int movie_native_color_keys; // the movie SDK's MediaData uses the native buffer's colour index directly (MOVIE_NATIVE_COLOR_KEYS)
     int64_t patch_off;         // patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
     uint64_t image_size, file_image_len, patch_len;   // only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     uint64_t back_off, back_len;   // a second patch area after the image (patch_nso.py TWO: a text longer than a B reaches), inside size; 0 = none
@@ -78,6 +126,7 @@ typedef struct {
     // NRO modules (nn::ro, loader.c "NRO modules"): mapped at start like the others, but they take part in symbol lookups only between LoadModule and UnloadModule
     int nro;
     _Atomic int loaded;        // the profile's modules always; NRO activation also synchronizes with borrowed stack backing
+    int alone;                 // loaded alone (a JIT plugin, nro_load_alone): not linked with the game, so no other module's load or unload rebinds its imports
     uint8_t sha256[32];        // an NRO's SHA-256 (what the game's NRR registers; LoadModule finds the module by the image it passes)
     uint32_t nro_size;         // an NRO's file size (header +0x18), the bytes the hash covers
     uint8_t *pristine; size_t pristine_len;   // an NRO's initialized data as rewritten; reload restores this and zeroes its bss
@@ -93,11 +142,13 @@ extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
 
 void load_modules(const char *dir, const char **names, int n);
 const char *dm_module_dir(void);   // the folder load_modules read the modules and the rewriter's tables from (the cheat engine reads main.changed.tsv there)
+uint8_t *dm_mod_rtld_slot(size_t *page_out);   // Mac contiguous startup reservation's 3-page slot below main for a stand-in rtld (loader.c); NULL if none
 void run_module_inits(void);
 module_t *nro_find(const uint8_t sha256[32]);   // the mapped NRO with this hash (loader.c)
 int nro_refused(const uint8_t sha256[32]);      // an NRO the pack refused (an online SDK, nro.tsv "refused")
 void nro_load(module_t *m);     // relocate an NRO against the loaded modules and bind the earlier modules' imports it defines (the caller runs its init)
 void nro_load_alone(module_t *m);   // relocate an NRO against itself only: a JIT plugin, which on Horizon is not linked with the game (hle_jit.c)
+void nro_unload_alone(module_t *m); // the end of a load alone (DestroyJitEnvironment): inactive again, after its fini; its memory stays mapped in the layout
 const char *dm_jit_serve_dir(void); uint8_t *dm_jit_layout_base(void);   // a served nn::jit image and the layout the modules are mapped in for it (loader.c, hle_jit.c)
 void nro_unload(module_t *m);   // take an NRO out of the lookups and bind the imports that pointed into it again
 int svc_nro_deactivate(module_t *m);   // mark inactive under the memory map lock, refusing while a stack borrows its data
@@ -105,10 +156,12 @@ void dm_device_share(const void *p, uint64_t size, int share);   // guest memory
 void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)
+int dm_sdk_nvn1_minor(void);   // the minor version from older NVN's own nvnDeviceGetInteger switch, or -1 if its layout is unrecognized
 int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDeviceGetInteger answers for item, read from the sdk module (loader.c); 0 when it has none
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
 int dm_game_imports(const char *prefix);   // main or an NRO imports a symbol whose name starts with prefix (loader.c)
 void *guest_sym(const char *name);
+void *guest_module_sym(uintptr_t base, const char *name);
 module_t *module_of(const void *p);
 // Gate dispatch: rewritten svc / timer reads come in through the common entry, ret_addr = the return point of that gate block, regs points to the saved x0..x30
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
@@ -126,12 +179,13 @@ int gate_obs_present(int id);
 uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 uint64_t guest_ns_at_host_time(uint64_t host_ns);  // Host Mach-absolute ns projected into the current guest clock
+int guest_clock_pinned(void);  // the guest clock is frozen or DM_DETCLOCK's: guest_ns_at_host_time maps every host time to one
 uint64_t guest_ticks(void);           // The guest's system counter on that clock: 19.2 MHz, or 31.25 MHz for the Switch 2 (hle_os.c)
 int dm_detclock_enabled(void);
-void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
-void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
-void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
+void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation; Stop / Flush / Finalize cancel the wait
+void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
+void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
 uint64_t dm_nvn_frame_count(void);
@@ -153,13 +207,44 @@ int hle_signal_bound_system_event(void *g);   // hle_thread.c: signal a service-
 uint64_t hle_system_event_binding(void *g);   // Opaque lifetime ID of a binding, 0 if unbound; a rebind gets a new ID even if its address and handle are reused
 int hle_signal_system_event_binding(uint64_t binding);   // Signal only this binding lifetime (any thread); 0 after its write handle closes
 uint32_t hle_new_event(uint32_t *write_end);   // hle_thread.c: a new kernel event's read end (a service's handle copied to its client); its write end in *write_end, none when NULL (never signaled)
+typedef struct { const void *bytes; size_t size; } hle_readonly_shmem;
+uint32_t hle_new_readonly_shmem(const hle_readonly_shmem *memory);   // immutable, process-lifetime backing; each returned handle closes independently
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle);
+typedef struct { uintptr_t address; size_t size; uint32_t owner_perm; } hle_transfer_memory;
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory);
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory);   // snapshot under the kernel handle lock
+typedef struct hle_transfer_mapping {
+    uintptr_t address;
+    size_t size;
+    struct hle_transfer_mapping *next;
+} hle_transfer_mapping;
+// A service owns the in-place mapping independently of the guest's handle. Start with a zeroed record, kept at a stable address until unmapped.
+int hle_map_transfer_memory(hle_transfer_mapping *mapping, uint32_t handle, uint64_t size, uint32_t owner_perm);
+void hle_unmap_transfer_memory(hle_transfer_mapping *mapping);
 uint32_t hle_dup_readable_handle(uint32_t h);   // hle_thread.c: a second read end of a kernel event (the copy a service hands its client), 0 if h is no read end
+int hle_signal_event_handle(uint32_t write_end);   // hle_thread.c: signal a host-made kernel event by its write end (any thread); 0 once that end is closed
 // Page fault hook / hook before the host writes guest memory (crash.c; used for write-protect dirty page tracking)
 void dm_fault_hook_register(int (*fn)(void *addr, int is_write, void *uc));
 void dm_guest_write_prep_register(void (*fn)(void *addr, size_t len));
 void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Resource count callback (registered by the graphics layer): called every 250 ticks, when the loading screen has been dismissed, and on exit when the record is full
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
+int dm_guest_as_contains(uintptr_t a);   // hle_svc.c: the address lies in the reserved guest address block
+int dm_stack_region_matches(uint64_t start, uint64_t end);   // hle_svc.c: [start, end) is the guest stack region
+uint64_t dm_stack_alloc(size_t size, size_t align, size_t align_offset, size_t guard_size);   // hle_svc.c: deterministic placement in the guest stack region (0 when none fits)
+// hle_exl.c: exlaunch code plugins (a mod's exefs/subsdk<N>). The process handle GetInfo 65001 answers; the stand-in rtld below the modules and its QueryMemory regions;
+// the writable views of module code MapProcessMemory makes, written back into the code on unmap and after each module's DT_INIT
+extern const uint32_t dm_exl_process_handle;
+void dm_exl_fake_rtld(void);
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm);
+uint64_t dm_exl_rtld_base(void);
+uint64_t dm_exl_rtld_size(void);
+int dm_exl_view_source_ok(uint64_t src, uint64_t size);
+void dm_exl_code_prepare(uint64_t src);   // prepares writable alias + changed.tsv for src's module outside g_map_lock / g_view_mu
+int dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size);   // 0 ok, -1 out of memory or view table full
+int dm_exl_mod_modules(const char **names, int n, int room);   // adds prepared mod code plugins from DM_ROMFS_OVERLAY before sdk (Mac only); returns new count
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size);
+void dm_exl_sync_all(void);
 void dm_guest_heap_range(uint64_t *base, size_t *open_len);   // hle_svc.c: the guest heap's base and opened length (guest addresses), 0 / 0 when none
 int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: hole-free guest heap read for the cheat VM (under the memory lock); 0 = ok, 1 = a byte outside the opened span
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
@@ -204,11 +289,14 @@ const char *dm_cheats_skipped_why(int i);
 int dm_cheats_nsources(void);         // anchored sources (*.cheats.toml) in the cheats folder
 const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
-// Graphics lifecycle (hle_nvn.c): on=1 suspends (afterwards submit / present block, and in-flight GPU work is drained before returning), on=0 resumes; called by the iOS front end when entering and leaving the background
+// Graphics lifecycle (hle_nvn.c): on=1 closes submission and waits up to three seconds for the drain, on=0 requests reopening once the drain completes.
 void dm_gfx_suspend(int on);
+void dm_fstep_settle(void);   // hle_nvn.c: the window changed size, visibility, screen or fullscreen state, or graphics resumed (nvn_fstep.h settle)
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms
+void dm_gfx_quit_begin(void);   // hle_nvn.c: the process is about to end (the graceful exit, oe::ExecuteProgram's hand-over): the pipeline prewarm stops and the archive starts writing what it holds, without waiting
+enum { DM_QUIT_ARCH_MS = 10000 };   // what any end of the process the host controls gives the pipeline archive's write (atexit, the graceful exit): a file of 900 bases took 1.8-4 s on Macs
 void dm_gfx_enter(void); void dm_gfx_leave(void);   // hle_nvn.c: the gate dm_gfx_suspend closes, for graphics layers other than NVN (dm/gfx/vk)
-void dm_gfx_shot_at(long k, const char *path);
+void dm_gfx_shot_at(long k, const char *path);   // graphics side: screenshot of the k-th frame after the current presented frame (nvn_mtl.m)
 void dm_shot_written(const char *path, int ok);   // The graphics side finished writing a screenshot to disk (diag.c: DM_TICK_HOLD=E:SHOT unfreezes on this)
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg);   // The same, then(arg) in place of the last _exit(0) (oe::ExecuteProgram: execve of the next program)
-void dm_host_shutdown(const char *why);   // Graceful exit (crash.c): stop background threads and audio, drain graphics, then _exit(0); used by SIGTERM and the iOS App termination callback   // graphics side: screenshot of the k-th frame after the current presented frame (nvn_mtl.m)
+void dm_host_shutdown(const char *why);   // Graceful exit (hle_lifecycle.c): stop background threads and audio, stop the pipeline prewarm, drain graphics, write the pipeline archive, then _exit(0); used by SIGTERM and oe::ExecuteProgram

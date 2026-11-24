@@ -1,0 +1,10 @@
+# Title -> Campaign -> New Game -> Doom 3 -> Marine, skip the intro movie, then wait for the hangar cutscene to finish before comparing the standing view.
+save	new
+keys	18:a,22:a,26:a,30:a,34:a,60:a
+secs	210
+quick	60
+reach	5400@180
+shots	190,205
+window	180	25
+hang	45
+prebuild	off

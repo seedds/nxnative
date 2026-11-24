@@ -27,7 +27,7 @@ static void *emit(chain *c, unsigned op, size_t n) {
 static void submit(const uint8_t *h0) {   // as nvnQueueSubmitCommands, with the capture hook
     uint64_t h = (uint64_t)(uintptr_t)h0;
     nvn_cap_submit(1, &h);
-    mtl_sub_begin(); mtl_sub_index(&h, 1); mtl_exec_rest(NULL, 0); mtl_exec(h0); mtl_exec_rest(NULL, 0); mtl_sub_commit(); mtl_finish();
+    mtl_sub_begin(); mtl_exec_rest(NULL, 0); mtl_exec(h0); mtl_exec_rest(NULL, 0); mtl_sub_commit(); mtl_finish();
 }
 static void copy_block(chain *c, const tex_t *t, uint64_t src, int x, int y) {
     p_copy_b2t *b = emit(c, OP_COPY_B2T, sizeof *b); b->src = src; b->tex = t; b->r = (NVNcopyRegion){x, y, 0, 16, 16, 1};

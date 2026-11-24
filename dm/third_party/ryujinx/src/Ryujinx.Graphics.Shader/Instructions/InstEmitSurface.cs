@@ -210,7 +210,18 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // Preserve source width before descriptor-sized formats are resolved.
             // Other backends retain their existing surface-instruction handling.
             bool metalAtomics = context.TranslatorContext.Options.Flags.HasFlag(TranslationFlags.MetalImageAtomics);
-            if (metalAtomics &&
+            // nxnative: a 64-bit unsigned max / min whose result is discarded (Ampere SURED.D.2D.MAX.U64, PRAGMATA's visibility buffer: depth << 32 | ID, 336 compute
+            // shaders) maps onto Metal's 64-bit texture atomics (MSL 3.1 texture2d<ulong>::atomic_max / atomic_min, an RG32Uint texture with the shader-atomic usage,
+            // Apple GPU family 9). Metal has no 64-bit fetch, add or bitwise texture atomic, so every other 64-bit form stays refused. The value is the register pair
+            // Rb (low word), Rb + 1 (high word); see GenerateImageAtomic and dmsh_atomic.py for how the pair reaches the Metal source. After uncraftablexd's PR #1801
+            bool wide = metalAtomics && size == SuatomSize.U64;
+            if (wide &&
+                (compareAndSwap || hasPredicateResult || dest != RegisterConsts.RegisterZeroIndex || atomicOp is not (SuatomOp.Max or SuatomOp.Min) ||
+                 isBindless || (dimensions != SuDim._2d && dimensions != SuDim._2dArray && dimensions != SuDim._3d)))
+            {
+                throw new NotSupportedException($"Metal 64-bit image atomics: only a 2D / 2D-array / 3D U64 max or min with no result ({atomicOp}, {dimensions}).");
+            }
+            if (metalAtomics && !wide &&
                 size is not (SuatomSize.U32 or SuatomSize.S32 or SuatomSize.Sd32))
             {
                 throw new NotSupportedException("Metal image atomics require a 32-bit integer source size.");
@@ -294,6 +305,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
             sourcesList.Add(Rb());
 
+            if (wide)
+            {
+                sourcesList.Add(Rb());   // the high word
+            }
+
             Operand[] sources = sourcesList.ToArray();
 
             TextureFlags flags = (compareAndSwap ? TextureFlags.CAS : GetAtomicOpFlags(atomicOp)) | (TextureFlags)((int)clamp << 20);
@@ -343,6 +359,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool isBindless,
             int cbufSlot = TextureOperation.DefaultCbufSlot)
         {
+            if (context.TranslatorContext.RayTracingProgram != null)
+                throw new InvalidOperationException("RT surface loads require a separately defined typed image-load contract.");
             if (srcB == RegisterConsts.RegisterZeroIndex)
             {
                 return;
@@ -425,7 +443,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     Array.Resize(ref dests, outputIndex);
                 }
 
-                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle);
+                TextureFormat format = isBindless ? TextureFormat.Unknown : ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, handle, cbufSlot);
 
                 SetBindingPair setAndBinding = isBindless ? default : context.ResourceManager.GetTextureOrImageBinding(
                     Instruction.ImageLoad,
@@ -630,12 +648,24 @@ namespace Ryujinx.Graphics.Shader.Instructions
             bool useComponents,
             bool byteAddress,
             bool isBindless,
-            int cbufSlot = TextureOperation.DefaultCbufSlot)
+            int cbufSlot = TextureOperation.DefaultCbufSlot,
+            TextureFormat? forcedFormat = null)
         {
+            if (context.TranslatorContext.RayTracingProgram != null && !forcedFormat.HasValue)
+            {
+                if (!useComponents || isBindless || byteAddress || componentMask is not (SuRgba.R or SuRgba.Rg or SuRgba.Rgba))
+                    throw new InvalidOperationException("RT surface stores support only bound, formatted R/RG/RGBA operations.");
+                RayTracingSurfaces.EmitFormattedStore(context, imm, cbufSlot, format =>
+                    EmitSust(context, cacheOp, dimensions, size, imm, componentMask, srcA, srcB, srcC,
+                        useComponents, byteAddress, isBindless, cbufSlot, format));
+                return;
+            }
             SamplerType type = ConvertSamplerType(dimensions);
 
             if (type == SamplerType.None)
             {
+                if (context.TranslatorContext.RayTracingProgram != null)
+                    throw new InvalidOperationException("RT formatted image store has an unsupported surface dimension.");
                 context.TranslatorContext.GpuAccessor.Log("Invalid image store sampler type.");
                 return;
             }
@@ -701,7 +731,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
                 if (!isBindless)
                 {
-                    format = ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm);
+                    format = forcedFormat ?? ShaderProperties.GetTextureFormat(context.TranslatorContext.GpuAccessor, imm, cbufSlot);
                 }
             }
             else

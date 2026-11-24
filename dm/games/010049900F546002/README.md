@@ -32,6 +32,8 @@ A talks and picks a block at the file select (stand under one: Mario starts betw
 
 - [Loading NROs with `ro::LoadModule`](../../../docs/reference/services.md#loading-nros-with-roloadmodule) (`.nrolz`).
 - [Occlusion queries that span render encoders](../../../docs/reference/rendering.md#occlusion-queries-that-span-render-encoders).
+- Resolved in the host: [a completed video batch needs another output event](../../../docs/reference/movies.md#a-completed-video-batch-needs-another-output-event). The reporter reached Bianco Hills through the first M graffiti on an M4 Mac mini with macOS 27.2.1.
+- Resolved in the rewriter: [an x18 scratch spill overwrites a live stack temporary](../../../docs/reference/rewriter.md#an-x18-scratch-spill-overwrites-a-live-stack-temporary) (`main+0x753bc` in 1.1.4). The Apple M6 smoke run reached 3D file select in the default six-channel mode with zero reported underruns.
 
 ## Open
 

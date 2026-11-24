@@ -587,6 +587,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Ace Attorney Investigations Collection](../../dm/games/010005501E68C000/README.md) (Unity 2022.3.17f1): 4,951 stage shaders: 2,475 vertex / pixel pairs (4,294 in the player's files, 517 built-ins, 140 in bundles) and one geometry shader, which Metal cannot express (its build fails).
 - **Note:** armyja's issue #17 proposed UnityPy and a reader of its own; neither was needed.
 
+### Unity asset bundles inside CRI CPK archives
+
+- **Symptom:** the split succeeds with the shaders in Unity's loose player data and `main`. The game's first frames request additional keys and log `[RED] shader … is not in the shader map`.
+- **Cause:** the CPK reader opened each member but sent it only to the raw binary scanner. The shader programs are serialized Unity objects inside UnityFS bundles, which the loose-file path already knows how to read.
+- **Fix:** scan Unity archive members with the same reader used for loose assets. Collect their type trees and retry members that need another bundle's tree in the existing second pass. Other CPK members still use the raw binary scanner.
+- **Found on:** [Ace Angler: Fishing Spirits](../../dm/games/01007C50132C8000/README.md). All ten keys absent from the old split and requested in the 15-second boot probe are present after the change.
+- **Check:** `test_unity_text_glslc.py` reads a synthetic UnityFS bundle from a CPK and checks the shader's key provenance.
+
 ### Unity Shader layouts written out for players without bundles
 
 - **Symptom:** the split stopped with `no bundle has a Shader type tree of the same hash to borrow`.

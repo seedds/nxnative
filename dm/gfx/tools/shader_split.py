@@ -1373,14 +1373,25 @@ def cpk_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, {p for p, _, _ in with_head}
 
-def cpk_shaders(path, rel, ents, out):
-    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file"""
-    import cpk
+def cpk_shaders(path, rel, ents, out, trees):
+    """Scan CPK entries, including Unity asset bundles, and return their pass pairs and entries needing borrowed trees."""
+    import cpk, unityfs
+    pairs, deferred = set(), []
     for e in ents:
         try: d = cpk.read(path, e)
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
-        scan_blob(d, f'/{rel}/{e[0]}', out)
+        where = f'/{rel}/{e[0]}'
+        if COMMON is None or not is_unity_asset(d):
+            scan_blob(d, where, out)
+            continue
+        member = []
+        try: pairs |= unity_shaders(d, where, member, trees)
+        except unityfs.NoTree:
+            deferred.append(e)
+            continue
+        out.extend(member)
+    return pairs, deferred
 
 MDB1 = b'MDB1'   # job tag: Media.Vision's MVGL archives (mvgl.py)
 def mvgl_jobs(files, parts=64):
@@ -4204,6 +4215,10 @@ def unity_pass_pairs(o, programs):
                 pairs.update((v, f) for v in stages['vs'] for f in cover)
     return pairs
 
+def is_unity_asset(d):
+    import unityfs
+    return d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and unityfs.is_serialized(d))
+
 def unity_shaders(d, label, out, trees):
     """Shaders and compute shaders in a UnityFS bundle or serialized file → out and legacy pass pairs; raises NoTree when no type tree is available"""
     import unityfs
@@ -4675,8 +4690,15 @@ def unreadable_why(e, name):
     why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
     return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
 
+class DeferredUnity:
+    """Unity scan inputs to retry after collecting type trees from other files."""
+
+    def __init__(self, args, trees):
+        self.args = args
+        self.trees = trees
+
 def scan_file(args):
-    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', first reason, files left out).
+    """→ (relative path, {key: …}, pairs, extra); extra = Unity type trees, a DeferredUnity scan, or ('unreadable', first reason, files left out).
     A file no reader can read (a format revision the reader does not know: its red line, or the exception it raised) is left out, and the split goes on: one such
     archive used to end the whole split with nothing written (PR #282: one of Mario Strikers: Battle League's 879 Next Level Games archives). main reports them"""
     try: return scan_file_in(args)
@@ -4836,8 +4858,9 @@ def scan_file_in(args):
         d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
-        cpk_shaders(path, rel, args[2], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        pairs, deferred = cpk_shaders(path, rel, args[2], found, trees if not TREES else dict(TREES))
+        extra = DeferredUnity((path, rel, tuple(deferred)), trees) if deferred else trees
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, extra
     if len(args) > 2 and args[2][0] == MDB1:   # .shad entries of a Media.Vision MVGL archive (mvgl_jobs)
         if args[2][1] is None: red(args[2][2])
         mvgl_shaders(path, rel, args[2][1], args[2][2], found)
@@ -4966,10 +4989,10 @@ def scan_file_in(args):
             d = head_d if len(head_d) >= struct.unpack_from('<I', d, 10)[0] else xnb_decompress(d)
         else:
             d = xnb_decompress(d)
-    if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
+    if is_unity_asset(d):
         import unityfs
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
-        except unityfs.NoTree: return rel, {}, set(), 'defer'
+        except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
@@ -5172,17 +5195,18 @@ def main():
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
-        if extra == 'defer': defer.append(rel)
+        if isinstance(extra, DeferredUnity):
+            defer.append(extra.args)
+            trees.update(extra.trees)
         elif isinstance(extra, dict): trees.update(extra)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
-        byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, defer))
         for rel, uniq, pr, extra in again:
-            if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
-        results = [r for r in results if r[3] != 'defer'] + again
+            if isinstance(extra, DeferredUnity): red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
+        results += again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()

@@ -49,6 +49,7 @@ class ScanFile(unittest.TestCase):
     def test_red_line_of_a_reader(self):
         p = self.tmp / 'a.dict'; p.write_bytes(index(5, 2)[:0x28])
         (rel, keys, pairs, extra), out = self.scan(p, 'sub/a.dict')
+        assert isinstance(extra, tuple)
         self.assertEqual((rel, keys, pairs, extra[0]), ('sub/a.dict', {}, set(), 'unreadable'))
         self.assertTrue(extra[1].startswith('/sub/a.dict: the index'))
         self.assertEqual(out.count('/sub/a.dict'), 1); self.assertTrue(out.startswith('[RED] /sub/a.dict: the index') and out.endswith('(its shaders are left out)\n'))

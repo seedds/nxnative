@@ -919,6 +919,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Bastion](../../dm/games/010038600B27E000/README.md) (1.0.0, SDK 5.4.0: both 1920x1080 window textures written by `main+0x9374`). The two later cases in `t_nvn`, whose window textures nothing draws into: they were GPU textures while a sliver of another GPU-written span counted, and came up as storage textures once it did not (c06d1e79).
 - **Check:** `t_nvn` (present pacing presents its never-drawn window textures).
 
+### NVN2 window textures written as images
+
+- **Symptom:** a Switch 2 game keeps one picture on screen (its boot logo) while its sound plays and it runs on: dumps of its render targets show the next screen, and `image pool (Metal type 2, class 0, rw): … 0 viewed for the shader` repeats in the log.
+- **Cause:** NVN2 stores to images through texture descriptors, and a texture needs no IMAGE flag for it. Cyberpunk 2077's window textures are `DISPLAY | COMPRESSIBLE`; its last pass of each frame, the compute shader `604a4137ac0a8d9d`, writes the frame into them through the image pool. The host pools a writable Metal texture only for an IMAGE texture (`img_pool_ids`, `img_usage`), so the pass wrote the write sink and the window kept the last frame a render pass drew into it.
+- **Fix:** on the Switch 2 (`dm_sdk_ounce`), `nvnTexturePoolRegisterTexture` registers a DISPLAY texture as an image (`mtl_reg_image`, which leaves the guest's flags alone), so `image_prepare` gives it the write usage and the pool holds it. Other textures stay as they were: making every texture writable would cost each render target Metal's compression and an upgrade copy.
+- **Found on:** Cyberpunk 2077 (`0400DDB020648000`, no profile yet): with it the title screen shows, and the game answers its + prompt.
+
 ### The present upscales through MetalFX
 
 - **Symptom:** a game that renders below the screen's resolution looks soft on a phone, in a large Mac window or on a 4K screen.

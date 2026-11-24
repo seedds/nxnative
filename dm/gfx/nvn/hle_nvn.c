@@ -394,7 +394,13 @@ NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPoo
     return 1;
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
+// NVN2 writes images through texture descriptors: a texture needs no IMAGE flag to be stored to (Cyberpunk 2077's swap chain textures are DISPLAY | COMPRESSIBLE, and its last compute
+// pass, 604a4137ac0a8d9d, writes the frame into them through the image pool). The host makes and pools a writable Metal texture only for IMAGE (img_pool_ids, img_usage), and
+// writing every texture would cost each render target Metal's compression and an upgrade copy. A window's textures are what a final pass writes, so on the Switch 2 a DISPLAY
+// texture registers as an image (mtl_reg_image keeps the guest's flags as they are). Without it the pass wrote the write sink and the screen kept the last frame drawn by a
+// render pass: the game's boot logo, while its title screen ran behind it
 NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
+    if (t && (((const tex_t *)t)->d.flags & NVN_TEXTURE_FLAGS_DISPLAY) && dm_sdk_ounce()) { mtl_reg_image(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v); return; }
     mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
 // Image descriptors live in the same pool index space as texture descriptors, and image handles are pool indices (nvnDeviceGetImageHandle; BindImages below), so an image

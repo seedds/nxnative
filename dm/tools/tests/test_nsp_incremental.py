@@ -393,7 +393,7 @@ class DeriveProfile(Base):
         logs = self.tmp / 'logs'; logs.mkdir()
         table = ['# alias region 0x1000000000; offset\tsize\twho\tmapped\tfirst opened\tend\tvia\n' + f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x185a8e0\t{0x14800000:#x}\t0\t{0x920000000:#x}\t0\n']
         boots = []
-        exits = [None]   # boot_mac: None, still running when the window ended; otherwise the exit code
+        exits: list[int | None] = [None]   # boot_mac: None, still running when the window ended; otherwise the exit code
         def boot(*args): boots.append(1); (logs / 'region_check.log').write_text('>>> nnMain\n'); (logs / 'regions.tsv').write_text(table[0]); return exits[0]
         def check(mac_only):   # main's rule: the check runs unless this build's stamp is there. (what it said, whether the step ended ok), None when it did not run
             g = game.Game(self.pdir)

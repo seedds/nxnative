@@ -2318,6 +2318,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `test_gl_shaders.py` translates 16, 17 and 32 live samplers plus a default uniform block. `make -C dm/gfx/tests GAME=010029D00E740000 gl-arguments` generates GLSL and its table/library, then checks GPU pixels for 17 distinct sampler states, a sampler shared by both stages, vertex attribute 15, changed uniforms, changed sampler units and changed named-block ranges across three draws in one command buffer, under Metal validation. This target needs glslang and SPIRV-Cross; `gl-imports` keeps its existing dependencies.
 - **Found on:** Fate/hollow ataraxia REMASTERED (`010070E022546000`, update v131072, provisional profile): `c5b7066d3afd5bfe` has 16 samplers and buffer 16; `3f4e845c008603d4` and `469deb981b2bf744` also read `gPatternMaskTexture`, their seventeenth sampler. All three compile with argument buffers for Mac and iPhone. The game has no registered repository note yet.
 
+### A GLsync that is no sync object
+
+- **Symptom:** an abort at boot in `h_glDeleteSync`, from libmalloc: `pointer being freed was not allocated`.
+- **Cause:** `glDeleteSync`, `glIsSync` and `glClientWaitSync` read through the value they were given as if it were a block of the GL layer. GL names a sync by value, and a value that is no sync object is `GL_INVALID_VALUE` (OpenGL 4.6, section 4.1). NVN's `nvnSyncCreateGLSync` is not implemented, so a game that fences through it holds a `GLsync` the host never wrote.
+- **Fix:** the GL layer keeps the set of live syncs (`g_syncs`, `hle_gl.m`). `glIsSync` answers from it; `glDeleteSync` ignores 0 and sets `GL_INVALID_VALUE` for any other value not in it, writing and freeing nothing; `glClientWaitSync` then returns `GL_WAIT_FAILED` with that error. The NVN and OpenGL interop itself is still missing.
+- **Check:** `test_sync_names` in `t_gl_imports` (also in its `--cpu` run): on main it aborts at the first delete.
+- **Found on:** NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS (`01005A20190A6000`, no profile), [GitHub issue #2835](https://github.com/seedds/nxnative/issues/2835). That the game's `glDeleteSync` call is what aborted there is inferred from the report's backtrace and log order; the game was not run. Removing this abort does not make the game start: its movie path still needs the interop.
+
 ### OpenGL 1.x fixed function
 
 - **Symptom:** the survey reports no graphics API and the host drops OpenGL draws that have no shader program.

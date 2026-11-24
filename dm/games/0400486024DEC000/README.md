@@ -271,6 +271,10 @@ The PR author compiled 160 mesh prewarm descriptors per target on `g13s`, `g13d`
 
 A matched Mac rebuild on the same toolchain compiled all 500 native mesh keys and the 1,000 companion keys selected by the builder on both chains (`26e1a5f38264` and `5468682c3cdf`). The only MSL differences were the expected changes to 44 mesh shaders. Reflection matched after excluding the chain stamp.
 
+## Version 1.0.0
+
+Packed from the base game (v0) with the profile derived from 1.1.1. Its NDSR upscaler writes through images of other formats over the textures its next passes read (an R8 image four times as wide as an RGBA8 texture, then R32UI read as RGB9E5), so the world drew black under the HUD until [uncompressed alias pairs](../../../docs/reference/rendering.md#writes-into-an-uncompressed-alias-of-another-format). With them it draws (M4 Pro, macOS 27.2, Kakariko at night).
+
 ## Open
 
 - Root cause confirmed on M4 Pro (2026-11-08): [ignored event waits](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues) let lighting consumers run before their producers. The game issues about 25 waits and 19 signals per frame. All 297 complete traced frames submit queue 5's ambient-cache consumer `9e6b00b050e30801` before queue 1's SH producer `21d9f83e6027c565`, despite the explicit dependency. Queue 1 also waits for the CPU frame-ready event after the CPU clears the lighting buffer. At frame 3872 the consumer ran at 0.686 ms, the clear at 0.966–0.968 ms, and the producer at 1.282 ms; its release followed at 4.467 ms. Exposure writer `1bba09ec4bc8ff67` has another event dependency. The native SDK's flush/invalidate functions are no-ops for these coherent pools.

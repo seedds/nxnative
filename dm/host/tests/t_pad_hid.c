@@ -104,6 +104,12 @@ int main(void) {
     { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_LS, DM_BTN_RS, 0, 0};
       for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
     pad_hid_init(&h, "A=1,Y=3", PAD_HID_TAIKO); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    // PDP's Wired Fight Pad Pro for Switch (0e6f:0185, GitHub issue #3290) uses the same order: its reporter measured usages 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R. Other PDP IDs keep the default
+    CHECK(pad_hid_layout_for(0, 0x0e6f, 0x0185, taiko) == PAD_HID_TAIKO);
+    CHECK(pad_hid_layout_for(0, 0x0e6f, 0x0180, taiko) == PAD_HID_DEFAULT);
+    pad_hid_init(&h, NULL, pad_hid_layout_for(0, 0x0e6f, 0x0185, taiko));
+    { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R};
+      for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
     // identical pads: a model is read here only with two or more pads and more than GameController lists, after the wait, and stops at once
     CHECK(pad_dupes_want(1, 0, 0, 1) == 0); CHECK(pad_dupes_want(2, 2, 1, 0) == 0); CHECK(pad_dupes_want(3, 3, 0, 1) == 0);
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);

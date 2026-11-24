@@ -8,7 +8,7 @@
 // which such a pad sends until then or when it does not answer, has its own button numbering (pad_hid_nin_map) and carries the sticks raw (pad_hid_raw_axis).
 // Steam Link's virtual Xbox 360 pad, GamePad-N (045e:028e, GitHub issue #2465), delivers Xbox button usages and six Generic Desktop axes:
 // X / Y left stick, Rx / Ry right stick, Z / Rz the two triggers (pad_hid_axis_for). Select that layout only for the matching ID and axes.
-// HORI's Taiko Drum for Switch (0f0d:00f0, PR #3061) reports buttons in the console's order (pad_hid_taiko_map).
+// HORI's Taiko Drum for Switch (0f0d:00f0, PR #3061) and PDP's Wired Fight Pad Pro for Switch (0e6f:0185, GitHub issue #3290) report buttons in the console's order (pad_hid_taiko_map).
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -58,6 +58,7 @@ static enum pad_hid_layout pad_hid_layout_for(int nin, int vid, int pid, const u
     if (vid == 0x045e && pid == 0x028e && has[PH_X] && has[PH_Y] && has[PH_RX] && has[PH_RY] &&
         has[PH_Z] && has[PH_RZ] && !has[PH_BRAKE] && !has[PH_ACCEL]) return PAD_HID_X360;
     if (vid == 0x0f0d && pid == 0x00f0) return PAD_HID_TAIKO;   // the PS4-mode HORI Fighting Stick Alpha also declares 14 button usages
+    if (vid == 0x0e6f && pid == 0x0185) return PAD_HID_TAIKO;   // the PDP pad's reporter measured 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R (#3290); matched by its ID alone, as other PDP pads differ
     return PAD_HID_DEFAULT;
 }
 

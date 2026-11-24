@@ -691,6 +691,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_pad_hid` checks the drum's 14 usages and the layout selection. `t_pad_hid_mac` exercises discovery and value callbacks for the drum and a fixture based on the PS4-mode Fighting Stick descriptor. The reporter identified the drum in an IOKit probe and played Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, 6.2.0) with `DM_HID_MAP=Y=1,B=2,A=3,X=4,L=5,R=6,ZL=7,ZR=8,MINUS=9,PLUS=10,LS=11,RS=12`, which supplies the same map.
 - **Open:** a gameplay run with the physical drum and the revised host is pending.
 - **Found on:** Taiko no Tatsujin: Rhythm Festival (`01006B0016AD6000`, no profile in this repository) with a USB HORI Taiko Drum on an Apple M3 Pro Mac.
+- **Also found on:** PDP's Wired Fight Pad Pro for Switch (USB `0e6f:0185`), [GitHub issue #3290](https://github.com/seedds/nxnative/issues/3290): A, L and R did not work. The reporter measured usages 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R, the same order, so `pad_hid_layout_for` gives that ID the drum's map too. Not run with the physical pad.
 
 ### A keyboard receiver that declares a gamepad takes player 1
 

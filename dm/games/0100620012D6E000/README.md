@@ -32,7 +32,7 @@ No `patches.py`. Its shared `sdk` build (`2d369d9999e3e10e665106f840ffff9b`) now
 ## Audio
 
 - Its `AudioRenderSystem::Update` lock is `SdkMutexType::Lock` at +0x1d8 (SDK 10.4–11.4); `update_lock` (`hle_audren.c`) was checked with sound on it ([The renderer's update lock](../../../docs/reference/audio.md#the-renderers-update-lock-update_lock)).
-- **Resolved:** when queued catch-up frames still signalled the renderer event, every frame of this game became a catch-up frame (about 38,000 catch-up renders instead of 37). A queued frame no longer signals the event ([A sound driver that never waits on the renderer event](../../../docs/reference/audio.md#a-sound-driver-that-never-waits-on-the-renderer-event)).
+- **Resolved:** when the former catch-up queue signalled the renderer event on queued frames, every frame of this game became a catch-up frame (about 38,000 catch-up renders instead of 37). The catch-up queue was later removed in favour of clearing the renderer event on `Update` ([A sound driver that never waits on the renderer event](../../../docs/reference/audio.md#a-sound-driver-that-never-waits-on-the-renderer-event)).
 
 ## Movies
 

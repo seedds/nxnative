@@ -1594,8 +1594,12 @@ static uint32_t vib_valid(uint32_t h, int *motor) {
     npad_ref r = npad_resolve(id);
     if (r.kind == KIND_PAD) {
         uint32_t st = pad_style(id);
-        // A cached full-key handle still reaches a pair's motors or the exposed side of a single Joy-Con.
-        if (st != (1u << (type - 3)) && !(type == 3 && (st == STYLE_JOYDUAL || st == (dev ? STYLE_JOYRIGHT : STYLE_JOYLEFT)))) return 0;
+        // A cached full-key handle still reaches a pair's motors or the exposed side of a single Joy-Con,
+        // and a JoyDual handle reaches both motors of a whole controller (FullKey or Handheld).
+        bool ok = st == (1u << (type - 3)) ||
+                  (type == 3 && (st == STYLE_JOYDUAL || st == (dev ? STYLE_JOYRIGHT : STYLE_JOYLEFT))) ||
+                  (type == 5 && (st == STYLE_FULLKEY || st == STYLE_HANDHELD));
+        if (!ok) return 0;
         return pad_sources(r.pad);
     }
     if (type >= 5) {

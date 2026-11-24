@@ -82,12 +82,44 @@ def devices(log):
     return res
 
 
+def env_text(env): return '# written by nx_ocarina_ios_builder\n' + ''.join(f'{k}={v}\n' for k, v in env.items())
+
+
+def patch_ipa(ipa, out, env, log):
+    """Copy an IPA with dm/env.txt in its .app replaced by these switches (the iOS host reads it at boot, main.m). The code signature no longer matches: install the result with a sideloader (AltStore, Sideloadly, LiveContainer), which signs it again."""
+    import zipfile
+    ipa, out = Path(ipa), Path(out)
+    with zipfile.ZipFile(ipa) as zi:
+        apps = sorted({n.split('/')[1] for n in zi.namelist() if n.startswith('Payload/') and n.split('/')[1].endswith('.app')})
+        if not apps: raise RuntimeError('no Payload/*.app in that IPA')
+        target = f'Payload/{apps[0]}/dm/env.txt'
+        with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zo:
+            for it in zi.infolist():
+                if it.filename in (target, f'Payload/{apps[0]}/_CodeSignature/CodeResources'): continue   # the old env file; the old seal goes too
+                if it.filename.startswith(f'Payload/{apps[0]}/_CodeSignature/'): continue
+                zo.writestr(it, zi.read(it.filename))
+            zo.writestr(target, env_text(env))
+    log(f'   wrote {out}: {target} now holds {len(env)} switches (unsigned: install it with AltStore, Sideloadly or LiveContainer)')
+    return out
+
+
+def pack_ipa(app, out, log):
+    """A built .app (already signed by Xcode) as Payload/<app>.app inside a zip: an IPA for a sideloader (the game files are pushed separately when the build is --romfs separate)."""
+    import zipfile
+    app, out = Path(app), Path(out)
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+        for f in sorted(app.rglob('*')):
+            if f.is_file() or f.is_symlink(): z.write(f, f'Payload/{app.name}/{f.relative_to(app)}')
+    log(f'   wrote {out}')
+
+
+
 def build(o, log):
     repo = Path(o['repo']).expanduser()
     nsp, keys = Path(o['nsp']).expanduser(), Path(o['keys']).expanduser()
     if not (repo / 'scripts/build_ipa_from_nsp.py').is_file(): raise RuntimeError('the checkout has no scripts/build_ipa_from_nsp.py: choose the nxnative / NX2Apple folder')
     if ' ' in str(repo): raise RuntimeError('the checkout\'s path has a space: move it')
-    if not nsp.is_dir(): raise RuntimeError('choose the game\'s NSP folder')
+    if not nsp.is_dir(): raise RuntimeError('choose the game folder (the one with the .nsp or .nup files)')
     team, bundle = o['team'].strip(), o['bundle'].strip()
     if not team: raise RuntimeError('enter your Apple team ID (Xcode > Settings > Apple Accounts > Manage Certificates, or developer.apple.com > Membership; a free Personal Team has one too)')
     dev = o.get('device', '').strip()
@@ -99,12 +131,19 @@ def build(o, log):
     P.apply_host_patch(repo, patches, log)
     P.apply_optional_patches(repo, log)
 
-    log('2. Preparing the Xcode project (extraction and shaders are reused when unchanged; the first run takes 30-60 minutes)')
-    envf = Path(tempfile.mkdtemp()) / 'env.txt'; envf.write_text(''.join(f'{k}={v}\n' for k, v in env.items()))
-    cmd = [python_with_modules(log), repo / 'scripts/build_ipa_from_nsp.py', nsp, '-k', keys, '--prepare-xcode', '--team-id', team, '--romfs', 'separate', '--env-file', envf, '--keep-extracted']
-    if bundle: cmd += ['--bundle-id', bundle]
-    if o.get('lang', '').strip(): cmd += ['-l', o['lang'].strip()]
-    P.run(cmd, log, cwd=repo)
+    envf = Path(tempfile.mkdtemp()) / 'env.txt'; envf.write_text(env_text(env))
+    wd0 = next(iter(sorted(nsp.glob(f'{P.GAME_ID}_build'))), None) or next(iter(sorted(nsp.glob('*_build'))), None)
+    have = wd0 and next(iter(sorted((wd0 / 'xcode').glob('*.xcodeproj'))), None)
+    if o.get('reuse', True) and have:
+        log('2. Reusing the Xcode project and extracted game files (no extraction, no shader rebuild); only the host is recompiled')
+        (wd0 / 'xcode/Gen/dm').mkdir(parents=True, exist_ok=True)
+        (wd0 / 'xcode/Gen/dm/env.txt').write_text(env_text(env))
+    else:
+        log('2. Preparing the Xcode project (extraction and shaders are reused when unchanged; the first run takes 30-60 minutes; .nsp and .nup both work)')
+        cmd = [python_with_modules(log), repo / 'scripts/build_ipa_from_nsp.py', nsp, '-k', keys, '--prepare-xcode', '--team-id', team, '--romfs', 'separate', '--env-file', envf, '--keep-extracted']
+        if bundle: cmd += ['--bundle-id', bundle]
+        if o.get('lang', '').strip(): cmd += ['-l', o['lang'].strip()]
+        P.run(cmd, log, cwd=repo)
 
     wd = next(iter(sorted(nsp.glob(f'{P.GAME_ID}_build'))), None) or next(iter(sorted(nsp.glob('*_build'))), None)
     if not wd: raise RuntimeError(f'no *_build folder appeared in {nsp}')
@@ -132,6 +171,7 @@ def build(o, log):
     apps = sorted((dd / 'Build/Products').glob('Release-iphoneos/*.app'))
     if not apps: raise RuntimeError('the build produced no .app under ' + str(dd))
     app = apps[0]
+    if o.get('ipa_out', '').strip(): pack_ipa(app, Path(o['ipa_out']).expanduser(), log)
     if not dev: log('   built; no device chosen, so nothing is installed. Choose one and run again to install.'); return
 
     log('4. Installing over USB')
@@ -155,10 +195,10 @@ def gui():
     s = {}
     try: s = json.loads(SETTINGS.read_text())
     except Exception: pass
-    root = tk.Tk(); root.title('Ocarina of Time iPhone builder'); root.geometry('1250x800'); root.minsize(1000, 650)
+    root = tk.Tk(); root.title('Ocarina of Time iPhone builder'); root.geometry('1300x980'); root.minsize(1000, 650)
     v = {k: tk.StringVar(value=s.get(k, d)) for k, d in dict(repo=str(Path.home() / 'NX2Apple'), nsp='', keys=str(Path.home() / '.switch/prod.keys'), team='', bundle='', lang='en-US', device='',
-                                                             stand_kb='8', stand_kb_mid='4', stand_kb_small='2', shadow_div='16', keep='ui', textures='big', extra='').items()}
-    b = {k: tk.BooleanVar(value=s.get(k, d)) for k, d in dict(guest_file=True, sweep=True, fps20=True, water_off=False, effects_off=False, hud=False, push_romfs=True).items()}
+                                                             stand_kb='8', stand_kb_mid='4', stand_kb_small='2', shadow_div='16', keep='ui', textures='big', extra='', ipa_in='', ipa_out='').items()}
+    b = {k: tk.BooleanVar(value=s.get(k, d)) for k, d in dict(guest_file=True, sweep=True, fps20=True, water_off=False, effects_off=False, hud=False, push_romfs=True, reuse=True).items()}
     q = queue.Queue()
     left, right = ttk.Frame(root, padding=10), ttk.Frame(root, padding=10)
     left.pack(side='left', fill='y'); right.pack(side='left', fill='both', expand=True)
@@ -171,7 +211,7 @@ def gui():
         if p: var.set(p.rstrip('/'))
     def path_row(label, key, folder):
         f = ttk.Frame(left); ttk.Entry(f, textvariable=v[key], width=44).pack(side='left'); ttk.Button(f, text='Choose…', command=lambda: pick(v[key], folder, label)).pack(side='left', padx=4); row(label, f)
-    path_row('nxnative / NX2Apple checkout', 'repo', True); path_row('Game NSP folder', 'nsp', True); path_row('prod.keys', 'keys', False)
+    path_row('nxnative / NX2Apple checkout', 'repo', True); path_row('Game folder (.nsp or .nup)', 'nsp', True); path_row('prod.keys', 'keys', False)
     row('Apple team ID', ttk.Entry(left, textvariable=v['team'], width=20)); row('Bundle ID (blank = default)', ttk.Entry(left, textvariable=v['bundle'], width=34)); row('Language', ttk.Entry(left, textvariable=v['lang'], width=10))
     devs = ttk.Combobox(left, textvariable=v['device'], width=46, state='readonly'); row('iPhone (USB-C)', devs)
     def refresh():
@@ -184,8 +224,25 @@ def gui():
                            ('Small textures', 'stand_kb_small', ['', '1', '2', '4', '6', '8', '16']), ('Shadow map divider', 'shadow_div', ['1', '2', '4', '8', '16', '24', '32', '48']), ('Textures dropped', 'textures', ['big', 'all', 'none'])):
         row(lab, ttk.Combobox(left, textvariable=v[key], values=vals, width=8))
     row('Also keep sharp (ui is always on)', ttk.Entry(left, textvariable=v['keep'], width=20)); row('Extra DM_X=Y (; separated)', ttk.Entry(left, textvariable=v['extra'], width=34))
-    for lab, key in (('RAM saver (DM_GUEST_FILE)', 'guest_file'), ('Texture sweep (DM_ALIAS_SWEEP)', 'sweep'), ('20 fps cap', 'fps20'), ('Water off', 'water_off'), ('Effects off', 'effects_off'), ('Metal HUD', 'hud'), ('Push game files over USB', 'push_romfs')):
+    for lab, key in (('RAM saver (DM_GUEST_FILE)', 'guest_file'), ('Texture sweep (DM_ALIAS_SWEEP)', 'sweep'), ('20 fps cap', 'fps20'), ('Water off', 'water_off'), ('Effects off', 'effects_off'), ('Metal HUD', 'hud'), ('Push game files over USB / Wi-Fi', 'push_romfs'), ('Fast rebuild: reuse the extracted game and Xcode project', 'reuse')):
         ttk.Checkbutton(left, text=lab, variable=b[key]).grid(row=r[0], column=1, sticky='w'); r[0] += 1
+    def preset_iphone():
+        v['stand_kb'].set('2'); v['stand_kb_mid'].set('1'); v['stand_kb_small'].set('1'); v['shadow_div'].set('48'); v['textures'].set('all'); v['keep'].set('')
+        b['guest_file'].set(True); b['sweep'].set(True); b['fps20'].set(True); b['water_off'].set(True); b['effects_off'].set(True)
+        q.put('iPhone preset (untested): the lowest settings. An iPhone 12 Pro Max reports a Metal working set of only 2.74 GB, about half of the Mac\'s.')
+    ttk.Button(left, text='iPhone preset: lowest memory (untested)', command=preset_iphone).grid(row=r[0], column=1, sticky='we', pady=2); r[0] += 1
+    ttk.Separator(left).grid(row=r[0], columnspan=2, sticky='we', pady=6); r[0] += 1
+    path_row('IPA to write (for AltStore / Sideloadly / AirDrop)', 'ipa_out', False)
+    path_row('IPA already built (settings only)', 'ipa_in', False)
+    def patch_only():
+        o = {k: x.get() for k, x in v.items()}; o.update({k: x.get() for k, x in b.items()})
+        try:
+            src = Path(o['ipa_in']).expanduser()
+            if not src.is_file(): raise RuntimeError('choose the IPA NX2Apple built')
+            patch_ipa(src, src.with_name(src.stem + '-settings.ipa'), build_env(o), q.put)
+            q.put('Only the switches the host already knows take effect this way; the texture tiers, the sweep and 20 fps need the rebuilt host (Build, sign and install).')
+        except Exception as e: q.put(f'FAILED: {e}')
+    ttk.Button(left, text='Patch the IPA\'s settings only (no rebuild)', command=patch_only).grid(row=r[0], column=1, sticky='we', pady=2); r[0] += 1
     txt = tk.Text(right, wrap='word', font=('Menlo', 11)); txt.pack(fill='both', expand=True)
     btn = ttk.Button(left, text='Build, sign and install')
     btn.grid(row=r[0], column=1, sticky='we', pady=10)
@@ -215,12 +272,15 @@ def main():
     ap.add_argument('--cli', action='store_true'); ap.add_argument('--repo'); ap.add_argument('--nsp'); ap.add_argument('--keys'); ap.add_argument('--team'); ap.add_argument('--bundle', default='')
     ap.add_argument('--device', default=''); ap.add_argument('--lang', default='en-US'); ap.add_argument('--stand-kb', default='8'); ap.add_argument('--stand-kb-mid', default='4'); ap.add_argument('--stand-kb-small', default='2')
     ap.add_argument('--shadow-div', default='16'); ap.add_argument('--keep', default='ui'); ap.add_argument('--textures', default='big'); ap.add_argument('--no-guest-file', action='store_true'); ap.add_argument('--no-sweep', action='store_true')
-    ap.add_argument('--fps20', action='store_true'); ap.add_argument('--no-push-romfs', action='store_true'); ap.add_argument('--list-devices', action='store_true')
+    ap.add_argument('--fps20', action='store_true'); ap.add_argument('--no-push-romfs', action='store_true'); ap.add_argument('--list-devices', action='store_true'); ap.add_argument('--no-reuse', action='store_true'); ap.add_argument('--ipa-out', default=''); ap.add_argument('--patch-ipa', default='', help='write <ipa>-settings.ipa with these switches and stop')
     a = ap.parse_args()
+    if a.patch_ipa:
+        src = Path(a.patch_ipa); o = dict(stand_kb=a.stand_kb, stand_kb_mid=a.stand_kb_mid, stand_kb_small=a.stand_kb_small, shadow_div=a.shadow_div, keep=a.keep, textures=a.textures, guest_file=not a.no_guest_file, sweep=not a.no_sweep, fps20=a.fps20)
+        patch_ipa(src, src.with_name(src.stem + '-settings.ipa'), build_env(o), log_default); return
     if a.list_devices: [print(*d) for d in devices(log_default)]; return
     if not a.cli: return gui()
     build(dict(repo=a.repo, nsp=a.nsp, keys=a.keys, team=a.team, bundle=a.bundle, device=a.device, lang=a.lang, stand_kb=a.stand_kb, stand_kb_mid=a.stand_kb_mid, stand_kb_small=a.stand_kb_small, shadow_div=a.shadow_div,
-               keep=a.keep, textures=a.textures, guest_file=not a.no_guest_file, sweep=not a.no_sweep, fps20=a.fps20, push_romfs=not a.no_push_romfs), log_default)
+               keep=a.keep, textures=a.textures, guest_file=not a.no_guest_file, sweep=not a.no_sweep, fps20=a.fps20, push_romfs=not a.no_push_romfs, reuse=not a.no_reuse, ipa_out=a.ipa_out), log_default)
 
 
 if __name__ == '__main__':

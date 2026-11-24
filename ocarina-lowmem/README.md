@@ -85,6 +85,19 @@ You need: a Mac with Xcode (iOS platform installed), Python 3.12+, the nxnative 
 
 The tool finds a Python that has the build script's modules (lz4, capstone, fonttools, zbic), or makes a venv at `~/.nx_ocarina_ios_venv` and installs them (needs the internet once).
 
+### Why not patch the `.img` files
+
+An IPA built from nxnative or NX2Apple contains `.img` files, but they are data: `RomFS.img` is the game's files and `msl/*.img` are shader libraries. The memory and frame-rate changes are **code in the host program** (`nvn_mtl.m`, compiled into the app) plus **switches** the host reads from `dm/env.txt` inside the app or `Documents/env.txt` on the phone. So the iPhone tool does two things instead:
+
+- **Build, sign and install** recompiles the host with the patches and puts your switches in the app. With "Fast rebuild" ticked (the default) and a build folder from an earlier run, it reuses the extracted game and Xcode project, so only the host is compiled. It can also write an IPA (for AltStore, Sideloadly, LiveContainer or AirDrop-then-sideload) and install over USB-C, or over Wi-Fi when Xcode lists the phone as a network device.
+- **Patch the IPA's settings only** writes `dm/env.txt` into an IPA you already built (for example with NX2Apple), with no rebuild. Only switches the stock host already knows take effect this way. The texture tiers, the sweep and the 20 fps target are code in this kit, so they need the rebuild. The result is unsigned: a sideloader signs it again.
+
+AirDrop, or any file sent to the phone, does not install an app by itself; an IPA needs a sideloader, and the direct route is USB or Wi-Fi install from Xcode.
+
+Both `.nsp` (Switch 1) and `.nup` (Switch 2) game folders go through the same nxnative build script, which reported the `.nup` and its update in the log. Use the "Game folder" box for either.
+
+**Memory on an iPhone is much tighter.** An iPhone 12 Pro Max (A14) reported a Metal working set of 2.74 GB (the Mac's was 5.46 GB), and the unpatched game reached 1.94 GB of app memory at 11 fps on the title screen. The Mac-tested sets above use about 5 GB of GPU memory and will not fit. The **iPhone preset** button fills the lowest settings (texture levels 2/1/1, all textures dropped, shadow divider 48, water and effects off, 20 fps, RAM saver, sweep). It is **untested**. The game's launcher also has a **Render scale** slider (0.5 to 1.0): lowering it shrinks the render-target heaps, which are about 1 GB at full size. Send the log if it still stops.
+
 Caveats: untested on a device; the Mac patcher's resolution edit is not part of it; whether a free account keeps Increased Memory Limit depends on Apple's side, and the log will tell you.
 
 ## Reading the log

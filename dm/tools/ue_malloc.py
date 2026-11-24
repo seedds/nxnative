@@ -6,7 +6,8 @@ pools (74 of 512 MB), which an iPhone cannot give.
 The chain, each link unique or nothing is cut:
 - the allocator's name, the UTF-16 string "Binned3" (TEXT("Binned3"); it starts a string), in ro;
 - its getter, GetDescriptiveName: adrp x0 + add x0 of the string, then ret;
-- the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to two words of 0 (offset to top, no RTTI). The getter's
+- the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to its header: an offset to top of 0, then an RTTI word of 0 or, in a
+  build compiled with RTTI (CAPTAIN TSUBASA 2: WORLD FIGHTERS 1.0.6), the class's own type_info: an object in the module's data whose name word points at "14FMallocBinned3" in ro. The getter's
   slot number names the slot layout: 19 for Unreal Engine 4.26 and 4.27, 22 for UE 5, 26 for UE 5.6 (hle_uemalloc.c); any other stops the chain with a [RED] line;
 - the constructor: the one function other than the vtable's two destructors that stores the vtable's address (adrp + add, then str to [xN]);
 - its call sites, each a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup). DRAGON BALL Sparking! ZERO (UE 5.1) has two,
@@ -66,7 +67,12 @@ def find(img, text_end, ro_off, data_off):
     vt = slots[0]
     while vt - 8 >= data_off and is_code(value(vt - 8)): vt -= 8
     slot = (slots[0] - vt) // 8
-    if (value(vt - 16), value(vt - 8)) != (0, 0): return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: no offset to top and RTTI words of 0 before it'
+    def own_rtti(t):   # FMallocBinned3's type_info: in the module's data, its name word at the class's mangled name in ro
+        if t % 8 or not data_off <= t <= len(img) - 16: return False
+        n = value(t + 8)
+        return ro_off <= n < data_off and img[n:n + 17] == b'14FMallocBinned3\0'
+    if value(vt - 16) != 0 or not (value(vt - 8) == 0 or own_rtti(value(vt - 8))):
+        return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: before it, no offset to top of 0 and RTTI word of 0 or of FMallocBinned3'
     if slot not in LAYOUTS: return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: the name getter is slot {slot}, a slot layout the host does not know'
     dtors = {value(vt), value(vt + 8)}
     # Direct calls and jumps in the text: bl (top bits 100101) and b (000101), by target

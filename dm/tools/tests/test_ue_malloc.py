@@ -74,5 +74,62 @@ class FindTest(unittest.TestCase):
         self.assertTrue(why.startswith('[RED] ') and '1 calls and 1 jumps' in why, why)
 
 
+TI, TI_NAME, OTHER_NAME = 0xa800, 0x8200, 0x8240   # the type_info object (data), its name and another class's (ro)
+
+
+def image_rtti(name=None, ti=TI, name_at=TI_NAME, relocated=False, **kw):
+    img = image(relocated=relocated, **kw)
+    img[TI_NAME:TI_NAME + 17] = b'14FMallocBinned3\0'
+    img[OTHER_NAME:OTHER_NAME + 9] = b'7FMalloc\0'
+    if name is not None: img[name_at:name_at + len(name)] = name
+    # type_info: its own vtable pointer (an import, 0 in place), the name, the base class's type_info
+    if relocated:   # the two pointers are 0 in place and come from R_AARCH64_RELATIVE entries after the vtable's
+        rela = 0x9000; n = struct.unpack_from('<Q', img, 0xb800 + 16 + 8)[0] // 24
+        for k, (at, v) in enumerate(((VT - 8, ti), (ti + 8, name_at))): struct.pack_into('<QQq', img, rela + 24 * (n + k), at, 1027, v)
+        struct.pack_into('<qQ', img, 0xb800 + 16, 8, 24 * (n + 2))
+    else:
+        struct.pack_into('<Q', img, VT - 8, ti)
+        struct.pack_into('<Q', img, ti + 8, name_at)
+    return img
+
+
+# A build compiled with RTTI (CAPTAIN TSUBASA 2: WORLD FIGHTERS 1.0.6, GitHub issue #3036): the words before the address point are (0, the class's type_info), not (0, 0)
+class RttiTest(unittest.TestCase):
+    def test_a_vtable_with_its_class_rtti_is_found(self):
+        for slot in (19, 26):
+            for relocated in (False, True):
+                with self.subTest(slot=slot, relocated=relocated):
+                    call, vt, got, why = find(image_rtti(slot=slot, relocated=relocated))
+                    self.assertEqual((call, vt, got), ((CALLER + 4,), VT, slot), why)
+
+    def test_another_class_rtti_is_red(self):   # the word before the slots names another class: not this vtable's header
+        call, _, _, why = find(image_rtti(name_at=OTHER_NAME))
+        self.assertIsNone(call)
+        self.assertTrue(why.startswith('[RED] '), why)
+
+    def test_a_longer_class_name_is_red(self):   # "14FMallocBinned3" must end there (FMallocBinned3Extra would be 19...)
+        call, _, _, why = find(image_rtti(name=b'14FMallocBinned3x\0'))
+        self.assertIsNone(call)
+        self.assertTrue(why.startswith('[RED] '), why)
+
+    def test_a_pointer_outside_the_data_is_red(self):   # a code or ro address, an odd one, one past the image
+        for ti in (0x1500, 0x8300, TI + 4, END - 8):
+            with self.subTest(ti=hex(ti)):
+                img = image_rtti(); struct.pack_into('<Q', img, VT - 8, ti)
+                call, _, _, why = find(img)
+                self.assertIsNone(call)
+                self.assertTrue(why.startswith('[RED] '), why)
+
+    def test_a_nonzero_offset_to_top_is_red(self):
+        img = image_rtti(); struct.pack_into('<q', img, VT - 16, -16)
+        call, _, _, why = find(img)
+        self.assertIsNone(call)
+        self.assertTrue(why.startswith('[RED] '), why)
+
+    def test_no_rtti_still_found(self):
+        call, vt, got, why = find(image(slot=22))
+        self.assertEqual((call, vt, got), ((CALLER + 4,), VT, 22), why)
+
+
 if __name__ == '__main__':
     unittest.main()

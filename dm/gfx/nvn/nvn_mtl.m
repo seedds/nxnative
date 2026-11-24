@@ -3669,8 +3669,14 @@ static inline int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uin
 // atomic at all (the pipeline does not build there), so their RG32Uint textures keep the usage they had. After uncraftablexd's PRAGMATA bring-up (PR #1801)
 static int dev_atomic64(void) { static int v = -1; if (v < 0 && g_dev) v = [g_dev supportsFamily:MTLGPUFamilyApple9] ? 1 : 0; return v > 0; }
 static inline int pf_atomic(MTLPixelFormat pf) { return pf_r32i(pf) || (pf == MTLPixelFormatRG32Uint && dev_atomic64()); }
+// NVN2 stores to images through texture descriptors, and a texture needs no IMAGE flag for it. Cyberpunk 2077 writes its text's glyph atlas (R8, flags 0) and its window textures
+// (DISPLAY | COMPRESSIBLE) with compute shaders through the image pool: pooled only with IMAGE, those writes went to the write sink, so its text drew nothing and its window kept
+// the boot logo. So on the Switch 2 every texture is made writable and may stand in the image pool (img_pool_ids); a texture the host never made itself (a packaged upload) still
+// gets the write sink there, as image_prepare upgrades only IMAGE textures
+int dm_sdk_ounce(void);
+static inline int tex_image_capable(const tex_t *t) { return (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) || dm_sdk_ounce(); }
 static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
-    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
+    if (!tex_image_capable(t)) return 0;
     return MTLTextureUsageShaderWrite | (pf_atomic(pf) ? MTLTextureUsageShaderAtomic : 0);
 }
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
@@ -14278,7 +14284,7 @@ static void img_pool_ids(void) {   // the IDs registered with the IMAGE flag, by
     g_ipool_nids = 0;
     for (int id_ = 1; id_ < g_ntreg; id_++) {
         const treg_t *r = &g_treg[id_];
-        if (!r->ok || r->gone || !(r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE)) continue;
+        if (!r->ok || r->gone || !tex_image_capable(&r->t)) continue;
         if (g_ipool_nids == g_ipool_cap) { g_ipool_cap = g_ipool_cap ? g_ipool_cap * 2 : 64; g_ipool_ids = realloc_or_die(g_ipool_ids, (size_t)g_ipool_cap * sizeof *g_ipool_ids, "the image pool"); }
         g_ipool_ids[g_ipool_nids++] = id_;
     }
@@ -14408,7 +14414,7 @@ static void image_prepare_shader(NvShader *sh, int st) {
                 int tid = g_ipool_ids[k];
                 if (tid < S.tex_base || tid >= g_ntreg) continue;
                 const treg_t *r = &g_treg[tid];
-                if (!r->ok || r->gone || !img_pool_target_ok(r, b->dtt) || (!r->view && !tex_storage_live(&r->t))) continue;
+                if (!r->ok || r->gone || !(r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE) || !img_pool_target_ok(r, b->dtt) || (!r->view && !tex_storage_live(&r->t))) continue;   // upgrades: IMAGE textures only (tex_image_capable)
                 if (nprep == prep_cap) { prep_cap = prep_cap ? prep_cap * 2 : 64; prep_ids = realloc_or_die(prep_ids, (size_t)prep_cap * sizeof *prep_ids, "image pool prepare"); }
                 prep_ids[nprep++] = tid;
             }

@@ -27,6 +27,13 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** `dm_thread_service_connect` (`hle_thread.c`), called by the host's `ro::Initialize`, waits until the threads started so far have been dispatched into guest code (at most 50 ms), then for a round trip (200 µs). Only `ro::Initialize` calls it so far. **Open:** like [File system calls are service requests](#file-system-calls-are-service-requests), this models a time rather than giving an order: the thread could still be stopped by the Mac between its dispatch and its read.
 - **Found on:** [Mario Tennis Fever](../../dm/games/0400D4201C6EA000/README.md).
 
+### A Switch 2 application runs on six cores
+
+- **Symptom:** at start, one thread spins forever in the game's own loop that picks its core.
+- **Cause:** `GetInfo(CoreMask)` returned 7 (cores 0 to 2) for every application. A Switch 2 application runs on cores 0 to 5. [Red Dead Redemption's Switch 2 program](../../dm/games/040000B0196AA000/README.md) places its threads on core (n mod 6) within `GetThreadAvailableCoreMask()` and its own mask (`main+0xd9fc`), so a thread whose mask named only cores 3 to 5 looped there forever.
+- **Fix:** `GetInfo(CoreMask)` returns 0x3f when the sdk is built for the Switch 2 (`dm_sdk_ounce`), and 7 otherwise (`hle_svc.c`).
+- **Found on:** [Red Dead Redemption's Switch 2 program](../../dm/games/040000B0196AA000/README.md).
+
 ### Core mask changes move the ideal core into the new mask
 
 - **Symptom:** per-core job queues never drained.

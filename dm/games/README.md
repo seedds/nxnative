@@ -198,6 +198,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Rayman Legends: Definitive Edition](01005FF002E2A000/README.md) | `01005FF002E2A000` | 1.2 | 1.3.1 | Ubisoft's UbiArt Framework | NVN | — |
 | [Re:ZERO -Starting Life in Another World- The Prophecy of the Throne](0100D800117F4000/README.md) | `0100D800117F4000` | 1.0.2 | 9.5.0 | The Forge renderer | Vulkan | — |
 | [Red Dead Redemption](01007820196A6000/README.md) | `01007820196A6000` | 1.0.7 | 15.3.2 | Rockstar's RAGE (Double Eleven port) | NVN | 60 fps target |
+| [Red Dead Redemption (Switch 2)](040000B0196AA000/README.md) | `040000B0196AA000` | v458752 (Switch 2) | 20.5.17 (Ounce) | Rockstar's RAGE (Double Eleven port) | NVN2 | — |
 | [Resident Evil](010050F00BC1A000/README.md) | `010050F00BC1A000` | 1.0.0 (base) | 5.4.0 | Capcom's MT Framework | NVN | — |
 | [Resident Evil 4](0400569027BF4000/README.md) | `0400569027BF4000` | v131072 (Switch 2) | 21.4.3 (Ounce) | RE Engine, Havok, Wwise | NVN2 | — |
 | [Return of the Obra Dinn](010032E00E6E2000/README.md) | `010032E00E6E2000` | 1.0.1 | 8.2.0 | Unity 2017.4.28f1 IL2CPP | NVN | — |

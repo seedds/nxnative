@@ -1,0 +1,36 @@
+# Red Dead Redemption, Switch 2 program: the NSP script's provisional profile (dm/games/profile_guess.py), checked on the Mac through the opening and about 5 minutes of play
+# SDK 20.5.17 (Ounce), RAGE (Double Eleven port), NVN2
+
+# ---- Identity ----
+title_id	040000B0196AA000
+program_id	040000B0196AA000
+
+# ---- App ----
+name	Red Dead Redemption (Switch 2)
+ipa	RedDeadRedemptionSwitch2.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v458752	?	main=4a2199b2b4bbb54b0d64d8be83b27d78	sdk=32a9ac1480a6f0e9e2e8a813ae9cd731
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (C / libc), subsdk1 (C / libc)
+modules	main sdk
+romfs_marker	audio_ounce.rpf
+zip_store	.bk2:.pat:.pkdounce:.rpf:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB − 1209 MB of bss (counted as used memory): a 8192 MB heap region
+mem_reserve	0x230000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+# the sdk is built for the Switch 2 (spec: Ounce): its 9 GB pool
+app_pool	0x240000000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/redemption/=redemption /cero/=cero /d11extra/=d11extra
+shader_note	Red Dead Redemption (Switch 2) shaders (RAGE effects in shaders.rpf and main, Double Eleven pack)

@@ -24,6 +24,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Orbitals](dm/games/040032B023CA4000/README.md) — two players: a controller for player 2
 - [Pokémon Pokopia](dm/games/0400A3A01EE4C000/README.md)
 - [PRAGMATA](dm/games/0400C76024710000/README.md)
+- [Red Dead Redemption (Switch 2)](dm/games/040000B0196AA000/README.md)
 - [Splatoon Raiders](dm/games/0400380020056000/README.md)
 - [Star Fox](dm/games/0400E88025B1A000/README.md)
 - [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](dm/games/040015100B514001/README.md)

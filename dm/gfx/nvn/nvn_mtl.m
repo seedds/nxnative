@@ -437,6 +437,8 @@ static void cb_end(id cb, id<MTLResidencySet> also) {
 // A classic command buffer on g_q, the sets named (nothing else calls commandBuffer on g_q: the same test)
 static id<MTLCommandBuffer> cl_cb(void) { id<MTLCommandBuffer> cb = [g_q commandBuffer]; res_name(cb, nil); return cb; }
 static NSHashTable *g_res_objects;
+static char g_tex_up_key;   // mem_census: an uploaded texture's storage (guest address, NVN size, pool flags)
+static NSMapTable *g_res_line;   // the source line that put each object in the set (the residency line's "in the set by line", the census)
 static _Atomic unsigned g_image_heap_n, g_big_n, g_pair_n, g_sparse_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN); g_pair_n: storage pairs (pair_texture); g_sparse_n: sparse virtual pools whose runs alias physical pools and replaced run buffers
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n || g_pair_n || g_sparse_n ? MTL4VisibilityOptionResourceAlias : 0); }
 void mtl_sparse_alias_delta(int delta) {
@@ -445,6 +447,17 @@ void mtl_sparse_alias_delta(int delta) {
 }
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
+// What is in the set now by the line that added it (adds less removals), and what it was at the last residency line: a load's leftovers show as a line whose bytes stay up after it.
+// The phone's set grew 3.2 → 3.9 → 4.5 GB over two loads of Ocarina of Time and nothing said by which line
+enum { RS_LIVE = 48 }; static struct { int line; int64_t n, bytes, last; } g_rs_live[RS_LIVE];
+// The bytes an object adds to the set: a texture made over a buffer (a linear texture over its pool's buffer, tex_linear) is that buffer's memory, which the set counts once (measured:
+// an 8 MB buffer and 31 textures over it read 8 MB in allocatedSize), though each texture's allocatedSize gives the whole buffer. Counted per texture, Ocarina of Time's 31-64 linear
+// targets over one 8 MB pool read 248-512 MB that the set does not hold (the iPhone 17's "line 4926: 64, 512 MB" back on the field)
+static uint64_t res_bytes(id<MTLAllocation> o) { return [(id)o conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)o).buffer ? 0 : o.allocatedSize; }
+static void rs_live_add(int line, int64_t n, int64_t bytes) {   // under g_res_mu
+    int k = 0; while (k < RS_LIVE - 1 && g_rs_live[k].line && g_rs_live[k].line != line) k++;
+    g_rs_live[k].line = line; g_rs_live[k].n += n; g_rs_live[k].bytes += bytes;
+}
 #define res_add(r) res_add_at((r), __LINE__)
 // File pages under a shared buffer that joins the set are wired through the CPU's fault path (mlock) before the commit, and given back after it, when the commit holds them for the GPU.
 // The commit wires an added buffer's pages itself, and pages a file in from the GPU driver's wiring path (IOGPUResourceGroupUpdateResources → the VM → APFS pagein). With the guest's
@@ -486,6 +499,8 @@ static void file_wire_record(fwire_t fw, uint64_t dt) {   // Caller holds g_res_
     }
     g_fwire[g_nfwire++] = fw;
 }
+static uint64_t g_fwire_peak, g_res_peak;   // since the last residency line: the most file-backed bytes wired before one commit, the largest set after a commit
+static _Atomic uint64_t g_ubs_live, g_ubs_peak;   // bytes of the upload batches' buffers over guest memory (up_big_src) in the set now, and the most at once since the last residency line
 static void file_unwire(fwire_t *fw, size_t n) { for (size_t i = 0; i < n; i++) munlock(fw[i].p, fw[i].n); free(fw); }   // a range the game has mapped anew meanwhile fails, harmlessly
 // Both run on guest threads too (pool_res from mtl_addr, uploads), whose implicit autorelease pools never drain; containsObject: / removeObject: on a weak NSHashTable leave the object
 // autoreleased in the calling thread's pool (measured in a standalone test: the object outlived its last strong reference until the thread ended), so each has a pool of its own
@@ -518,10 +533,13 @@ static void res_add_at(id<MTLAllocation> allocation, int line) { @autoreleasepoo
             return;
         }
     }
-    { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += r.allocatedSize; }
+    { int k = 0; while (k < RS_SITES - 1 && g_rs_site[k].line && g_rs_site[k].line != line) k++; g_rs_site[k].line = line; g_rs_site[k].n++; g_rs_site[k].bytes += res_bytes(r); }
     if (fw.p) file_wire_record(fw, fw_ns);
     res_q_put(r, 1);
     [g_res_objects addObject:r];
+    if (!g_res_line) g_res_line = [NSMapTable weakToStrongObjectsMapTable];
+    [g_res_line setObject:@(line) forKey:r];
+    rs_live_add(line, 1, (int64_t)res_bytes(r));
     pthread_mutex_unlock(&g_res_mu);
 } }
 static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
@@ -530,6 +548,7 @@ static void res_remove(id<MTLAllocation> r) { @autoreleasepool {
     if (![g_res_objects containsObject:r]) { pthread_mutex_unlock(&g_res_mu); return; }
     res_q_put(r, 0);
     [g_res_objects removeObject:r];
+    rs_live_add([[g_res_line objectForKey:r] intValue], -1, -(int64_t)res_bytes(r));
     g_rs_rm++;
     pthread_mutex_unlock(&g_res_mu);
 } }
@@ -769,6 +788,7 @@ static void mem_pressure_said(char *b, size_t n) {
              (unsigned long long)atomic_load(&g_mp_trims), (unsigned long long)(atomic_load(&g_mp_freed) >> 20),
              (unsigned long long)atomic_load(&g_sweep_n), (unsigned long long)(atomic_load(&g_sweep_bytes) >> 20));
 }
+static void res_report(const char *why, int kind);
 static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (the source's handler; a test calls it directly)
     atomic_fetch_add(&g_mp_n[lv], 1);
     sys_mem_t m = sys_mem(); char room[32] = "none";
@@ -780,6 +800,7 @@ static void mem_pressure_event(int lv) {   // lv: 0 normal, 1 warn, 2 critical (
          (unsigned long long)m.free, (unsigned long long)m.wired, (unsigned long long)m.compressed, (unsigned long long)m.file, (unsigned long long)(g_res ? g_res.allocatedSize >> 20 : 0), room,
          act ? "trimming at the next submission" : lv ? "no trim at this level here" : "");
     if (act) { int cur = atomic_load(&g_mp_want); while (lv > cur && !atomic_compare_exchange_weak(&g_mp_want, &cur, lv)) {} }
+    if (lv) res_report(lv == 2 ? "[mem] memory pressure critical" : "[mem] memory pressure warn", lv);
 }
 static void mem_pressure_start(void) {
     static dispatch_source_t src;
@@ -829,19 +850,21 @@ static void res_check(id r, const char *what, int reg) {
 // until it has committed and dropped its queue references. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set.
 // Upload staging is queued with the commit lock held so this caller also owns the removal references through their release.
 static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autoreleasepool {
+    uint64_t z = 0;   // the set after the commit (the three-quarters line, res_report)
     pthread_mutex_lock(&g_res_commit_mu);
     if (staging) for (id<MTLAllocation> obj in staging) res_remove(obj);
     pthread_mutex_lock(&g_res_mu);
     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
     fwire_t *fw = g_fwire; size_t nfw = g_nfwire; g_fwire = NULL; g_nfwire = g_cfwire = 0;   // the file pages wired for exactly these changes
+    { uint64_t b = 0; for (size_t i = 0; i < nfw; i++) b += fw[i].n; if (b > g_fwire_peak) g_fwire_peak = b; }
     pthread_mutex_unlock(&g_res_mu);
     uint64_t dt = 0;
     if (n) {
         uint64_t t0 = commit_now();
         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
         [g_res commit];
-        dt = commit_now() - t0;
-        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+        dt = commit_now() - t0; z = g_res.allocatedSize;   // the set after the commit, read under g_res_commit_mu
+        pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; if (z > g_res_peak) g_res_peak = z; pthread_mutex_unlock(&g_res_mu);
     }
     file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
     uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
@@ -862,6 +885,10 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
              dt / 1e6, (unsigned long long)adds, added_bytes / 1048576.0, (unsigned long long)removes, removed_bytes / 1048576.0,
              th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)slow);
     }
+    // What the set is made of, once, when it first passes three quarters of Metal's working set: a device that later fails with GPU out-of-memory has said it before (the M1 iPad's
+    // 5,461 MB is passed going outside in Ocarina of Time), and one that does not still tells what to cut. Checked after each commit: read only at the 300-frame line, the iPhone 17's
+    // set passed 4.4 GB of its 4,096 MB line between two lines and was back under it at each
+    static _Atomic int told; if (z && g_dev && z > g_dev.recommendedMaxWorkingSetSize / 4 * 3 && !atomic_exchange(&told, 1)) res_report("[mem] the residency set passed three quarters of Metal's working set", 0);
 } }
 static void res_commit(void) { res_commit_retiring(nil); }
 static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
@@ -870,7 +897,7 @@ static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn !
 static void res_top(const char *why) { @autoreleasepool {
     enum { N = 24 }; id<MTLAllocation> top[N] = {nil}; uint64_t total = 0, n = 0, kind[4] = {0}, count[4] = {0};
     pthread_mutex_lock(&g_res_mu);
-    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize; total += z; n++;
+    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = res_bytes(o); total += z; n++;
         int k = [(id)o conformsToProtocol:@protocol(MTLTexture)] ? 0 : [(id)o conformsToProtocol:@protocol(MTLHeap)] ? 1 : ((id<MTLBuffer>)o).storageMode == MTLStorageModeShared ? 2 : 3;
         kind[k] += z; count[k]++;
         for (int q = 0; q < N; q++) if (!top[q] || z > top[q].allocatedSize) { for (int j = N - 1; j > q; j--) top[j] = top[j - 1]; top[q] = o; break; } }
@@ -909,10 +936,30 @@ void mtl_res_stats(char *out, size_t n) {
     if (o < n) o += snprintf(out + o, n - o, "), removed %llu, %lu allocations in the set (%.0f MB)", (unsigned long long)g_rs_rm, set_n, set_mb);
     if (o < n) snprintf(out + o, n - o, ", named on %llu command buffers in %.2f ms, longest %.2f ms", (unsigned long long)atomic_exchange(&g_res_names, 0), atomic_exchange(&g_res_name_ns, 0) / 1e6, atomic_exchange(&g_res_name_max, 0) / 1e6);
     { uint64_t ffail = atomic_load(&g_fwire_fail);
-      if (g_fwire_n + ffail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, (unsigned long long)ffail); }
-      g_fwire_n = g_fwire_bytes = g_fwire_ns = 0; }
+      { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", at most %.0f MB after a commit", g_res_peak / 1048576.0); }
+      if (g_fwire_n + ffail) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", file-backed buffers wired before their commit %llu, %.0f MB, %.1f ms, at most %.0f MB before one commit (refused %llu)", (unsigned long long)g_fwire_n, g_fwire_bytes / 1048576.0, g_fwire_ns / 1e6, g_fwire_peak / 1048576.0, (unsigned long long)ffail); }
+      { uint64_t pk = atomic_exchange(&g_ubs_peak, atomic_load(&g_ubs_live)); if (pk) { o = strlen(out); if (o < n) snprintf(out + o, n - o, ", upload reads over guest memory at most %.0f MB at once", pk / 1048576.0); } }
+      g_fwire_n = g_fwire_bytes = g_fwire_ns = g_fwire_peak = 0; g_res_peak = (uint64_t)(set_mb * 1048576.0); }   // set_mb: the set's size read under g_res_commit_mu
     memset(g_rs_site, 0, sizeof g_rs_site); g_rs_rm = g_rs_commits = g_rs_commit_ns = 0;
+    {   // in the set now by the line that added it, the largest first, with the change since the last residency line
+        int ord[RS_LIVE], no = 0; for (int k = 0; k < RS_LIVE; k++) if (g_rs_live[k].line && (g_rs_live[k].bytes || g_rs_live[k].last)) ord[no++] = k;
+        for (int i = 0; i < no; i++) for (int j = i + 1; j < no; j++) if (g_rs_live[ord[j]].bytes > g_rs_live[ord[i]].bytes) { int x = ord[i]; ord[i] = ord[j]; ord[j] = x; }
+        o = strlen(out); if (o < n) o += snprintf(out + o, n - o, ", in the set by line (change since the last line):");
+        for (int i = 0; i < no && i < 8 && o < n; i++) { int k = ord[i];
+            o += snprintf(out + o, n - o, "%s line %d %lld, %.0f MB (%+.0f)", i ? "," : "", g_rs_live[k].line, (long long)g_rs_live[k].n, g_rs_live[k].bytes / 1048576.0, (g_rs_live[k].bytes - g_rs_live[k].last) / 1048576.0); }
+        for (int k = 0; k < RS_LIVE; k++) g_rs_live[k].last = g_rs_live[k].bytes;
+    }
     pthread_mutex_unlock(&g_res_mu);
+}
+// res_top and mem_census off the caller's thread: res_commit runs with g_mu held on some paths, and the census takes it. kind 0 once (the three-quarters line), 1 / 2 a memory pressure warn /
+// critical, each at most once a minute. A device that is ended for its wired memory (proc-thrashing, the iPhone 17) never fails a command buffer, so these are what its log says of the set
+static void res_report(const char *why, int kind) {
+    static _Atomic uint64_t last[3];
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), was = atomic_load(&last[kind]);
+    if (kind && was && now - was < 60000000000ull) return;
+    if (!atomic_compare_exchange_strong(&last[kind], &was, now)) return;
+    char *w = strdup(why);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ @autoreleasepool { res_top(w); mem_census(w); free(w); } });
 }
 
 @interface NvDeferredRelease : NSObject { @public id object; uint64_t fence; int keep_resident; } @end
@@ -1083,6 +1130,8 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+#include "nvn_res_probe.inc"   // DM_RES_PROBE=1: what an access through a pointer to a buffer outside the residency set gets, on this device (mtl_init)
+static void res_probe_say(const char *s) { MLOG("[res-probe] %s", s); }
 static void mtl_init_once(void) {
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -1129,6 +1178,7 @@ static void mtl_init_once(void) {
     // BC textures are created and uploaded as BC, with no decompression path (dm/gfx/tex/README.md); without BC the first one aborts in Metal's descriptor validation mid-game
     // (GitHub issue #704: an iPhone 15, A16). The iOS front end refuses such a device before the launcher (main.m); this stops every other route at the device, with the reason
     if (!g_dev.supportsBCTextureCompression) MDIE("the Metal device %s has no BC texture formats, which the games' textures use and the host does not decompress: an iPhone needs an A17 Pro or later, an iPad an M1 or later", g_dev.name.UTF8String);
+    if (getenv("DM_RES_PROBE") && atoi(getenv("DM_RES_PROBE")) > 0) res_probe(g_dev, 2, res_probe_say);   // diagnostic, before the game: its own queue and residency set
     { void crash_set_wait_dump(void (*fn)(void)); void mtl_wait_state_dump(void); crash_set_wait_dump(mtl_wait_state_dump); }
     g_alloc_n = 3;
     for (int i = 0; i < 3; i++) {
@@ -3357,7 +3407,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[179];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[184];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -3813,6 +3863,33 @@ static inline void tex_lsize(const tex_t *t, unsigned l, uint32_t *w, uint32_t *
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
 static void tex_zero_fill(id<MTLTexture> mt);
+// Smaller textures on small devices (docs/reference/memory.md, "Large sampled textures leave out their largest level on small devices"). Where Metal's working set is under 6 GB (the
+// iPhone 17 and the M1 iPad: 5,461 MB), a large texture made from the game's data (pkg_upload_) leaves out its largest level: the Metal texture is half the size with one level fewer,
+// and its level k holds the game's level k+1. Sampled with normalized coordinates, it gives the same texel density from the next level; only the closest views lose detail. Only
+// sampling may see it: tex_mtl hands it out only to the sampled-texture path (treg_tex, t_drop_ok), and every other use (attachments, copies, image slots, readbacks, upgrades) makes the
+// texture whole first (tex_undrop), after which it stays whole (g_drop_full). Shaders that fetch texels, ask the size or pick an explicit level read the smaller texture. DM_NVN_TEX_DROP_MIP=0/1
+// forces it off or on
+enum { DROP_MIN = 512 };   // both sides at least this, and 2 levels or more
+// Small devices: Metal's working set under 6 GB (the iPhone 17 and the M1 iPad, 5,461 MB; 8 GB Macs too). The rule for smaller textures here, for upload staging released (up_reuse)
+// and for the sweep of idle uploaded textures (pkg_sweep)
+static int small_working_set(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+static int drop_wants(uint64_t working_set) { return small_working_set(working_set); }
+static int g_drop_on = -1;
+static int drop_on(void) {
+    if (g_drop_on < 0) { const char *e = getenv("DM_NVN_TEX_DROP_MIP"); g_drop_on = e && *e ? atoi(e) > 0 : drop_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (g_drop_on) MLOG("large sampled textures leave out their largest level (DM_NVN_TEX_DROP_MIP%s): sides of %d and more, 2 levels or more", e && *e ? "" : ", Metal's working set under 6 GB", DROP_MIN); }
+    return g_drop_on;
+}
+static char g_drop_key;   // set on a dropped Metal texture (and carried by tex_upgrade)
+static __thread int t_drop_ok;   // tex_mtl's caller samples the texture (treg_tex)
+static __thread int t_drop_off;   // pkg_upload_ makes the texture whole (tex_undrop)
+static NSMutableSet *g_drop_full;   // storage of textures made whole again: they stay whole (submit thread)
+static uint64_t g_drop_n, g_drop_bytes, g_drop_full_n, g_drop_cand_n[4], g_drop_cand_b[4];
+static uint64_t g_drop_no[8]; static uint32_t g_drop_no_flags;   // first uploads of 256 and more that no rule lets drop, by the first rule they fail (pkg_upload_), and the flags of those refused for flags   // dropped, bytes saved, made whole; candidates by largest side 256 / 512 / 1024 / 2048+
+static struct { int line; uint64_t n; } g_drop_why[8];
+static int tex_dropped(id<MTLTexture> m) { return m && (objc_getAssociatedObject(m, &g_drop_key) || (m.parentTexture && objc_getAssociatedObject(m.parentTexture, &g_drop_key))); }
+// A sampled view of a dropped texture: from level 0 it starts at Metal level 0 with one level fewer (at least one), from level k at Metal level k-1
+static void drop_levels(NSUInteger *l0, NSUInteger *nl) { if (*l0) (*l0)--; else if (*nl > 1) (*nl)--; }
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
@@ -3837,6 +3914,7 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         if (upgraded) { res_add(raw); NvAtomicRaw *own = [NvAtomicRaw new]; own->raw = raw; objc_setAssociatedObject(upgraded, &g_atomic_raw_key, own, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     } else upgraded = backing ? [backing newTextureWithDescriptor:d offset:base.bufferOffset bytesPerRow:base.bufferBytesPerRow] : [g_dev newTextureWithDescriptor:d];
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
+    if (objc_getAssociatedObject(base, &g_drop_key)) objc_setAssociatedObject(upgraded, &g_drop_key, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // a sampled view's format: still dropped
     if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
     int copy_src = !backing && fam_is_valid(base);
@@ -3909,11 +3987,14 @@ static unsigned g_up_seq;
 #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
-// Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
+// Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. Small devices (small_working_set, as smaller
+// textures) keep the original one-block policy, each batch's staging released once its GPU work is done: in play a game uploads 1-6 MB per 300 frames, and on the iPhone 17 the retained
+// blocks cost Ocarina of Time 125 MB of resident memory for no speed (docs/reference/memory.md, "Upload staging kept for reuse on small devices"). DM_NVN_UPLOAD_REUSE=0 / 1 forces either
 #define UP_SLOT_BLOCK (4u * 1024u * 1024u)
 static __strong id<MTLBuffer> g_up_slot_blk[3], g_up_slot_over[3]; static unsigned g_up_cur_slot;
 static size_t g_up_slot_want[3], g_up_batch_bytes; static int g_up_over_used;
 static size_t g_up_src_bytes;   // page-rounded bytes of the open batch's zero-copy sources
+static uint64_t g_up_big_batch;   // bytes of up_big_src buffers in the open batch, budget or not (the residency line's peak, g_ubs_live)
 static size_t up_src_budget(void) {
     static size_t bytes = SIZE_MAX;
     if (bytes == SIZE_MAX) {
@@ -3924,7 +4005,13 @@ static size_t up_src_budget(void) {
     }
     return bytes;
 }
-static int up_reuse(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = !e || atoi(e); } return on; }
+static int up_reuse_wants(uint64_t working_set) { return !small_working_set(working_set); }
+static int up_reuse(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("DM_NVN_UPLOAD_REUSE"); on = e && *e ? atoi(e) > 0 : up_reuse_wants(g_dev ? g_dev.recommendedMaxWorkingSetSize : 0);
+        if (!on && !(e && *e)) MLOG("upload staging is released after each batch, not kept for reuse (Metal's working set under 6 GB; DM_NVN_UPLOAD_REUSE=1 keeps it)"); }
+    return on;
+}
 static int up_retained(id<MTLBuffer> b, unsigned slot) { return b && (b == g_up_slot_blk[slot] || b == g_up_slot_over[slot]); }
 static size_t up_slot_block_size(size_t demand) {
     size_t want = UP_SLOT_BLOCK;
@@ -4052,6 +4139,7 @@ static void up_flush(void) {
     NSMutableArray *staging = g_up_keep;
     if (g_up_block && !up_retained(g_up_block, slot)) [staging addObject:g_up_block];
     NSMutableArray *views = g_up_views; g_up_views = nil;
+    uint64_t big = g_up_big_batch; g_up_big_batch = 0;   // this batch's buffers over guest memory, out of the set with its staging
     g_up_keep = nil; g_up_block = nil;
     g_up_block_off = g_up_block_size = g_up_staging_bytes = 0;
     NSMutableSet *targets = [NSMutableSet setWithArray:g_up_texs]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [targets addObject:g_up_blits[i].dst];
@@ -4078,6 +4166,7 @@ static void up_flush(void) {
                     res_commit_retiring(staging);
                     [staging removeAllObjects];
                 }
+                atomic_fetch_sub(&g_ubs_live, big);
                 up_complete(slot);
             });
         } else {
@@ -4452,6 +4541,7 @@ static id<MTLBuffer> up_big_src(uint64_t addr, uint64_t len, uint64_t *off, int 
     if (!buf) return nil;
     g_up_src_made++;
     if (budget) g_up_src_bytes += b - a;
+    g_up_big_batch += b - a; { uint64_t lv = atomic_fetch_add(&g_ubs_live, b - a) + (b - a), pk = atomic_load(&g_ubs_peak); while (lv > pk && !atomic_compare_exchange_weak(&g_ubs_peak, &pk, lv)) {} }
     res_add(buf); [g_up_keep addObject:buf]; *off = (uint64_t)addr - a;
     return buf;
 }
@@ -4494,7 +4584,30 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     d.usage |= keep & (MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView);
     int rb_shift = rb_packed_shift(t->d.format);   // the RGB565 family is repacked into Metal's order on the CPU (rb_packed_shift)
     int linear = (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0;   // linear storage no view could take (linear_fit): its rows are copied on the CPU
-    int direct = !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
+    // Smaller textures on small devices (drop_on): a sampled 2D texture of the game's data, of 2 levels or more, leaves out its largest level; nothing made to be rendered into. The image flag
+    // does not keep it whole: Ocarina of Time gives it to its material textures (611 of 766 refused at its title for that), and a shader can write one only through an image slot, which
+    // makes it whole first (img_binding → tex_undrop), as an attachment does
+    unsigned drop = 0;
+    // The first rule a texture fails, counted for the memory report (g_drop_no): 0 type, 1 levels, 2 samples / linear / CPU repack, 3 sparse pool, 4 render-target or write usage, 5 flags, 6 depth, 7 made whole before
+    int no = -1;
+    if (drop_on() && !t_drop_off && !reuse) {
+        no = !(d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) ? 0 : d.mipmapLevelCount < 2 ? 1 : (d.sampleCount != 1 || linear || rb_shift) ? 2
+           : (t->pool && nvn_sparse_pool(t->pool)) ? 3 : (d.usage & MTLTextureUsageRenderTarget) ? 4
+           : (t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE)) ? 5
+           : (d.pixelFormat == MTLPixelFormatDepth16Unorm || d.pixelFormat == MTLPixelFormatDepth32Float || d.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || d.pixelFormat == MTLPixelFormatStencil8) ? 6
+           : [g_drop_full containsObject:@((uintptr_t)t->mem)] ? 7 : -1;
+        if (no >= 0 && MAX(t->d.width, t->d.height) >= 256) { g_drop_no[no]++; if (no == 5) g_drop_no_flags |= t->d.flags; }
+    }
+    if (drop_on() && !t_drop_off && (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) && d.mipmapLevelCount >= 2 && d.sampleCount == 1 && !linear && !rb_shift
+        && !(t->pool && nvn_sparse_pool(t->pool)) && !(d.usage & MTLTextureUsageRenderTarget) && !(t->d.flags & (NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_VIDEO_DECODE))
+        && d.pixelFormat != MTLPixelFormatDepth16Unorm && d.pixelFormat != MTLPixelFormatDepth32Float && d.pixelFormat != MTLPixelFormatDepth32Float_Stencil8 && d.pixelFormat != MTLPixelFormatStencil8 && ![g_drop_full containsObject:@((uintptr_t)t->mem)]) {
+        unsigned side = MAX(t->d.width, t->d.height), k = side >= 2048 ? 3 : side >= 1024 ? 2 : side >= 512 ? 1 : 0;
+        int bw0, bh0, bpb0 = nvn_fmt_bpb(t->d.format, &bw0, &bh0); unsigned ly = d.textureType == MTLTextureType2DArray ? (unsigned)d.arrayLength : 1;
+        uint64_t top = bpb0 ? (uint64_t)((t->d.width + bw0 - 1) / bw0) * bpb0 * ((t->d.height + bh0 - 1) / bh0) * ly : 0;   // what the largest level takes
+        if (side >= 256 && !reuse) { g_drop_cand_n[k]++; g_drop_cand_b[k] += top; }
+        if (t->d.width >= DROP_MIN && t->d.height >= DROP_MIN) { drop = 1; d.width = MAX(d.width >> 1, 1u); d.height = MAX(d.height >> 1, 1u); d.mipmapLevelCount -= 1; if (!reuse) g_drop_bytes += top; }
+    }
+    int direct = !drop && !linear && !rb_shift && stamp && direct_upload_on() && g_nvn_deswz_gpu && !(t->pool && nvn_sparse_pool(t->pool)) && nvn_deswz_gpu_direct_supported(&t->d);
     if (direct) d.usage |= MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
     id<MTLTexture> mt = reuse && reuse.pixelFormat == d.pixelFormat && reuse.width == d.width && reuse.height == d.height && reuse.mipmapLevelCount == d.mipmapLevelCount && reuse.textureType == d.textureType
                         && (reuse.usage & d.usage) == d.usage
@@ -4504,22 +4617,25 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         MLOG("large texture ser=%llu %ux%ux%u format %#x target %d levels %u: %llu MB%s", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels,
              (unsigned long long)(mt.allocatedSize >> 20), t->pool && nvn_sparse_pool(t->pool) ? ", in a sparse virtual pool" : t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? ", in a virtual pool" : ""); }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("new texture (%s) #%d ser=%llu %ux%ux%u format %#x target %d levels %u storage %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
+    if (t->pool && t->mem && mt != reuse) objc_setAssociatedObject(mt, &g_tex_up_key, @[@((uint64_t)(uintptr_t)t->mem), @(t->L.size), @(t->pool->flags)], OBJC_ASSOCIATION_RETAIN_NONATOMIC);   // the census: its storage
     res_add(mt);   // Both first upload and re-upload register residency here (Metal 4 does not make resources resident automatically; a missed registration = GPU address page fault)
+    if (drop) { objc_setAssociatedObject(mt, &g_drop_key, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC); if (!reuse) g_drop_n++; }
     int sparse = t->pool && nvn_sparse_pool(t->pool);
     if (stamp) {   // no stamp: a one-time upload of content the CPU will not change (tex_init_fill), with no write tracking
         *stamp = nvn_dirty_now();
         if (sparse) nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); else nvn_dirty_protect(t->mem, t->L.size); }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     unsigned layers = (t->d.target == 4 || t->d.target == 9) ? t->d.depth : t->d.target == 8 ? 6 : t->d.target == 3 ? t->d.height : 1;   // a cube array's depth counts layer-faces (tex_desc)
-    // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look
+    // Taken after the stamp and the protect: a write that lands from here on faults and is found at the next look. A texture that leaves out its largest level (drop) is read
+    // whole: pkg_written and the copies count Metal levels from the game's level 0
     uint8_t *need = NULL; unsigned nimg = (unsigned)d.mipmapLevelCount * layers, nup = 0;
-    if (prev && prev != mt && stamp && !sparse && !linear && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
+    if (prev && prev != mt && stamp && !sparse && !linear && !drop && bpb && d.sampleCount <= 1 && prev.pixelFormat == mt.pixelFormat && prev.textureType == mt.textureType && prev.sampleCount == mt.sampleCount
         && prev.width == mt.width && prev.height == mt.height && prev.depth == mt.depth && prev.arrayLength == mt.arrayLength && prev.mipmapLevelCount == mt.mipmapLevelCount)
         need = pkg_written(t, span, since, (unsigned)d.mipmapLevelCount, layers, &nup);
     if (need && nup == nimg) { free(need); need = NULL; }
     if (need && taken) *taken = nimg - nup;
     size_t total = 0;
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) {   // the game's levels: from 1 for a dropped texture, Metal level l - drop
         uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
         unsigned n = layers; if (need) { n = 0; for (unsigned y = 0; y < layers; y++) n += need[l * layers + y]; }
         total += (size_t)((w + bw - 1) / bw) * bpb * ((h + bh - 1) / bh) * z * n;
@@ -4574,14 +4690,14 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             mb = (__bridge void *)upsrc;   // if the new buffer was refused, fall back to the CPU instead of using the old batch's address
         }
         size_t off = 0; int enc_ok = g_up_ce != nil && mb != NULL, nb0 = g_nup_blits;
-        for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {
+        for (unsigned l = drop; enc_ok && l < d.mipmapLevelCount + drop; l++) {
             uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
             size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
             for (unsigned y = 0; y < layers; y++) {
                 if (need && !need[l * layers + y]) { up_copy_add(prev, MTLSizeMake(w, h, z), mt, y, l); continue; }
                 size_t poff; id<MTLBuffer> params = up_param_alloc(&poff);   // Metal 4 has no setBytes: the parameter block of each deswizzle is cut from a shared block (no new GPU buffer each time)
                 if (nvn_deswz_gpu_encode_m4(g_up_ce, g_up_ct, params, poff, (__bridge id<MTLBuffer>)mb, mo, &t->d, l, y, stg, stg_off + off, pitch)) { enc_ok = 0; break; }
-                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+                up_blit_add(stg, stg_off + off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - drop);
                 off += pitch * rows * z;
             }
         }
@@ -4615,7 +4731,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     res_add(stg); [g_up_keep addObject:stg];
     size_t off = 0;
     int zb = zblock_on() && t->d.format >= 0x79 && t->d.format <= 0x94; if (zb) { g_zb_ser = t->serial; g_zb_n = (int)MIN(d.mipmapLevelCount, 16u); memset(g_zb, 0, sizeof g_zb); memset(g_zb_tot, 0, sizeof g_zb_tot); }
-    for (unsigned l = 0; l < d.mipmapLevelCount; l++) {
+    for (unsigned l = drop; l < d.mipmapLevelCount + drop; l++) {
         uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
         size_t pitch = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh;
         for (unsigned y = 0; y < layers; y++) {
@@ -4629,7 +4745,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
             if (zb && l < 16) { const uint64_t *q = (const uint64_t *)((const uint8_t *)stg.contents + off); size_t nb = pitch * rows * z / 16;
                 for (size_t i = 0; i < nb; i++) g_zb[l] += !(q[2 * i] | q[2 * i + 1]);
                 g_zb_tot[l] += (uint32_t)nb; }
-            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l);
+            up_blit_add(stg, off, pitch, pitch * rows, MTLSizeMake(w, h, z), mt, y, l - drop);
             off += pitch * rows * z;
         }
     }
@@ -5567,10 +5683,13 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct, int *in_storage) {
     return owned;
 }
 static int bcp_up_fill(const tex_t *t, id<MTLTexture> mt); static void bcp_up_follow(const tex_t *t, id<MTLTexture> mt);   // compressed-alias pairs: a side made, a side uploaded from storage
-static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct, NULL); AP_E(4); return r; }
-// An open replay can borrow until its submission fence. A serial or package holds the result, and retirement waits for that fence (nvn_owner.h).
-static void *tex_mtl_replay_ref(const tex_t *ct) { AP_B; void *r = tex_mtl_resolve(ct, NULL, NULL); AP_E(4); return r; }
-#define tex_mtl_replay(ct) ((__bridge id<MTLTexture>)tex_mtl_replay_ref(ct))
+static id<MTLTexture> tex_mtl_at(const tex_t *ct, int line);   // tex_mtl: a dropped texture is made whole for any use but sampling (tex_undrop)
+#define tex_mtl(ct) tex_mtl_at((ct), __LINE__)
+// An open replay can borrow until its submission fence. A serial or package holds the result, and retirement waits for that fence (nvn_owner.h). A dropped texture is made
+// whole here too (tex_undrop), and its package holds the whole one, so the borrow stays valid
+static void *tex_mtl_replay_at(const tex_t *ct, int line);
+#define tex_mtl_replay(ct) ((__bridge id<MTLTexture>)tex_mtl_replay_at((ct), __LINE__))
+static inline void *tex_mtl_replay_ref(const tex_t *ct) { return tex_mtl_replay_at(ct, 0); }   // line 0: a caller with no line of its own (tests)
 static inline void *tex_mtl_result(id<MTLTexture> texture, id<MTLTexture> __strong *owned) {
     if (owned) *owned = texture;
     return (__bridge void *)texture;
@@ -6005,6 +6124,27 @@ static void reup_note(const NvPkg *pk, const tex_t *t, unsigned taken, uint64_t 
          (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, t->L.size / 1048576.0, u, ns / 1e6, (unsigned long long)atomic_load(&g_cur_frame),
          (unsigned long long)g_sub_serial, w, pk->stored);
 }
+// A dropped texture (drop_on) put to a use other than sampling is made whole on the spot, and stays whole: uploaded again with every level into its packaged record, which every
+// serial and texture ID that names it follows (own_note, as tex_upgrade's replacement does). line: the caller's, counted in the memory report. Off the submit thread it is handed out as
+// it is (only the submit thread uploads; the present thread only shows render targets)
+static id<MTLTexture> tex_undrop(const tex_t *t, id<MTLTexture> r, int line) {
+    if (!tex_dropped(r) || (atomic_load(&g_sub_thread_set) && !on_sub_thread())) return r;
+    id h = tex_get(t->serial); NvPkg *pk = [h isKindOfClass:[NvPkg class]] ? h : nil;
+    if (!pk || pk->sparse || pk->ps) return r;
+    if (!g_drop_full) g_drop_full = [NSMutableSet set];
+    [g_drop_full addObject:@((uintptr_t)t->mem)];
+    uint64_t st, lg = atomic_load(&g_up_lost_gen); t_drop_off = 1; id<MTLTexture> nt = pkg_upload(t, &st, nil, pk->tex.usage, nil, NULL, 0, NULL); t_drop_off = 0;
+    if (!nt) { RED_ONCE(183, "a texture that left out its largest level could not be made whole again (ser=%llu %ux%u format %#x): kept smaller", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format); return r; }
+    id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; pk->part = 0; pk->lost_gen = lg; defer_obj_release(old);   // read whole
+    if (pk->spare) { defer_obj_release(pk->spare); pk->spare = nil; }   // of the smaller shape
+    pk->stamp = pk->seen = st; pk->span = nvn_dirty_span(t->mem, t->L.size); if (dirtycheck()) pk->hash = full_hash(t->mem, t->L.size);
+    own_note(t->serial); g_drop_full_n++;
+    int k = 0; while (k < 7 && g_drop_why[k].line && g_drop_why[k].line != line) k++;
+    if (!g_drop_why[k].n++) { g_drop_why[k].line = line; MLOG("a texture that left out its largest level is made whole for a use other than sampling (tex_mtl at line %d): ser=%llu %ux%u format %#x levels %u", line, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, t->d.levels); }
+    return nt;
+}
+static id<MTLTexture> tex_mtl_at(const tex_t *ct, int line) { AP_B; id<MTLTexture> r = tex_mtl_(ct, NULL); if (r && g_drop_n && !t_drop_ok) r = tex_undrop(ct, r, line); AP_E(4); return r; }
+static void *tex_mtl_replay_at(const tex_t *ct, int line) { AP_B; void *r = tex_mtl_resolve(ct, NULL, NULL); if (r && g_drop_n && !t_drop_ok) r = (__bridge void *)tex_undrop(ct, (__bridge id<MTLTexture>)r, line); AP_E(4); return r; }
 // A sparse texture is bound from its first level whose pages, and those of every smaller level, are all mapped: a view of levels [r, n) samples as with a minimum LOD of r.
 // The translator drops TEX's LOD clamp and residency predicate, so Monster Hunter Rise's streamed textures were sampled at levels it had not mapped yet; those read 0, which ASTC
 // decodes as its error colour (magenta clothes on the title screen). Single-layer 2D textures only; the view follows each upload, as the mappings change only with one
@@ -6630,6 +6770,15 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
       if (gw) MLOG("raw pool table words at commit: %llu, of them %llu held an older table than the current one and %llu the current one behind the pools", (unsigned long long)gw, (unsigned long long)go, (unsigned long long)gb); }
     if (g_gptr_bindings) MLOG("raw pointer discovery up to frame %llu: %llu bindings, %llu pointer words read, %llu previously unaddressed ranges (%llu logical MB)", frame,
                             (unsigned long long)g_gptr_bindings, (unsigned long long)g_gptr_reads, (unsigned long long)g_gptr_added, (unsigned long long)(g_gptr_bytes >> 20));
+    if (g_drop_on > 0) {   // smaller textures (drop_on): what was saved, what was made whole and where, and what each threshold would take (candidates by their largest side)
+        char why[160] = ""; size_t o = 0; for (int k = 0; k < 8 && g_drop_why[k].n && o < sizeof why - 24; k++) o += (size_t)snprintf(why + o, sizeof why - o, "%sline %d: %llu", k ? ", " : "", g_drop_why[k].line, (unsigned long long)g_drop_why[k].n);
+        MLOG("[mem] large sampled textures without their largest level: %llu, %llu MB saved; made whole again %llu (%s); candidates by largest side 256: %llu, %llu MB; 512: %llu, %llu MB; 1024: %llu, %llu MB; 2048+: %llu, %llu MB",
+             (unsigned long long)g_drop_n, (unsigned long long)(g_drop_bytes >> 20), (unsigned long long)g_drop_full_n, o ? why : "none",
+             (unsigned long long)g_drop_cand_n[0], (unsigned long long)(g_drop_cand_b[0] >> 20), (unsigned long long)g_drop_cand_n[1], (unsigned long long)(g_drop_cand_b[1] >> 20),
+             (unsigned long long)g_drop_cand_n[2], (unsigned long long)(g_drop_cand_b[2] >> 20), (unsigned long long)g_drop_cand_n[3], (unsigned long long)(g_drop_cand_b[3] >> 20));
+        MLOG("[mem] large sampled textures kept whole, by the first rule they fail (256 and more): type %llu, one level %llu, samples / linear / repack %llu, sparse pool %llu, render-target usage %llu, flags %llu (%#x), depth %llu, made whole before %llu",
+             (unsigned long long)g_drop_no[0], (unsigned long long)g_drop_no[1], (unsigned long long)g_drop_no[2], (unsigned long long)g_drop_no[3], (unsigned long long)g_drop_no[4], (unsigned long long)g_drop_no[5], g_drop_no_flags, (unsigned long long)g_drop_no[6], (unsigned long long)g_drop_no[7]);
+    }
 }
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads) { *uploads = g_pkg_uploads; *reuploads = g_pkg_reuploads; }
 void mtl_spare_stats(uint64_t *held, uint64_t *trimmed, uint64_t *trimmed_mb) { *held = atomic_load(&g_spare_held); *trimmed = atomic_load(&g_spare_trimmed); *trimmed_mb = atomic_load(&g_spare_trimmed_bytes) >> 20; }
@@ -9010,7 +9159,7 @@ static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue stat
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
 void mtl_set_samp_pool_n(int n) { g_spool_n = n; }
-static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_mtl(&r->t); }   // Caller holds g_rmu
+static id<MTLTexture> treg_tex(const treg_t *r) { if (r->gone) return tex_made(&r->t); t_drop_ok++; id<MTLTexture> m = tex_mtl(&r->t); t_drop_ok--; return m; }   // sampled: may be dropped (drop_on)   // Caller holds g_rmu
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
     rp->view_span = NULL; if (!rp->view_pkg) return;
@@ -9097,9 +9246,9 @@ static void *tex_by_id_ref(int tid) {
         // The view's levels count from the texture's level 0, which a sparse texture's host texture may start past (tex_level_shift): Resident Evil 4's streamed 512x512 and 1024x1024
         // textures, with only their two or three smallest levels mapped, are sampled through views of levels 1 + 0 and 2 + 0, which read past the host texture's one level and were left out
         NSUInteger lb = tex_level_shift(&rp->t, base), n = base.mipmapLevelCount + lb;
-        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0;
+        NSUInteger l0 = r.v.set_levels ? r.v.base_level : 0, nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : (l0 < n ? n - l0 : 0);
+        if (r.v.set_levels && g_drop_n && tex_dropped(base)) { drop_levels(&l0, &nl); if (!r.v.nlevels) nl = n - MIN(l0, n); }   // a texture that left out its largest level (drop_on, never sparse: lb is 0): the game's level k is Metal's k-1
         if (l0 >= n) { RED_ONCE(109, "texture view id %d starts at mip %lu beyond %lu levels", tid, (unsigned long)l0, (unsigned long)n); return NULL; }
-        NSUInteger nl = r.v.set_levels && r.v.nlevels ? r.v.nlevels : n - l0;
         // A level count past the texture's levels is cut to those it has, as deko3d's Tegra descriptor writer clips the maximum level (Echoes of Wisdom: levels 1 + 7 of a seven-level texture,
         // which Metal's validation refuses)
         if (nl > n - l0) nl = n - l0;
@@ -14616,8 +14765,7 @@ static uint64_t pkg_evict_idle(unsigned *n_out) { @autoreleasepool {
     return bytes;
 } }
 // Small devices (Metal recommended working set under 6 GB: 8 GB iPhones, M1 iPads, 8 GB Macs): sweep idle uploaded textures every PKG_SWEEP_DS without waiting for OS memory pressure so
-// an area's copies leave once the game has left it (docs/reference/memory.md). Elsewhere memory pressure alone frees them. DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
-static int small_working_set(uint64_t working_set) { return working_set && working_set < (6ull << 30); }
+// an area's copies leave once the game has left it (docs/reference/memory.md). Elsewhere memory pressure alone frees them (small_working_set, the rule of smaller textures). DM_NVN_TEX_EVICT_IDLE=0 / 1 forces it
 static int g_sweep_on = -1; static uint32_t g_sweep_last;
 static void pkg_sweep(void) {
     if (g_sweep_on < 0) {
@@ -14831,6 +14979,7 @@ static uint64_t dummy_buf_gpu(void) { static uint64_t gpu; if (!gpu) gpu = dummy
 static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, int *real) {
     void *tv = NULL; uint8_t vtt = 0; uint32_t vpf = 0; *rid = tid ? tex_fast_rid_meta(tid, &tv, &vtt, &vpf) : 0;
     id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+    if (t && g_drop_n && tex_dropped(t) && tid > 0 && tid < g_ntreg && g_treg[tid].ok) { (void)tex_mtl(&g_treg[tid].t); tv = NULL; *rid = tex_fast_rid(tid, &tv); t = (__bridge id<MTLTexture>)tv; }   // an image slot reads texels: made whole (tex_undrop)
     int swz_only = t && !(t.usage & MTLTextureUsageShaderWrite) && (t.parentTexture.usage & MTLTextureUsageShaderWrite);
     if (t && (b->rw || b->atom) && !(t.usage & MTLTextureUsageShaderWrite) && !swz_only) {
         const tex_t *tt = tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid].t : NULL;
@@ -22674,11 +22823,13 @@ void mem_census(const char *why) { @autoreleasepool {
     // registered descriptors: their views' bases, and per storage address the distinct bases
     NSMapTable *by_mem = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];
     NSMapTable *by_flags = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality valueOptions:NSPointerFunctionsStrongMemory];   // texture flags | pool flags << 32
+    NSCountedSet *v_live = [NSCountedSet set], *v_ret = [NSCountedSet set];   // the descriptors whose views name each base texture (live / retired), for the holders line
     os_unfair_lock_lock(&g_rmu);
     uint64_t nreg = 0, nretired = 0;
     for (int i = 1; i < g_ntreg; i++) { treg_t *r = &g_treg[i]; if (!r->ok) continue; nreg++; nretired += r->retired;
         void *vs[7] = {r->view, r->alt, r->im, r->palt[0], r->palt[1], r->palt[2], r->palt[3]};
         for (int k = 0; k < 7; k++) if (vs[k]) { id<MTLTexture> b = census_base((__bridge id)vs[k]); if (!b) continue; [r->retired ? named_ret : named addObject:(__bridge id)(__bridge void *)b]; [keep addObject:b];
+            [r->retired ? v_ret : v_live addObject:b];
             if (k == 0 && r->t.mem) { const void *key = r->t.mem; NSHashTable *set = [by_mem objectForKey:(__bridge id)key];
                 if (!set) { set = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; [by_mem setObject:set forKey:(__bridge id)key]; }
                 [set addObject:(__bridge id)(__bridge void *)b];
@@ -22690,7 +22841,7 @@ void mem_census(const char *why) { @autoreleasepool {
     uint64_t n_ret = 0, b_ret = 0, n_named = 0, b_named = 0, n_wait = 0, b_wait = 0, n_none = 0, b_none = 0, n_buf = 0, b_buf = 0;
     enum { NF = 24 }; struct { unsigned long pf; uint64_t n, b; } fm[NF] = {{0}}; int nfm = 0;
     pthread_mutex_lock(&g_res_mu);
-    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = o.allocatedSize;
+    for (id<MTLAllocation> o in g_res_objects.allObjects) { uint64_t z = res_bytes(o);
         if (z <= 65536) { int tx = [(id)o conformsToProtocol:@protocol(MTLTexture)], sh = ((id<MTLResource>)o).storageMode == MTLStorageModeShared; small_n[tx][sh]++; small_b[tx][sh] += z; }
         if (![(id)o conformsToProtocol:@protocol(MTLTexture)]) { n_buf++; b_buf += z; continue; }
         id<MTLTexture> t = (id)o; if (t.parentTexture) continue;
@@ -22700,9 +22851,78 @@ void mem_census(const char *why) { @autoreleasepool {
         else if ([waiting containsObject:(__bridge id)(__bridge void *)t]) { n_wait++; b_wait += z; }
         else { n_none++; b_none += z; } }
     pthread_mutex_unlock(&g_res_mu);
-    uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0;
+    // The memory a group takes beyond its largest allocation, counting each allocation once: textures placed in one heap (a resolution family's, a span's) share its bytes, so a group's
+    // placed textures count by their heaps. Summing each texture's allocatedSize counted a family of 36 sizes in one 15 MB heap as 490 MB (Ocarina of Time at the field's edge: 1,131 MB
+    // reported, 1,089 MB of it family members)
+    uint64_t dup_addr = 0, dup_tex = 0, dup_b = 0, dup_naive = 0;
     for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count < 2) continue; dup_addr++;
-        uint64_t biggest = 0, sum = 0; for (id b in set) { uint64_t z = ((id<MTLTexture>)b).allocatedSize; sum += z; if (z > biggest) biggest = z; } dup_tex += set.count - 1; dup_b += sum - biggest; }
+        uint64_t biggest = 0, sum = 0, nbig = 0, nsum = 0; NSHashTable *seen = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality];
+        for (id<MTLTexture> b in set) { uint64_t z = b.allocatedSize; nsum += z; if (z > nbig) nbig = z;
+            id<MTLHeap> h = b.heap; if (h) { if ([seen containsObject:h]) continue; [seen addObject:h]; z = h.size; }
+            sum += z; if (z > biggest) biggest = z; }
+        dup_tex += set.count - 1; dup_b += sum - biggest; dup_naive += nsum - nbig; }
+    {   // Who holds the textures of those groups: s a live serial (g_by_serial), g a finalized one (the ghost ring), p a pin, a the sharing table, v a live descriptor's view, r only a retired
+        // one's; R in the residency set (itself or its heap); and where its memory is: h a recycled heap of its own (rh_texture), f a resolution family's heap, - its own
+        enum { NM = 32 }; struct { char k[16]; uint64_t n, b; } hm[NM]; int nhm = 0;
+        NSMutableArray *all = [NSMutableArray array]; for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count >= 2) for (id t in set) [all addObject:t]; }
+        char (*ks)[16] = calloc(all.count ? all.count : 1, 16);
+        pthread_mutex_lock(&g_smu);
+        for (NSUInteger i = 0; i < all.count; i++) { id t = all[i]; const void *p = (__bridge const void *)t; char *k = ks[i]; int o = 0;
+            if (serial_table_holds(p)) k[o++] = 's';
+            if (own_ghost_holds_locked(p)) k[o++] = 'g';
+            if (tex_object_pinned(t)) k[o++] = 'p';
+            if (own_shared_locked(t)) k[o++] = 'a';
+            k[o] = 0; }
+        uint64_t age_n[4] = {0}, age_b[4] = {0};   // their sharing-table entries by submissions since a lookup last found them: under ALIAS_IDLE, under 300, more, never recorded
+        { NSHashTable *in = [NSHashTable hashTableWithOptions:NSPointerFunctionsOpaqueMemory | NSPointerFunctionsOpaquePersonality]; for (id t in all) [in addObject:t];
+          uint64_t *an = age_n, *ab = age_b;   // (a block cannot capture an array)
+          own_alias_each_locked(^(const alias_key *ak2, id o) { if (![in containsObject:o]) return;
+              uint64_t seen = own_alias_seen_locked(ak2), age = g_fence + 1 - seen;
+              int c = !seen ? 3 : age < ALIAS_IDLE ? 0 : age < 300 ? 1 : 2; an[c]++; ab[c] += ((id<MTLTexture>)o).allocatedSize; }); }
+        pthread_mutex_unlock(&g_smu);
+        MLOG("%s census: their sharing-table entries by submissions since last found: under %d %llu, %llu MB; under 300 %llu, %llu MB; more %llu, %llu MB; never %llu, %llu MB", why, ALIAS_IDLE,
+             (unsigned long long)age_n[0], (unsigned long long)(age_b[0] >> 20), (unsigned long long)age_n[1], (unsigned long long)(age_b[1] >> 20), (unsigned long long)age_n[2], (unsigned long long)(age_b[2] >> 20), (unsigned long long)age_n[3], (unsigned long long)(age_b[3] >> 20));
+        pthread_mutex_lock(&g_res_mu);
+        for (NSUInteger i = 0; i < all.count; i++) { id<MTLTexture> t = all[i]; char *k = ks[i]; size_t o = strlen(k);
+            if ([v_live countForObject:t]) k[o++] = 'v'; else if ([v_ret countForObject:t]) k[o++] = 'r';
+            if ([g_res_objects containsObject:t.heap ? (id)t.heap : (id)t]) k[o++] = 'R';
+            NvImageHeap *ih = objc_getAssociatedObject(t, &g_image_heap_owner_key);
+            k[o++] = objc_getAssociatedObject(t, &g_rh_owner_key) ? 'h' : ih ? 'f' : '-'; k[o] = 0; }
+        pthread_mutex_unlock(&g_res_mu);
+        for (NSUInteger i = 0; i < all.count; i++) { int j = 0; while (j < nhm && strcmp(hm[j].k, ks[i])) j++;
+            if (j == nhm) { if (nhm == NM) continue; memcpy(hm[nhm].k, ks[i], 16); hm[nhm].n = hm[nhm].b = 0; nhm++; }
+            hm[j].n++; hm[j].b += ((id<MTLTexture>)all[i]).allocatedSize; }
+        free(ks);
+        for (int i = 0; i < nhm; i++) for (int j = i + 1; j < nhm; j++) if (hm[j].b > hm[i].b) { __typeof__(hm[0]) x = hm[i]; hm[i] = hm[j]; hm[j] = x; }
+        char hl[900]; size_t ho = 0; for (int i = 0; i < nhm && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%s%s %llu, %llu MB", i ? "; " : "", hm[i].k, (unsigned long long)hm[i].n, (unsigned long long)(hm[i].b >> 20));
+        MLOG("%s census: textures at storage addresses with several, by holder (s live serial, g finalized serial, p pin, a sharing table, v live descriptor, r retired descriptor; R resident; memory h own recycled heap, f family heap, - own): %s", why, nhm ? hl : "none");
+    }
+    {   // Every texture in the set by the line that added it and who holds it (the letters of the line above), and whether the memory pool its storage lies in still exists (P) or was
+        // finalized (x), or no storage is recorded (-). A texture left over from an area the game has left would be held by something here while its pool is gone
+        enum { NK = 40 }; struct { int line; char k[16]; uint64_t n, b; } hk[NK]; int nhk = 0; uint64_t nview = 0;
+        NSArray *objs; pthread_mutex_lock(&g_res_mu); objs = g_res_objects.allObjects; pthread_mutex_unlock(&g_res_mu);
+        NSMutableArray *tx = [NSMutableArray array]; for (id o in objs) if ([o conformsToProtocol:@protocol(MTLTexture)]) { id<MTLTexture> t = o; if (t.buffer || t.parentTexture) nview++; else [tx addObject:t]; }
+        NSUInteger nt = tx.count; char (*ks)[16] = calloc(nt ? nt : 1, 16); int *ln = calloc(nt ? nt : 1, sizeof *ln);
+        pthread_mutex_lock(&g_smu);
+        for (NSUInteger i = 0; i < nt; i++) { id t = tx[i]; const void *p = (__bridge const void *)t; char *k = ks[i]; int o = 0;
+            if (serial_table_holds(p)) k[o++] = 's';
+            if (own_ghost_holds_locked(p)) k[o++] = 'g';
+            if (tex_object_pinned(t)) k[o++] = 'p';
+            if (own_shared_locked(t)) k[o++] = 'a';
+            if ([v_live countForObject:t]) k[o++] = 'v'; else if ([v_ret countForObject:t]) k[o++] = 'r';
+            k[o] = 0; }
+        pthread_mutex_unlock(&g_smu);
+        pthread_mutex_lock(&g_res_mu); for (NSUInteger i = 0; i < nt; i++) ln[i] = [[g_res_line objectForKey:tx[i]] intValue]; pthread_mutex_unlock(&g_res_mu);
+        for (NSUInteger i = 0; i < nt; i++) { id<MTLTexture> t = tx[i]; NSArray *rg = objc_getAssociatedObject(t, &g_tex_up_key);
+            size_t o = strlen(ks[i]); ks[i][o++] = ' '; ks[i][o++] = !rg ? '-' : mtl_addr_known([rg[0] unsignedLongLongValue], MAX([rg[1] unsignedLongLongValue], 1ull)) ? 'P' : 'x'; ks[i][o] = 0;
+            int j = 0; while (j < nhk && (hk[j].line != ln[i] || strcmp(hk[j].k, ks[i]))) j++;
+            if (j == nhk) { if (nhk == NK) continue; hk[nhk].line = ln[i]; memcpy(hk[nhk].k, ks[i], 16); hk[nhk].n = hk[nhk].b = 0; nhk++; }
+            hk[j].n++; hk[j].b += t.heap ? 0 : t.allocatedSize; }
+        free(ks); free(ln);
+        for (int i = 0; i < nhk; i++) for (int j = i + 1; j < nhk; j++) if (hk[j].b > hk[i].b) { __typeof__(hk[0]) x = hk[i]; hk[i] = hk[j]; hk[j] = x; }
+        char hl[1400]; size_t ho = 0; for (int i = 0; i < nhk && i < 24 && ho < sizeof hl; i++) ho += snprintf(hl + ho, sizeof hl - ho, "%sline %d [%s] %llu, %llu MB", i ? "; " : "", hk[i].line, hk[i].k, (unsigned long long)hk[i].n, (unsigned long long)(hk[i].b >> 20));
+        MLOG("%s census: textures in the set by the line that added them, holder (s live serial, g finalized serial, p pin, a sharing table, v live descriptor, r retired descriptor) and their storage's pool (P live, x finalized, - none recorded; placed textures count 0, their heaps apart): %s; views and textures over buffers %llu", why, hl, (unsigned long long)nview);
+    }
     {   // the largest groups: each Metal texture over one storage address, so a reader can tell views made as copies from different images that reuse the memory
         NSMutableArray *groups = [NSMutableArray array];
         for (id key in by_mem) { NSHashTable *set = [by_mem objectForKey:key]; if (set.count >= 2) { [groups addObject:set]; objc_setAssociatedObject(set, &census_flags_key, [by_flags objectForKey:key], OBJC_ASSOCIATION_RETAIN_NONATOMIC); } }
@@ -22720,9 +22940,9 @@ void mem_census(const char *why) { @autoreleasepool {
     }
     for (int i = 0; i < nfm; i++) for (int j = i + 1; j < nfm; j++) if (fm[j].b > fm[i].b) { __typeof__(fm[0]) x = fm[i]; fm[i] = fm[j]; fm[j] = x; }
     char line[900] = "none"; size_t o = 0; for (int i = 0; i < nfm && i < 12 && o < sizeof line; i++) o += snprintf(line + o, sizeof line - o, "%s%lu: %llu, %llu MB", i ? "; " : "", fm[i].pf, (unsigned long long)fm[i].n, (unsigned long long)(fm[i].b >> 20));
-    MLOG("%s census: textures named by serials, sharing or live descriptors' views %llu, %llu MB; only by retired descriptors' views %llu, %llu MB; only in the deferred-release queue %llu, %llu MB; named by nothing %llu, %llu MB; buffers %llu, %llu MB; descriptors %llu (%llu retired); storage addresses with several Metal textures %llu (%llu extra textures, %llu MB)",
+    MLOG("%s census: textures named by serials, sharing or live descriptors' views %llu, %llu MB; only by retired descriptors' views %llu, %llu MB; only in the deferred-release queue %llu, %llu MB; named by nothing %llu, %llu MB; buffers %llu, %llu MB; descriptors %llu (%llu retired); storage addresses with several Metal textures %llu (%llu extra textures, %llu MB beyond each address's largest allocation, a heap counted once; %llu MB by each texture's own size)",
          why, (unsigned long long)n_named, (unsigned long long)(b_named >> 20), (unsigned long long)n_ret, (unsigned long long)(b_ret >> 20), (unsigned long long)n_wait, (unsigned long long)(b_wait >> 20), (unsigned long long)n_none, (unsigned long long)(b_none >> 20),
-         (unsigned long long)n_buf, (unsigned long long)(b_buf >> 20), (unsigned long long)nreg, (unsigned long long)nretired, (unsigned long long)dup_addr, (unsigned long long)dup_tex, (unsigned long long)(dup_b >> 20));
+         (unsigned long long)n_buf, (unsigned long long)(b_buf >> 20), (unsigned long long)nreg, (unsigned long long)nretired, (unsigned long long)dup_addr, (unsigned long long)dup_tex, (unsigned long long)(dup_b >> 20), (unsigned long long)(dup_naive >> 20));
     MLOG("%s census: textures by Metal format: %s", why, line);
     MLOG("%s census: residency objects of 64 KB or less: buffers shared %llu (%llu KB), private %llu (%llu KB); textures shared %llu (%llu KB), private %llu (%llu KB)", why,
          (unsigned long long)small_n[0][1], (unsigned long long)(small_b[0][1] >> 10), (unsigned long long)small_n[0][0], (unsigned long long)(small_b[0][0] >> 10),

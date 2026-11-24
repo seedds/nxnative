@@ -1110,8 +1110,15 @@ Games read this count as a position in their own command memory and size their h
 
 - **Symptom:** a null-pointer crash early in `nnMain`, right after NVN setup should have happened (Super Mario 3D World + Bowser's Fury, `main+0x759e08`: the device singleton `main+0x1a28ea0` is still null).
 - **Cause:** the game checks `nvnDeviceGetInteger(API_MAJOR / API_MINOR)` for major == 53 and minor ≥ 313 (`main+0x711c88`) and quietly skips creating its device otherwise.
-- **Fix:** the reported version follows the SDK (`hle_nvn.c` `nvn_api`: 53.313 for SDK 10 and older, 55.15 for later ones, Mario's requirement); the profile key `device_api` overrides it. NVN 53 also brings `nvnQueueAcquireTexture` (the older window acquire: the queue waits instead of a sync object), `nvnSamplerCompare` and the debug group calls (no-ops).
-- **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10); [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (needs 55.15).
+- **Fix:** the reported version follows the SDK (`hle_nvn.c` `nvn_api`: 53 for SDK 10 and older, 55.15 for later ones, Mario's requirement). The profile key `device_api` overrides it. NVN 53 also brings `nvnQueueAcquireTexture` (the older window acquire, where the queue waits), `nvnSamplerCompare` and the debug group calls (no-ops).
+- **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (SDK 10) and [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (needs 55.15).
+
+### Older NVN minor versions from the SDK
+
+- **Symptom:** Assassin's Creed III Remastered's launcher exits on `Break#1 reason=0` in `NvnDevice::Init` (launcher NRO +0xd744) just after the host reports API 53.313.
+- **Cause:** the launcher compares the minor version for equality with 209. Its SDK 5.4.0 build (`26ffb122262ca25e4c016c0af2f92a29`) reports 53.209 in its own device-info switch (SDK +0x3a2ab0).
+- **Fix:** for older SDKs, `dm_sdk_nvn1_minor` reads the minor from the SDK's device-info jump table when its dispatch and both version cases match the observed instruction layout. Unrecognized layouts keep 53.313. The host reports the version without executing the SDK's NVN driver.
+- **Found on:** Assassin's Creed III Remastered 1.0.0. The launcher passed the assertion with 53.209 and displayed the game selector on Mac.
 
 ### Newest GPU code version reported by the driver
 

@@ -2202,8 +2202,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - **ABI:** `DMSH_PUSH_BLOCKS` is 6.
   - **Host:** `push_const` keeps graphics blocks 0 to 5, and compute's 0 and 1.
   - **Removed:** the per-stage fill of `c[0] + 0x210` for graphics stages; only compute reads that table.
-  - **Check:** `Nvn2Buffers.test_a_graphics_stage_bank_is_its_push_block` fails on the old translator.
-- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `c[25]` in 9,944 vertex shaders, `c[26]` in 538 mesh and 3 hull shaders, `c[27]` in 37 domain shaders, `c[28]` in 1 geometry shader, `c[29]` in 12,195 pixel shaders. In one intro frame it pushes block 1 157 times, block 2 51 times and block 5 92 times. A host-only test (each stage's rows filled from its block) brought back the ship's engines and the tower's lights at the moon base.
+  - **Check:** `Nvn2Buffers.test_a_push_block_bank_is_that_block_of_c24`.
+- **Later correction:** the bank is not the stage's. Every stage of the group reads push block b as `c[24 + b]`, and the game chooses the blocks. PRAGMATA's blocks happen to be 1 + its stage index. Cyberpunk 2077 pushes one 8-byte address into block 7 of both groups at boot, and its vertex and pixel shaders read it as `c[31][0]`; its pixel shaders also read `c[25]`. The translator refused those reads as another stage's bank, and 3,515 of its 6,754 shaders failed. `APushBlock` now maps any bank past 24 to `c[24] + (bank - 24) * 0x100`; the 5-bit bank field reaches block 7, the last of the eight the host keeps. The build no longer passes a per-stage bank (`stage_bank`). With it, 6,715 of Cyberpunk 2077's shaders translate.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `c[25]` in 9,944 vertex shaders, `c[26]` in 538 mesh and 3 hull shaders, `c[27]` in 37 domain shaders, `c[28]` in 1 geometry shader, `c[29]` in 12,195 pixel shaders. In one intro frame it pushes block 1 157 times, block 2 51 times and block 5 92 times. A host-only test (each stage's rows filled from its block) brought back the ship's engines and the tower's lights at the moon base. Cyberpunk 2077 (`0400DDB020648000`, no profile yet): the correction above.
 
 ### Uniform words read through a buffer address (cx)
 

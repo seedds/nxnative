@@ -267,9 +267,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // c[0] + 0x210 + 0x10 r and storage slot s to c[0] + 0x310 + 0x10 s (NVN's compute tables), texture slot t to c[2] + 0x20 + 8 t, separate texture r to
         // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
         // Push block 1 (control +0xaa words; PRAGMATA's buffer entries and handles) lies between push block 0 and the uniform entries, mapped to c[24] + 0x100.
-        // NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own, c[25 + stage index] (QueryAmpereStageBank): mapped to their push block
-        // in c[24] (AStageBlock). A bank past the push constants' (24) that is not the stage's is refused here: the binding table ends there, and it failed later as an
-        // IndexOutOfRangeException (PRAGMATA: 18,198 shaders before the map)
+        // A bank past the push constants' (24) is another push block of the stage group, c[24 + b] (APushBlock): mapped to block b in c[24]. Left as it was, the binding table
+        // ended there, and it failed later as an IndexOutOfRangeException (PRAGMATA: 18,198 shaders before the map)
         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
         {
             if (bank > 24)
@@ -279,7 +278,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     throw AFail(context, $"stage buffer bank c[{bank}] read at 0x{offset:x}, past its push block");
                 }
 
-                return (24, AStageBlock(context, bank) * 0x100 + offset);
+                return (24, APushBlock(bank) * 0x100 + offset);
             }
 
             int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
@@ -353,19 +352,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return (bank, offset);
         }
 
-        // A constant bank past the push constants' (24) is an NVN2 graphics stage's buffer bank: stage i (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) reads c[25 + i]
-        // (QueryAmpereStageBank), which holds what the game pushes into the graphics push block 1 + i with nvnCommandBufferPushGraphicsConstants: {address, size} entries, 16 bytes
-        // each, or 8-byte handles, as compute reads its own from push block 1. PRAGMATA pushes the mesh stage's six entries into block 2 and the pixel stage's five into block 5 before
-        // its visibility and material passes. The bank maps to that block of c[24] (dmsh_abi.h DMSH_PUSH_BLOCKS; an indexed read, LDC Ra / ULDC URa, is moved by the block's base
-        // with it). Taken for the uniform slots the game binds, the mesh shader read three unbound slots and the material pass the wrong tables: every object drawn through the
-        // visibility buffer came out black. Another stage's bank is refused.
-        private static int AStageBlock(EmitterContext context, int bank)
+        // NVN2's push blocks are constant banks: block b of the stage group (nvnCommandBufferPushGraphicsConstants / PushComputeConstants, block b) is c[24 + b], for every stage
+        // of the group. The 5-bit bank field reaches c[31], block 7, the last of the group's eight (dmsh_abi.h DMSH_PUSH_BLOCKS). The game chooses the blocks: PRAGMATA pushes its
+        // vertex stage's {address, size} entries into block 1 (c[25]), its mesh stage's into block 2 (c[26]) and its pixel stage's into block 5 (c[29]); Cyberpunk 2077 pushes one
+        // 8-byte address into block 7 of both groups at boot, which 2,237 of its pixel and 852 of its vertex shaders read as c[31][0], and its pixel shaders also read c[25].
+        // The bank maps to that block of c[24] (an indexed read, LDC Ra / ULDC URa, is moved by the block's base with it). Taken for the uniform slots the game binds, PRAGMATA's
+        // mesh shader read three unbound slots and its material pass the wrong tables: every object drawn through the visibility buffer came out black
+        private static int APushBlock(int bank)
         {
-            if (bank != context.TranslatorContext.GpuAccessor.QueryAmpereStageBank())
-            {
-                throw AFail(context, $"constant bank c[{bank}], which is not this stage's buffer bank");
-            }
-
             return bank - 24;
         }
 

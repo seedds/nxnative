@@ -12,7 +12,7 @@ LDG_UR4 = (0x000ea200081e8900, 0x00000004ff057981)       # LDG.E R5, [UR4] (Ra =
 ULDCX = (0x000fe40008000800, 0x0000040004057ab9)         # ULDC UR5, cx[UR4][0x10], a word (bit 91: the bank's handle in the uniform register at 24)
 MOV_R5_UR5 = (0x000fe20008000000, 0x0000000500057c02)    # MOV R5, UR5
 SUATOM_R5 = (0x004ea200001ee000, 0x00000c05030c7593)     # SUATOM.ADD on image slot 0 (c0 word 12), adding R5: keeps R5 alive
-ULDC64_C29_10 = (0x000fe20000000a00, 0x0000040000047ab9 | 29 << 54)   # ULDC.64 UR4, c[29][0x10]: the pixel stage's buffer bank, entry 1
+ULDC64_C29_10 = (0x000fe20000000a00, 0x0000040000047ab9 | 29 << 54)   # ULDC.64 UR4, c[29][0x10]: push block 5, entry 1
 LDG_R0_UR4 = (0x000ea200081e8900, 0x00000004ff007981)    # LDG.E R0, [UR4] (Ra = RZ): colour 0's x, so it stays
 ISETP_NE_P0_R5 = (0x004fc20003f05070, 0x000000ff0500720c)   # ISETP.NE.U32.AND P0, PT, R5, RZ, PT, waiting on the LDG's scoreboard (2), as SUATOM_R5
 MOV_R6_C3_10_NP0 = (0x000fe20000000f00, (0xa02 | 0x8 << 12 | 6 << 16 | 0x10 << 38 | 3 << 54))   # @!P0 MOV R6, c[3][0x10]: a word of the game's uniform buffer
@@ -39,25 +39,21 @@ class Nvn2Buffers(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             return json.loads((work / 'k.res.json').read_text())
 
-    def translate_ps(self, code, stage_bank):
+    def translate_ps(self, code):
         with tempfile.TemporaryDirectory(prefix='nvn2_buffers_') as d:
             work = Path(d); (work / 'k.bin').write_bytes(PS_SPH + code)
-            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, stage_bank=stage_bank)]))
+            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={})]))
             r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             return json.loads((work / 'k.res.json').read_text())
 
-    def test_a_graphics_stage_bank_is_its_push_block(self):
-        # The pixel stage (index 4) reads its buffer entries from c[29]: what the game pushes into graphics push block 5 (PRAGMATA's material pass), at c[24] + 5 * 0x100
-        res = self.translate_ps(inst(*ULDC64_C29_10) + inst(*LDG_R0_UR4) + inst(*EXIT), 29)
-        self.assertIn((24, (5 * 0x100 + 0x10) // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])
-
-    def test_another_stage_bank_is_refused(self):
-        with tempfile.TemporaryDirectory(prefix='nvn2_buffers_') as d:
-            work = Path(d); (work / 'k.bin').write_bytes(PS_SPH + inst(*ULDC64_C29_10) + inst(*LDG_R0_UR4) + inst(*EXIT))
-            (work / 'jobs.json').write_text(json.dumps([dict(key='k', stage='ps', arch='sm86', code=str(work / 'k.bin'), tex={}, img={}, attr={}, fout={}, stage_bank=25)]))
-            r = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(work / 'jobs.json'), d], capture_output=True, text=True)
-            self.assertIn("not this stage's buffer bank", r.stdout + r.stderr)
+    def test_a_push_block_bank_is_that_block_of_c24(self):
+        # c[24 + b] is push block b for every stage: PRAGMATA's pixel stage reads block 5 as c[29], Cyberpunk 2077's pixel stage block 1 as c[25] and block 7 as c[31]
+        for bank in (25, 29, 31):
+            with self.subTest(bank=bank):
+                uldc = (ULDC64_C29_10[0], ULDC64_C29_10[1] & ~(0x1f << 54) | bank << 54)
+                res = self.translate_ps(inst(*uldc) + inst(*LDG_R0_UR4) + inst(*EXIT))
+                self.assertIn((24, ((bank - 24) * 0x100 + 0x10) // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])
 
     def test_a_pushed_buffer_entry_is_read_from_push_block_1(self):
         # c0: no push words, push block 1 at 0x10 (+0xaa: 4 words, one entry), one uniform entry at 0x20, images from 0x30 (image slot 0 = word 12)

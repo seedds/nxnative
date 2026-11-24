@@ -1091,10 +1091,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // An indexed constant read's bank and immediate offset: an NVN2 graphics stage's buffer bank moves to c[24] by its push block's base (AMapC0, AStageBlock)
+        // An indexed constant read's bank and immediate offset: a push block's bank moves to c[24] by the block's base (AMapC0, APushBlock)
         private static (int Bank, int Offset) AIndexedBank(EmitterContext context, int bank, int offset)
         {
-            return bank > 24 ? (24, AStageBlock(context, bank) * 0x100 + offset) : (bank, offset);
+            return bank > 24 ? (24, APushBlock(bank) * 0x100 + offset) : (bank, offset);
         }
 
         private static void ALoadConstant(EmitterContext context, AmpereOp x, int bank, Operand index, int offset, bool uniform)

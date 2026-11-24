@@ -74,7 +74,7 @@ class RtCompile(unittest.TestCase):
     def test_ordinary_nvn2_graphics_job_accepts_short_control_sections(self):
         code = bytes(0x100) + b'constant data'
         env = lift('job_for', dmsh_ampere=dmsh_ampere, abi=abi, struct=struct, os=os,
-                   FACTS={}, NVN2_STAGE_INDEX={'vs': 0})
+                   FACTS={})
         with tempfile.TemporaryDirectory() as work:
             for size in (0x48, 0x50, 0x56, 0x57, 0xe0):
                 with self.subTest(control_size=size):
@@ -84,7 +84,7 @@ class RtCompile(unittest.TestCase):
                     struct.pack_into('<II', control, 0x40, 0x100, len(code))
                     raw = bytes(0x38) + code + control
                     job, c1 = env['job_for']('short-control', 'vs_other.bin', raw, work)
-                    self.assertEqual((job['stage'], job['arch'], job['stage_bank']), ('vs', 'sm86', abi.NVN2_STAGE_BANK))
+                    self.assertEqual((job['stage'], job['arch']), ('vs', 'sm86'))
                     self.assertEqual(Path(job['code']).read_bytes(), code[:0x80])
                     self.assertEqual(c1, b'constant data')
 

@@ -4314,11 +4314,11 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
 }
 // NVN2 push constants: (command buffer, block, byte offset, size, data). The bytes form a constant block of the graphics stages or of compute, which their shaders read
 // as c[24] (DMSH_PUSH_BANK; NVN2 compute's own c0 layout starts with them, which the translator maps there). Donkey Kong Bananza's upscaler pushes (1 / w, 1 / h, w, h) of its
-// target for its graphics passes, and two integer rectangles (source, destination) for its compute network. Block 1 + i holds stage i's buffer entries (dmsh_abi.h DMSH_PUSH_BLOCKS):
-// compute's single stage reads block 1 (PRAGMATA: 16-byte {address, size} entries, 1 to 3 at offset 0, before its dispatches), at DMSH_PUSH_SIZE in c[24]; with it taken for
-// block 0, PRAGMATA's persistent compute shaders spun on a work counter in the wrong buffer and the GPU never finished its first 3D frame. Graphics stage i reads block 1 + i
-// through its own bank: PRAGMATA pushes its vertex stage's entries into block 1, its mesh stage's into block 2 and its pixel stage's into block 5. Blocks 2 to 5 were dropped,
-// and the objects of its visibility buffer drew black
+// target for its graphics passes, and two integer rectangles (source, destination) for its compute network. The other blocks hold what the game chooses (dmsh_abi.h DMSH_PUSH_BLOCKS),
+// which every stage of the group reads as bank c[24 + block]: PRAGMATA's compute reads {address, size} entries from block 1 (1 to 3 at offset 0, before its dispatches), at
+// DMSH_PUSH_SIZE in c[24]; with it taken for block 0, its persistent compute shaders spun on a work counter in the wrong buffer and the GPU never finished its first 3D frame.
+// PRAGMATA pushes its vertex stage's entries into block 1, its mesh stage's into block 2 and its pixel stage's into block 5 (blocks 2 to 5 dropped, the objects of its visibility
+// buffer drew black); Cyberpunk 2077 pushes an 8-byte address into block 7 of both groups
 static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, const void *data) {
     const uint64_t blocks = DMSH_PUSH_BLOCKS;
     if (w >= blocks) { static int once; if (!once++) LOG("[RED] %s push constants into block %llu (%#llx + %#llx): the host keeps %llu, dropped", compute ? "compute" : "graphics", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n, (unsigned long long)blocks); return; }

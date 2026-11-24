@@ -508,8 +508,6 @@ def ps_omap(code):
     NaN above Ocarina of Time's horizon to the missing per-component mask (their commit 79c1516; Ocarina's agl_common depth pass has map 0x10f: output 0 RGBA, output 2 R only)"""
     return struct.unpack_from('<I', code, 18 * 4)[0] if len(code) >= 0x50 else None
 
-NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NVN2 graphics stage indices (PRAGMATA's banks: vertex c[25], hull and mesh c[26], domain c[27], geometry c[28], pixel c[29])
-
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
     # Short NVN2 graphics control sections have no optional stage byte.
@@ -530,9 +528,6 @@ def job_for(key, name, rec, w):
         # laid out right after push block 0, before the uniform entries; the translator maps it to c[24] + DMSH_PUSH_SIZE (dmsh_abi.h DMSH_PUSH_BLOCKS). With it every one of
         # PRAGMATA's 6,856 compute shaders adds up to its size (+0xba); Donkey Kong Bananza's and Star Fox's sizes add up without it, as +0xaa is 0 there
         if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xaa] * 4]
-        # a graphics stage reads the buffer entries the game pushes into its push block 1 + stage index from a bank of its own, c[25 + stage index]; the translator maps
-        # that bank onto the block in c[24] (dmsh_abi.h DMSH_NVN2_STAGE_BANK). A task shader's bank has not been seen
-        if stage in NVN2_STAGE_INDEX: extra['stage_bank'] = abi.NVN2_STAGE_BANK + NVN2_STAGE_INDEX[stage]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader

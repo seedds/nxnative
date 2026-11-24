@@ -15415,7 +15415,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
                     }
                     // Compute's uniform slots at 0x210 + 16 r (address 64 bits, size 32 bits). NVN2's compute shaders read a slot through its first 8 bytes as a bindless constant buffer
                     // handle too (cx[UR], InstEmitAmpere.cs ABindlessConstant), which NVN2's driver writes there in the hardware's layout (ucb_handle); NVN's read the address itself
-                    // (Link's Awakening's c0[0x280]). NVN2's graphics stages read no such table: their bank holds the entries the game pushes (dmsh_abi.h DMSH_NVN2_STAGE_BANK)
+                    // (Link's Awakening's c0[0x280]). NVN2's graphics stages read no such table: they read the entries the game pushes from the push blocks' banks (InstEmitAmpere.cs APushBlock)
                     int ounce = dm_sdk_ounce();
                     if (nvn_stage == 5) for (int r = 0; r < DMSH_C0_CS_UBO_SLOTS; r++) { uint64_t a = S.ubo[nvn_stage][r].addr; uint32_t n = (uint32_t)S.ubo[nvn_stage][r].size; if (ounce) a = ucb_handle(a, n); memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r, &a, 8); memcpy(d + DMSH_C0_CS_UBO + DMSH_C0_ROW * r + 8, &n, 4); }
                 } else {

@@ -8,9 +8,14 @@
 // Commands are 64-byte feature reports, report ID 0: the command, the length of its data, its data. Gamepad mode turns the keys and the mouse off: clear the digital
 // mappings, then settings (three bytes each: the setting, its value low, high) with both pads in mode 7 (none). Lizard mode back: the default digital mappings, the
 // default settings, the right pad as the mouse (SDL's CloseSteamController).
+// Over Bluetooth LE (its Bluetooth firmware, 28de:1106) macOS lists one device: a mouse, a keyboard and the vendor collection, whose input and feature reports (report ID 3,
+// 19 bytes) are segments of packets, as SDL's HIDAPI driver reads them: a header (PAD_STEAM_BLE_DATA, PAD_STEAM_BLE_LAST on the packet's last, the segment's number 0..7)
+// and 18 bytes of the packet. A state packet (type 4 in the low nibble of its first byte) carries only the chunks its mask names (that byte's high nibble and the next
+// byte, PAD_STEAM_BLE_*): the 24 button bits as over USB, the analog triggers, the joystick, the left pad, the right pad (no longer sharing fields), the gyro's; a chunk
+// left out keeps its last value. Type 5 is its status (the battery), about once a second. Commands are the same bytes, in segments of feature report 3.
 // Switch buttons by position, as front_mac.m maps an Xbox pad: right A, bottom B, top X, left Y. The left pad clicked in a direction is the d-pad (the firmware's direction
 // bits, which it sets only while the pad is clicked, in mode 7 too: seen on a wired controller; the click is checked as well), the right pad touched is the right stick (where the thumb is, a round dead zone at its centre), its click RS. The grips and the Steam
-// button have no Switch button. Not read: the gyro (off unless the settings turn it on), BLE (the Bluetooth firmware's 28de:1106 speaks another report format).
+// button have no Switch button. Not read: the gyro (off unless the settings turn it on).
 #pragma once
 #include <stdint.h>
 #include <stdlib.h>
@@ -21,8 +26,18 @@
 #define PAD_STEAM_VID 0x28DE
 #define PAD_STEAM_PID_WIRED 0x1102      // over USB
 #define PAD_STEAM_PID_RECEIVER 0x1142   // the wireless receiver: an interface of usage page 0xFF00 per controller it pairs
+#define PAD_STEAM_PID_BLE 0x1106        // over Bluetooth LE: its reports are segments (PAD_STEAM_BLE_*)
 #define PAD_STEAM_PAGE 0xFF00
 #define PAD_STEAM_LEN 64
+#define PAD_STEAM_BLE_REPORT 3
+#define PAD_STEAM_BLE_SEG 18                        // the packet's bytes in a segment
+#define PAD_STEAM_BLE_LEN (2 + PAD_STEAM_BLE_SEG)   // a segment's report: the report ID, the header, the bytes
+enum { PAD_STEAM_BLE_DATA = 0x80, PAD_STEAM_BLE_LAST = 0x40 };   // the header's flags; its low 3 bits: the segment's number in the packet
+enum { PAD_STEAM_BLE_STATE = 4, PAD_STEAM_BLE_STATUS = 5 };       // a packet's type
+enum {   // a state packet's chunks, in their order
+    PAD_STEAM_BLE_BUTTONS = 0x10, PAD_STEAM_BLE_TRIGGERS = 0x20, PAD_STEAM_BLE_BUTTONS2 = 0x40, PAD_STEAM_BLE_STICK = 0x80,
+    PAD_STEAM_BLE_LPAD = 0x100, PAD_STEAM_BLE_RPAD = 0x200, PAD_STEAM_BLE_ACCEL = 0x400, PAD_STEAM_BLE_GYRO = 0x800, PAD_STEAM_BLE_QUAT = 0x1000,
+};
 enum { PAD_STEAM_MSG_STATE = 0x01, PAD_STEAM_MSG_WIRELESS = 0x03, PAD_STEAM_MSG_STATUS = 0x04 };
 enum {
     PAD_STEAM_CMD_CLEAR_MAPPINGS = 0x81, PAD_STEAM_CMD_DEFAULT_MAPPINGS = 0x85, PAD_STEAM_CMD_SETTINGS = 0x87, PAD_STEAM_CMD_DEFAULT_SETTINGS = 0x8E,
@@ -42,17 +57,42 @@ enum {
 };
 #define PAD_STEAM_TRIGGER_HALF 128
 
-static inline int pad_steam_is(int vid, int pid) { return vid == PAD_STEAM_VID && (pid == PAD_STEAM_PID_WIRED || pid == PAD_STEAM_PID_RECEIVER); }
+static inline int pad_steam_is(int vid, int pid) { return vid == PAD_STEAM_VID && (pid == PAD_STEAM_PID_WIRED || pid == PAD_STEAM_PID_RECEIVER || pid == PAD_STEAM_PID_BLE); }
 
 typedef struct {
     int16_t stick[2];   // the joystick's last position: a report carrying the left pad keeps it
     uint32_t bits;      // the last state report's button bits, PAD_STEAM_LPAD_TOUCH while a thumb is on the left pad (DM_HID_LOG logs their changes, pad_hid_mac.h)
     int16_t lpad[2];    // where the thumb last was on the left pad
+    uint8_t trig[2];    // the analog triggers
+    int16_t rpad[2];    // the right pad
+    uint8_t pkt[PAD_STEAM_BLE_SEG * 8]; int seg;   // over Bluetooth: the packet being assembled, the number of the segment it needs next
 } pad_steam;
 
 static int16_t pad_steam_s16(const uint8_t *p) { return (int16_t)(uint16_t)(p[0] | p[1] << 8); }
 static float pad_steam_axis(int16_t v) { return v < -32767 ? -1.f : v / 32767.f; }
-// A state report as Switch buttons and sticks (lx, ly, rx, ry); 0 for any other report
+// The controller's state as Switch buttons and sticks (lx, ly, rx, ry): its button bits b, analog triggers, joystick and right pad
+static void pad_steam_switch(const pad_steam *p, uint32_t b, uint64_t *m, int32_t s[4]) {
+    static const struct { uint32_t from; uint64_t to; } map[] = {
+        {PAD_STEAM_B, DM_BTN_A}, {PAD_STEAM_A, DM_BTN_B}, {PAD_STEAM_Y, DM_BTN_X}, {PAD_STEAM_X, DM_BTN_Y},
+        {PAD_STEAM_STICK_CLICK, DM_BTN_LS}, {PAD_STEAM_RPAD_CLICK, DM_BTN_RS}, {PAD_STEAM_LB, DM_BTN_L}, {PAD_STEAM_RB, DM_BTN_R},
+        {PAD_STEAM_LT, DM_BTN_ZL}, {PAD_STEAM_RT, DM_BTN_ZR}, {PAD_STEAM_START, DM_BTN_PLUS}, {PAD_STEAM_BACK, DM_BTN_MINUS},
+    };
+    uint64_t o = 0;
+    for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (b & map[i].from) o |= map[i].to;
+    if (p->trig[0] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZL;   // past half, as the raw HID pads' analog triggers
+    if (p->trig[1] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZR;
+    if (b & PAD_STEAM_LPAD_CLICK) {
+        if (b & PAD_STEAM_LPAD_UP) o |= DM_BTN_UP;
+        if (b & PAD_STEAM_LPAD_DOWN) o |= DM_BTN_DOWN;
+        if (b & PAD_STEAM_LPAD_LEFT) o |= DM_BTN_LEFT;
+        if (b & PAD_STEAM_LPAD_RIGHT) o |= DM_BTN_RIGHT;
+    }
+    *m = o;
+    pad_hid_stick(pad_steam_axis(p->stick[0]), pad_steam_axis(p->stick[1]), &s[0], &s[1]);
+    if (b & PAD_STEAM_RPAD_TOUCH) pad_hid_stick(pad_steam_axis(p->rpad[0]), pad_steam_axis(p->rpad[1]), &s[2], &s[3]);
+    else s[2] = s[3] = 0;   // the thumb off the right pad: the right stick at rest
+}
+// A state report (USB, a receiver) as Switch buttons and sticks; 0 for any other report
 static int pad_steam_state(pad_steam *p, const uint8_t *r, size_t n, uint64_t *m, int32_t s[4]) {
     if (n < 24 || r[0] != 1 || r[1] != 0 || r[2] != PAD_STEAM_MSG_STATE) return 0;
     uint32_t b = r[8] | r[9] << 8 | (uint32_t)r[10] << 16;
@@ -62,28 +102,56 @@ static int pad_steam_state(pad_steam *p, const uint8_t *r, size_t n, uint64_t *m
         if (!(b & PAD_STEAM_LPAD_AND_STICK)) p->stick[0] = p->stick[1] = 0;   // the left pad alone: the joystick is at rest
     }
     p->bits = b & PAD_STEAM_LPAD_AND_STICK ? b | PAD_STEAM_LPAD_TOUCH : b;   // a thumb on the pad in either of the reports that take turns
+    p->trig[0] = r[11]; p->trig[1] = r[12]; p->rpad[0] = pad_steam_s16(r + 20); p->rpad[1] = pad_steam_s16(r + 22);
     // older firmware reports the joystick's click as the left pad's while the pad is not touched (SDL's FormatStatePacketUntilGyro)
     if ((b & PAD_STEAM_LPAD_CLICK) && !(b & (PAD_STEAM_LPAD_TOUCH | PAD_STEAM_LPAD_AND_STICK))) b = (b & ~PAD_STEAM_LPAD_CLICK) | PAD_STEAM_STICK_CLICK;
-    static const struct { uint32_t from; uint64_t to; } map[] = {
-        {PAD_STEAM_B, DM_BTN_A}, {PAD_STEAM_A, DM_BTN_B}, {PAD_STEAM_Y, DM_BTN_X}, {PAD_STEAM_X, DM_BTN_Y},
-        {PAD_STEAM_STICK_CLICK, DM_BTN_LS}, {PAD_STEAM_RPAD_CLICK, DM_BTN_RS}, {PAD_STEAM_LB, DM_BTN_L}, {PAD_STEAM_RB, DM_BTN_R},
-        {PAD_STEAM_LT, DM_BTN_ZL}, {PAD_STEAM_RT, DM_BTN_ZR}, {PAD_STEAM_START, DM_BTN_PLUS}, {PAD_STEAM_BACK, DM_BTN_MINUS},
-    };
-    uint64_t o = 0;
-    for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (b & map[i].from) o |= map[i].to;
-    if (r[11] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZL;   // past half, as the raw HID pads' analog triggers
-    if (r[12] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZR;
-    if (b & PAD_STEAM_LPAD_CLICK) {
-        if (b & PAD_STEAM_LPAD_UP) o |= DM_BTN_UP;
-        if (b & PAD_STEAM_LPAD_DOWN) o |= DM_BTN_DOWN;
-        if (b & PAD_STEAM_LPAD_LEFT) o |= DM_BTN_LEFT;
-        if (b & PAD_STEAM_LPAD_RIGHT) o |= DM_BTN_RIGHT;
-    }
-    *m = o;
-    pad_hid_stick(pad_steam_axis(p->stick[0]), pad_steam_axis(p->stick[1]), &s[0], &s[1]);
-    if (b & PAD_STEAM_RPAD_TOUCH) pad_hid_stick(pad_steam_axis(pad_steam_s16(r + 20)), pad_steam_axis(pad_steam_s16(r + 22)), &s[2], &s[3]);
-    else s[2] = s[3] = 0;   // the thumb off the right pad: the right stick at rest
+    pad_steam_switch(p, b, m, s);
     return 1;
+}
+// A Bluetooth report into the packet being assembled: the packet's length once its last segment is in, else 0. An empty segment or another report ID is passed over,
+// a segment out of order drops the packet (SDL's WriteSegmentToSteamControllerPacketAssembler)
+static size_t pad_steam_ble_segment(pad_steam *p, const uint8_t *r, size_t n) {
+    if (n < PAD_STEAM_BLE_LEN || r[0] != PAD_STEAM_BLE_REPORT || !(r[1] & PAD_STEAM_BLE_DATA)) return 0;
+    int k = r[1] & 7;
+    if (k != p->seg) { p->seg = 0; if (k) return 0; }   // a first segment starts the packet again
+    memcpy(p->pkt + k * PAD_STEAM_BLE_SEG, r + 2, PAD_STEAM_BLE_SEG);
+    if (!(r[1] & PAD_STEAM_BLE_LAST)) { p->seg++; return 0; }
+    p->seg = 0;
+    return (size_t)(k + 1) * PAD_STEAM_BLE_SEG;
+}
+// A Bluetooth report as Switch buttons and sticks: 1 once it completes a state packet, 0 otherwise (a segment of a longer packet, the status, a packet too short for its mask)
+static int pad_steam_ble_state(pad_steam *p, const uint8_t *r, size_t n, uint64_t *m, int32_t s[4]) {
+    size_t len = pad_steam_ble_segment(p, r, n);
+    if (len < 2 || (p->pkt[0] & 0x0F) != PAD_STEAM_BLE_STATE) return 0;
+    uint32_t mask = (p->pkt[0] & 0xF0u) | (uint32_t)p->pkt[1] << 8;
+    static const struct { uint32_t chunk; size_t size; } chunks[] = {
+        {PAD_STEAM_BLE_BUTTONS, 3}, {PAD_STEAM_BLE_TRIGGERS, 2}, {PAD_STEAM_BLE_BUTTONS2, 3}, {PAD_STEAM_BLE_STICK, 4}, {PAD_STEAM_BLE_LPAD, 4},
+        {PAD_STEAM_BLE_RPAD, 4}, {PAD_STEAM_BLE_ACCEL, 6}, {PAD_STEAM_BLE_GYRO, 6}, {PAD_STEAM_BLE_QUAT, 8},
+    };
+    size_t at = 2;
+    for (size_t i = 0; i < sizeof chunks / sizeof *chunks; i++) at += mask & chunks[i].chunk ? chunks[i].size : 0;
+    if (at > len) return 0;
+    const uint8_t *q = p->pkt + 2;
+    if (mask & PAD_STEAM_BLE_BUTTONS) { p->bits = q[0] | q[1] << 8 | (uint32_t)q[2] << 16; q += 3; }
+    if (mask & PAD_STEAM_BLE_TRIGGERS) { p->trig[0] = q[0]; p->trig[1] = q[1]; q += 2; }
+    if (mask & PAD_STEAM_BLE_BUTTONS2) q += 3;   // buttons the Steam Controller does not have
+    if (mask & PAD_STEAM_BLE_STICK) { p->stick[0] = pad_steam_s16(q); p->stick[1] = pad_steam_s16(q + 2); q += 4; }
+    if (mask & PAD_STEAM_BLE_LPAD) { p->lpad[0] = pad_steam_s16(q); p->lpad[1] = pad_steam_s16(q + 2); q += 4; }
+    if (mask & PAD_STEAM_BLE_RPAD) { p->rpad[0] = pad_steam_s16(q); p->rpad[1] = pad_steam_s16(q + 2); }
+    pad_steam_switch(p, p->bits, m, s);
+    return 1;
+}
+// A command (as pad_steam_cmd builds it: the command, the length of its data, its data) as Bluetooth feature reports of PAD_STEAM_BLE_LEN bytes; their number
+static int pad_steam_ble_cmd(const uint8_t cmd[PAD_STEAM_LEN], uint8_t out[4][PAD_STEAM_BLE_LEN]) {
+    int n = 2 + cmd[1], k = 0;
+    if (n > PAD_STEAM_LEN) n = PAD_STEAM_LEN;
+    for (int at = 0; at < n; at += PAD_STEAM_BLE_SEG, k++) {
+        int c = n - at < PAD_STEAM_BLE_SEG ? n - at : PAD_STEAM_BLE_SEG;
+        memset(out[k], 0, PAD_STEAM_BLE_LEN);
+        out[k][0] = PAD_STEAM_BLE_REPORT; out[k][1] = (uint8_t)(PAD_STEAM_BLE_DATA | k | (at + c == n ? PAD_STEAM_BLE_LAST : 0));
+        memcpy(out[k] + 2, cmd + at, (size_t)c);
+    }
+    return k;
 }
 // A wireless receiver's event: 1 a controller connected, -1 disconnected, 0 another report
 static int pad_steam_wireless(const uint8_t *r, size_t n) {

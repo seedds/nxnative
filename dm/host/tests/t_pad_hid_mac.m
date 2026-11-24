@@ -81,6 +81,10 @@ static uint8_t outs[64][3]; static int nouts;   // each output report: its id, s
 static uint8_t feats[64][PAD_STEAM_LEN]; static int nfeats;   // each feature report (a Steam Controller's commands)
 static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) {
     (void)d;
+    if (t == kIOHIDReportTypeFeature && id == PAD_STEAM_BLE_REPORT) {   // over Bluetooth: a command in one segment (all of ours fit), kept as its bytes
+        assert(n == PAD_STEAM_BLE_LEN && r[0] == PAD_STEAM_BLE_REPORT && r[1] == (PAD_STEAM_BLE_DATA | PAD_STEAM_BLE_LAST) && nfeats < 64);
+        memset(feats[nfeats], 0, PAD_STEAM_LEN); memcpy(feats[nfeats++], r + 2, PAD_STEAM_BLE_SEG); return kIOReturnSuccess;
+    }
     if (t == kIOHIDReportTypeFeature) { assert(id == 0 && n == PAD_STEAM_LEN && nfeats < 64); memcpy(feats[nfeats++], r, PAD_STEAM_LEN); return kIOReturnSuccess; }
     assert(t == kIOHIDReportTypeOutput && id == r[0] && n >= 12 && nouts < 64);
     outs[nouts][0] = r[0]; outs[nouts][1] = r[10]; outs[nouts][2] = r[11]; nouts++; return kIOReturnSuccess;
@@ -386,7 +390,7 @@ static void hid_composite_and_wrapped(void) {
 }
 
 // Valve's first Steam Controller (pad_steam.h): read from its reports in gamepad mode unless Steam holds it or started the game with Steam Input; a receiver's controller
-// from its connect event to its disconnect event; lizard mode given back at exit, once
+// from its connect event to its disconnect event; one over Bluetooth LE; lizard mode given back at exit, once
 static TestDev *steam_dev(int pid, uint64_t entry) { TestDev *d = [TestDev new]; d.vid = PAD_STEAM_VID; d.pid = pid; d.name = @"Wired Controller"; d.entry = entry; return d; }
 static void steam_report(TestDev *d, const uint8_t *r) { push_report(d, r, PAD_STEAM_LEN); }
 static void steam_controller(void) {
@@ -435,6 +439,26 @@ static void steam_controller(void) {
     f0 = nfeats; hidpad_steam_exit(); assert(nfeats == f0);   // gone: nothing to give back
     steam_report(rx, st); assert(d->sc_live && d->sc_owned && attached == a0 + 1 && buttons == DM_BTN_B && nfeats == f0 + 2);   // sends before its event: connected all the same
     hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(rx)); assert(!find(rx) && attached == a0);
+
+    // over Bluetooth LE: a controller at once, its commands in segments of feature report 3, its state from segments; its mouse reports and its status read nothing
+    TestDev *bt = steam_dev(PAD_STEAM_PID_BLE, 205); f0 = nfeats;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(bt)); d = find(bt);
+    assert(d && d->steam && d->sc_live && d->sc_owned && attached == a0 + 1 && nfeats == f0 + 2 && bt.opened == 1);
+    assert(feats[f0][0] == PAD_STEAM_CMD_CLEAR_MAPPINGS && feats[f0 + 1][0] == PAD_STEAM_CMD_SETTINGS && feats[f0 + 1][1] == 12);
+    uint8_t seg[PAD_STEAM_BLE_LEN] = {PAD_STEAM_BLE_REPORT, PAD_STEAM_BLE_DATA | PAD_STEAM_BLE_LAST, PAD_STEAM_BLE_STATE | PAD_STEAM_BLE_BUTTONS, 0, (uint8_t)PAD_STEAM_X};
+    push_report(bt, seg, sizeof seg); assert(buttons == DM_BTN_Y);
+    r0 = reads;
+    uint8_t mouse[5] = {1, 1, 10, 0, 0}; push_report(bt, mouse, sizeof mouse);
+    uint8_t status[PAD_STEAM_BLE_LEN] = {PAD_STEAM_BLE_REPORT, PAD_STEAM_BLE_DATA | PAD_STEAM_BLE_LAST, PAD_STEAM_BLE_STATUS, 0x55, 0x02};
+    push_report(bt, status, sizeof status); assert(reads == r0 && buttons == DM_BTN_Y);
+    seg[4] = 0; push_report(bt, seg, sizeof seg); assert(buttons == 0);
+    f0 = nfeats; hidpad_steam_exit();
+    assert(nfeats == f0 + 3 && feats[f0][0] == PAD_STEAM_CMD_DEFAULT_MAPPINGS && feats[f0 + 1][0] == PAD_STEAM_CMD_DEFAULT_SETTINGS && feats[f0 + 2][2] == PAD_STEAM_SET_RPAD_MODE);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(bt)); assert(!find(bt) && attached == a0 && !bt.opened);
+    // over Bluetooth in an app without Input Monitoring: its open refused, so it is not read and nothing is sent
+    TestDev *denied = steam_dev(PAD_STEAM_PID_BLE, 206); denied.refuse = kIOReturnNotPermitted; f0 = nfeats; o0 = opens;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(denied)); assert(!find(denied) && !denied.callback && nfeats == f0 && attached == a0 && opens == o0 + 1);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(denied)); assert(!denied.opened);
     assert(!g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
     puts("t_pad_hid_mac: Steam Controller passed");
 }

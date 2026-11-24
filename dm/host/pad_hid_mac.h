@@ -57,7 +57,7 @@ typedef struct hid_pad {
     int asks, answered;    // device info asks so far, and the last one answered
     uint64_t asked;        // when the last handshake began
     int lights, rumble_off, sink;   // lights: the pattern last sent (-1 none); rumble_off: silent reports still to send after a buzz; sink: 1 + the player its rumble goes to
-    int steam, sc_live, sc_owned;   // a Steam Controller's interface (pad_steam.h); a controller behind it; put in gamepad mode here (lizard mode back at exit)
+    int steam, sc_live, sc_owned, sc_logged;   // a Steam Controller's interface (pad_steam.h); a controller behind it; put in gamepad mode here (lizard mode back at exit); Bluetooth reports logged
     pad_steam sc;          // its joystick, from its state reports into pro_m / pro_s
     uint8_t report[512];   // its report buffer
 } hid_pad;
@@ -322,8 +322,9 @@ static int hidpad_open(hid_pad *d) {
     if (r != kIOReturnNotPermitted) { LOG("[RED] controller '%s' (HID, %04x:%04x): not read: cannot open it (0x%x)", d->name, d->vid, d->pid, r); return 0; }
     IOHIDAccessType a = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
     LOG("[RED] controller '%s' (HID, %04x:%04x): not read: it is also a keyboard, which macOS lets an app read only with Input Monitoring (%s). Allow this game in System "
-        "Settings > Privacy & Security > Input Monitoring, then start it again; if it is allowed there already, remove it from that list (-), start it and allow it again",
-        d->name, d->vid, d->pid, a == kIOHIDAccessTypeGranted ? "on for this game, yet refused" : a == kIOHIDAccessTypeDenied ? "off for this game" : "macOS asks for it now");
+        "Settings > Privacy & Security > Input Monitoring, then start it again; if it is allowed there already, remove it from that list (-), start it and allow it again%s",
+        d->name, d->vid, d->pid, a == kIOHIDAccessTypeGranted ? "on for this game, yet refused" : a == kIOHIDAccessTypeDenied ? "off for this game" : "macOS asks for it now",
+        pad_steam_is(d->vid, d->pid) ? ". By its cable or its wireless receiver the controller needs no permission" : "");
     return 0;
 }
 static void hidpad_keep_gc(hid_pad *d) {
@@ -354,7 +355,8 @@ static void hidpad_use(hid_pad *d) {
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
 // ---- Valve's first Steam Controller (pad_steam.h) ----
-// Read from its vendor interface (usage page 0xFF00; a wireless receiver has one per controller it pairs) in gamepad mode: the firmware's keys and mouse are off while the
+// Read from its vendor interface (usage page 0xFF00; a wireless receiver has one per controller it pairs; over Bluetooth LE the vendor collection of its one device, whose
+// reports and commands are segments, pad_steam_ble_*) in gamepad mode: the firmware's keys and mouse are off while the
 // game runs and back on at exit (atexit: a quit, ⌘Q or the window closed; not after SIGTERM or a crash, after which it stays a gamepad until it is turned off or plugged in
 // again). A receiver's interface counts as a controller from its connect event (asked for with PAD_STEAM_CMD_WIRELESS_STATE) or its first state report until its
 // disconnect event. Like any raw HID pad it becomes a player at its first button press.
@@ -379,23 +381,30 @@ static int hidpad_steam_held(IOHIDDeviceRef hid) {
     return held;
 }
 // A command, in order with the other output on the output queue, tried again for a while (Linux's hid-steam: a receiver's controller can refuse one at first); at once
-// without the queue (the tests) or when now is set (exit)
+// without the queue (the tests) or when now is set (exit). Over USB one feature report, report ID 0; over Bluetooth its segments, feature report 3
 typedef struct { uint8_t b[PAD_STEAM_LEN]; } hidpad_steam_cmd;   // by value into the block
-static void hidpad_steam_send(IOHIDDeviceRef hid, const uint8_t *cmd, int now) {
+static IOReturn hidpad_steam_set(IOHIDDeviceRef hid, int ble, const uint8_t *cmd) {
+    if (!ble) return IOHIDDeviceSetReport(hid, kIOHIDReportTypeFeature, 0, cmd, PAD_STEAM_LEN);
+    uint8_t seg[4][PAD_STEAM_BLE_LEN]; int n = pad_steam_ble_cmd(cmd, seg); IOReturn e = kIOReturnSuccess;
+    for (int i = 0; i < n && e == kIOReturnSuccess; i++) e = IOHIDDeviceSetReport(hid, kIOHIDReportTypeFeature, PAD_STEAM_BLE_REPORT, seg[i], PAD_STEAM_BLE_LEN);
+    return e;
+}
+static void hidpad_steam_send(const hid_pad *d, const uint8_t *cmd, int now) {
     hidpad_steam_cmd c; memcpy(c.b, cmd, sizeof c.b);
-    if (now || !g_hidpad_out) { IOReturn e = IOHIDDeviceSetReport(hid, kIOHIDReportTypeFeature, 0, c.b, sizeof c.b); if (e != kIOReturnSuccess) LOG("[RED] Steam Controller: command 0x%02x failed (0x%x)", c.b[0], e); return; }
+    IOHIDDeviceRef hid = d->hid; int ble = d->pid == PAD_STEAM_PID_BLE;
+    if (now || !g_hidpad_out) { IOReturn e = hidpad_steam_set(hid, ble, c.b); if (e != kIOReturnSuccess) LOG("[RED] Steam Controller: command 0x%02x failed (0x%x)", c.b[0], e); return; }
     CFRetain(hid);
     dispatch_async(g_hidpad_out, ^{
         IOReturn e = kIOReturnError;
-        for (int i = 0; i < 10 && (e = IOHIDDeviceSetReport(hid, kIOHIDReportTypeFeature, 0, c.b, sizeof c.b)) != kIOReturnSuccess; i++) usleep(20000);
+        for (int i = 0; i < 10 && (e = hidpad_steam_set(hid, ble, c.b)) != kIOReturnSuccess; i++) usleep(20000);
         if (e != kIOReturnSuccess) LOG("[RED] Steam Controller: command 0x%02x failed (0x%x)", c.b[0], e);
         CFRelease(hid);
     });
 }
 static void hidpad_steam_gamepad(hid_pad *d) {   // its firmware's keys and mouse off
     uint8_t cmd[PAD_STEAM_LEN];
-    pad_steam_cmd(cmd, PAD_STEAM_CMD_CLEAR_MAPPINGS); hidpad_steam_send(d->hid, cmd, 0);
-    pad_steam_gamepad_settings(cmd); hidpad_steam_send(d->hid, cmd, 0);
+    pad_steam_cmd(cmd, PAD_STEAM_CMD_CLEAR_MAPPINGS); hidpad_steam_send(d, cmd, 0);
+    pad_steam_gamepad_settings(cmd); hidpad_steam_send(d, cmd, 0);
     d->sc_owned = 1;
 }
 // Lizard mode back for every controller put in gamepad mode here, after the commands still queued (atexit)
@@ -403,9 +412,9 @@ static void hidpad_steam_exit(void) {
     void (^restore)(void) = ^{
         for (hid_pad *d = g_hidpads; d; d = d->next) if (d->steam && d->sc_owned) {
             uint8_t cmd[PAD_STEAM_LEN];
-            pad_steam_cmd(cmd, PAD_STEAM_CMD_DEFAULT_MAPPINGS); hidpad_steam_send(d->hid, cmd, 1);
-            pad_steam_cmd(cmd, PAD_STEAM_CMD_DEFAULT_SETTINGS); hidpad_steam_send(d->hid, cmd, 1);
-            pad_steam_lizard_settings(cmd); hidpad_steam_send(d->hid, cmd, 1);
+            pad_steam_cmd(cmd, PAD_STEAM_CMD_DEFAULT_MAPPINGS); hidpad_steam_send(d, cmd, 1);
+            pad_steam_cmd(cmd, PAD_STEAM_CMD_DEFAULT_SETTINGS); hidpad_steam_send(d, cmd, 1);
+            pad_steam_lizard_settings(cmd); hidpad_steam_send(d, cmd, 1);
             d->sc_owned = 0;
         }
     };
@@ -429,10 +438,15 @@ static void hidpad_steam_report(void *ctx, IOReturn result, void *sender, IOHIDR
     (void)sender; (void)report_id;
     hid_pad *d = ctx;
     if (result != kIOReturnSuccess || type != kIOHIDReportTypeInput || len < 1) return;
-    int ev = pad_steam_wireless(r, (size_t)len);
+    int ble = d->pid == PAD_STEAM_PID_BLE, ev = ble ? 0 : pad_steam_wireless(r, (size_t)len);
     if (ev) { hidpad_steam_live(d, ev > 0); return; }
+    if (g_hidpad_log && ble && len >= PAD_STEAM_BLE_LEN && r[0] == PAD_STEAM_BLE_REPORT && d->sc_logged < 16 && !(!(r[1] & 7) && (r[2] & 0x0F) == PAD_STEAM_BLE_STATUS)) {
+        char hex[3 * PAD_STEAM_BLE_LEN + 1]; for (int i = 0; i < PAD_STEAM_BLE_LEN; i++) snprintf(hex + 3 * i, 4, " %02x", r[i]);   // DM_HID_LOG: its first segments but the status
+        LOG("[hid] %s: Bluetooth report%s", d->name, hex); d->sc_logged++;
+    }
     uint32_t was = d->sc.bits;
-    if (!pad_steam_state(&d->sc, r, (size_t)len, &d->pro_m, d->pro_s)) return;   // the battery, once a second
+    // the battery, once a second; over Bluetooth also a segment of a longer packet, and its mouse and keyboard reports (report IDs 1 and 2) while lizard mode lasts
+    if (!(ble ? pad_steam_ble_state : pad_steam_state)(&d->sc, r, (size_t)len, &d->pro_m, d->pro_s)) return;
     if (g_hidpad_log && d->sc.bits != was)   // DM_HID_LOG: each change of its button bits (PAD_STEAM_*) and the Switch buttons they press (DM_BTN_*)
         LOG("[hid] %s: button bits 0x%06x, left pad at (%d, %d): Switch buttons 0x%llx", d->name, d->sc.bits, d->sc.lpad[0], d->sc.lpad[1], (unsigned long long)d->pro_m);
     if (!d->sc_live) hidpad_steam_live(d, 1);   // a receiver's controller that sends before its connect event arrives
@@ -450,11 +464,11 @@ static void hidpad_steam_found(hid_pad *d) {
             "virtual pad), or quit Steam before starting the game", d->name, d->vid, d->pid);
         hidpad_drop(d); return;
     }
-    if (!hidpad_open(d)) { hidpad_drop(d); return; }   // after the checks above: one left to Steam is not opened
+    if (!hidpad_open(d)) { hidpad_drop(d); return; }   // after the checks above: one left to Steam is not opened, so over Bluetooth it needs no Input Monitoring
     d->next = g_hidpads; g_hidpads = d;
     IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_steam_report, d);
     if (d->pid != PAD_STEAM_PID_RECEIVER) { hidpad_steam_live(d, 1); return; }
-    uint8_t cmd[PAD_STEAM_LEN]; pad_steam_cmd(cmd, PAD_STEAM_CMD_WIRELESS_STATE); hidpad_steam_send(d->hid, cmd, 0);   // answered with a connect or disconnect event
+    uint8_t cmd[PAD_STEAM_LEN]; pad_steam_cmd(cmd, PAD_STEAM_CMD_WIRELESS_STATE); hidpad_steam_send(d, cmd, 0);   // answered with a connect or disconnect event
 }
 
 // The device's I/O Registry entry: IOHIDManager hands one device over once per matching dictionary it meets (a Pro Controller meets both the GamePad usage
@@ -644,9 +658,11 @@ static void hidpad_start(void) {
         @{@kIOHIDDeviceUsagePageKey: @(kHIDPage_GenericDesktop), @kIOHIDDeviceUsageKey: @(kHIDUsage_GD_GamePad)},
         @{@kIOHIDDeviceUsagePageKey: @(kHIDPage_GenericDesktop), @kIOHIDDeviceUsageKey: @(kHIDUsage_GD_Joystick)},
         @{@kIOHIDVendorIDKey: @0x057E, @kIOHIDProductIDKey: @0x2009},   // the Pro Controller, whatever usage it declares, so that identical ones are counted
-        // a Steam Controller's vendor interface (not its keyboard and mouse: matching those would also need Input Monitoring)
+        // a Steam Controller's vendor interface: over USB not its keyboard and mouse interfaces, which would need Input Monitoring; over Bluetooth LE they are one
+        // device, which does (hidpad_open)
         @{@kIOHIDVendorIDKey: @PAD_STEAM_VID, @kIOHIDProductIDKey: @PAD_STEAM_PID_WIRED, @kIOHIDDeviceUsagePageKey: @PAD_STEAM_PAGE},
-        @{@kIOHIDVendorIDKey: @PAD_STEAM_VID, @kIOHIDProductIDKey: @PAD_STEAM_PID_RECEIVER, @kIOHIDDeviceUsagePageKey: @PAD_STEAM_PAGE}]);
+        @{@kIOHIDVendorIDKey: @PAD_STEAM_VID, @kIOHIDProductIDKey: @PAD_STEAM_PID_RECEIVER, @kIOHIDDeviceUsagePageKey: @PAD_STEAM_PAGE},
+        @{@kIOHIDVendorIDKey: @PAD_STEAM_VID, @kIOHIDProductIDKey: @PAD_STEAM_PID_BLE, @kIOHIDDeviceUsagePageKey: @PAD_STEAM_PAGE}]);
     if (g_steam_pad) atexit(hidpad_steam_exit);
     IOHIDManagerRegisterDeviceMatchingCallback(g_hidpad_manager, hidpad_found, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(g_hidpad_manager, hidpad_removed, NULL);

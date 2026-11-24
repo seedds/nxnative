@@ -1356,15 +1356,22 @@ static void big_moved(int i) {   // caller holds g_mu: entry i has a new index
         if (e->reach == REACH_WHOLE) b->full = i + 1; else b->chunk[(e->lo - b->a) >> 24] = i + 1;
         return; }
 }
+// The sparse runs replaced since the submit thread last looked (treg_run_notes), under g_mu: their span and their buffers by address (compared, never messaged; past RUN_GONE of them,
+// *_many says that any buffer in the span may be one), and how many replacements made them
+enum { RUN_GONE = 64 };
+static uintptr_t g_run_gone_lo = UINTPTR_MAX, g_run_gone_hi;
+static const void *g_run_gone[RUN_GONE]; static unsigned g_run_gone_k; static int g_run_gone_many;
+static _Atomic uint64_t g_run_gone_n;
 // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
 // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s.
 // In an autorelease pool of its caller's: this runs on the guest thread that finalizes the pool, whose implicit pool never drains, and adding to the weak table g_dead_pools left the buffer
 // autoreleased there, so every finalized pool buffer stayed alive for good (Ghost Trick: Phantom Detective, 125 buffers and 6.6 GB of GPU allocations 300 frames into the boot, 0 with the pool)
-static void pool_take_out(const void *mem, NSMutableArray<id<MTLBuffer>> *gone) {   // caller holds g_mu
+static void pool_take_out(const void *mem, NSMutableArray<id<MTLBuffer>> *gone, uintptr_t span[2]) {   // caller holds g_mu; span: widened to the addresses its buffers held, or NULL
     as_drop_pool(mem);
     int bg = -1; for (int k = 0; k < g_nbig; k++) if (g_big[k].mem == mem) bg = k;
     for (int i = 0; i < g_npool; i++)
         if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; [gone addObject:b]; if (g_pools[i].res) g_pool_res_n--;
+            if (span) { if (g_pools[i].lo < span[0]) span[0] = g_pools[i].lo; if (g_pools[i].hi > span[1]) span[1] = g_pools[i].hi; }
             if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
             [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);
             if (i < g_npool) big_moved(i);   // the entry moved into this place
@@ -1393,13 +1400,14 @@ void mtl_pool_del(const void *mem) {
     reg_bump(-1, REG_POOL);
     @autoreleasepool {
     NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
-    pthread_mutex_lock(&g_mu); pool_take_out(mem, gone); pool_gone_release(gone); pthread_mutex_unlock(&g_mu);
+    pthread_mutex_lock(&g_mu); pool_take_out(mem, gone, NULL); pool_gone_release(gone); pthread_mutex_unlock(&g_mu);
     }
 }
 // Pools that take the place of others, in one step under g_mu: a lookup finds the old ones or the new ones, never neither. A sparse pool's mapped run is a pool of its own, replaced
 // whenever a mapping joins it to its neighbours or an unmap splits it (hle_nvn.c vrun_set), on the game's thread while the replay looks addresses up on its own. Removed and then
 // added, an address mapped all along was in no pool between the two: PRAGMATA's mesh shaders 765e6d9d2588ce70 and 5aab38bb5ba67ef7 read a buffer whose address the game pushes,
-// 0x3000000 into a sparse pool whose one run kept growing (0x8c5e304000..0x8c7b1a4000, then on), and got a dummy buffer at frames 2971 and 4484, the frames the run was replaced in
+// 0x3000000 into a sparse pool whose one run kept growing (0x8c5e304000..0x8c7b1a4000, then on), and got a dummy buffer at frames 2971 and 4484, the frames the run was replaced in.
+// The old runs' buffers go, over the pages no request named too: their span is kept for the textures viewed on them, which follow at the next submission (treg_run_notes)
 void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd) {
     mtl_init();
     pool_new *n = nadd ? (pool_new *)calloc((size_t)nadd, sizeof *n) : NULL; if (nadd && !n) MDIE("pool replacement");
@@ -1408,7 +1416,14 @@ void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, 
     @autoreleasepool {
     NSMutableArray<id<MTLBuffer>> *gone = [NSMutableArray array];
     pthread_mutex_lock(&g_mu);
-    for (int i = 0; i < ndel; i++) pool_take_out(del[i], gone);
+    uintptr_t span[2] = {UINTPTR_MAX, 0};
+    for (int i = 0; i < ndel; i++) pool_take_out(del[i], gone, span);
+    if (span[1]) {
+        if (span[0] < g_run_gone_lo) g_run_gone_lo = span[0];
+        if (span[1] > g_run_gone_hi) g_run_gone_hi = span[1];
+        for (id<MTLBuffer> b in gone) { if (g_run_gone_k < RUN_GONE) g_run_gone[g_run_gone_k++] = (__bridge const void *)b; else g_run_gone_many = 1; }
+        atomic_fetch_add(&g_run_gone_n, 1);
+    }
     for (int i = 0; i < nadd; i++) pool_new_put(&n[i]);
     pool_gone_release(gone);
     pthread_mutex_unlock(&g_mu);
@@ -1963,6 +1978,7 @@ static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(voi
 static void tu_tick(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
 static void treg_sparse_notes(void);
+static void treg_run_notes(void);
 static void pass_split_try(void);
 static uint64_t g_setrt_n;   // render target changes so far (pass_split_try: splits per NVN pass)
 static int g_split_resume;   // the pass was split at this draw: it opens again where the dispatch scan already looked (cs_hoist_try)
@@ -1991,6 +2007,7 @@ void mtl_sub_begin(void) {
     atomic_store(&g_last_commit_error, 0);
     g_sub_pool = objc_autoreleasePoolPush();
     atomic_store(&g_sub_open, g_fence + 1); atomic_thread_fence(memory_order_seq_cst);   // before any pool lookup of this submission (pool_gone_release); only this thread moves g_fence
+    treg_run_notes();   // after that flag: a run replaced from here on sees this submission open and its buffer waits for it, and one replaced before is noted here
     g_cb = rec_cb_new();
     // Do not wait for the GPU mid-frame (hot real device: with a fixed rotation of 3, when the GPU cannot keep up every frame blocks here, and the submit thread runs at low frequency after waking, instruction count −18% but CPU time +49%):
     // pick an allocator the GPU has finished with; if all are in use create a new one; only at the cap wait for the oldest one. How far ahead it runs is bounded by the wait where the game acquires the swapchain texture, same as the old interface.
@@ -3313,7 +3330,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[179];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[180];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -5847,6 +5864,63 @@ static id<MTLTexture> tex_buffer(const tex_t *t) {
     if (!mt) RED_ONCE(39, "cannot create buffer texture: %u elements format %#x", t->d.width, t->d.format);
     return mt;
 }
+// A linear texture or a buffer texture in a sparse pool is a view on the buffer of the run that holds its storage (tex_linear, tex_buffer), and any mapping or unmap that touches the
+// run replaces that buffer (treg_run_notes). Whether `t`'s texture `root` is on the buffer its storage is in now: 1 yes, 0 no,
+// -1 its storage is in no run (a buffer texture: its first element; a linear one: all its rows, as a view of them needs one buffer). *mb and *at: that buffer and the view's offset in it
+static int tex_views_pool_buffer(const tex_t *t) { return t->d.target == NVN_TEXTURE_TARGET_BUFFER || (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)); }
+static int run_view_current(const tex_t *t, id<MTLTexture> root, void **mb, uint64_t *at) {
+    int buffer = t->d.target == NVN_TEXTURE_TARGET_BUFFER, bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+    uint64_t mo = 0, a = (uint64_t)(uintptr_t)t->mem, n = buffer ? (uint64_t)t->d.width * (uint64_t)bpb : (uint64_t)root.bufferBytesPerRow * root.height;
+    // In tex_buffer's order, as a large pool's lookup depends on its length (asked for one byte, big_lookup makes and commits the whole run's buffer). What runs past the run is clipped there
+    if (!mtl_addr(a, n, mb, &mo) && !(buffer && mtl_addr(a, 1, mb, &mo))) return -1;
+    *at = buffer ? mo - mo % tbuf_view_align(root.pixelFormat) : mo;
+    return root.buffer == (__bridge id<MTLBuffer>)*mb && root.bufferOffset == *at;
+}
+// `have`, what t's serial resolves to, if it is on its run's buffer or is no view of a buffer (a Metal texture of its own); otherwise the same texture on the buffer of now, in this
+// serial's entry and the sharing table (own_view_move, which retires the old one). One serial at a time, at the cost of a lookup: an upgrade's rename walks all four tables and starts a new epoch, which sends every
+// texture ID down the slow path, and a game that streams replaces a run dozens of times a second (Ocarina of Time: 70, docs/reference/memory.md). The other serials over the storage
+// take the moved view when they resolve, and the old view leaves the residency set when the last of them has (own_retire_locked). Only an sRGB / linear twin's view, whose parent's sharing
+// key this serial cannot name, goes through the upgrade's rename. nil: its storage is not whole in one run (tex_mtl_ decides what it reads then)
+static uint64_t g_run_follow;
+static id<MTLTexture> run_view_follow(const tex_t *t, id<MTLTexture> have) {
+    id<MTLTexture> root = have; while (root.parentTexture) root = root.parentTexture;
+    if (!root.buffer) return have;
+    void *mb = NULL; uint64_t at = 0; int now = run_view_current(t, root, &mb, &at);
+    if (now > 0) return have;
+    if (now < 0) return nil;
+    id<MTLBuffer> b = (__bridge id<MTLBuffer>)mb;
+    if (!g_run_follow++) MLOG("texture ser=%llu target %d format %#x in a sparse pool follows its run's new buffer (first case)", (unsigned long long)t->serial, t->d.target, t->d.format);
+    int buffer = t->d.target == NVN_TEXTURE_TARGET_BUFFER, twin = !buffer && have != root;
+    alias_key key = tex_alias_key(t);
+    if (!twin) {   // another serial over this storage moved it first
+        id<MTLTexture> shared = own_alias_peek(&key);   // borrowed: a texture the table lets go is released only after the submission in flight
+        if (shared && shared != root && shared.buffer == b && shared.bufferOffset == at) { own_view_move(t->serial, &key, shared); return shared; }
+    }
+    id<MTLTexture> fresh = nil, fresh_view = nil;
+    if (buffer) fresh = tex_buffer(t);
+    else {   // from the old texture's own description: an upgrade may have added usage that tex_linear would not ask for
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:root.pixelFormat width:root.width height:root.height mipmapped:NO];
+        d.resourceOptions = b.resourceOptions; d.usage = root.usage | (tex_atomic_capable(root) ? MTLTextureUsageShaderAtomic : 0); d.swizzle = root.swizzle;   // the usage property leaves the atomic usage out
+        fresh = [b newTextureWithDescriptor:d offset:at bytesPerRow:root.bufferBytesPerRow];
+        if (fresh && twin) fresh_view = [fresh newTextureViewWithPixelFormat:have.pixelFormat textureType:have.textureType levels:NSMakeRange(0, fresh.mipmapLevelCount) slices:NSMakeRange(0, fresh.arrayLength) swizzle:have.swizzle];
+    }
+    if (!fresh || (twin && !fresh_view)) {
+        RED_ONCE(167, "texture ser=%llu %ux%u format %#x: cannot be viewed on its sparse run's new buffer (offset %#llx): it keeps the buffer the run had",
+                 (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format, (unsigned long long)at);
+        return have;
+    }
+    res_add(fresh);
+    if (twin) {
+        own_upgrade(root, fresh, t->serial, fresh_view); defer_obj_release(root);
+        // The sharing table may hold another texture by now (the linear serial moved first, and a pin kept this view from being dropped as stale): `fresh` is then held by the view's
+        // entry alone, and retired here it waits for that entry (own_retire_locked), instead of staying in the residency set after the pool has gone
+        pthread_mutex_lock(&g_smu); int shared = own_shared_locked(fresh); pthread_mutex_unlock(&g_smu);
+        if (!shared) defer_obj_release(fresh);
+        return fresh_view;
+    }
+    own_view_move(t->serial, &key, fresh);
+    return fresh;
+}
 static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __strong *owned) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return NULL;
@@ -5979,21 +6053,25 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         static int nstale; if (nstale++ < 4) MLOG("stale sRGB / linear view dropped ser=%llu format %lu (%d so far)", (unsigned long long)t->serial, (unsigned long)((id<MTLTexture>)have).pixelFormat, nstale);
         have = nil;
     }
-    if (!have && t->d.target == NVN_TEXTURE_TARGET_BUFFER) { alias_key key = tex_alias_key(t); have = own_alias_take(t->serial, &key); }
-    if (have && !off && t->d.target == NVN_TEXTURE_TARGET_BUFFER && t->pool && nvn_sparse_pool(t->pool)) {
-        // treg_sparse_notes invalidates the registered views, but a BUFFER's
-        // serial and sharing entry still name its previous physical mapping.
-        // Refresh only when that mapping changed; queued consumers keep the old view.
-        void *mb = NULL; uint64_t mo = 0;
-        int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
-        if (!mtl_addr((uint64_t)(uintptr_t)t->mem, (uint64_t)t->d.width * (uint64_t)bpb, &mb, &mo)) return NULL;
+    int run_view = t->pool && nvn_sparse_pool(t->pool) && tex_views_pool_buffer(t);
+    if (!have && (t->d.target == NVN_TEXTURE_TARGET_BUFFER || run_view)) { alias_key key = tex_alias_key(t); have = own_alias_take(t->serial, &key); }
+    if (have && !off && run_view && obj_is_tex(have)) {   // queued consumers keep the old view
         id<MTLTexture> root = have; while (root.parentTexture) root = root.parentTexture;
-        NSUInteger al = tbuf_view_align(root.pixelFormat);
-        if (root.buffer != (__bridge id<MTLBuffer>)mb || root.bufferOffset != mo - mo % al) {
-            id<MTLTexture> fresh = tex_buffer(t); if (!fresh) return NULL;
-            res_add(fresh);
-            own_upgrade(have, fresh, t->serial, fresh); have = fresh;
+        id<MTLTexture> moved = run_view_follow(t, have);
+        if (!moved) {   // a page of its storage is unmapped. On NVN only that page reads 0
+            if (!linear_storage_ok(t)) {   // written by the GPU, or a buffer texture: there is no copy to read it through
+                RED_ONCE(179, "texture ser=%llu %ux%u format %#x in a sparse pool: its storage is no longer whole in one mapped run, so it reads 0 until a mapping brings it back (first case)",
+                         (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format);
+                return NULL;
+            }
+            // Its storage holds its content: from here on it is uploaded through the page table, where the unmapped pages read 0 and the mapped rows keep theirs (pkg_upload)
+            static int nhole; if (!nhole++) MLOG("linear texture ser=%llu %ux%u format %#x in a sparse pool has an unmapped page: taken from its storage from here on (first case)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.format);
+            alias_key key = tex_alias_key(t);
+            pthread_mutex_lock(&g_smu); if (own_alias_get_locked(&key) == root) own_alias_del_locked(&key); pthread_mutex_unlock(&g_smu);
+            mtl_tex_cpu_written(t);
+            return tex_mtl_resolve(ct, in_storage, owned);
         }
+        have = moved;
     }
     if (have) { if (!off && t->pool && nvn_sparse_pool(t->pool)) sparse_gpu_look(t, have); if (!g_pool_walk) tu_stamp(have, 0); return tex_mtl_result(have, owned); }   // its mappings are synced on the submit thread (sparse_sync)
     alias_key ak = tex_alias_key(t);
@@ -6022,6 +6100,7 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
             MTLTextureDescriptor *d = tex_desc(t, 0);
             if (!d || d.sampleCount > 1 || (d.textureType != MTLTextureType2D && d.textureType != MTLTextureType2DArray)) break;
             if (b.pixelFormat == d.pixelFormat || tex_need_pfv(b.pixelFormat, d.pixelFormat) || b.textureType != d.textureType) continue;
+            if (run_view && b.buffer) { void *cb = NULL; uint64_t ca = 0; if (run_view_current(t, b, &cb, &ca) <= 0) continue; }   // on a buffer its run has left: this one gets its own view (below)
             v = [b newTextureViewWithPixelFormat:d.pixelFormat textureType:b.textureType levels:NSMakeRange(0, b.mipmapLevelCount) slices:NSMakeRange(0, b.arrayLength) swizzle:b.swizzle];
             if (!v) continue;
             // The entry counts b as held from here on (count_add), so no takeover evicts it under the twin. b may have left the sharing table on another thread since the lookup
@@ -8035,6 +8114,46 @@ static void treg_sparse_notes(void) {
     if (ns > 1) qsort(ser, ns, sizeof *ser, sp_cmp);
     for (size_t i = 0; i < ns; i++) if (!i || ser[i] != ser[i - 1]) own_note(ser[i]);
 }
+// A texture viewed on a sparse run's buffer follows the run. A run is a pool of its own, and a mapping beside it or an unmap inside it replaces its buffer (hle_nvn.c vrun_set,
+// mtl_pool_replace), over the pages the request did not name as well. The request's note above reaches the textures its own pages overlap, so a linear texture or a buffer
+// texture elsewhere in the run kept its view of the old buffer, which leaves the residency set at its deferred release while the ID views, pool tables and argument blocks still name the
+// view. GitHub issue #3229 reports a GPU fault of that shape (a read inside a replaced and released run); whether one of these views is what faulted there is open. So the runs replaced
+// since the last submission note the serial of every registered ID whose view is on one of their buffers, and its next resolution moves the view (run_view_follow). An ID with no view
+// yet looks at its run when it first resolves. Other textures of a sparse pool are Metal textures of their own, which no run change reaches
+static uint64_t g_run_gone_seen, g_run_notes;   // the replacements looked at so far (the submit thread); serials noted for them
+static void treg_run_notes(void) { @autoreleasepool {   // on the submit thread before its submission's pool, and its implicit pool never drains (defer_drain)
+    if (atomic_load(&g_run_gone_n) == g_run_gone_seen) return;
+    const void *gone[RUN_GONE];
+    pthread_mutex_lock(&g_mu);
+    uintptr_t lo = g_run_gone_lo, hi = g_run_gone_hi; unsigned ng = g_run_gone_k; int many = g_run_gone_many;
+    memcpy(gone, g_run_gone, ng * sizeof *gone);
+    g_run_gone_lo = UINTPTR_MAX; g_run_gone_hi = 0; g_run_gone_k = 0; g_run_gone_many = 0; g_run_gone_seen = atomic_load(&g_run_gone_n);
+    pthread_mutex_unlock(&g_mu);
+    static uint64_t *ser; static size_t ser_cap; size_t ns = 0;
+    os_unfair_lock_lock(&g_rmu);
+    for (size_t i = 0; i < g_ntreg_sp; i++) {
+        const treg_t *rp = &g_treg[g_treg_sp[i]];
+        if (!rp->ok || rp->gone || !rp->view || !rp->t.serial || !tex_views_pool_buffer(&rp->t)) continue;
+        uintptr_t a = (uintptr_t)rp->t.mem;
+        if (a >= hi || a + (rp->t.L.size ? rp->t.L.size : 1) <= lo) continue;
+        __unsafe_unretained id<MTLTexture> v = (__bridge id<MTLTexture>)rp->view; while (v.parentTexture) v = v.parentTexture;
+        const void *b = (__bridge const void *)v.buffer; if (!b) continue;
+        int on_gone = many; for (unsigned k = 0; k < ng && !on_gone; k++) on_gone = gone[k] == b;
+        if (!on_gone) continue;
+        if (ns == ser_cap) { ser_cap = ser_cap ? ser_cap * 2 : 64; ser = realloc_or_die(ser, ser_cap * sizeof *ser, "the replaced sparse runs' notes"); }
+        ser[ns++] = rp->t.serial;
+    }
+    os_unfair_lock_unlock(&g_rmu);
+    if (ns > 1) qsort(ser, ns, sizeof *ser, sp_cmp);
+    size_t w = 0; for (size_t i = 0; i < ns; i++) if (!i || ser[i] != ser[i - 1]) ser[w++] = ser[i];
+    if (w && !g_run_notes) MLOG("sparse pool runs replaced over %#lx..%#lx: %zu textures viewed on their old buffers resolve again (first case)", (unsigned long)lo, (unsigned long)hi, w);
+    // Taken in batches: past SER_NOTES waiting, the next sync would start a new epoch and send every texture ID down the slow path, in each such submission of a streaming game
+    for (size_t i = 0; i < w; i++) {
+        if (!(i % (SER_NOTES / 2))) { os_unfair_lock_lock(&g_rmu); ser_sync(); os_unfair_lock_unlock(&g_rmu); }
+        own_note(ser[i]);
+    }
+    g_run_notes += w;
+} }
 static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_cap;
 // Lock-free copy of texture ID → serial (the replay hot path only needs the serial): texture IDs are 20 bits, fixed 1M entries (BSS, only touched pages are used),
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)

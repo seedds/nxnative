@@ -381,6 +381,17 @@ id own_alias_publish(uint64_t serial, const alias_key *k, id o) {
     pthread_mutex_unlock(&g_smu); return o;
 }
 
+// A view on a sparse run's buffer, moved to the run's new buffer (nvn_mtl.m run_view_follow): `to` takes the place of what the sharing table holds under k and of this serial's entry, in
+// one hold, at the cost of two lookups. What it replaces is retired and waits for the other serials that still name it (own_retire_locked): each takes `to` when it resolves. A key
+// no longer in the table (its pool was finalized meanwhile) is not put back
+void own_view_move(uint64_t serial, const alias_key *k, id to) {
+    pthread_mutex_lock(&g_smu);
+    id cur = hm_get_id(&g_alias, k);
+    if (cur && cur != to) alias_put(k, to, own_hook_submission());
+    tex_put_locked(serial, to);
+    pthread_mutex_unlock(&g_smu);
+}
+
 // sRGB / linear views (tex_mtl_'s twin of a shared texture). A view shares its parent's bytes only while the parent is in the sharing table: a parent that left it (evicted with its
 // pool, taken over, upgraded) no longer holds the storage's bytes, and neither does the view. The parent's place there is checked in the same hold of g_smu as the view's entry
 // changes, so no entry names a view whose parent had already gone. Publishing first and taking the entry back with serial_del when the parent turned out gone (as tex_mtl_ did)

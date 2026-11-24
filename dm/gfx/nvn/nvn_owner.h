@@ -96,6 +96,7 @@ int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 
 // An upgrade (a texture made again with more usage): every name of `from`, the serial tables, the pins and the sharing table, moves to `to` in place (a new epoch); then `put` (when not
 // nil) is published under serial unless the rename already named it there (an sRGB / linear twin passes its view made again on `to`). One hold of g_smu. → whether serial was one of from's names
 int own_upgrade(id from, id to, uint64_t serial, id put);
+void own_view_move(uint64_t serial, const alias_key *k, id to);   // a sparse run's view on the run's new buffer: for this serial and the sharing table alone (no epoch)
 // Shared textures another one drew over (nvn_mtl.m's tu_pass, nvn_owner.m says why). The replay layer keeps two stamps of a texture it covers, in its own clock (0: none)
 typedef struct { uint32_t use, wr; } own_use;   // its last use (a read or a write) and its last write by the GPU
 typedef int (*own_use_fn)(id o, own_use *u);    // o's stamps: 1; 0 for a texture the release does not cover (it is never released, and its writes count for nothing)

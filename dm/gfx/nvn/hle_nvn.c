@@ -1043,7 +1043,7 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
         atomic_fetch_add(&g_sync_ns, now_ns() - w0);
         return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : sync_expired(o, timeout, now_ns() - t0);
     }
-    if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:sync_expired(o,timeout,now_ns()-t0); }
+    if(o->fenced==3) { if(nvn_sync_wait(o,0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED; void nvn_qtrace(const char *, uint64_t, uint64_t); nvn_qtrace("syncwait<",0,0); uint64_t t0=now_ns(); int ok=nvn_sync_wait(o,timeout); nvn_qtrace("syncwait>",0,0); atomic_fetch_add(&g_sync_ns,now_ns()-t0); return ok?NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED:sync_expired(o,timeout,now_ns()-t0); }
     int (*w)(uint64_t, uint64_t) = o->fenced == 2 ? mtl_wait_acq : mtl_wait;
     if (w(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
     uint64_t t0 = now_ns(); int ok = w(o->fence, timeout); atomic_fetch_add(&g_sync_ns, now_ns() - t0);   // the frame's blocked SyncWait time (@sync_ms)
@@ -1137,8 +1137,10 @@ static uint8_t *align8(uint8_t *p) { return (uint8_t *)(((uintptr_t)p + 7) & ~(u
 static struct { int on; uint64_t bytes, recs, grants, grant_bytes, grant_min, grant_max, cbs, hostseg, op_n[256], op_b[256], frame0, waste; } g_cs = { .on = -1 };
 static pthread_mutex_t g_cs_mu = PTHREAD_MUTEX_INITIALIZER;
 uint64_t dm_nvn_frame_count(void);
-static int cs_on(void) { if (g_cs.on < 0) g_cs.on = getenv("DM_NVN_CMDSTAT") != NULL; return g_cs.on; }
-static void cs_op(uint32_t op, uint32_t size) { op &= 0xff; if (!cs_on()) return; pthread_mutex_lock(&g_cs_mu); g_cs.op_n[op]++; g_cs.op_b[op] += size; pthread_mutex_unlock(&g_cs_mu); }
+static __attribute__((noinline, cold)) int cs_init(void) { g_cs.on = getenv("DM_NVN_CMDSTAT") != NULL; return g_cs.on; }
+static inline int cs_on(void) { return __builtin_expect(g_cs.on >= 0, 1) ? g_cs.on : cs_init(); }
+static __attribute__((noinline, cold)) void cs_op_on(uint32_t op, uint32_t size) { op &= 0xff; pthread_mutex_lock(&g_cs_mu); g_cs.op_n[op]++; g_cs.op_b[op] += size; pthread_mutex_unlock(&g_cs_mu); }
+static inline void cs_op(uint32_t op, uint32_t size) { if (__builtin_expect(cs_on(), 0)) cs_op_on(op, size); }
 static void cs_dump(void) {   // Called once per frame (at present)
     if (!cs_on()) return; uint64_t f = dm_nvn_frame_count(); if (f - g_cs.frame0 < 300) return;
     pthread_mutex_lock(&g_cs_mu); double n = (double)(f - g_cs.frame0); char top[700]; int k = 0; uint8_t used[256] = {0};
@@ -1148,7 +1150,7 @@ static void cs_dump(void) {   // Called once per frame (at present)
         (unsigned long long)f, g_cs.bytes / n / 1024.0, g_cs.recs / n, g_cs.grants / n, g_cs.grants ? g_cs.grant_bytes / (double)g_cs.grants / 1024.0 : 0, g_cs.grant_min / 1024.0, g_cs.grant_max / 1024.0, g_cs.cbs / n, g_cs.hostseg / n, g_cs.waste / n / 1024.0, top);
     int on = g_cs.on; memset(&g_cs, 0, sizeof g_cs); g_cs.on = on; g_cs.frame0 = f; pthread_mutex_unlock(&g_cs_mu);
 }
-static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, size}; memcpy(p, &h, sizeof h); if (op) cs_op(op, size); }
+static inline __attribute__((always_inline)) void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, size}; memcpy(p, &h, sizeof h); if (__builtin_expect(op && cs_on(), 0)) cs_op_on(op, size); }
 static void ctl_chunk_close(cmd_t *o);
 // The recording's first byte in the current segment (cmd_t own_back), and setting it to p when it has none yet
 static uint8_t *cmd_own(const cmd_t *o) { return o->own_back ? o->end - o->own_back : NULL; }
@@ -1296,8 +1298,7 @@ static void ctl_chunk_close(cmd_t *o) {
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { ctl_set(CB(c), m, n); }
 // Get space for one record; if not enough, call back into the game per the NVN convention to add command memory. The record joins the recording's open piece of the control list
-static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
-    size = (size + 7) & ~7u;
+static __attribute__((noinline, cold)) uint8_t *cmd_alloc_slow(cmd_t *o, uint32_t size) {
     for (int tries = 0; !o->cur || o->cur + size > o->end; tries++) {
         // The record goes here in the game's count, though it does not fit: a lent segment hanging off this position belongs to a dead list (see hostseg_take)
         if (o->recording && o->cur && o->cur < o->end) { cmd_own_at(o, o->cur); hostseg_written(o, o->cur, 1); }
@@ -1322,6 +1323,16 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         ctl_flush(o);
     }
     return p;
+}
+static inline __attribute__((always_inline)) uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
+    size = (size + 7) & ~7u;
+    uint8_t *p = o->cur;
+    if (__builtin_expect(o->recording == 1 && p && p + size <= o->end && o->chunk && o->own_back && !o->ctl_q[1] && !cs_on() && (uint64_t)(p + size - o->chunk) <= CTL_CHUNK_MAX, 1)) {
+        o->cur = p + size;
+        o->used += size;
+        return p;
+    }
+    return cmd_alloc_slow(o, size);
 }
 // A recording starts with its first command, as in NVN: no BEGIN record, and an empty recording takes no command memory, only its control entry. Games size command memory by
 // GetCommandMemoryUsed (nvn_obj.h draw_rec): Breath of the Wild sums one scratch recording per mesh and per shape and render pass into each model's prerecorded commands, and with an
@@ -1366,15 +1377,21 @@ static int ctl_handle_ok(NVNcommandHandle h) {
 // submitted yet, so it returns (on the console too: Unity does not submit between events, and a wait that held would stop the game) and the block's 16-byte fence-only recording
 // became the head of a 504-byte SET_RT. The records that fit run and the piece ends at the first that does not, where the GPU would run part of it (docs/reference/nvn-objects.md,
 // "A called recording recorded over before its caller is submitted")
-static int nvn_piece_record(const void *list, uint64_t v, const uint8_t *p, const uint8_t *pe, op_hdr *h) {
-    if (p >= pe) return 0;
-    memcpy(h, p, sizeof *h);
-    if (h->size >= 8 && !(h->size & 7) && h->size <= (size_t)(pe - p)) return 1;
+static __attribute__((noinline, cold)) int nvn_piece_record_bad(const void *list, uint64_t v, const uint8_t *p, const uint8_t *pe, const op_hdr *h) {
     static _Atomic uint64_t n; uint64_t k = atomic_fetch_add(&n, 1) + 1;
     if (k <= 8 || k % 1000 == 0)
         LOG("[RED] NVN command list %p: record {op %u, size %u} at %p, %zu bytes into its piece of %zu at %p, does not fit: the piece was recorded over after it was called; the rest of the piece is skipped (%llu so far)",
             list, h->op, h->size, (const void *)p, (size_t)(p - ctl_addr(v)), (size_t)(pe - ctl_addr(v)), (const void *)ctl_addr(v), (unsigned long long)k);
     return 0;
+}
+static inline __attribute__((always_inline)) int nvn_piece_record(const void *list, uint64_t v, const uint8_t *p, const uint8_t *pe, op_hdr *h) {
+    if (__builtin_expect(p >= pe, 0)) return 0;
+    size_t rem = (size_t)(pe - p);
+    if (__builtin_expect(rem < 8u, 0)) { memset(h, 0, sizeof *h); return nvn_piece_record_bad(list, v, p, pe, h); }
+    memcpy(h, p, sizeof *h);
+    uint32_t sz = h->size;
+    if (__builtin_expect((size_t)(sz - 8u) <= rem - 8u && !(sz & 7u), 1)) return 1;
+    return nvn_piece_record_bad(list, v, p, pe, h);
 }
 // CallCommands: the called recording's pieces join the caller's list (its records run in place at submit: what its command memory holds then, nvn_piece_record; its control
 // memory may be given out again at once). It takes no command memory
@@ -1486,54 +1503,66 @@ static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
 // BindUniformBuffer (24; 20), BindDepthStencilState (16 + 8; 8), BindColorState (16; 12), SetScissor (24; 12), SetPrimitiveRestart (16; 12), SetBlendColor (24; 20).
 // Tests set g_rec_compact to 0 to record the canonical forms and compare them with the expanded compact ones
 static int g_rec_compact = 1;
-static uint8_t *crec(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t payload) {
+static inline uint8_t *crec(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t payload) {
     uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7);
     uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, opc | args << 8, sz); memset(p + 8, 0, sz - 8);
     return p + 8;
 }
-static void put32(uint8_t **q, uint32_t v) { memcpy(*q, &v, 4); *q += 4; }
-static void put64(uint8_t **q, uint64_t v) { memcpy(*q, &v, 8); *q += 8; }
+static inline __attribute__((always_inline)) uint8_t *crec_raw(NVNcommandBuffer *c, uint32_t opc, uint32_t args, size_t payload) {
+    uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7);
+    uint8_t *p = cmd_alloc(CB(c), sz); put_hdr(p, opc | args << 8, sz);
+    size_t pad = (size_t)sz - 8 - payload;
+    if (pad) memset(p + 8 + payload, 0, pad);
+    return p + 8;
+}
+static inline __attribute__((always_inline)) void put32(uint8_t **q, uint32_t v) { memcpy(*q, &v, 4); *q += 4; }
+static inline __attribute__((always_inline)) void put64(uint8_t **q, uint64_t v) { memcpy(*q, &v, 8); *q += 8; }
 // Draws carry the indirect / multi-draw fields (ind onwards) only when they use them: a plain indexed draw record is 0x28 bytes instead of 0x40 (nvn_obj.h draw_rec)
 static void rec_draw(NVNcommandBuffer *c, p_draw d) {
     if (g_rec_compact && !d.mdi_cnt && (uint32_t)d.prim < 0x100) {
         uint8_t *q;
-        if (d.ind) { q = crec(c, OPC_DRAW_IND, (uint32_t)d.prim, 8); put64(&q, d.ind); return; }
-        if (d.instances == 1 && !d.base_instance) { q = crec(c, OPC_DRAW, (uint32_t)d.prim, 8); put32(&q, (uint32_t)d.first); put32(&q, (uint32_t)d.count); return; }
-        q = crec(c, OPC_DRAW_INST, (uint32_t)d.prim, 16); put32(&q, (uint32_t)d.first); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_instance); put32(&q, (uint32_t)d.instances); return;
+        if (d.ind) { q = crec_raw(c, OPC_DRAW_IND, (uint32_t)d.prim, 8); put64(&q, d.ind); return; }
+        if (d.instances == 1 && !d.base_instance) { q = crec_raw(c, OPC_DRAW, (uint32_t)d.prim, 8); put32(&q, (uint32_t)d.first); put32(&q, (uint32_t)d.count); return; }
+        q = crec_raw(c, OPC_DRAW_INST, (uint32_t)d.prim, 16); put32(&q, (uint32_t)d.first); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_instance); put32(&q, (uint32_t)d.instances); return;
     }
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw, ind); memcpy(rec(c, OP_DRAW, n), &d, n);
 }
 static void rec_draw_idx(NVNcommandBuffer *c, p_draw_idx d) {
     if (g_rec_compact && !d.mdi_cnt && (uint32_t)d.prim < 0x100 && (uint32_t)d.itype < 0x100) {
         uint32_t a = (uint32_t)d.prim | (uint32_t)d.itype << 8; uint8_t *q;
-        if (d.ind) { if (d.count || d.base_vertex || d.base_instance || d.instances != 1) goto full; q = crec(c, OPC_DRAW_IDX_IND, a, 16); put64(&q, d.ibuf); put64(&q, d.ind); return; }
-        if (d.instances == 1 && !d.base_instance) { q = crec(c, OPC_DRAW_IDX, a, 16); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_vertex); put64(&q, d.ibuf); return; }
-        q = crec(c, OPC_DRAW_IDX_INST, a, 24); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_vertex); put32(&q, (uint32_t)d.base_instance); put32(&q, (uint32_t)d.instances); put64(&q, d.ibuf); return;
+        if (d.ind) { if (d.count || d.base_vertex || d.base_instance || d.instances != 1) goto full; q = crec_raw(c, OPC_DRAW_IDX_IND, a, 16); put64(&q, d.ibuf); put64(&q, d.ind); return; }
+        if (d.instances == 1 && !d.base_instance) { q = crec_raw(c, OPC_DRAW_IDX, a, 16); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_vertex); put64(&q, d.ibuf); return; }
+        q = crec_raw(c, OPC_DRAW_IDX_INST, a, 24); put32(&q, (uint32_t)d.count); put32(&q, (uint32_t)d.base_vertex); put32(&q, (uint32_t)d.base_instance); put32(&q, (uint32_t)d.instances); put64(&q, d.ibuf); return;
     }
 full:;
     size_t n = d.ind || d.mdi_cnt ? sizeof d : offsetof(p_draw_idx, ind); memcpy(rec(c, OP_DRAW_IDX, n), &d, n);
 }
 // A compact record's canonical records, written to out (at least REC_EXPAND_MAX bytes); returns their bytes
-static uint8_t *xrec(uint8_t *out, size_t *n, uint32_t op, size_t payload) {
+static inline uint8_t *xrec_raw(uint8_t *out, size_t *n, uint32_t op, size_t payload) {
     uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7); uint8_t *p = out + *n;
-    if (*n + sz > REC_EXPAND_MAX) die("NVN compact record: its expansion exceeds REC_EXPAND_MAX");
+    if (__builtin_expect(*n + sz > REC_EXPAND_MAX, 0)) die("NVN compact record: its expansion exceeds REC_EXPAND_MAX");
+    op_hdr h = {op, sz}; memcpy(p, &h, 8); *n += sz; return p + 8;
+}
+static inline uint8_t *xrec(uint8_t *out, size_t *n, uint32_t op, size_t payload) {
+    uint32_t sz = (uint32_t)((8 + payload + 7) & ~(size_t)7); uint8_t *p = out + *n;
+    if (__builtin_expect(*n + sz > REC_EXPAND_MAX, 0)) die("NVN compact record: its expansion exceeds REC_EXPAND_MAX");
     op_hdr h = {op, sz}; memcpy(p, &h, 8); memset(p + 8, 0, sz - 8); *n += sz; return p + 8;
 }
-static uint32_t get32(const uint8_t **q) { uint32_t v; memcpy(&v, *q, 4); *q += 4; return v; }
-static uint64_t get64(const uint8_t **q) { uint64_t v; memcpy(&v, *q, 8); *q += 8; return v; }
-static size_t rec_expand(const uint8_t *rec_, uint8_t *out) {
-    op_hdr h; memcpy(&h, rec_, 8); uint32_t a = h.op >> 8; const uint8_t *q = rec_ + 8; size_t n = 0;
+static inline uint32_t get32(const uint8_t **q) { uint32_t v; memcpy(&v, *q, 4); *q += 4; return v; }
+static inline uint64_t get64(const uint8_t **q) { uint64_t v; memcpy(&v, *q, 8); *q += 8; return v; }
+static __attribute__((noinline)) size_t rec_expand_other(op_hdr h, const uint8_t *rec_, uint8_t *out) {
+    uint32_t a = h.op >> 8; const uint8_t *q = rec_ + 8; size_t n = 0;
     switch (h.op & 0xff) {
     case OPC_DRAW: case OPC_DRAW_INST: case OPC_DRAW_IND: {
         p_draw d = { .prim = (int32_t)(a & 0xff), .instances = 1 };
         if ((h.op & 0xff) == OPC_DRAW_IND) d.ind = get64(&q);
         else { d.first = (int32_t)get32(&q); d.count = (int32_t)get32(&q); if ((h.op & 0xff) == OPC_DRAW_INST) { d.base_instance = (int32_t)get32(&q); d.instances = (int32_t)get32(&q); } }
-        size_t k = d.ind ? sizeof d : offsetof(p_draw, ind); memcpy(xrec(out, &n, OP_DRAW, k), &d, k); break; }
+        size_t k = d.ind ? sizeof d : offsetof(p_draw, ind); memcpy(xrec_raw(out, &n, OP_DRAW, k), &d, k); break; }
     case OPC_DRAW_IDX: case OPC_DRAW_IDX_INST: case OPC_DRAW_IDX_IND: {
         p_draw_idx d = { .prim = (int32_t)(a & 0xff), .itype = (int32_t)(a >> 8 & 0xff), .instances = 1 };
         if ((h.op & 0xff) == OPC_DRAW_IDX_IND) { d.ibuf = get64(&q); d.ind = get64(&q); }
         else { d.count = (int32_t)get32(&q); d.base_vertex = (int32_t)get32(&q); if ((h.op & 0xff) == OPC_DRAW_IDX_INST) { d.base_instance = (int32_t)get32(&q); d.instances = (int32_t)get32(&q); } d.ibuf = get64(&q); }
-        size_t k = d.ind ? sizeof d : offsetof(p_draw_idx, ind); memcpy(xrec(out, &n, OP_DRAW_IDX, k), &d, k); break; }
+        size_t k = d.ind ? sizeof d : offsetof(p_draw_idx, ind); memcpy(xrec_raw(out, &n, OP_DRAW_IDX, k), &d, k); break; }
     case OPC_VIEWPORTS: {
         p_viewports *r = (p_viewports *)xrec(out, &n, OP_VIEWPORTS, sizeof *r); r->first = (int32_t)(a & 0xff); r->n = (int32_t)(a >> 8 & 0xff); r->origin = (uint8_t)(a >> 16 & 3);
         for (int i = 0; i < r->n; i++) { memcpy(r->v[i], q, 16); q += 16; }
@@ -1541,49 +1570,82 @@ static size_t rec_expand(const uint8_t *rec_, uint8_t *out) {
     case OPC_STENCIL: {
         p_stencil s = { .face = (int32_t)(a & 3), .which = (int32_t)(a >> 2 & 3) }; int32_t v = (int32_t)(a >> 4);
         if (s.which == 0) s.value_mask = v; else if (s.which == 1) s.mask = v; else s.ref = v;
-        memcpy(xrec(out, &n, OP_STENCIL, sizeof s), &s, sizeof s); break; }
+        uint8_t *dst = xrec_raw(out, &n, OP_STENCIL, sizeof s); memcpy(dst, &s, sizeof s); memset(dst + sizeof s, 0, 4); break; }
     case OPC_HANDLES: {
         int cnt = (int)(a >> 17 & 0x3f);
-        p_bind_handles *r = (p_bind_handles *)xrec(out, &n, a & 0x3f, offsetof(p_bind_handles, h) + 8 * (size_t)cnt);
-        r->stage = (int32_t)(a >> 6 & 7); r->first = (int32_t)(a >> 9 & 0xff); r->n = cnt;
+        p_bind_handles *r = (p_bind_handles *)xrec_raw(out, &n, a & 0x3f, offsetof(p_bind_handles, h) + 8 * (size_t)cnt);
+        r->stage = (int32_t)(a >> 6 & 7); r->first = (int32_t)(a >> 9 & 0xff); r->n = cnt; r->defer = 0; r->src = 0;
         for (int i = 0; i < cnt; i++) r->h[i] = get32(&q);
         break; }
     case OPC_BUFS: {
         uint32_t op = a & 0x3f, st = a >> 6 & 7, first = a >> 9 & 0xff, cnt = a >> 17 & 0x3f;
         for (uint32_t i = 0; i < cnt; i++) {
             uint64_t addr = get64(&q); uint32_t size = get32(&q);
-            if (op == OP_BIND_UBO_SMALL) *(p_bind_ubo_small *)xrec(out, &n, op, sizeof(p_bind_ubo_small)) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)(first + i), size, addr};
-            else *(p_bind_buf *)xrec(out, &n, op, sizeof(p_bind_buf)) = (p_bind_buf){(int32_t)st, (int32_t)(first + i), addr, size};
+            if (op == OP_BIND_UBO_SMALL) *(p_bind_ubo_small *)xrec_raw(out, &n, op, sizeof(p_bind_ubo_small)) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)(first + i), size, addr};
+            else *(p_bind_buf *)xrec_raw(out, &n, op, sizeof(p_bind_buf)) = (p_bind_buf){(int32_t)st, (int32_t)(first + i), addr, size};
         }
         break; }
     case OPC_VBUFS: {
         int cnt = (int)(a >> 8 & 0xff);
-        p_bind_vbuf *r = (p_bind_vbuf *)xrec(out, &n, OP_BIND_VBUF, offsetof(p_bind_vbuf, r) + sizeof(NVNbufferRange) * (size_t)cnt); r->first = (int32_t)(a & 0xff); r->n = cnt;
+        p_bind_vbuf *r = (p_bind_vbuf *)xrec_raw(out, &n, OP_BIND_VBUF, offsetof(p_bind_vbuf, r) + sizeof(NVNbufferRange) * (size_t)cnt); r->first = (int32_t)(a & 0xff); r->n = cnt;
         for (int i = 0; i < cnt; i++) { r->r[i].address = get64(&q); r->r[i].size = get32(&q); }
         break; }
     case OPC_VATTR: {
         int cnt = (int)(a & 0xff);
-        p_bind_vattr *r = (p_bind_vattr *)xrec(out, &n, OP_BIND_VATTR, offsetof(p_bind_vattr, st) + 4 * (size_t)cnt); r->n = cnt; memcpy(r->st, q, 4 * (size_t)cnt);
+        p_bind_vattr *r = (p_bind_vattr *)xrec_raw(out, &n, OP_BIND_VATTR, offsetof(p_bind_vattr, st) + 4 * (size_t)cnt); r->first = 0; r->n = cnt; memcpy(r->st, q, 4 * (size_t)cnt);
+        if (cnt & 1) r->st[cnt] = 0;
         break; }
     case OPC_VSTREAM: {
         int cnt = (int)(a & 0xff);
-        p_bind_vstream *r = (p_bind_vstream *)xrec(out, &n, OP_BIND_VSTREAM, offsetof(p_bind_vstream, st) + 8 * (size_t)cnt); r->n = cnt; memcpy(r->st, q, 8 * (size_t)cnt);
+        p_bind_vstream *r = (p_bind_vstream *)xrec_raw(out, &n, OP_BIND_VSTREAM, offsetof(p_bind_vstream, st) + 8 * (size_t)cnt); r->first = 0; r->n = cnt; memcpy(r->st, q, 8 * (size_t)cnt);
         break; }
     case OPC_UBO: {
         uint32_t st = a & 7, first = a >> 3 & 0xf, cnt = a >> 7 & 0x1f;
-        for (uint32_t i = 0; i < cnt; i++) { uint64_t v = get64(&q); *(p_bind_ubo_small *)xrec(out, &n, OP_BIND_UBO_SMALL, sizeof(p_bind_ubo_small)) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)(first + i), (uint32_t)(v >> 40), (v & ((UINT64_C(1) << 40) - 1)) << 8}; }
+        for (uint32_t i = 0; i < cnt; i++) { uint64_t v = get64(&q); *(p_bind_ubo_small *)xrec_raw(out, &n, OP_BIND_UBO_SMALL, sizeof(p_bind_ubo_small)) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)(first + i), (uint32_t)(v >> 40), (v & ((UINT64_C(1) << 40) - 1)) << 8}; }
         break; }
     case OPC_STATE: case OPC_STATE8: {
         size_t k = (h.op & 0xff) == OPC_STATE ? 4 : 8;
-        p_bind_state *r = (p_bind_state *)xrec(out, &n, OP_BIND_STATE, offsetof(p_bind_state, bytes) + k); r->kind = (int32_t)(a & 7);
-        if (k == 4) { uint32_t v = a >> 3; memcpy(r->bytes, &v, 4); } else memcpy(r->bytes, q, 8);
+        p_bind_state *r = (p_bind_state *)xrec_raw(out, &n, OP_BIND_STATE, offsetof(p_bind_state, bytes) + k); r->kind = (int32_t)(a & 7);
+        if (k == 4) { uint32_t v = a >> 3; memcpy(r->bytes, &v, 4); } else { memcpy(r->bytes, q, 8); memset(r->bytes + 8, 0, 4); }
         break; }
-    case OPC_BARRIER: { int32_t b = (int32_t)a; memcpy(xrec(out, &n, OP_BARRIER, 8), &b, 4); break; }
-    case OPC_PRIM_RESTART: *(p_prim_restart *)xrec(out, &n, OP_PRIM_RESTART, sizeof(p_prim_restart)) = (p_prim_restart){a & 1, a & 2 ? UINT32_MAX : a >> 2}; break;
-    case OPC_SCISSOR: { uint16_t v[4]; memcpy(v, q, 8); *(p_scissor *)xrec(out, &n, OP_SCISSOR, sizeof(p_scissor)) = (p_scissor){v[0], v[1], v[2], v[3]}; break; }
+    case OPC_BARRIER: { uint64_t b = (uint32_t)a; memcpy(xrec_raw(out, &n, OP_BARRIER, 8), &b, 8); break; }
+    case OPC_PRIM_RESTART: *(p_prim_restart *)xrec_raw(out, &n, OP_PRIM_RESTART, sizeof(p_prim_restart)) = (p_prim_restart){a & 1, a & 2 ? UINT32_MAX : a >> 2}; break;
+    case OPC_SCISSOR: { uint16_t v[4]; memcpy(v, q, 8); *(p_scissor *)xrec_raw(out, &n, OP_SCISSOR, sizeof(p_scissor)) = (p_scissor){v[0], v[1], v[2], v[3]}; break; }
     default: die("NVN command list: unknown compact record %#x", h.op);
     }
     return n;
+}
+static inline __attribute__((always_inline)) size_t rec_expand_h(op_hdr h, const uint8_t *rec_, uint8_t *out) {
+    uint32_t opc = h.op & 0xff, a = h.op >> 8;
+    if (opc == OPC_UBO) {
+        const uint8_t *q = rec_ + 8;
+        uint32_t st = a & 7, first = a >> 3 & 0xf, cnt = a >> 7 & 0x1f;
+        size_t n = 0;
+        for (uint32_t i = 0; i < cnt; i++) {
+            uint64_t v = get64(&q);
+            *(p_bind_ubo_small *)xrec_raw(out, &n, OP_BIND_UBO_SMALL, sizeof(p_bind_ubo_small)) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)(first + i), (uint32_t)(v >> 40), (v & ((UINT64_C(1) << 40) - 1)) << 8};
+        }
+        return n;
+    }
+    if (opc == OPC_DRAW_IDX) {
+        const uint8_t *q = rec_ + 8;
+        p_draw_idx d = { .prim = (int32_t)(a & 0xff), .itype = (int32_t)(a >> 8 & 0xff), .count = (int32_t)get32(&q), .base_vertex = (int32_t)get32(&q), .instances = 1, .ibuf = get64(&q) };
+        size_t n = 0;
+        memcpy(xrec_raw(out, &n, OP_DRAW_IDX, offsetof(p_draw_idx, ind)), &d, offsetof(p_draw_idx, ind));
+        return n;
+    }
+    if (opc == OPC_STATE) {
+        size_t n = 0;
+        p_bind_state *r = (p_bind_state *)xrec_raw(out, &n, OP_BIND_STATE, offsetof(p_bind_state, bytes) + 4);
+        r->kind = (int32_t)(a & 7);
+        uint32_t v = a >> 3; memcpy(r->bytes, &v, 4);
+        return n;
+    }
+    return rec_expand_other(h, rec_, out);
+}
+static size_t rec_expand(const uint8_t *rec_, uint8_t *out) {
+    op_hdr h; memcpy(&h, rec_, 8);
+    return rec_expand_h(h, rec_, out);
 }
 static void copy_view(view_t *dst, uint8_t *has, const NVNtextureView *v) { *has = v != NULL; if (v) *dst = *(const view_t *)v; }
 // Records with textures snapshot the texture objects (0x80 bytes each, after the record struct) and replay reads the snapshots: an NVN command no longer depends on the API object once recorded, and the game may finalize, free or reuse it before submitting.
@@ -1640,14 +1702,14 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
 }
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
-    if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
+    if (g_rec_compact && first >= 0) { uint8_t *q = crec_raw(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
     r->origin = ((dev_t_ *)CB(c)->dev)->origin + 1;
 }
 NVN(nvnCommandBufferSetScissor, void, NVNcommandBuffer *c, int x, int y, int w, int h) {
     if (g_rec_compact && (unsigned)x < 0x10000 && (unsigned)y < 0x10000 && (unsigned)w < 0x10000 && (unsigned)h < 0x10000) {
-        uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec(c, OPC_SCISSOR, 0, 8), v, 8); return;
+        uint16_t v[4] = {(uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h}; memcpy(crec_raw(c, OPC_SCISSOR, 0, 8), v, 8); return;
     }
     *REC(c, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h};
 }
@@ -1655,9 +1717,9 @@ NVN(nvnCommandBufferSetDepthRange, void, NVNcommandBuffer *c, float n, float f) 
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
 }
-static void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) {
-    if (g_rec_compact && (unsigned)kind < 8 && n == 4) { uint32_t v; memcpy(&v, st, 4); if (v < (1u << 21)) { crec(c, OPC_STATE, (uint32_t)kind | v << 3, 0); return; } }
-    if (g_rec_compact && (unsigned)kind < 8 && n == 8) { memcpy(crec(c, OPC_STATE8, (uint32_t)kind, 8), st, 8); return; }
+static inline void bind_state(NVNcommandBuffer *c, int kind, const void *st, size_t n) {
+    if (g_rec_compact && (unsigned)kind < 8 && n == 4) { uint32_t v; memcpy(&v, st, 4); if (v < (1u << 21)) { crec_raw(c, OPC_STATE, (uint32_t)kind | v << 3, 0); return; } }
+    if (g_rec_compact && (unsigned)kind < 8 && n == 8) { memcpy(crec_raw(c, OPC_STATE8, (uint32_t)kind, 8), st, 8); return; }
     p_bind_state *r = rec(c, OP_BIND_STATE, offsetof(p_bind_state, bytes) + n); r->kind = kind; memcpy(r->bytes, st, n); }   // only the state's own bytes (nvn_obj.h p_bind_state)
 NVN(nvnCommandBufferBindBlendState, void, NVNcommandBuffer *c, const NVNblendState *st) { bind_state(c, 0, st, sizeof(blend_st)); }
 NVN(nvnCommandBufferBindColorState, void, NVNcommandBuffer *c, const NVNcolorState *st) { bind_state(c, 1, st, sizeof(color_st)); }
@@ -1668,12 +1730,12 @@ NVN(nvnCommandBufferBindDepthStencilState, void, NVNcommandBuffer *c, const NVNd
 NVN(nvnCommandBufferBindVertexAttribState, void, NVNcommandBuffer *c, int n, const NVNvertexAttribState *st) {
     // 32 on NVN2 (16 on NVN): Yoshi and the Mysterious Book's Unreal Engine 5.4 binds 17, the last on its own stream, and refusing the bind left the scene's draws without vertex layouts: a black scene
     if (n < 0 || n > 32) { LOG("[RED] BindVertexAttribState n=%d", n); return; }
-    if (g_rec_compact) { memcpy(crec(c, OPC_VATTR, (uint32_t)n, 4 * (size_t)n), st, 4 * (size_t)n); return; }
+    if (g_rec_compact) { memcpy(crec_raw(c, OPC_VATTR, (uint32_t)n, 4 * (size_t)n), st, 4 * (size_t)n); return; }
     p_bind_vattr *r = RECN(c, OP_BIND_VATTR, p_bind_vattr, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 4 * n);
 }
 NVN(nvnCommandBufferBindVertexStreamState, void, NVNcommandBuffer *c, int n, const NVNvertexStreamState *st) {
     if (n < 0 || n > 16) { LOG("[RED] BindVertexStreamState n=%d", n); return; }
-    if (g_rec_compact) { memcpy(crec(c, OPC_VSTREAM, (uint32_t)n, 8 * (size_t)n), st, 8 * (size_t)n); return; }
+    if (g_rec_compact) { memcpy(crec_raw(c, OPC_VSTREAM, (uint32_t)n, 8 * (size_t)n), st, 8 * (size_t)n); return; }
     p_bind_vstream *r = RECN(c, OP_BIND_VSTREAM, p_bind_vstream, st, n); r->first = 0; r->n = n; memcpy(r->st, st, 8 * n);
 }
 NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int n, const NVNbufferRange *rg) {
@@ -1684,7 +1746,7 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
         *REC(c, OP_BIND_VBUF1, p_bind_vbuf1) = (p_bind_vbuf1){(uint32_t)first, (uint32_t)rg[0].size, rg[0].address}; return;
     }
     int fit = g_rec_compact && first >= 0; for (int i = 0; i < n && fit; i++) fit = rg[i].size <= UINT32_MAX;
-    if (fit) { uint8_t *q = crec(c, OPC_VBUFS, (uint32_t)first | (uint32_t)n << 8, 12 * (size_t)n); for (int i = 0; i < n; i++) { put64(&q, rg[i].address); put32(&q, (uint32_t)rg[i].size); } return; }
+    if (fit) { uint8_t *q = crec_raw(c, OPC_VBUFS, (uint32_t)first | (uint32_t)n << 8, 12 * (size_t)n); for (int i = 0; i < n; i++) { put64(&q, rg[i].address); put32(&q, (uint32_t)rg[i].size); } return; }
     p_bind_vbuf *r = RECN(c, OP_BIND_VBUF, p_bind_vbuf, r, n); r->first = first; r->n = n; memcpy(r->r, rg, sizeof *rg * n);
 }
 // NVN2 task/mesh resources share hull/domain (programs use one pair or the
@@ -1692,14 +1754,14 @@ NVN(nvnCommandBufferBindVertexBuffers, void, NVNcommandBuffer *c, int first, int
 // Only public entry points normalize: internal record helpers take host slots.
 static inline NVNshaderStage st_host(NVNshaderStage st) { return (unsigned)st == 6 ? 3 : (unsigned)st == 7 ? 4 : (unsigned)st == 8 ? NVN_RT_RESOURCE_STAGE : st; }
 // Uniform bindings with a 256-aligned address (the device's uniform buffer alignment) and a size below 2^18 (NVN's limit is 64 KB) take 8 bytes each after one header (OPC_UBO)
-static int rec_ubo(NVNcommandBuffer *c, int st, int first, int n, const NVNbufferRange *rg) {
+static inline int rec_ubo(NVNcommandBuffer *c, int st, int first, int n, const NVNbufferRange *rg) {
     if (!g_rec_compact || (unsigned)st >= NVN_RESOURCE_STAGES || first < 0 || n < 1 || first >= 16 || n > 16 - first) return 0;
     for (int i = 0; i < n; i++) if ((rg[i].address & 0xff) || rg[i].address >> 48 || rg[i].size >= (1u << 18)) return 0;
-    uint8_t *q = crec(c, OPC_UBO, (uint32_t)st | (uint32_t)first << 3 | (uint32_t)n << 7, 8 * (size_t)n);
+    uint8_t *q = crec_raw(c, OPC_UBO, (uint32_t)st | (uint32_t)first << 3 | (uint32_t)n << 7, 8 * (size_t)n);
     for (int i = 0; i < n; i++) put64(&q, rg[i].address >> 8 | (uint64_t)rg[i].size << 40);
     return 1;
 }
-static void record_uniform_buffer(NVNcommandBuffer *c, int st, int i, NVNbufferAddress a, size_t n) {
+static inline void record_uniform_buffer(NVNcommandBuffer *c, int st, int i, NVNbufferAddress a, size_t n) {
     NVNbufferRange r = {a, n}; if (rec_ubo(c, st, i, 1, &r)) return;
     if (n <= UINT32_MAX) {
         *REC(c, OP_BIND_UBO_SMALL, p_bind_ubo_small) = (p_bind_ubo_small){(uint16_t)st, (uint16_t)i, (uint32_t)n, a}; return;
@@ -1710,10 +1772,10 @@ NVN(nvnCommandBufferBindUniformBuffer, void, NVNcommandBuffer *c, NVNshaderStage
     if (slots_bound("BindUniformBuffer", st, i, 1, 16)) record_uniform_buffer(c, st, i, a, n);
 }
 // Several uniform or storage buffer bindings in one compact record (OPC_BUFS), when each fits its canonical record's compact form
-static int rec_bufs(NVNcommandBuffer *c, uint32_t op, int st, int first, int n, const NVNbufferRange *rg, int slots) {
+static inline int rec_bufs(NVNcommandBuffer *c, uint32_t op, int st, int first, int n, const NVNbufferRange *rg, int slots) {
     if (!g_rec_compact || n < 1 || n > 63 || (unsigned)st >= NVN_RESOURCE_STAGES || first < 0 || first > 0xff || first >= slots || n > slots - first) return 0;
     for (int i = 0; i < n; i++) if (rg[i].size > UINT32_MAX) return 0;
-    uint8_t *q = crec(c, OPC_BUFS, op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 12 * (size_t)n);
+    uint8_t *q = crec_raw(c, OPC_BUFS, op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 12 * (size_t)n);
     for (int i = 0; i < n; i++) { put64(&q, rg[i].address); put32(&q, (uint32_t)rg[i].size); }
     return 1;
 }
@@ -1735,19 +1797,17 @@ NVN(nvnCommandBufferBindStorageBuffers, void, NVNcommandBuffer *c, NVNshaderStag
 // compact: as one OPC_HANDLES record (the handles' final values; BindTexturesDeferred edits its record afterwards, so it takes the canonical one)
 enum { BIND_REC_MAX = 32 };   // the handles one record holds
 static p_bind_handles *bind_handles_chunk(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact) {
-    p_bind_handles tmp, *r;
-    if (compact && g_rec_compact && (unsigned)st < NVN_RESOURCE_STAGES && first >= 0 && first <= 0xff && n >= 1) r = &tmp;
-    else r = RECN(c, op, p_bind_handles, h, n);
-    r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
     // The driver writes each handle into the c2 table as a 32-bit word (texture ID in bits 0-19, sampler ID in bits 20-31), so the GPU never sees the upper half of the 64-bit handle.
     // EA SPORTS FC 27 binds separate textures with bit 32 set (0x1000001d1): read whole, its sampler ID was 4096, beyond any pool, where the GPU reads sampler 0
-    for (int i = 0; i < n; i++) r->h[i] = (uint32_t)h[i];
     // Descriptor indices belong to the pools active at execution, including pools inherited from a caller or an earlier submission. Keep the hardware's relative handles.
-    if (r == &tmp) {
-        uint8_t *q = crec(c, OPC_HANDLES, (uint32_t)op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 4 * (size_t)n);
-        for (int i = 0; i < n; i++) put32(&q, (uint32_t)r->h[i]);
+    if (__builtin_expect(compact && g_rec_compact && (unsigned)st < NVN_RESOURCE_STAGES && first >= 0 && first <= 0xff && n >= 1, 1)) {
+        uint8_t *q = crec_raw(c, OPC_HANDLES, (uint32_t)op | (uint32_t)st << 6 | (uint32_t)first << 9 | (uint32_t)n << 17, 4 * (size_t)n);
+        for (int i = 0; i < n; i++) put32(&q, (uint32_t)h[i]);
         return NULL;
     }
+    p_bind_handles *r = RECN(c, op, p_bind_handles, h, n);
+    r->stage = st; r->first = first; r->n = n; r->defer = 0; r->src = 0;
+    for (int i = 0; i < n; i++) r->h[i] = (uint32_t)h[i];
     return r;
 }
 static void bind_handles_ex(NVNcommandBuffer *c, int op, int st, int first, int n, const uint64_t *h, int compact, int defer) {
@@ -1780,8 +1840,8 @@ NVN(nvnCommandBufferBindSeparateSampler, void, NVNcommandBuffer *c, NVNshaderSta
     bind_handles(c, OP_BIND_SAMP, st, i, 1, &h.value);
 }
 // which: 0 value mask, 1 write mask, 2 reference value (p_stencil)
-static void rec_stencil(NVNcommandBuffer *c, NVNface f, int which, int v) {
-    if (g_rec_compact && (unsigned)f < 4 && (unsigned)v < (1u << 20)) { crec(c, OPC_STENCIL, (uint32_t)f | (uint32_t)which << 2 | (uint32_t)v << 4, 0); return; }
+static inline void rec_stencil(NVNcommandBuffer *c, NVNface f, int which, int v) {
+    if (g_rec_compact && (unsigned)f < 4 && (unsigned)v < (1u << 20)) { crec_raw(c, OPC_STENCIL, (uint32_t)f | (uint32_t)which << 2 | (uint32_t)v << 4, 0); return; }
     *REC(c, OP_STENCIL, p_stencil) = (p_stencil){f, which == 0 ? v : 0, which == 1 ? v : 0, which == 2 ? v : 0, which};
 }
 NVN(nvnCommandBufferSetStencilValueMask, void, NVNcommandBuffer *c, NVNface f, int m) { rec_stencil(c, f, 0, m); }
@@ -1839,7 +1899,7 @@ NVN(nvnCommandBufferDispatchRaysIndirect, void, NVNcommandBuffer *c, uint64_t ra
     die("[RED] RT indirect-dispatch GPU command payload is not implemented");
 }
 NVN(nvnCommandBufferBarrier, void, NVNcommandBuffer *c, int bits) {
-    if (g_rec_compact && (unsigned)bits < (1u << 24)) { crec(c, OPC_BARRIER, (uint32_t)bits, 0); return; }
+    if (g_rec_compact && (unsigned)bits < (1u << 24)) { crec_raw(c, OPC_BARRIER, (uint32_t)bits, 0); return; }
     *(int32_t *)rec(c, OP_BARRIER, 8) = bits;
 }
 NVN(nvnCommandBufferSetTexturePool, void, NVNcommandBuffer *c, const NVNtexturePool *p) { REC(c, OP_SET_TEX_POOL, p_set_pool)->pool = (const dpool_t *)p; }
@@ -2251,6 +2311,21 @@ void dm_fstep_settle(void) { atomic_fetch_add(&g_fs_settle_seq, 1); }
 static uint64_t g_fs_drain, g_fs_drain_late;
 static _Atomic uint64_t g_screen_at;   // when the screen wait released the acquire of the frame being made (0 = it did not wait since the last present): the pacer takes the screen's phase
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
+// Queue timeline of a frame (frames.tsv, frame_rec): k 0 the game's first submit, 1 its last, 2 the replay's first translation of the frame's work, 3 the replay done with its present; ns
+static _Atomic uint64_t g_qt[64][4]; _Atomic uint64_t g_rq_idle_ns, g_rq_idle_why[4]; _Atomic uint64_t g_sync_pub_ns;   // of @sync_ms: waiting for the replay to publish the sync's fence (nvn_sync_wait), before the GPU wait   // why: 0 no work queued, 1 an event wait holds a queue, 2 a sync wait, 3 other
+// DM_NVN_QTRACE=<frame>: from that frame, about 800 log lines of queue events (diagnostic): what = a short name, a/b two numbers
+extern uint64_t g_t0_ns;
+void nvn_qtrace(const char *what, uint64_t a, uint64_t b) {
+    static int64_t from = -2; static _Atomic int left = 800; if (from == -2) { const char *e = getenv("DM_NVN_QTRACE"); from = e ? atoll(e) : -1; }
+    if (from < 0 || g_frame < (uint64_t)from || atomic_fetch_sub(&left, 1) <= 0) return;
+    char tn[32] = ""; pthread_getname_np(pthread_self(), tn, sizeof tn);
+    LOG("qtrace %.3f f%llu %s %llu %llu [%s]", (now_ns() - g_t0_ns) / 1e6, (unsigned long long)g_frame, what, (unsigned long long)a, (unsigned long long)b, tn);
+}
+void nvn_qt_note(uint64_t frame, int k, uint64_t ns) {
+    _Atomic uint64_t *w = &g_qt[frame & 63][k];
+    if (k == 0 || k == 2) { uint64_t z = 0; atomic_compare_exchange_strong(w, &z, ns); }
+    else { uint64_t o = atomic_load(w); while (ns > o && !atomic_compare_exchange_weak(w, &o, ns)) {} }
+}
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
 int mtl_present_screen_wait_timeout(double period, uint64_t timeout_ns, uint64_t *waited_ns);   // nvn_mtl.m
@@ -3466,7 +3541,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (prev_in) {
         double fr = (t0 - prev_in) / 1e6, wk = (t0 - prev_out) / 1e6, nv = atomic_exchange(&g_nvn_ns, 0) / 1e6;
         tpush(0, fr); tpush(1, wk); tpush(2, nv);
-        trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
+        trow(f, "@frame_ms", fr); trow(f, "@work_ms", wk); trow(f, "@nvn_ms", nv); trow(f, "@sync_ms", atomic_exchange(&g_sync_ns, 0) / 1e6); trow(f, "@sync_pub_ms", atomic_exchange(&g_sync_pub_ns, 0) / 1e6); trow(f, "@itv", (double)present_itv(o));
         // Slow-frame attribution (taken only when DM_NVN_TSV is on): this frame's present-thread CPU time (−1 if the thread changed), CPU of all threads in the process, acquire wait accumulated per frame, present call time (same base as the GPU / on-screen present times: ms since process start)
         trow(f, "@wait_ms", atomic_exchange(&g_acq_wait_ns, 0) / 1e6); trow(f, "@pq_wait_ms", atomic_exchange(&g_pq_wait_ns, 0) / 1e6);
         if (frame_rec()) {
@@ -3519,7 +3594,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
                        (unsigned long long)r->f, r->t_s, r->fr, r->nv, g, r->pso, r->lib, r->make_ms, r->up, r->rup, r->up_mb, r->up_ms, r->hy);
               // Visibility: during the time a long frame "comes out late", what stays on screen is the previous frame; if the previous frame was a loading screen (or this frame itself is one), all the player sees is the loading screen staying a bit longer, with no motion interrupted
               dm_longframe_note(b); } }
-        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
+        uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); }
+        if (frame_rec() && f >= 8) { static const char *qn[4] = {"@qt_sub0_ms", "@qt_sub1_ms", "@qt_rq0_ms", "@qt_rq1_ms"};
+            for (int k = 0; k < 4; k++) { uint64_t v = atomic_exchange(&g_qt[(f - 8) & 63][k], 0); if (v) trow(f - 8, qn[k], (v - g_t0_ns) / 1e6); }
+            trow(f, "@rq_idle_ms", atomic_exchange(&g_rq_idle_ns, 0) / 1e6);
+            static const char *wn[4] = {"@rq_idle_none_ms", "@rq_idle_event_ms", "@rq_idle_sync_ms", "@rq_idle_other_ms"}; for (int k = 0; k < 4; k++) trow(f, wn[k], atomic_exchange(&g_rq_idle_why[k], 0) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
     if (g_frame % TWIN == 0) tsummary(g_frame);

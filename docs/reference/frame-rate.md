@@ -921,6 +921,25 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** each shader keeps, made once, the indices of its texture and image bindings and of the bindings `ubd_conflict_sh` looks at (`sh_lists_make` in `nvn_mtl.m`). The loops walk those lists with the same conditions inside, and a shader with no texture binding skips `ubd_conflict_textures`' lock. The lists are published by a release store of `lists_nb`, read with acquire.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 45 bindings at the 90th percentile, a third of them textures; the walks were about 7 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
 
+### A streamed submission reached the replay only at its next wait or its end
+
+- **Symptom:** the replay thread idle for the first milliseconds of a busy frame while the game's presentation thread was still copying its one big submission (about 5 MB of records), then translating it all at once; `@qt_rq0_ms` (the replay's first node of the frame) late against `@qt_sub0_ms`.
+- **Cause:** a streamed submission (`DM_NVN_SUB_STREAM`) handed its copied commands to the replay at its next wait or its end, so a frame submitted as one job was translated only after the whole job was copied. The encode thread was woken for every block of 256 records, each hand-off a possible system call.
+- **Fix:** in `nvn_queue.inc`, for every NVN game. A streamed submission hands its commands over in chunks, the first of 128 KB and each next 4 times the last, and the replay runs a job's chunks as one submission (`DM_NVN_SUB_CHUNK_KB`, `0` off). The submit thread publishes 2,048 records per block to the encode thread (`DM_NVN_REC_BLK`; a commit still hands over at once whatever the size).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) (`checkpoint`, M1 Max): together with the replay's uniform slot memo and fragment table cache, 23.9 → 21.0 ms a frame.
+
+### The queue flatten copied every record on its own
+
+- **Symptom:** the game's presentation thread (which copies its submissions, `nq_flatten`) about 2.9 ms a frame at 26,000 draws, most of it in `cap_rec_fields`, `rec_expand` and `realloc`.
+- **Cause:** every record was looked at and copied on its own, through `cap_rec_fields` (which has nothing to do for most kinds) and a stack buffer for compact records; each submission's `NQ_COMMANDS` buffer was allocated, grown by doubling and freed again.
+- **Fix:** in `nvn_queue.inc` and `hle_nvn.c`. Runs of plain records with no objects are copied in bulk, compact records expand straight into the queue buffer, the three commonest compact kinds inline (`DM_NVN_QFAST`); a small best-fit pool recycles `NQ_COMMANDS` buffers across submissions (`DM_NVN_QPOOL`). `cmd_alloc` and the compact record writers inline, and a compact texture bind writes its handles straight into the command memory.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) (`checkpoint`, M1 Max): the presentation thread's CPU 2.85 → 1.24 ms a frame over these steps (the bulk copies 2.85 → 1.52, the inlined writers 1.51 → 1.41, the buffer pool 1.41 → 1.24).
+
+### Where a frame goes (queue timeline)
+
+- **What:** `@qt_sub0_ms` / `@qt_sub1_ms` (the game's first and last submission of a frame), `@qt_rq0_ms` / `@qt_rq1_ms` (the replay's first node of the frame and the end of its present), in the frame's row like `@gpu_beg_ms`; `@rq_idle_ms` and its split `@rq_idle_none_ms` (no work queued), `@rq_idle_event_ms` (a queue held by an event wait), `@rq_idle_sync_ms`, `@rq_idle_other_ms`. `DM_NVN_QTRACE=<frame>` logs about 800 queue events from that frame (submit, present, the replay's nodes, its idle periods, the game's fence waits, event waits with their word and value).
+- **Found:** a Donkey Kong Bananza frame of 21.5–25 ms (`checkpoint`, M1 Max, 2026-11-22) is, in order: the game's fence wait returns and its presentation thread submits the whole frame in one job 0.3–0.5 ms later; the job's first node waits on an event the game sets with a plain store about 2.5 ms later, just before its present (no GPU write is pending: the word is 0xFFFFFFFF, the wait wants 0); the replay translates 14.4–16.4 ms; the GPU finishes 4–9 ms after the replay's last node, and the game's wait returns. The replay is idle 7–8.6 ms a frame, all of it waiting for the game or the GPU. A 0.1 ms poll for the event word in place of 1 ms changed nothing (the store comes when it comes); translating the job before the store would read memory the game writes before it.
+
 ### Main guest thread keeps inherited default QoS
 
 - **Symptom:** gameplay has low CPU clocks, large render submission wall time compared with thread CPU time, and default QoS (`0x15`) on the main guest thread while workers report user-interactive (`0x21`).

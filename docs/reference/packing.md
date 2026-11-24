@@ -85,6 +85,13 @@
 
 ## Build tools
 
+### An uncached Nextendo CA download returns HTTP 403
+
+- **Symptom:** a Nextendo build with no cached provider CA stops while preparing its service profile with `HTTP Error 403: Forbidden`.
+- **Cause:** the Git server's web raw link refuses the download.
+- **Fix:** fetch the same file and commit through Forgejo's raw API without following redirects. The DER SHA-256 check and per-route trust still apply.
+- **Found on:** an uncached public CA fetch and a network-free service profile fixture.
+
 ### Stopping a build left its tools running
 
 - **Symptom:** after the NSP script was stopped in Spyder (its interrupt), or by a front end's SIGTERM, the tool it was running went on: a shader build or `build_ipa.sh`'s `xcodebuild` kept the CPU busy and wrote into the build folder that the next build reads, and the script could wait for it with no end. A regression run (`regress.py`) stopped during a shader build whose direct child ignored SIGTERM for 10 s left the build's workers running. A tool's child still writing after the tool's own exit was taken for a finished step.

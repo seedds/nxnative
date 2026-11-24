@@ -1,11 +1,15 @@
 """Public Nextendo service profiles (dm/tools/nextendo_services.py), after NX-Port-Studio's test (MIT); no account state, no network."""
+import base64
+from email.message import Message
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 REPO = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('nextendo_services', REPO / 'dm/tools/nextendo_services.py')
@@ -15,6 +19,43 @@ WONDER = '010015100b514000'
 
 
 class NextendoServicesTests(unittest.TestCase):
+    def test_empty_cache_uses_the_pinned_raw_api(self):
+        value = n.contract(REPO)
+        self.assertEqual(value['provider']['caSHA256'], 'a654c0eff8aa20a72280ea0ef2b5c2a17392922dd78ffbb113862e1ad2c66d49')
+        url = ('https://git.nextendo.network/api/v1/repos/NextendoNetwork/Prelude-Nextendo/raw/'
+               'romfs/sd/rootCA.pem?ref=482c182917228d69ebbbabfea44fffa4a44051be')
+        der = b'synthetic public CA bytes'
+        encoded = b'-----BEGIN CERTIFICATE-----\n' + base64.b64encode(der) + b'\n-----END CERTIFICATE-----\n'
+
+        def fetch(request, timeout):
+            if request.full_url != url:
+                with HTTPError(request.full_url, 403, 'Forbidden', Message(), io.BytesIO()) as error:
+                    raise error
+            self.assertEqual(timeout, 15)
+            return io.BytesIO(encoded)
+
+        with tempfile.TemporaryDirectory() as folder, patch.object(n.Path, 'home', return_value=Path(folder)):
+            with (patch.object(n.urllib.request, 'urlopen', side_effect=fetch),
+                  patch.object(n.urllib.request.OpenerDirector, 'open', side_effect=fetch) as opened):
+                with self.assertRaisesRegex(ValueError, 'integrity check failed'): n.provider_ca(value)
+                value['provider']['caSHA256'] = hashlib.sha256(der).hexdigest()
+                self.assertEqual(n.provider_ca(value), der)
+                self.assertEqual(n.provider_ca(value), der)
+                self.assertEqual(opened.call_count, 2)
+
+    def test_ca_redirect_is_not_followed(self):
+        value = n.contract(REPO)
+        headers = Message()
+        headers['Location'] = 'https://outside.invalid/other.pem'
+        with HTTPError(value['provider']['caURL'], 302, 'Found', headers, io.BytesIO()) as redirect:
+            with (tempfile.TemporaryDirectory() as folder, patch.object(n.Path, 'home', return_value=Path(folder)),
+                  patch.object(n.urllib.request.HTTPSHandler, 'https_open', return_value=redirect) as opened,
+                  self.assertRaises(HTTPError) as failure):
+                n.provider_ca(value)
+            self.assertEqual(failure.exception.code, 302)
+            failure.exception.close()
+            self.assertEqual(opened.call_count, 1)
+
     def test_shared_families_and_title_scoped_services(self):
         value = n.contract(REPO)
         self.assertIn('suffix\tdemonware.net\t', n.rules(value, '01001b300b9be000'))

@@ -72,6 +72,12 @@ void dm_set_game_image_header(const void *mh);
 typedef struct { uint32_t id; float x, y; } dm_touch;
 void dm_touch_set(const dm_touch *t, int n);
 void dm_touch_script(const dm_touch *t, int n);   // scripted touches (DM_KEYS, DM_CTL; hle_hid.c): as dm_touch_set, but never recorded by DM_REC
+// Virtual Switch 2 Nmouse pointer (Mac mouse / iOS touch or pointer -> hle_hid.c): normalized picture coordinates [0, 1),
+// relative deltas in pointer pixels (dx, dy), wheel deltas, button mask (DM_HOST_MOUSE_*), and flags (DM_HOST_MOUSE_FLAG_*).
+// Active while the game requests Nmouse, DM_VIRTUAL_NMOUSE != 0, and no physical Joy-Con 2 mouse is connected. May be called from any thread.
+enum { DM_HOST_MOUSE_LEFT = 1u << 0, DM_HOST_MOUSE_RIGHT = 1u << 1, DM_HOST_MOUSE_MIDDLE = 1u << 2 };
+enum { DM_HOST_MOUSE_FLAG_ABS = 1u << 0, DM_HOST_MOUSE_FLAG_REL = 1u << 1, DM_HOST_MOUSE_FLAG_SURFACE = 1u << 2, DM_HOST_MOUSE_FLAG_RESET = 1u << 3 };
+void dm_host_mouse(float nx, float ny, float dx, float dy, int wheel_x, int wheel_y, uint32_t buttons, uint32_t flags);
 
 // Save not written (called by the host's hle_fs.c; the iOS front end provides a strong implementation of the same name that shows the native prompt "Not enough storage. Progress was not saved"; the default weak implementation only logs).
 // Timing: when a save write fails (disk full etc.) within one of the game's save transactions (between two Commits), so that this Commit is refused and the previously committed save is unchanged, it is called once per refused transaction;

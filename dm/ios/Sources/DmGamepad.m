@@ -164,6 +164,8 @@ static void pads_start(void);   // Physical controllers, below
     BOOL _padOff;                                  // a physical controller is connected: every touch goes to the game
     DmLayout _layout;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
+    CGPoint _nmLast; BOOL _nmActive;              // virtual Switch 2 Nmouse state for unclaimed touches / pointer hover
+    UIHoverGestureRecognizer *_nmHover API_AVAILABLE(ios(13.4));
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
@@ -187,6 +189,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [(UIView *)environment setNeedsLayout];
         }];
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
+        if (@available(iOS 13.4, *)) {
+            _nmHover = [[UIHoverGestureRecognizer alloc] initWithTarget:self action:@selector(onHover:)];
+            [self addGestureRecognizer:_nmHover];
+        }
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -397,16 +403,50 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     if (changed || stick || _stickShown) [self refresh];   // also refresh on the stick release so the knob returns to the centre
     _stickShown = stick;
 }
+- (void)onHover:(UIHoverGestureRecognizer *)gr API_AVAILABLE(ios(13.4)) {
+    if (!dm_joy_mouse_wanted()) return;
+    CGRect b = _layout.game;
+    if (b.size.width <= 0 || b.size.height <= 0) return;
+    CGPoint p = dm_game_touch_point(b, [gr locationInView:self]);
+    if (gr.state == UIGestureRecognizerStateEnded || gr.state == UIGestureRecognizerStateCancelled) {
+        _nmActive = NO;
+        dm_host_mouse((float)p.x, (float)p.y, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_ABS);
+        return;
+    }
+    float dx = _nmActive ? (float)((p.x - _nmLast.x) * b.size.width) : 0.f;
+    float dy = _nmActive ? (float)((p.y - _nmLast.y) * b.size.height) : 0.f;
+    _nmLast = p; _nmActive = YES;
+    dm_host_mouse((float)p.x, (float)p.y, dx, dy, 0, 0, 0,
+                  DM_HOST_MOUSE_FLAG_ABS | DM_HOST_MOUSE_FLAG_REL | DM_HOST_MOUSE_FLAG_SURFACE);
+}
 // Touches no control takes go to the game's touch screen, normalized on front_ios.m's actual 16:9 viewport (including portrait and tabletop splits, and the cropped Fill picture): Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
 - (void)pushGame {
     CGRect b = _layout.game;
-    if (b.size.width <= 0 || b.size.height <= 0) { dm_touch_set(NULL, 0); return; }
+    if (b.size.width <= 0 || b.size.height <= 0) {
+        dm_touch_set(NULL, 0);
+        if (_nmActive) { _nmActive = NO; dm_host_mouse(0.f, 0.f, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_RESET); }
+        return;
+    }
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = dm_game_touch_point(b, [_game[i] locationInView:self]);   // with Fill the game rectangle is larger than the view (DmLayout.h)
         t[n++] = (dm_touch){(uint32_t)i, (float)p.x, (float)p.y};
     }
     dm_touch_set(t, n);
+    if (dm_joy_mouse_wanted()) {
+        if (n > 0) {
+            CGPoint p = CGPointMake(t[0].x, t[0].y);
+            uint32_t btn = n >= 2 ? DM_HOST_MOUSE_RIGHT : DM_HOST_MOUSE_LEFT;
+            float dx = _nmActive ? (float)((p.x - _nmLast.x) * b.size.width) : 0.f;
+            float dy = _nmActive ? (float)((p.y - _nmLast.y) * b.size.height) : 0.f;
+            uint32_t flags = DM_HOST_MOUSE_FLAG_ABS | DM_HOST_MOUSE_FLAG_SURFACE | (_nmActive ? DM_HOST_MOUSE_FLAG_REL : 0u);
+            _nmLast = p; _nmActive = YES;
+            dm_host_mouse((float)p.x, (float)p.y, dx, dy, 0, 0, btn, flags);
+        } else if (_nmActive) {
+            _nmActive = NO;
+            dm_host_mouse((float)_nmLast.x, (float)_nmLast.y, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_ABS);
+        }
+    }
 }
 - (BOOL)gameBegin:(UITouch *)t {
     if (CGRectIsEmpty(_layout.game) || (_layout.separated && !CGRectContainsPoint(_layout.game, [t locationInView:self]))) return NO;
@@ -477,7 +517,7 @@ int front_web_touch(void);
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; if (_nmActive || dm_joy_mouse_wanted()) { _nmActive = NO; dm_host_mouse(0.f, 0.f, 0.f, 0.f, 0, 0, 0, DM_HOST_MOUSE_FLAG_RESET); } [self pushGame]; [self recompute]; }
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }

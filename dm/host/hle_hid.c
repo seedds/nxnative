@@ -437,6 +437,7 @@ static void styles_sync(void) {
 // npad, empty once docked, and took no input again (GitHub issue #2143)
 void dm_hid_opmode_changed(void) { styles_sync(); }
 // Joy-Cons as devices (dm_input.h): which a pad holds, then each one's buttons and stick. The style events tell the game that its npads changed
+static void jcms_clear_sides(int p, uint32_t detached_mask);
 void dm_joy_attach(int p, uint32_t sides) {
     if (p < 0 || p >= DM_PLAYERS) return;
     atomic_store(&g_joy_two[p], (sides & DM_JOY_2) && (sides & 3) ? 1u : 0u);
@@ -444,6 +445,7 @@ void dm_joy_attach(int p, uint32_t sides) {
     if (sides == 3 || !sides) atomic_store(&g_joy_paired[p], sides == 3);
     atomic_fetch_and(&g_joy_reported[p], sides);   // a Joy-Con taken away has reported nothing yet when it comes back
     if (atomic_exchange(&g_joy_sides[p], sides) != sides && !sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
+    jcms_clear_sides(p, (~sides) & 3u);
     styles_sync();
 }
 void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
@@ -1203,14 +1205,28 @@ HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS
     return k;
 }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
-// Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15). No device
-// reports here: GetNmouseHandles finds none and the merged handle, which exists without a device on the console, has no states. The game skips its mouse code on those answers (main+0x112638c, +0x11262b4)
+// Merged mouse pointer (Nmouse, Switch 2 SDKs; Pokemon Pokopia, main+0x11251dc). The SDK opens the hid service itself in InitializeNmouse, which the host does not serve (abort 0xe15).
+// Physical Joy-Con 2 sensors report through dm_joy_mouse; when none are connected and DM_VIRTUAL_NMOUSE is not 0, host mouse/touch events (dm_host_mouse) feed a virtual Nmouse pointer.
 static _Atomic uint32_t g_jcms_wanted;   // the game reads the mouse sensors (dm_joy_mouse_wanted, with InitializeJcms below)
+// An NmouseState as Nintendo Switch 2 Welcome Tour reads it (main+0x253b2c): 48 bytes, 8 bytes first as in a JcmsState, then the Switch's MouseState fields (sampling number,
+// position, movement, wheel), buttons at 0x28 (left 1, right 2, middle 4: R / ZR on a right Joy-Con, L / ZL on a left one) and attributes at 0x2c (bit 1 connected, bit 0 on a surface)
+typedef struct { int64_t unk0, sampling; int32_t x, y, dx, dy, wheel_x, wheel_y; uint32_t buttons, attributes; } NmouseState;
+_Static_assert(sizeof(NmouseState) == 48, "NmouseState");
+#define NMOUSE_TAG 0x4e4d0000ull
+#define NMOUSE_HOST_HANDLE (NMOUSE_TAG | 0xff00ull)   // virtual host mouse / touch Nmouse handle when no physical Joy-Con 2 mouse is active
+#define NMOUSE_RING 16
+#define NMOUSE_LIFTOFF_NS 2500000000ull   // 2.5 s idle lift-off (clears on-surface bit so games return to controller prompts)
+static int nmouse_fill_states(NmouseState *out, int n, uint64_t h);
+static uint32_t nmouse_type_set(uint64_t h);
 HLE_FORCE("_ZN2nn3hid14FinalizeNmouseEv", "merged mouse: nothing to release", void, h_hid_NmouseFini, void) { atomic_fetch_and(&g_jcms_wanted, ~2u); }
-HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "merged mouse sources: no device", void, h_hid_NmouseSources, uint32_t types) { (void)types; }
-HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "merged mouse handle: 0, with no states", int, h_hid_NmouseMerged, uint64_t *out) { *out = 0; return 1; }
-HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "mouse types: none", int, h_hid_NmouseTypes, uint32_t *out, uint64_t h) { (void)h; *out = 0; return 1; }
-HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "mouse states: none", int, h_hid_NmouseStates, int *count, void *out, int n, uint64_t h) { (void)out; (void)n; (void)h; *count = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid26SetMergedNmouseSourceTypesENS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEE", "merged mouse sources: accepted", void, h_hid_NmouseSources, uint32_t types) { (void)types; }
+HLE_FORCE("_ZN2nn3hid21GetMergedNmouseHandleEPNS0_12NmouseHandleE", "merged mouse handle: 0", int, h_hid_NmouseMerged, uint64_t *out) { *out = 0; return 1; }
+HLE_FORCE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE", "mouse types: active physical or virtual source", int, h_hid_NmouseTypes, uint32_t *out, uint64_t h) { if (out) *out = nmouse_type_set(h); return 1; }
+HLE_FORCE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", "mouse states: newest first for physical Joy-Con 2 or virtual host pointer", int, h_hid_NmouseStates, int *count, void *out, int n, uint64_t h) {
+    if (!count) return 0;
+    *count = (out && n > 0) ? nmouse_fill_states((NmouseState *)out, n, h) : 0;
+    return 1;
+}
 
 // Joy-Con 2 mouse sensor (JCMS, Switch 2 SDKs; Donkey Kong Bananza). The SDK opens the hid service itself in InitializeJcms, which the host does not serve. A handle is the npad id in
 // byte 0 and the JcmsType in byte 1 (sdk hid::utility::MakeJcmsHandle); a JcmsState is 32 bytes, and GetJcmsStates returns 0 while its ring holds no samples, as here: no controller
@@ -1236,9 +1252,25 @@ static float g_nm_pos[DM_PLAYERS][2][2]; static int32_t g_nm_d[DM_PLAYERS][2][2]
 static int g_nm_last[DM_PLAYERS] = {[0 ... DM_PLAYERS - 1] = -1};   // the Joy-Con last used on a surface: the player's pointer, also while it is lifted
 static int g_nmouse_range[2];
 #define NMOUSE_SCALE 0.25f   // pointer pixels per sensor count (a slow 10 cm slide is about 6,000 counts: about 1,500 pixels)
+static void jcms_clear_sides(int p, uint32_t detached_mask) {
+    if (p < 0 || p >= DM_PLAYERS || !detached_mask) return;
+    pthread_mutex_lock(&g_jcms_mu);
+    for (int s = 0; s < 2; s++) {
+        if (!(detached_mask & (1u << s))) continue;
+        if (g_nm_state[p][s] & DM_JOYMOUSE_CONNECTED) {
+            int64_t n = ++g_jcms_n[p][s];
+            g_jcms[p][s][(n - 1) % JCMS_RING] = (JcmsState){.sampling = n, .attributes = 0};
+        }
+        g_nm_state[p][s] = 0;
+        g_nm_d[p][s][0] = g_nm_d[p][s][1] = 0;
+        if (g_nm_last[p] == s) g_nm_last[p] = (g_nm_state[p][s ^ 1] & DM_JOYMOUSE_CONNECTED) ? (s ^ 1) : -1;
+    }
+    pthread_mutex_unlock(&g_jcms_mu);
+}
 void dm_joy_mouse(int p, int side, int32_t dx, int32_t dy, uint32_t state) {
     if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
     pthread_mutex_lock(&g_jcms_mu);
+    if (!state && g_jcms_n[p][side] == 0) { pthread_mutex_unlock(&g_jcms_mu); return; }
     int64_t n = ++g_jcms_n[p][side];
     g_jcms[p][side][(n - 1) % JCMS_RING] = (JcmsState){.sampling = n, .dx = dx, .dy = dy, .attributes = state & 3};
     int w = g_nmouse_range[0] > 0 ? g_nmouse_range[0] : 1920, hgt = g_nmouse_range[1] > 0 ? g_nmouse_range[1] : 1080;
@@ -1247,6 +1279,7 @@ void dm_joy_mouse(int p, int side, int32_t dx, int32_t dy, uint32_t state) {
     xy[0] = fminf((float)(w - 1), fmaxf(0.f, xy[0] + dx * NMOUSE_SCALE)); xy[1] = fminf((float)(hgt - 1), fmaxf(0.f, xy[1] + dy * NMOUSE_SCALE));
     g_nm_d[p][side][0] = (int32_t)lrintf(dx * NMOUSE_SCALE); g_nm_d[p][side][1] = (int32_t)lrintf(dy * NMOUSE_SCALE); g_nm_state[p][side] = state;
     if (state & DM_JOYMOUSE_ON_SURFACE) g_nm_last[p] = side;
+    else if (!(state & DM_JOYMOUSE_CONNECTED) && g_nm_last[p] == side) g_nm_last[p] = (g_nm_state[p][side ^ 1] & DM_JOYMOUSE_CONNECTED) ? (side ^ 1) : -1;
     pthread_mutex_unlock(&g_jcms_mu);
 }
 // A handle's player and Joy-Con: the player the npad shows (a split pair's other half included), its Joy-Con of the handle's side
@@ -1514,17 +1547,196 @@ HLE_FORCE("_ZN2nn3hid38StoreSixAxisSensorCalibrationParameterERKNS0_19SixAxisSen
     pthread_mutex_unlock(&g_six_cal_mu);
     return RES_OK;
 }
-// The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24). InitializeNmouse opens the
-// hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340). No controller of the host has the sensor, so there are no handles, and the calls on a handle have nothing to do
-HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; front ends may turn the sensors on", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) { (void)work; (void)size; (void)w; (void)h; atomic_fetch_or(&g_jcms_wanted, 2u); }
-// A Joy-Con whose sensor reports (dm_joy_mouse) has a pointer handle on its npad: NMOUSE_TAG | npad id << 8 | side (the merged handle 0 stays the one without a device)
-#define NMOUSE_TAG 0x4e4d0000ull
-static int nmouse_of(uint64_t h, int *side) {
-    if ((h & ~0xffffull) != NMOUSE_TAG) return -1;
-    int p = jcms_target((uint32_t)(h >> 8 & 0xff) | (uint32_t)(h & 1) << 8, side);
-    return p >= 0 && g_jcms_n[p][*side] ? p : -1;
+// The Switch 2's pointer on top of those sensors (Nmouse; Fire Emblem Fortune's Weave initializes it at boot with the 1920x1080 screen it maps the pointer to, main+0x650a24).
+// InitializeNmouse opens the hid service as InitializeJcms does (its Result aborts: sdk+0x6d5340).
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmii", "Joy-Con mouse pointer: no hid service; front ends may turn the sensors on", void, h_hid_NmouseInit, void *work, uint64_t size, int w, int h) {
+    (void)work; (void)size;
+    pthread_mutex_lock(&g_jcms_mu);
+    if (w > 0 && h > 0) { g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
+    pthread_mutex_unlock(&g_jcms_mu);
+    atomic_fetch_or(&g_jcms_wanted, 2u);
 }
-HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: one per Joy-Con of the npad whose sensor reports", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) {
+// Virtual host Nmouse state (protected by g_jcms_mu): fed by Mac mouse / iOS touch & pointer through dm_host_mouse()
+// when DM_VIRTUAL_NMOUSE != 0 and no physical Joy-Con 2 mouse is connected.
+static NmouseState g_vm_ring[NMOUSE_RING];
+static int64_t g_vm_n;
+static float g_vm_pos[2];
+static int32_t g_vm_accum_dx, g_vm_accum_dy, g_vm_accum_wx, g_vm_accum_wy;
+static uint32_t g_vm_buttons;
+static int g_vm_on_surface;
+static uint64_t g_vm_active_ns;
+
+static int vm_env_enabled(void) {
+    const char *e = getenv("DM_VIRTUAL_NMOUSE");
+    return !e || atoi(e) != 0;
+}
+static int phys_jcms_any_locked(void) {
+    for (int p = 0; p < DM_PLAYERS; p++)
+        for (int s = 0; s < 2; s++)
+            if (g_jcms_n[p][s] > 0 && (g_nm_state[p][s] & DM_JOYMOUSE_CONNECTED)) return 1;
+    return 0;
+}
+static int vm_active_locked(void) {
+    return g_vm_n > 0 && vm_env_enabled() && !phys_jcms_any_locked();
+}
+static int vm_on_surface_locked(uint64_t now) {
+    if (!g_vm_on_surface) return 0;
+    if (g_vm_buttons) return 1;   // keep on surface while a button is held (e.g. click-drag)
+    if (now >= g_vm_active_ns && now - g_vm_active_ns >= NMOUSE_LIFTOFF_NS) {
+        g_vm_on_surface = 0;
+        return 0;
+    }
+    return 1;
+}
+static void vm_range_locked(int *w, int *hgt) {
+    *w = g_nmouse_range[0] > 0 ? g_nmouse_range[0] : 1920;
+    *hgt = g_nmouse_range[1] > 0 ? g_nmouse_range[1] : 1080;
+}
+static float vm_clampf(float v, float lo, float hi) {
+    if (!(v >= lo)) return lo;
+    return v > hi ? hi : v;
+}
+void dm_host_mouse(float nx, float ny, float dx, float dy, int wheel_x, int wheel_y, uint32_t buttons, uint32_t flags) {
+    if (!vm_env_enabled() && !(flags & DM_HOST_MOUSE_FLAG_RESET)) return;
+    uint64_t now = now_ns();
+    pthread_mutex_lock(&g_jcms_mu);
+    if (flags & DM_HOST_MOUSE_FLAG_RESET) {
+        g_vm_buttons = 0;
+        g_vm_on_surface = 0;
+        g_vm_accum_dx = g_vm_accum_dy = g_vm_accum_wx = g_vm_accum_wy = 0;
+        if (g_vm_n > 0) {
+            int64_t n = ++g_vm_n;
+            g_vm_ring[(n - 1) % NMOUSE_RING] = (NmouseState){
+                .sampling = n,
+                .x = (int32_t)lrintf(g_vm_pos[0]),
+                .y = (int32_t)lrintf(g_vm_pos[1]),
+                .attributes = 2u,
+            };
+        }
+        pthread_mutex_unlock(&g_jcms_mu);
+        return;
+    }
+    int w, hgt; vm_range_locked(&w, &hgt);
+    int first = g_vm_n == 0;
+    if (first) { g_vm_pos[0] = w / 2.f; g_vm_pos[1] = hgt / 2.f; }
+    float max_x = (float)(w > 1 ? w - 1 : 0), max_y = (float)(hgt > 1 ? hgt - 1 : 0);
+    int32_t step_dx = 0, step_dy = 0;
+    if (flags & DM_HOST_MOUSE_FLAG_ABS) {
+        float tx = vm_clampf(nx, 0.f, 1.f) * max_x;
+        float ty = vm_clampf(ny, 0.f, 1.f) * max_y;
+        if (flags & DM_HOST_MOUSE_FLAG_REL) {
+            step_dx = (int32_t)lrintf(dx);
+            step_dy = (int32_t)lrintf(dy);
+        } else if (!first) {
+            step_dx = (int32_t)lrintf(tx - g_vm_pos[0]);
+            step_dy = (int32_t)lrintf(ty - g_vm_pos[1]);
+        }
+        g_vm_pos[0] = tx;
+        g_vm_pos[1] = ty;
+    } else if (flags & DM_HOST_MOUSE_FLAG_REL) {
+        g_vm_pos[0] = vm_clampf(g_vm_pos[0] + dx, 0.f, max_x);
+        g_vm_pos[1] = vm_clampf(g_vm_pos[1] + dy, 0.f, max_y);
+        step_dx = (int32_t)lrintf(dx);
+        step_dy = (int32_t)lrintf(dy);
+    }
+    uint32_t btn = buttons & (DM_HOST_MOUSE_LEFT | DM_HOST_MOUSE_RIGHT | DM_HOST_MOUSE_MIDDLE);
+    int surface = (flags & DM_HOST_MOUSE_FLAG_SURFACE) || btn != 0;
+    int moved = step_dx != 0 || step_dy != 0 || wheel_x != 0 || wheel_y != 0;
+    int btn_changed = btn != g_vm_buttons;
+    if (surface && (moved || btn != 0 || btn_changed || !g_vm_on_surface)) {
+        g_vm_on_surface = 1;
+        g_vm_active_ns = now;
+    } else if (!surface) {
+        g_vm_on_surface = 0;
+    }
+    g_vm_buttons = btn;
+    g_vm_accum_dx += step_dx;
+    g_vm_accum_dy += step_dy;
+    g_vm_accum_wx += wheel_x;
+    g_vm_accum_wy += wheel_y;
+    int64_t n = ++g_vm_n;
+    g_vm_ring[(n - 1) % NMOUSE_RING] = (NmouseState){
+        .sampling = n,
+        .x = (int32_t)lrintf(g_vm_pos[0]),
+        .y = (int32_t)lrintf(g_vm_pos[1]),
+        .dx = step_dx,
+        .dy = step_dy,
+        .wheel_x = (int32_t)wheel_x,
+        .wheel_y = (int32_t)wheel_y,
+        .buttons = btn,
+        .attributes = 2u | (vm_on_surface_locked(now) ? 1u : 0u),
+    };
+    pthread_mutex_unlock(&g_jcms_mu);
+}
+// A Joy-Con whose sensor reports (dm_joy_mouse) has a pointer handle on its npad: NMOUSE_TAG | npad id << 8 | side (the merged handle 0 stays the one without a device)
+static int nmouse_of(uint64_t h, int *side) {
+    if ((h & ~0xffffull) != NMOUSE_TAG || h == NMOUSE_HOST_HANDLE) return -1;
+    int p = jcms_target((uint32_t)(h >> 8 & 0xff) | (uint32_t)(h & 1) << 8, side);
+    if (p < 0) return -1;
+    pthread_mutex_lock(&g_jcms_mu);
+    int ok = g_jcms_n[p][*side] > 0 && (g_nm_state[p][*side] & DM_JOYMOUSE_CONNECTED) != 0;
+    pthread_mutex_unlock(&g_jcms_mu);
+    return ok ? p : -1;
+}
+static int nmouse_phys_first_locked(int *out_p, int *out_side) {
+    for (int p = 0; p < DM_PLAYERS; p++) {
+        int pref = g_nm_last[p] >= 0 ? g_nm_last[p] : 1;
+        for (int pass = 0; pass < 2; pass++) {
+            int s = pass == 0 ? pref : (pref ^ 1);
+            if (g_jcms_n[p][s] > 0 && (g_nm_state[p][s] & DM_JOYMOUSE_CONNECTED)) {
+                *out_p = p; *out_side = s; return 1;
+            }
+        }
+    }
+    return 0;
+}
+static void nmouse_fill_phys_locked(NmouseState *st, int p, int side) {
+    memset(st, 0, sizeof *st);
+    uint64_t b = atomic_load(&g_joy_btn[p][side]);
+    st->buttons = side ? ((b & DM_BTN_R) ? 1u : 0u) | ((b & DM_BTN_ZR) ? 2u : 0u) : ((b & DM_BTN_L) ? 1u : 0u) | ((b & DM_BTN_ZL) ? 2u : 0u);
+    st->sampling = g_jcms_n[p][side];
+    st->x = (int32_t)lrintf(g_nm_pos[p][side][0]);
+    st->y = (int32_t)lrintf(g_nm_pos[p][side][1]);
+    st->dx = g_nm_d[p][side][0];
+    st->dy = g_nm_d[p][side][1];
+    st->attributes = 2u | ((g_nm_state[p][side] & DM_JOYMOUSE_ON_SURFACE) ? 1u : 0u);
+}
+static uint32_t nmouse_type_set(uint64_t h) {
+    int side, p = nmouse_of(h, &side);
+    if (p >= 0) return side ? 2u : 1u;
+    pthread_mutex_lock(&g_jcms_mu);
+    uint32_t t = 0;
+    if ((h == NMOUSE_HOST_HANDLE || h == 0) && vm_active_locked()) t = 4u;
+    else if (h == 0 && nmouse_phys_first_locked(&p, &side)) t = side ? 2u : 1u;
+    pthread_mutex_unlock(&g_jcms_mu);
+    return t;
+}
+static int nmouse_fill_states(NmouseState *out, int n, uint64_t h) {
+    int side, p = nmouse_of(h, &side);
+    uint64_t now = now_ns();
+    pthread_mutex_lock(&g_jcms_mu);
+    if (p >= 0) {
+        nmouse_fill_phys_locked(&out[0], p, side);
+        pthread_mutex_unlock(&g_jcms_mu);
+        return 1;
+    }
+    if ((h == NMOUSE_HOST_HANDLE || h == 0) && vm_active_locked()) {
+        int64_t have = g_vm_n;
+        int k = 0;
+        for (; k < n && k < NMOUSE_RING && have - k > 0; k++) out[k] = g_vm_ring[(have - 1 - k) % NMOUSE_RING];
+        if (k > 0) out[0].attributes = 2u | (vm_on_surface_locked(now) ? 1u : 0u);
+        pthread_mutex_unlock(&g_jcms_mu);
+        return k;
+    }
+    if (h == 0 && nmouse_phys_first_locked(&p, &side)) {
+        nmouse_fill_phys_locked(&out[0], p, side);
+        pthread_mutex_unlock(&g_jcms_mu);
+        return 1;
+    }
+    pthread_mutex_unlock(&g_jcms_mu);
+    return 0;
+}
+HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse pointer handles: physical Joy-Con 2 sensors, or virtual host pointer when none are connected", int, h_hid_NmouseHandles, void *out, int n, uint32_t id) {
     // The Joy-Con last used on a surface first, and it stays first while lifted (to press a button): Nintendo Switch 2 Welcome Tour moves its pointer by the first handle only
     uint64_t *o = out; int k = 0;
     for (int pass = 0; pass < 2; pass++)
@@ -1533,48 +1745,110 @@ HLE_FORCE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", "Joy-Con mouse 
             pthread_mutex_lock(&g_jcms_mu); int first = g_nm_last[p] < 0 ? sd == 1 : g_nm_last[p] == sd; pthread_mutex_unlock(&g_jcms_mu);
             if (first == !pass) o[k++] = h;
         }
+    if (k == 0 && o && n > 0 && (id == 0 || id == NPAD_HANDHELD || npad_resolve(id).pad == 0)) {
+        pthread_mutex_lock(&g_jcms_mu);
+        if (vm_active_locked()) o[k++] = NMOUSE_HOST_HANDLE;
+        pthread_mutex_unlock(&g_jcms_mu);
+    }
     if (jcms_log_due(2 + (id & 1))) LOG("hid nmouse: GetNmouseHandles npad %u (up to %d): %d", id, n, k);
     return k; }
 HLE_FORCE("_ZN2nn3hid32SetNmouseButtonConfigJoyLeftJcmsERKNS0_29NmouseButtonConfigJoyLeftJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgL, const void *c) { (void)c; }
 HLE_FORCE("_ZN2nn3hid33SetNmouseButtonConfigJoyRightJcmsERKNS0_30NmouseButtonConfigJoyRightJcmsE", "Joy-Con mouse pointer: no sensor on the host", void, h_hid_NmouseCfgR, const void *c) { (void)c; }
 // SDK 21's forms (Mario Kart World 1.8.0 at boot, by pull request #1116: InitializeNmouse with a pointer type aborted on the hid service). The pointer settings are kept or dropped, with no
 // device to apply them to. The calls on a handle return the SDK's bool (its Result is success: SDK 22.2.0 sdk+0x6d5510 and +0x6d5530): the merged handle 0 above is known, and with no device
-// its pointer takes the settings and reports nothing (no state, no controller); the standard mouse has no handle, as no USB mouse is connected
-HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Joy-Con mouse pointer (with a pointer type): no hid service; no sensor on the host", void, h_hid_NmouseInitT,
-          void *work, uint64_t size, int w, int h, int type) { (void)work; (void)size; (void)type; g_nmouse_range[0] = w; g_nmouse_range[1] = h; atomic_fetch_or(&g_jcms_wanted, 2u); }
-HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Joy-Con mouse pointer range: kept", void, h_hid_NmouseSetRange, int w, int h) { g_nmouse_range[0] = w; g_nmouse_range[1] = h; }
-HLE_FORCE("_ZN2nn3hid22GetNmousePointerRangesEPiS1_", "Joy-Con mouse pointer range: the one set", void, h_hid_NmouseGetRange, int *w, int *h) { *w = g_nmouse_range[0]; *h = g_nmouse_range[1]; }
+// its pointer takes the settings and reports nothing (no state, no controller); the standard mouse handle reports the virtual host pointer once active
+HLE_FORCE("_ZN2nn3hid16InitializeNmouseEPvmiiNS0_17NmousePointerTypeE", "Joy-Con mouse pointer (with a pointer type): no hid service; front ends may feed virtual Nmouse", void, h_hid_NmouseInitT,
+          void *work, uint64_t size, int w, int h, int type) {
+    (void)work; (void)size; (void)type;
+    pthread_mutex_lock(&g_jcms_mu);
+    g_nmouse_range[0] = w; g_nmouse_range[1] = h;
+    pthread_mutex_unlock(&g_jcms_mu);
+    atomic_fetch_or(&g_jcms_wanted, 2u);
+}
+HLE_FORCE("_ZN2nn3hid22SetNmousePointerRangesEii", "Joy-Con mouse pointer range: kept", void, h_hid_NmouseSetRange, int w, int h) {
+    pthread_mutex_lock(&g_jcms_mu); g_nmouse_range[0] = w; g_nmouse_range[1] = h; pthread_mutex_unlock(&g_jcms_mu);
+}
+HLE_FORCE("_ZN2nn3hid22GetNmousePointerRangesEPiS1_", "Joy-Con mouse pointer range: the one set", void, h_hid_NmouseGetRange, int *w, int *h) {
+    pthread_mutex_lock(&g_jcms_mu); if (w) *w = g_nmouse_range[0]; if (h) *h = g_nmouse_range[1]; pthread_mutex_unlock(&g_jcms_mu);
+}
 HLE_FORCE("_ZN2nn3hid28SetNmousePointerMovementAreaEiiii", "Joy-Con mouse pointer area: no device to apply it to", void, h_hid_NmouseArea, int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
 HLE_FORCE("_ZN2nn3hid21RestrictNmousePointerEffff", "Joy-Con mouse pointer restriction: no device to apply it to", void, h_hid_NmouseRestrict, float a, float b, float c, float d) { (void)a; (void)b; (void)c; (void)d; }
-HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "USB mouse buttons: no mouse on the host", void, h_hid_NmouseCfgM, const void *c) { (void)c; }
-HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "USB mouse handle: none (no mouse on the host)", bool, h_hid_NmouseStd, uint64_t *out) { (void)out; return false; }
-HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "mouse pointer on / off: the merged handle and a Joy-Con's take it", bool, h_hid_NmouseEnable, uint64_t h, unsigned on) { (void)on; int sd; return h == 0 || nmouse_of(h, &sd) >= 0; }
-HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "mouse pointer position: a Joy-Con's pointer moves there; the merged handle takes it, with no device", bool, h_hid_NmousePos, uint64_t h, int x, int y) {
-    int side, p = nmouse_of(h, &side);
-    if (jcms_log_due(5)) LOG("hid nmouse: SetNmousePointerPosition %#llx %d,%d (%s)", (unsigned long long)h, x, y, p >= 0 ? "a Joy-Con's" : "no device");
-    if (p < 0) return h == 0;
-    pthread_mutex_lock(&g_jcms_mu); g_nm_pos[p][side][0] = (float)x; g_nm_pos[p][side][1] = (float)y; pthread_mutex_unlock(&g_jcms_mu);
-    return true; }
-// An NmouseState as Nintendo Switch 2 Welcome Tour reads it (main+0x253b2c): 48 bytes, 8 bytes first as in a JcmsState, then the Switch's MouseState fields (sampling number,
-// position, movement, wheel), buttons at 0x28 (left 1, right 2: R / ZR on a right Joy-Con, L / ZL on a left one) and attributes at 0x2c (bit 1 connected, which the game
-// requires; bit 0 here: on a surface)
-typedef struct { int64_t unk0, sampling; int32_t x, y, dx, dy, wheel_x, wheel_y; uint32_t buttons, attributes; } NmouseState;
-_Static_assert(sizeof(NmouseState) == 48, "NmouseState");
-HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "mouse state: a Joy-Con's pointer; none for the merged handle (no device)", bool, h_hid_NmouseState, void *out, uint64_t h) {
-    int side, p = nmouse_of(h, &side);
-    if (p < 0 && jcms_log_due(6)) LOG("hid nmouse: state %#llx: no device", (unsigned long long)h);
-    if (p < 0 || !out) return false;
-    NmouseState st = {0};
-    uint64_t b = atomic_load(&g_joy_btn[p][side]);
-    st.buttons = side ? ((b & DM_BTN_R) ? 1u : 0u) | ((b & DM_BTN_ZR) ? 2u : 0u) : ((b & DM_BTN_L) ? 1u : 0u) | ((b & DM_BTN_ZL) ? 2u : 0u);
+HLE_FORCE("_ZN2nn3hid34SetNmouseButtonConfigStandardMouseERKNS0_31NmouseButtonConfigStandardMouseE", "USB mouse buttons: accepted", void, h_hid_NmouseCfgM, const void *c) { (void)c; }
+HLE_FORCE("_ZN2nn3hid28GetStandardMouseNmouseHandleEPNS0_12NmouseHandleE", "USB mouse handle: virtual host pointer when active and no physical Joy-Con 2 mouse is connected", bool, h_hid_NmouseStd, uint64_t *out) {
     pthread_mutex_lock(&g_jcms_mu);
-    st.sampling = g_jcms_n[p][side]; st.x = (int32_t)lrintf(g_nm_pos[p][side][0]); st.y = (int32_t)lrintf(g_nm_pos[p][side][1]);
-    st.dx = g_nm_d[p][side][0]; st.dy = g_nm_d[p][side][1];
-    st.attributes = 2u | ((g_nm_state[p][side] & DM_JOYMOUSE_ON_SURFACE) ? 1u : 0u);
+    int active = vm_active_locked();
     pthread_mutex_unlock(&g_jcms_mu);
-    memcpy(out, &st, sizeof st);
-    if (jcms_log_due(4)) LOG("hid nmouse: state %#llx: #%lld at %d,%d d %d,%d buttons %u attr %u", (unsigned long long)h, (long long)st.sampling, st.x, st.y, st.dx, st.dy, st.buttons, st.attributes);
-    return true; }
+    if (!active) return false;
+    if (out) *out = NMOUSE_HOST_HANDLE;
+    return true;
+}
+HLE_FORCE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", "mouse pointer on / off: merged, Joy-Con 2, or active virtual host handle", bool, h_hid_NmouseEnable, uint64_t h, unsigned on) {
+    (void)on;
+    if (h == 0) return true;
+    if (h == NMOUSE_HOST_HANDLE) {
+        pthread_mutex_lock(&g_jcms_mu); int active = vm_active_locked(); pthread_mutex_unlock(&g_jcms_mu);
+        return active != 0;
+    }
+    int sd; return nmouse_of(h, &sd) >= 0;
+}
+HLE_FORCE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", "mouse pointer position: moves Joy-Con 2 or virtual host pointer; merged handle takes it", bool, h_hid_NmousePos, uint64_t h, int x, int y) {
+    int side, p = nmouse_of(h, &side);
+    if (jcms_log_due(5)) LOG("hid nmouse: SetNmousePointerPosition %#llx %d,%d (%s)", (unsigned long long)h, x, y, p >= 0 ? "a Joy-Con's" : h == NMOUSE_HOST_HANDLE ? "virtual host" : "merged/none");
+    if (p >= 0) {
+        pthread_mutex_lock(&g_jcms_mu); g_nm_pos[p][side][0] = (float)x; g_nm_pos[p][side][1] = (float)y; pthread_mutex_unlock(&g_jcms_mu);
+        return true;
+    }
+    if (h == NMOUSE_HOST_HANDLE || h == 0) {
+        pthread_mutex_lock(&g_jcms_mu);
+        int active = vm_active_locked();
+        if (active) {
+            int w, hgt; vm_range_locked(&w, &hgt);
+            g_vm_pos[0] = vm_clampf((float)x, 0.f, (float)(w > 1 ? w - 1 : 0));
+            g_vm_pos[1] = vm_clampf((float)y, 0.f, (float)(hgt > 1 ? hgt - 1 : 0));
+        }
+        pthread_mutex_unlock(&g_jcms_mu);
+        return h == 0 || active;
+    }
+    return false;
+}
+HLE_FORCE("_ZN2nn3hid14GetNmouseStateEPNS0_11NmouseStateENS0_12NmouseHandleE", "mouse state: Joy-Con 2 or virtual host pointer", bool, h_hid_NmouseState, void *out, uint64_t h) {
+    if (!out) return false;
+    int side, p = nmouse_of(h, &side);
+    NmouseState st = {0};
+    if (p >= 0) {
+        pthread_mutex_lock(&g_jcms_mu);
+        nmouse_fill_phys_locked(&st, p, side);
+        pthread_mutex_unlock(&g_jcms_mu);
+        memcpy(out, &st, sizeof st);
+        if (jcms_log_due(4)) LOG("hid nmouse: state %#llx: #%lld at %d,%d d %d,%d buttons %u attr %u", (unsigned long long)h, (long long)st.sampling, st.x, st.y, st.dx, st.dy, st.buttons, st.attributes);
+        return true;
+    }
+    if (h == NMOUSE_HOST_HANDLE || h == 0) {
+        uint64_t now = now_ns();
+        pthread_mutex_lock(&g_jcms_mu);
+        int active = vm_active_locked();
+        if (active) {
+            st.sampling = g_vm_n;
+            st.x = (int32_t)lrintf(g_vm_pos[0]);
+            st.y = (int32_t)lrintf(g_vm_pos[1]);
+            st.dx = g_vm_accum_dx;
+            st.dy = g_vm_accum_dy;
+            st.wheel_x = g_vm_accum_wx;
+            st.wheel_y = g_vm_accum_wy;
+            g_vm_accum_dx = g_vm_accum_dy = g_vm_accum_wx = g_vm_accum_wy = 0;
+            st.buttons = g_vm_buttons;
+            st.attributes = 2u | (vm_on_surface_locked(now) ? 1u : 0u);
+        }
+        pthread_mutex_unlock(&g_jcms_mu);
+        if (active) {
+            memcpy(out, &st, sizeof st);
+            if (jcms_log_due(4)) LOG("hid nmouse: virtual state %#llx: #%lld at %d,%d d %d,%d wheel %d,%d buttons %u attr %u", (unsigned long long)h, (long long)st.sampling, st.x, st.y, st.dx, st.dy, st.wheel_x, st.wheel_y, st.buttons, st.attributes);
+            return true;
+        }
+    }
+    if (jcms_log_due(6)) LOG("hid nmouse: state %#llx: no device", (unsigned long long)h);
+    return false;
+}
 HLE_FORCE("_ZN2nn3hid13GetNpadIdTypeEPjNS0_12NmouseHandleE", "mouse's controller: none (no device)", bool, h_hid_NmouseNpad, uint32_t *out, uint64_t h) { (void)out; (void)h; return false; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "six-axis sensor states: every requested entry, newest first",
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }

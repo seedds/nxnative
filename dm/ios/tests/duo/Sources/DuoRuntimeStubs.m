@@ -127,3 +127,7 @@ bool front_ios_hud_enabled_from_saved_choice(void) { return false; }
 void dm_cloud_saves_env(void) {}
 int save_sync_flush(int timeout_ms) { (void)timeout_ms; return 1; }
 int front_web_touch(void) { return 0; }
+int dm_joy_mouse_wanted(void) { return 0; }
+void dm_host_mouse(float nx, float ny, float dx, float dy, int wheel_x, int wheel_y, uint32_t buttons, uint32_t flags) {
+    (void)nx; (void)ny; (void)dx; (void)dy; (void)wheel_x; (void)wheel_y; (void)buttons; (void)flags;
+}

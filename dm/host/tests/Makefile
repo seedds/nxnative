@@ -81,6 +81,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_motion_pro_mac
 	$(B)/t_jc1
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
+	$(B)/t_hid_nmouse
 	$(B)/t_pad_hid
 	$(B)/t_pad_gip
 	$(B)/t_pad_hid_mac
@@ -344,6 +345,12 @@ $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ..
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
+run: $(B)/t_hid_nmouse
+$(B)/t_hid_nmouse: t_hid_nmouse.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../front.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_hid_nmouse.c ../hle_haptics.c ../hle_bigstack.c
+.PHONY: hid-nmouse
+hid-nmouse: $(B)/t_hid_nmouse
+	$(B)/t_hid_nmouse
 $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
 # The default application task role lifts the QoS ceiling for a Mac host without a window.

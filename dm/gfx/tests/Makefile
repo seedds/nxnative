@@ -195,6 +195,8 @@ t_present_history_tsan: t_present_history.c ../nvn/nvn_present_history.h
 .PHONY: present-history-tsan
 present-history-tsan: t_present_history_tsan
 	./t_present_history_tsan
+t_present_written: t_present_written.c ../nvn/nvn_written_presents.h
+	clang -O2 -Wall -Wextra -Werror -o $@ t_present_written.c
 t_thermal: t_thermal.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_thermal.c $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_thermal_tsan: t_thermal.c $(MTL_T_DEP)

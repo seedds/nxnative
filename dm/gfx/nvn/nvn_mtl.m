@@ -41,6 +41,7 @@
 #include "nvn_link_drain.h"
 #include "nvn_link_latch.h"
 #include "nvn_present_history.h"
+#include "nvn_written_presents.h"
 #include "nvn_timestamp.h"
 #include "msl_image.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
@@ -6942,6 +6943,9 @@ typedef struct { uint64_t ser, bytes; uint32_t lv, sl; int idx; uint8_t depth, s
 // Eight color targets therefore need ten records (XC2 uses the full set).
 enum { SD_ATT_MAX = 8 + 2 };
 static sd_att g_sd[SD_ATT_MAX]; static int g_nsd;
+// The stores every texture serial received and what each serial's own previous present saw, so present_now can drop a present
+// that would re-show the same picture (DM_NVN_PRESENT_DRAWN; the mechanism is in nvn_written_presents.h; sd_finish marks stores)
+static nvn_written_presents g_written_presents = NVN_WRITTEN_PRESENTS_INIT;
 static int g_udc = -1;
 // Attachments this pass did not write (depth / stencil test only, color write mask 0, etc.) get their write-back changed to DontCare: the content is already in memory, saving one full write-back.
 // On by default: on Mac, same-process on / off screenshots follow the same distribution as the null control; on A19 Pro, private Depth32F_S8 / RGBA8 read back after DontCare differ in 0 places.
@@ -16121,6 +16125,7 @@ static void sd_finish(void) {
         if (t->depth == 1) [g_enc setDepthStoreAction:sa]; else if (t->depth == 2) [g_enc setStencilStoreAction:sa]; else [g_enc setColorStoreAction:sa atIndex:(NSUInteger)t->idx];
         if (!dead && t->fam_tex) fam_mark_valid((__bridge id<MTLTexture>)t->fam_tex);
         g_sd_n_all++; if (dead) { g_sd_n_dead++; g_sd_dead_bytes += t->bytes; g_bw_store -= t->bytes; if (udc_dead) g_udc_saved_bytes += t->bytes; }
+        if (!dead && t->wrote) nvn_written_stored(&g_written_presents, t->ser);   // this store fills the texture: a present of it carries a new picture
         if (!t->state) t->why = 5;
         PD("Z %llu %s ser=%llu lv%u sl%u %s why=%d by=%s slot=%d", g_stat_pass, t->depth == 1 ? "d" : t->depth == 2 ? "s" : "c", (unsigned long long)t->ser, t->lv, t->sl, dead ? "dontcare" : "store", dead ? 0 : t->why, t->why == 1 && t->wkey ? t->wkey : "-", t->wslot);
         if (udc_on()) PD("U %llu %s ser=%llu lv%u sl%u runtime=%s reason=%s state=%d load=%d", g_stat_pass, t->depth == 1 ? "d" : t->depth == 2 ? "s" : "c", (unsigned long long)t->ser, t->lv, t->sl, t->wrote ? "written" : "unwritten", t->wwhy == 1 ? "image_write" : t->wwhy == 2 ? "color_write_mask" : t->wwhy == 4 ? "depth_write" : t->wwhy == 5 ? "stencil_write" : "none", t->state, t->load);
@@ -21635,6 +21640,18 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
              g_up_total_ns / 1e6, g_bp_first_present / 1e9);
     }
     PD("X ser=%llu", t->serial);
+    // DM_NVN_PRESENT_DRAWN (default off): a present of a window texture no pass stored into since that texture's own previous present would
+    // re-show the same picture on the console, while a Mac present repaints the screen from the texture's stale bytes (NARUTO SHIPPUDEN Ultimate
+    // Ninja STORM 3 Full Burst presents its drawn texture and one a boot clear left black in turn, so every other frame flashed). Drop it: the
+    // screen keeps the last picture, and the present's ticket is retired the way one that could not get a Metal texture is ("not submitted").
+    // The first two presents go through whatever the texture holds, keeping the first-frame residency case below (Super Smash Bros. Ultimate
+    // presents its window texture before its first draw). Only pass stores are counted, so a game that feeds its window by copies or clears
+    // alone must leave the switch off.
+    {
+        static int pw_on = -1; static uint64_t pw_drop;
+        if (pw_on < 0) { const char *e = getenv("DM_NVN_PRESENT_DRAWN"); pw_on = e && atoi(e); if (pw_on) MLOG("DM_NVN_PRESENT_DRAWN=1: presents of a texture no render pass stored into since its previous present are dropped (the screen keeps the last picture)"); }
+        if (pw_on && nvn_written_presented(&g_written_presents, t->serial) && g_present_n > 2) { if (++pw_drop == 1 || pw_drop % 300 == 0) MLOG("present: %llu presents of an unchanged texture dropped, the last picture kept", (unsigned long long)pw_drop); return 0; }
+    }
     id<MTLTexture> src = tex_mtl(t);
     if (!src) { RED_ONCE(8, "present texture could not get an MTLTexture"); return 0; }
     // The picture's shape for the front end's layout (front.h front_picture_shape): reported when its width / height changes by more than 0.1 %, not on a size change of the same

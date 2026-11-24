@@ -14,6 +14,7 @@ At a 1280×720 drawable, the later 300-frame windows ending at frames 15,300–1
 | `sys_resource 0x1400000` | The NPDM declares 20 MiB of system resource memory. |
 | `depth_mode zero` | The game selects this depth mode at startup. The profile gives offline pipeline bases the same mode. |
 | `tex_dyn_slots on` | Vertex shaders that choose buffer textures at run time read their handles from the NVN driver tables. The existing [dynamic slot binding](../../../docs/reference/shaders.md#texture-slots-picked-at-run-time) lets those shaders index the bound textures. |
+| `fps_target 60` | The shared [Unreal frame-rate controls](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name) set `rhi.SyncInterval` to one vsync and raise the game's positive `t.MaxFPS` limit to 60. The rewriter finds both variables by name. |
 
 The values and exact build IDs are in [game.tsv](game.tsv).
 
@@ -26,6 +27,8 @@ The values and exact build IDs are in [game.tsv](game.tsv).
 ## On the Mac
 
 Use the run command printed by `--platform mac`. If the title reports a transmission error, close the notice, select Yes to continue offline and close the offline confirmation. Press A on the title to reach the publisher's EULA on the first run.
+
+On 2026-11-25, the user replayed the same offline match with `DM_FPS_TARGET=60` and reported normal player movement and match-clock speed. On the Apple M6 at 2560×1440, the 300-frame windows ending at frames 5,400–6,300 ran at 59.8–59.9 fps (median 16.71–16.74 ms). A later 247 ms frame spent 231 ms loading new pipelines and shader libraries. Select 30 fps in the launcher's Frame rate setting, or use `DM_FPS_TARGET=0` to restore the game's own timing controls.
 
 ## Open
 

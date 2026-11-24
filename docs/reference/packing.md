@@ -425,6 +425,14 @@
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
 - **Check:** `test_shader_cache.py` (`Generations`: copying on read, newest generation first, other chains' shaders never hit, dropping older files with the other target kept, a folder as the read-only cache), `test_nsp_mac.py` (`test_older_compile_caches_go_with_a_build`).
 
+### A partial Mac build creates a database at the cache directory path
+
+- **Symptom:** a fresh `--seen-shaders` build succeeds. A later full build stops with `NotADirectoryError` while removing `shader/cache/b-<chain>.img`.
+- **Cause:** the packer passes `shader/cache` as `DMSH_CAS` on partial builds. When that path is absent, `dmsh_build.py` interprets it as the name of a SQLite file.
+- **Fix:** `build_shaders` creates the cache directory before calling the compiler. For an existing misplaced database, it folds in the SQLite write-ahead log and moves the file to `shader/cache/cas.db`, where the compiler can reuse its Metal compilations.
+- **Found on:** [Mortal Kombat 11](../../dm/games/0100F2200C984000/README.md), switching from its first partial Mac build to a full one. The bug can affect any fresh NVN partial build.
+- **Check:** `test_nsp_mac_app.py` (`SeenShaders`) checks the directory before a partial compile and retrieves a saved Metal compile after the full build recovers a misplaced database.
+
 ### A new compile cache on an exFAT drive is "a readonly database"
 
 - **Symptom:** the first build of a game whose build folder is on an exFAT drive stops at its shader step, before any shader is compiled: `dmsh_build.py` fails opening `shader/cache/cas.db` with `sqlite3.OperationalError: attempt to write a readonly database` at `PRAGMA journal_mode=WAL` in `shader_cache.Store._open`, and the step ends with `[RED] own_compilers.py exit code 1`. Running the build again goes past it, as the failed run has left the file 16 KB long.

@@ -53,7 +53,21 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 bool converted = table == TableHandle.Set && TryConvertBindless(block, resourceManager, gpuAccessor, texOp);
                 if (!converted && texOp.Inst == Instruction.ImageAtomic && texOp.Flags.HasFlag(TextureFlags.AtomicMetal))
                 {
-                    throw new NotSupportedException("Metal image atomics require a statically resolved image handle.");
+                    // nxnative: an image atomic whose handle the shader does not take from c2 or a uniform buffer indexes the image pool as other dynamic images do
+                    // (GenerateBindlessAccess). Its format is then not in a descriptor the build can read: Metal runs texture atomics only on R32 integer textures, which the
+                    // host makes with atomic usage (nvn_mtl.m img_usage), so the pool is read as R32Uint. Cyberpunk 2077's engine compute shaders load the handle from a
+                    // table at an address the game pushed into block 7 (Load.StorageBuffer at +0x10): 14 of them failed here, among those its loading screen dispatches
+                    if (texOp.Format == TextureFormat.Unknown)
+                    {
+                        texOp.Format = TextureFormat.R32Uint;
+                    }
+
+                    if (!GenerateBindlessAccess(block, resourceManager, gpuAccessor, texOp, node))
+                    {
+                        throw new NotSupportedException("Metal image atomics require a statically resolved image handle.");
+                    }
+
+                    continue;
                 }
 
                 if (!converted &&

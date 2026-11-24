@@ -109,6 +109,35 @@ class PoolArrays(unittest.TestCase):
         cout = NS['pool_arrays'](callable_msl)
         self.assertIn('dm_buffer_write(cp_ib_cb0_40000000_, min(uint(idx), cp_ib_cb0_40000000_->n), uint4(1u, 2u, 3u, 4u), idx)', cout)
 
+    def test_buffer_image_pool_atomic(self):
+        # Cyberpunk 2077's engine compute shaders: an atomic add on a buffer image whose handle the shader loads from memory. The coordinate moves by the element's lead,
+        # as a read's does, and the MSL compiles at the chain's MSL version
+        msl = ('#include <metal_stdlib>\nusing namespace metal;\n'
+               'template<typename T, access a> inline void spvImageFence(texture_buffer<T, a> img) { img.fence(); }\n'
+               'struct spvDescriptorSetBuffer0\n{\n'
+               '    array<texture_buffer<uint, access::read_write>, 1048576> cp_ib_cb0_40000000_r32ui [[id(0)]];\n'
+               '    device uint* out [[id(1048576)]];\n'
+               '};\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]], uint i [[thread_position_in_grid]])\n{\n'
+               '    uint c = i * 2u;\n'
+               '    uint r = d.cp_ib_cb0_40000000_r32ui[int(i)].atomic_fetch_add(uint(c), uint(1)).x;\n'
+               '    spvImageFence(d.cp_ib_cb0_40000000_r32ui[i]);\n'
+               '    d.out[i] = r;\n'
+               '}\n')
+        out = NS['pool_arrays'](msl)
+        self.assertIn('(&d.cp_ib_cb0_40000000_r32ui->e[0])[min(uint(int(i)), d.cp_ib_cb0_40000000_r32ui->n)].atomic_fetch_add('
+                      'dm_buffer_coord(d.cp_ib_cb0_40000000_r32ui, min(uint(int(i)), d.cp_ib_cb0_40000000_r32ui->n), uint(c)), uint(1)).x', out)
+        self.assertIn('spvImageFence((&d.cp_ib_cb0_40000000_r32ui->e[0])[min(uint(i), d.cp_ib_cb0_40000000_r32ui->n)]);', out)   # a fence keeps the element as it is
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': [], 'cbufs': []})}
+        self.assertEqual(b['cp_ib_cb0_40000000_r32ui']['kind'], abi.KIND_IMG_POOL)
+        if platform.system() != 'Darwin' or not shutil.which('xcrun'):
+            return
+        with tempfile.TemporaryDirectory(prefix='dm-pool-atomic-') as temporary:
+            src = Path(temporary) / 'atomic.metal'; src.write_text(out)
+            r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal3.2', '-c', str(src), '-o', str(src.with_suffix('.air'))], capture_output=True, text=True)
+            if 'unable to find utility' in r.stderr: return
+            self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_mark_tests_with_a_plain_load(self):
         # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic
         mark = NS['POOL_MARK']

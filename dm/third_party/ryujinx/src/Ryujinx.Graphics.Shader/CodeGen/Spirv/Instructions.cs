@@ -733,12 +733,14 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             {
                 throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
             }
-            if (bounded && (declaration.IsIndexed ||
+            // nxnative: an indexed declaration is an image pool array (BindlessElimination.GenerateBindlessAccess): SPIRV-Cross writes the atomic on the indexed element, and
+            // dmsh_reflect.pool_arrays moves a buffer image's coordinate by the element's lead as it does for its reads and writes
+            if (bounded && (
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
                 (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
-                throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
+                throw new NotSupportedException("Metal image atomics support 32-bit buffer/2D/2D-array/3D images only.");
             }
 
             SpvInstruction resultType = context.GetType(componentType);

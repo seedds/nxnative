@@ -210,7 +210,7 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
 """
 
 def _buffer_pool_operation(src, start, base, index):
-    call = re.match(r'\.(read|write|get_width)\(', src[start:])
+    call = re.match(r'\.(read|write|get_width|atomic_\w+)\(', src[start:])
     if not call: raise ValueError(f'{base}: unsupported BUFFER table operation')
     first, depth, split = start + call.end(), 1, []
     end = first
@@ -223,6 +223,10 @@ def _buffer_pool_operation(src, start, base, index):
         out = f'dm_buffer_read({base}, {index}, {src[first:end - 1]})'
     elif call[1] == 'get_width':
         out = f'dm_buffer_width({base}, {index})'
+    elif call[1].startswith('atomic_'):   # a texture atomic (MSL 3.1): its first argument is the coordinate, moved by the element's lead as a read's or a write's is
+        if not split: raise ValueError(f'{base}: unsupported BUFFER atomic arguments')
+        coord, rest = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
+        out = f'(&{base}->e[0])[{index}].{call[1]}(dm_buffer_coord({base}, {index}, {coord}), {rest})'
     else:
         if len(split) != 1: raise ValueError(f'{base}: unsupported BUFFER write arguments')
         val, coord = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
@@ -347,6 +351,12 @@ template<typename P, typename V> static inline __attribute__((always_inline)) vo
     uint m = c + b;
     (&p->e[0])[i].write(v, m < b ? c : m);
 }
+template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_coord(constant P* p, uint i, uint c)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    uint m = c + b;
+    return m < b ? c : m;
+}
 template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_width(constant P* p, uint i)
 {
     uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
@@ -426,13 +436,14 @@ def pool_arrays(src):
             if end >= len(src): raise ValueError(f'{name}: unbalanced BUFFER index')
             depth += {'[': 1, ']': -1}.get(src[end], 0); end += 1
         index = src[first:end - 1]
+        if src.startswith(')', end) and src[:access.start()].endswith('spvImageFence('): continue   # a fence on the element (before a read of what this thread wrote): no coordinate to move
         end, replacement = _buffer_pool_operation(src, end, base, index)
         src = src[:access.start()] + replacement + src[end:]
     # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
     # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
     # a test before it would get wrong (then it stays late, and only costs the shading)
     own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
-    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|\.atomic_\w+\(|^\s*device\s', own, re.M):
         src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 

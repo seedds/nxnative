@@ -1102,6 +1102,20 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 }
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
+// ⌘⇧H shows or hides Apple's performance HUD (DM_METAL_HUD=1) while the game runs. It runs the Metal HUD menu's own Enable HUD item, which libMTLHud adds to the menu bar
+// once the HUD is loaded: its ⌘F9 shortcut carries the Globe modifier, which AppKit honours only on system menu items, so it never fired here. Setting the layer's
+// developerHUDProperties instead does not work: on macOS 27 any value set there turns the HUD off for the rest of the run, and mode=default kept it from being hidden
+// (rendering.md, Metal HUD stays visible after Hide HUD). Without DM_METAL_HUD=1 the HUD library is not loaded, so there is nothing to toggle: the log says so
+@interface DmHudToggle : NSObject @end
+@implementation DmHudToggle
+- (void)toggleHud:(id)sender {
+    (void)sender;
+    for (NSMenuItem *top in NSApp.mainMenu.itemArray) for (NSMenuItem *it in top.submenu.itemArray)
+        if (it.action == NSSelectorFromString(@"toggleEnabled:") && it.target) { [top.submenu performActionForItemAtIndex:[top.submenu indexOfItem:it]]; LOG("front end: Metal performance HUD toggled (⌘⇧H)"); return; }
+    LOG("front end: no Metal performance HUD to toggle (⌘⇧H): start the game with DM_METAL_HUD=1");
+}
+@end
+static DmHudToggle *g_hud_toggle;   // NSMenuItem keeps its target unretained
 
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
@@ -1799,6 +1813,9 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        g_hud_toggle = [DmHudToggle new];
+        NSMenuItem *hud = [wm addItemWithTitle:@"Show or Hide Performance HUD" action:@selector(toggleHud:) keyEquivalent:@"h"];
+        hud.target = g_hud_toggle; hud.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;   // ⌘⇧H (⌘H alone hides the app)
         NSApp.mainMenu = bar;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         if (fs && strcmp(fs, "0")) {

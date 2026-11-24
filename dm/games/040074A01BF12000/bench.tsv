@@ -1,0 +1,5 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS (seconds or f<frame>), window start and length (s), description.
+# checkpoint: a save at a checkpoint in a busy view (26,200 draws a frame, translation-bound: about 26 ms of replay CPU a frame on an M1 Max, 29 fps, 2026-11-20).
+# The save is kept outside the repo (the player's own): pass --save <folder>. Recorded with DM_REC: two presses through the title menu, then standing still.
+# The scene is loaded by about 36 s from host start and steady from about 60 s. Pass the player's settings: --env DM_OPMODE=1 --env DM_GFX_SCALE=1 --env DM_UPSCALER=metalfx
+checkpoint	f1059:A~f7,f1105:A~f4	70	20	Continue the save from the title menu; stand still at the checkpoint

@@ -36,3 +36,14 @@ sys_resource	0x0
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shader/=shader /Effect/=effect /UI/=layout
 shader_note	Donkey Kong Bananza shaders
+
+# ---- Graphics ----
+# Draw passes ordered by the game's own barriers (nvn_mtl.m barrier_game): with the default full barrier every one of the ~120 draw passes a frame waited for all earlier GPU work,
+# so the ~70 small post-processing passes at the frame's end ran one after another. 2026-11-23, M1 Max, checkpoint route at ~26,200 draws: frame 21.28 -> 20.26 ms (47 -> 49 fps),
+# GPU tail after translation 5.2 -> 4.2 ms; screen-recording flicker check and 90 s screenshot unchanged. DM_NVN_BARRIER=full restores the full barriers
+draw_barriers	game
+# At most 1 split of one long render pass while the GPU waits (nvn_mtl.m pass_split_try; the default is 2): each split stores and loads the G-buffer. M1 Max, checkpoint route
+# (~26,200 draws, 2 runs each). 2026-11-23, with ~16 ms of translation: limit 6 18.56 ms a frame, 4 18.30-18.41 (p95 20.9 -> 19.8, GPU 12.05 -> 11.46 ms), none 19.41.
+# 2026-11-24, with ~9.5 ms of translation: limit 4 GPU p50 11.36 ms / frame p99 18.49, 2 11.45 / 17.54, 1 11.05 / 18.11, none 11.01 / 20.54: one split starts the GPU early enough.
+# DM_NVN_PASS_SPLIT_MAX=<n> overrides
+pass_split_max	1

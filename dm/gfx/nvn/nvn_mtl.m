@@ -1033,7 +1033,7 @@ static void want_note(want_list *w, const char *key) {
     pthread_mutex_lock(&w->mu);
     if (!w->loaded) {
         FILE *f = fopen(path, "r"); char line[64]; uint64_t v;
-        if (f) { while (fgets(line, sizeof line, f)) { size_t l = strcspn(line, "\r\n"); w->torn = !line[l]; if (l == 16 && line[l] && want_hex(line, &v)) want_add(w, v); } fclose(f); }
+        if (f) { while (fgets(line, sizeof line, f)) { size_t l = strcspn(line, "\r\n"); w->torn = !line[l]; if (l == 16 && line[l] && want_hex(line, &v)) want_add(w, v); } fclose(f); }   // NOLINT(clang-analyzer-unix.BlockInCriticalSection): a one-time load under the list's lock, which a note needs before it can tell a key is new
         w->loaded = 1;
     }
     if (want_add(w, k)) {

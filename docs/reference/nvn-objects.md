@@ -1118,7 +1118,7 @@ Games read this count as a position in their own command memory and size their h
 - **Symptom:** Assassin's Creed III Remastered's launcher exits on `Break#1 reason=0` in `NvnDevice::Init` (launcher NRO +0xd744) just after the host reports API 53.313.
 - **Cause:** the launcher compares the minor version for equality with 209. Its SDK 5.4.0 build (`26ffb122262ca25e4c016c0af2f92a29`) reports 53.209 in its own device-info switch (SDK +0x3a2ab0).
 - **Fix:** for older SDKs, `dm_sdk_nvn1_minor` reads the minor from the SDK's device-info jump table when its dispatch and both version cases match the observed instruction layout. Unrecognized layouts keep 53.313. The host reports the version without executing the SDK's NVN driver.
-- **Found on:** Assassin's Creed III Remastered 1.0.0. The launcher passed the assertion with 53.209 and displayed the game selector on Mac.
+- **Found on:** [Assassin's Creed III Remastered](../../dm/games/01007F600B134000/README.md) 1.0.0. The launcher passed the assertion with 53.209 and displayed the game selector on Mac.
 
 ### Newest GPU code version reported by the driver
 

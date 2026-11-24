@@ -343,6 +343,50 @@ class AddressRegions(unittest.TestCase):
 
     def test_no_table(self):
         self.assertEqual(pg.region_findings('', 0x118000000), [])
+        self.assertEqual(pg.region_verdict('', 0x20000000, mac_only=True), ([], False))
+
+    def test_a_mac_only_build_of_regions_that_fit_the_mac(self):   # issue #2860: Minecraft Dungeons' row, past the 0.50 GB iPhone layout and inside the Mac's 64 GB
+        row = f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x185a8e0\t{0x14800000:#x}\t0\t{0x920000000:#x}\t0x2010\n'
+        t = self.HEAD + row
+        ios, ios_mac = pg.region_verdict(t, 0x20000000, self.SYMS)
+        self.assertTrue(ios[-1][0]); self.assertFalse(ios_mac)   # for an iPhone it stays red
+        mac, mac_stamp = pg.region_verdict(t, 0x20000000, self.SYMS, mac_only=True)
+        self.assertTrue(mac_stamp); self.assertFalse(any(red for red, _ in mac), mac)
+        self.assertEqual(mac, pg.region_findings(t, 0x20000000, self.SYMS, mac_only=True))
+        self.assertEqual(mac[:-1], ios[:-1])   # per-region detail (size, API, caller) stays intact
+        self.assertIn("within this Mac-only build's 64.00 GB alias region", mac[-1][1])
+        self.assertIn("past the profile's 0.50 GB iPhone layout", mac[-1][1])
+        self.assertIn('a build for an iPhone checks again', mac[-1][1])
+        self.assertNotIn('fixed offsets', mac[-1][1])   # direct Mac-only verdict, not a rewritten iPhone error
+        sw2, sw2_stamp = pg.region_verdict(t.replace('0x1000000000', '0x2000000000'), 0x20000000, self.SYMS, mac_only=True)
+        self.assertTrue(sw2_stamp); self.assertFalse(any(red for red, _ in sw2), sw2)
+        self.assertIn("within this Mac-only build's 128.00 GB alias region", sw2[-1][1])   # the size the run had: a Switch 2 game's
+
+    def test_a_mac_only_build_reports_early_stop_and_over_limit(self):
+        row = f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x185a8e0\t{0x14800000:#x}\t0\t{0x920000000:#x}\t0x2010\n'
+        t = self.HEAD + row
+        early, mac_stamp = pg.region_verdict(t, 0x20000000, self.SYMS, mac_only=True, stopped='the host stopped before the end of the check window (exit 1)')
+        self.assertTrue(mac_stamp); self.assertTrue(early[-1][0], early)
+        self.assertIn('the host stopped before the end of the check window (exit 1)', early[-1][1])
+        self.assertIn('a refused request leaves no row in the table', early[-1][1])
+        self.assertNotIn('in its first 15 s in nnMain', early[-1][1])
+        self.assertNotIn('fixed offsets', early[-1][1])
+
+        over = self.HEAD + f'{0x7000000:#x}\t{64 << 30:#x}\tmain+0x10\t0\t-\t-\t0x2010\n'   # reaches past the 64 GB the run had
+        mac_over, mac_stamp = pg.region_verdict(over, 0x20000000, self.SYMS, mac_only=True)
+        self.assertTrue(mac_stamp); self.assertTrue(mac_over[-1][0], mac_over)
+        self.assertIn("past this Mac-only build's 64.00 GB alias region", mac_over[-1][1])
+        mac_over_early, _ = pg.region_verdict(over, 0x20000000, self.SYMS, mac_only=True, stopped='the host stopped before nnMain (exit 1)')
+        self.assertTrue(mac_over_early[-1][0]); self.assertIn('the host stopped before nnMain (exit 1)', mac_over_early[-1][1])
+
+        fits = self.HEAD + '0x4000000\t0x100000000\tmain+0x10\t0x60000000\t0\t0x100000000\t0x1010\n'
+        clean, mac_stamp = pg.region_verdict(fits, 0x118000000, self.SYMS, mac_only=True)
+        self.assertFalse(mac_stamp); self.assertFalse(any(red for red, _ in clean))   # fits the iPhone too: shared verdict and stamp
+
+        unnamed = '# offset\tsize\twho\tmapped\tfirst opened\tend\tvia\n' + row
+        unk, mac_stamp = pg.region_verdict(unnamed, 0x20000000, self.SYMS, mac_only=True)
+        self.assertTrue(mac_stamp); self.assertTrue(unk[-1][0], unk)
+        self.assertIn("did not name this Mac-only build's alias region", unk[-1][1])
 
 
 class Ue3OodlePackages(unittest.TestCase):

@@ -524,17 +524,27 @@ def stdalloc_cap_needed(rows, alias):   # the stdalloc_cap the regions need (the
     return min(caps) if caps else None
 
 
-def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
-    """[(red, text)] from the host's address region table (DM_REGIONS, hle_svc.c "Address regions") of a run with a Switch-sized alias region, against the profile's alias
+def table_alias(table):   # the alias region the run had, from the first line of its table (hle_svc.c "# alias region <size>; ..."); 0 when it does not say
+    m = re.match(r'# alias region (0x[0-9a-fA-F]+);', table)
+    return int(m.group(1), 16) if m else 0
+
+
+def region_verdict(table, alias, sdk_syms=None, secs=15, cap=0, mac_only=False, stopped=None):
+    """([(red, text)], mac_verdict) from the host's address region table (DM_REGIONS, hle_svc.c "Address regions") of a run with a Switch-sized alias region, against the profile's alias
     region (the layout an iPhone runs): where the regions reach, and for each of 256 MB or more where the request returns to in the game (the first return address outside the
     sdk: the function that asked, or its caller when it tail-called the SDK API), through which SDK API (sdk_syms: the sdk's nso_syms.defined) and how much of it the game used.
     The run covers the game's first secs seconds in nnMain: what it takes later in play is not in the table, so a reach within the alias region is a lower bound. Where a region stands depends on who lays it out, not on where it is used (Pokémon Legends: Z-A's StandardAllocator puts its 3.15 GB
     startup block at the top of its region). One the SDK's StandardAllocator lays out the host makes fit at run time (hle_svc.c "StandardAllocator's address space": what the alias
     region has room for, less 256 MB for the regions made after it); when those need more, the profile key stdalloc_cap (cap: the profile's, 0 when it sets none) sets the size,
     which this computes from them (stdalloc_room; Absolum: its .NET garbage collector's region). One the game's own allocator takes with nn::os::AllocateAddressRegion works
-    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook)"""
+    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook).
+    mac_only (a build that makes no iPhone app): when the regions pass the iPhone layout, judge them directly against the alias region the Mac run actually had (table_alias:
+    64 GB for Switch 1, 128 GB for Switch 2; Minecraft Dungeons: 37 GB through nn::os::AllocateAddressRegion, GitHub issue #2860). A boot that stopped early or never reached
+    nnMain (stopped: reason string) stays red with that reason, because a refused request leaves no row in the table; a reach past the run's alias region or a table that does
+    not name its size stays red too. mac_verdict is True whenever the verdict depended on mac_only (so an iPhone build must check again); a clean check that fits the iPhone
+    layout too returns mac_verdict=False so its stamp answers for both"""
     rows = region_rows(table, sdk_syms)
-    if not rows: return []
+    if not rows: return [], False
     gb = lambda n: f'{n / 2**30:.2f} GB'
     out, red, own = [], [], []
     for r in sorted((r for r in rows if r['size'] >= 0x10000000), key=lambda r: r['off']):
@@ -559,10 +569,26 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
     where = f'in its first {secs} s in nnMain the game\'s regions reach alias +{gb(reach)}'
     capped = any(r['api'] and 'StandardAllocator' in r['api'] and r['off'] + r['size'] > alias for r in rows)
     if not red and reach > alias and not capped: red.append('no single region is too big, but together they need more room than the alias region has')
+    if red and mac_only:
+        run_alias = table_alias(table)
+        if not run_alias:
+            out.append((True, f'{where}, past the profile\'s {gb(alias)} alias region, the iPhone layout (the region table did not name this Mac-only build\'s alias region): ' + '; '.join(red) + ' (docs/reference/memory.md, Virtual address memory and the alias region)'))
+        elif reach > run_alias:
+            what = f'the game\'s regions reach alias +{gb(reach)}, past this Mac-only build\'s {gb(run_alias)} alias region, and {stopped}' if stopped else f'{where}, past this Mac-only build\'s {gb(run_alias)} alias region'
+            out.append((True, f'{what} (docs/reference/memory.md, The Mac\'s alias region is the Switch\'s 64 GB)'))
+        elif stopped:
+            out.append((True, f'the game\'s regions reach alias +{gb(reach)}, within this Mac-only build\'s {gb(run_alias)} alias region, but {stopped}: a refused request leaves no row in the table (past the profile\'s {gb(alias)} iPhone layout; a build for an iPhone checks again)'))
+        else:
+            out.append((False, f'{where}, within this Mac-only build\'s {gb(run_alias)} alias region (what it takes later in play is not measured here; past the profile\'s {gb(alias)} iPhone layout; a build for an iPhone checks again)'))
+        return out, True
     if red: out.append((True, f'{where}, past the profile\'s {gb(alias)} alias region, the iPhone layout: ' + '; '.join(red) + ' (docs/reference/memory.md, Virtual address memory and the alias region)'))
     elif reach > alias: out.append((False, f'{where}, past the profile\'s {gb(alias)} alias region only by StandardAllocator regions, which the host makes fit (what it takes later in play is not measured here)'))
     else: out.append((False, f'{where}, within the profile\'s {gb(alias)} alias region (what it takes later in play is not measured here)'))
-    return out
+    return out, False
+
+
+def region_findings(table, alias, sdk_syms=None, secs=15, cap=0, mac_only=False, stopped=None):
+    return region_verdict(table, alias, sdk_syms, secs, cap, mac_only=mac_only, stopped=stopped)[0]
 
 
 STDALLOC_LATER = 0x10000000   # the room the host leaves after a StandardAllocator region (hle_svc.c STDALLOC_LATER)

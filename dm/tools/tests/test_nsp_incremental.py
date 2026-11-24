@@ -386,6 +386,64 @@ class DeriveProfile(Base):
         self.assertEqual(len(stamps), 1); self.assertTrue(stamps[0].endswith(f'(rewrite {"b" * 12})'))
         self.assertNotIn('\n\n\n', g.table('game.tsv').read_text())
 
+    def test_a_mac_only_stamp_does_not_answer_for_an_ipa(self):   # issue #2860: the Mac-only pack ends ok, early exits report why, and the next build with an IPA still boots the game and reports the regions in red
+        with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x20000000\n')
+        self.derive(); patched = self.tmp / 'work/patched_v65536'; key = patched.with_name(patched.name + '.key')
+        key.parent.mkdir(parents=True); key.write_text('a' * 64 + '\n')
+        logs = self.tmp / 'logs'; logs.mkdir()
+        table = ['# alias region 0x1000000000; offset\tsize\twho\tmapped\tfirst opened\tend\tvia\n' + f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x185a8e0\t{0x14800000:#x}\t0\t{0x920000000:#x}\t0\n']
+        boots = []
+        exits: list[int | None] = [None]   # boot_mac: None, still running when the window ended; otherwise the exit code
+        log_text = ['>>> nnMain\n']
+        def boot(*args): boots.append(1); (logs / 'region_check.log').write_text(log_text[0]); (logs / 'regions.tsv').write_text(table[0]); return exits[0]
+        def check(mac_only):   # main's rule: the check runs unless this build's stamp is there. (what it said, whether the step ended ok), None when it did not run
+            g = game.Game(self.pdir)
+            if nsp.region_checked(g, patched, mac_only): return None
+            said, end = [], mock.Mock()
+            with mock.patch.object(nsp, 'build_mac_host'), mock.patch.object(nsp, 'boot_mac', side_effect=boot), mock.patch.object(nsp, 'say', said.append), mock.patch.object(nsp.PROG, 'end', end):
+                nsp.region_check(REPO, self.ex, patched, self.tmp / 'work', {}, logs, g, mac_only)
+            return said, end.call_args.kwargs['ok']
+        def ran(mac_only):   # a check that must run
+            result = check(mac_only); self.assertIsNotNone(result); assert result is not None
+            return result
+        def stamp(): return next(l for l in (self.pdir / 'game.tsv').read_text().splitlines() if l.startswith('# address regions: '))
+        def clear_stamp(): (self.pdir / 'game.tsv').write_text(''.join(l for l in (self.pdir / 'game.tsv').read_text().splitlines(True) if not l.startswith('# address regions: ')))
+
+        # Early exit or timeout during the check: a refused request leaves no row, so Mac-only stays red with the explicit stop reason and a Mac-only stamp
+        for rc, text, why in ((1, '>>> nnMain\n', 'the host stopped before the end of the check window (exit 1)'),
+                              (1, '', 'the host stopped before nnMain (exit 1)'),
+                              (None, '', 'the host never reached nnMain within the time limit')):
+            with self.subTest(rc=rc, nnmain=bool(text)):
+                clear_stamp(); exits[0] = rc; log_text[0] = text
+                said, ok = ran(True)
+                self.assertFalse(ok)
+                self.assertTrue(any(m.startswith('[RED] address regions:') and why in m for m in said), said)
+                self.assertFalse(any('fixed offsets' in m for m in said), said)
+                self.assertTrue(stamp().endswith(f'(rewrite {"a" * 12}, Mac only)'))
+
+        clear_stamp(); boots.clear(); exits[0] = None; log_text[0] = '>>> nnMain\n'
+        said, ok = ran(True)   # a Mac app that ran through its window: no failure, and no red line
+        self.assertTrue(ok); self.assertFalse([m for m in said if '[RED]' in m])
+        self.assertTrue(any("within this Mac-only build's 64.00 GB alias region" in m for m in said), said)
+        self.assertTrue(stamp().endswith(f'(rewrite {"a" * 12}, Mac only)'))
+        self.assertIsNone(check(True)); self.assertEqual(len(boots), 1)   # the next Mac-only build skips it
+        said, ok = ran(False)   # the same rewrite with an IPA: boots again and is red, as before
+        self.assertEqual(len(boots), 2); self.assertFalse(ok)
+        self.assertTrue(any(m.startswith('[RED] address regions:') and 'the iPhone layout' in m for m in said), said)
+        self.assertFalse(any('Mac-only' in m for m in said))
+        self.assertTrue(stamp().endswith(f'(rewrite {"a" * 12})'))
+        self.assertEqual(sum(l.startswith('# address regions: ') for l in (self.pdir / 'game.tsv').read_text().splitlines()), 1)
+        self.assertIsNone(check(False)); self.assertIsNone(check(True)); self.assertEqual(len(boots), 2)   # its verdict answers for either build
+
+        key.write_text('b' * 64 + '\n'); table[0] = table[0].split('\n')[0] + '\n0x4000000\t0x1000000\tmain+0x10\t0\t-\t-\t0\n'   # a new rewrite whose regions fit the iPhone too
+        said, ok = ran(True)
+        self.assertTrue(ok); self.assertTrue(stamp().endswith(f'(rewrite {"b" * 12})'))   # verdict holds for an iPhone too
+        self.assertIsNone(check(False)); self.assertEqual(len(boots), 3)
+
+    def test_main_tells_the_region_check_the_builds_target(self):   # the stamp and the verdict above depend on it
+        text = (Path(REPO) / 'scripts/build_ipa_from_nsp.py').read_text()
+        self.assertIn('not region_checked(g, patched, mac)', text); self.assertIn('g = region_check(repo, game, patched, work, env, logs, g, mac)', text)
+
     def test_region_check_sets_stdalloc_cap(self):   # set when the regions need it, worked out again by a later check, never over a value set by hand
         with (self.src / 'game.tsv').open('a') as f: f.write('mem_alias\t0x118000000\n')
         self.derive(); patched = self.tmp / 'work/patched_v65536'; key = patched.with_name(patched.name + '.key')

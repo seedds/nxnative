@@ -281,6 +281,15 @@
 - **Found on:** [Tears of the Kingdom](../../dm/games/0100F2C0115B6000/README.md#found-on-this-game), while profiling the shader split.
 - **Check:** `test_split_magics.py` splits an image with a renamed zip, an eight-byte EA signature and concatenated zstd frames with an empty `PATH`. `test_easf.py` covers EA's version keys and DLC routing.
 
+### The shader split takes over a minute on a RomFS of Yaz0 files
+
+- **Symptom:** the NSP script's `shader split` step takes 76 to 79 s for Breath of the Wild on an M5 Pro, every core busy (about 980 s of CPU).
+- **Cause:** 31,304 of the RomFS's 41,062 files are Yaz0 (8.0 GB stored, 15.7 GB decoded), and `yaz0()` decoded them one item at a time in Python, about 34 MB/s a core: 911 of the workers' 1,051 CPU seconds. Four in five items are literals, so the time went to interpreter steps, not to copies.
+- **Fix:** once 0x1000 bytes are out, `yaz0()` goes through whole groups in batches, as many as can neither read past the stream nor pass the size in its header. A 256-entry table gives each group header's literal runs, so a run is one slice and a `0xff` group one 8-byte slice; another gives a back-reference's length and distance from its first byte. The start, the end and a damaged stream still go item by item, so the output and both `[RED]` messages stay the same.
+- **Measurement:** against `002724b8` on an 18-core M5 Pro, Python 3.13, `J=18`, three cold scratch splits each: 75.7 to 78.8 s (961 to 987 s CPU) became 41.2 to 44.0 s (521 to 527 s CPU). On one core, 330 of the game's Yaz0 files (304 MB decoded) went from 34.5 to 71.4 MB/s. The package and all six tables were byte-identical in every run.
+- **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game), while profiling the shader split.
+- **Check:** `test_split_yaz0.py` keeps the old decoder as the reference and compares `yaz0()` with it on 7,259 generated streams (random, every length at short distances, sizes ending inside a group or a copy, every truncation, back-references before the start), as bytes, bytearray and memoryview.
+
 ## Diagnostic reports
 
 ### A large log can retain key material after redaction

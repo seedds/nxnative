@@ -302,6 +302,7 @@ General host changes first needed here; each applies to every game:
 - **Resolved in synthetic profiling review checks:** [Periodic GPU profiles close at frame boundaries](../../../docs/reference/rendering.md#periodic-gpu-profiles-close-at-frame-boundaries). No new gameplay or iPhone validation.
 - **Hitch dumps and guest thread names** (`DM_HITCH_DUMP`), **heap probes** (`DM_PROBE_HEAP*`), **autorelease leaks**: [05, Scripted input and thread scheduling](../../../docs/agents/05-debugging.md#scripted-input-and-thread-scheduling), [05, Memory growth](../../../docs/agents/05-debugging.md#memory-growth).
 - **Resolved: type-compatible views read as not resident** (`tex_fit`): [Compatible views made from the texture under a view](../../../docs/reference/rendering.md#compatible-views-made-from-the-texture-under-a-view). Found by replaying the outdoors frame under shader validation; validation is clean after it, and the replayed digest without validation is unchanged.
+- [The shader split takes over a minute on a RomFS of Yaz0 files](../../../docs/reference/packing.md#the-shader-split-takes-over-a-minute-on-a-romfs-of-yaz0-files): the cold split on an M5 Pro (`J=18`, 2026-11-23, against `002724b8`) took 75.7 to 78.8 s before and 41.2 to 44.0 s after, package and tables byte-identical.
 
 ## Open
 

@@ -4028,12 +4028,33 @@ def ungzip(d, label):
     return out
 
 
+YAZ0_RUNS = tuple((len(r[0]), tuple(map(len, r[1:]))) for r in (format(h, '08b').split('0') for h in range(256)))   # a group header's literal runs: before its first back-reference, and after each one
+YAZ0_REF = tuple((b >> 4 and (b >> 4) + 2, ((b & 15) << 8) + 1) for b in range(256))   # a back-reference's first byte: its length (0: one more byte + 0x12) and its distance less the second byte
+
+
 def yaz0(s, label='Yaz0'):
-    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
-    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period"""
+    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0; Breath of the Wild's base RomFS: 31,304 Yaz0 files, 15.7 GB decoded). Pure Python, needs no extra dependency.
+    Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period.
+    Whole groups go in batches: past the first 0x1000 bytes (no distance reaches before the start), g groups that can neither read past the stream (a group reads at most 1 + 8 * 3 bytes) nor pass n
+    (it writes at most 8 * 0x111), each literal run one slice (YAZ0_RUNS). The rest, the start, the end and a damaged stream, goes item by item, with the same output and errors.
+    About 70 MB/s per core on Breath of the Wild's files, twice the item-by-item loop (M5 Pro, Python 3.13; 79% of their items are literals, 31% of their headers 0xff)"""
     n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16
+    end, top = len(s) - 25, n - 0x888
     try:
         while len(out) < n:
+            o = len(out)
+            if o >= 0x1000 and (g := min((end - si) // 25, (top - o) // 0x888) + 1) > 0:
+                for _ in range(g):
+                    k, rest = YAZ0_RUNS[s[si]]; si += 1
+                    if k: out += s[si:si + k]; si += k; o += k
+                    for k in rest:
+                        ln, dist = YAZ0_REF[s[si]]; dist += s[si + 1]
+                        if ln: si += 2
+                        else: ln = s[si + 2] + 0x12; si += 3
+                        st = o - dist; o += ln
+                        out += out[st:st + ln] if dist >= ln else (out[st:] * (ln // dist + 1))[:ln]
+                        if k: out += s[si:si + k]; si += k; o += k
+                continue
             h = s[si]; si += 1
             for _ in range(8):
                 if h & 0x80:

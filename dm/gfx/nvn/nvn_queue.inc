@@ -166,7 +166,8 @@ static void *nq_worker(void *unused) {
                     // The queued GPU write satisfies the wait: the GPU runs this continuation after it (nq_event_write). Ocarina of Time waits on about 25 events a frame; each wait
                     // for the writer's completion left the GPU idle while the host encoded the next submission, 2 ms of its 14.5 ms frame, which its dynamic resolution read as work
                     nq_event_write *queued=predecessor>mtl_completed_fence() ? nq_event_write_of(n->event) : NULL;
-                    if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) break;
+                    // The writer's fence goes with the wait (q->physical below): a fence right behind it waits for the writer
+                    if(queued && queued->exact && nq_predicate(queued->value,n->mode,n->value)) { n->wait_fence=queued->fence; break; }
                     if(predecessor>mtl_completed_fence() || !nq_predicate(atomic_load_explicit((_Atomic uint32_t *)n->event,memory_order_acquire),n->mode,n->value)) {
                         // A queue held more than 5 s by one event wait: what it waits for, since the game's own GPU watchdog acts on the fences behind it (PRAGMATA aborts after 15 s)
                         uint64_t t=now_ns(); if(!n->wait_since) n->wait_since=t;

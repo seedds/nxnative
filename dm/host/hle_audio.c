@@ -161,7 +161,7 @@ static void pull_pcm(aout *a, uint8_t *dst, uint64_t n, int stage_tail) {
 static void pull(aout *a, uint8_t *dst, uint64_t n) { pull_pcm(a, dst, n, 0); }
 
 // The unit's channel count for this output and route. A six-channel output (front-left front-right center LFE back-left back-right) goes as six
-// when the route offers six (dm_audio_output_channels: HDMI or a multichannel interface, or the iOS session on such a route), otherwise as stereo, downmixed in pull_device.
+// when the route offers six (dm_audio_output_channels: a Mac device with a surround speaker layout, or the iOS session on such a route), otherwise as stereo, downmixed in pull_device.
 // Every other output goes as the guest writes it
 static int unit_channels(const aout *a, int route) { return a->sink_pcm || a->ch == 6 ? route : a->ch; }
 // A six-channel output on a stereo unit is downmixed with the audio renderer's default Q15 coefficients (hle_audren.c): Core Audio's own 6 → 2 mapping keeps only
@@ -330,6 +330,42 @@ static int device_out_channels(AudioDeviceID d, char *name, size_t namesz) {
     if (AudioObjectGetPropertyData(d, &pa, 0, NULL, &sz, &f)) return 0;
     return (int)f.mChannelsPerFrame;
 }
+// Whether Core Audio maps 5.1's front pair, center and surround pair (MPEG_5_1_A: L R C LFE Ls Rs; LFE optional so 5.0 stays surround)
+// onto the device's first `channels` outputs via its preferred speaker layout (Audio MIDI Setup, Configure Speakers; HDMI: the sink's).
+// A channel count alone is not surround: an audio interface's many outputs are discrete, usually with stereo monitors on the first two,
+// and asking Core Audio's own ChannelMap covers descriptions, standard tags and bitmaps while agreeing with the AudioUnit's real routing.
+static int device_has_surround(AudioDeviceID d, int channels) {
+    if (d == kAudioObjectUnknown || channels < 5) return 0;
+    AudioObjectPropertyAddress pa = {kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    const UInt32 head = (UInt32)offsetof(AudioChannelLayout, mChannelDescriptions);
+    UInt32 sz = 0;
+    if (AudioObjectGetPropertyDataSize(d, &pa, 0, NULL, &sz) || sz < head) return 0;
+    AudioChannelLayout *l = malloc(sz);
+    if (!l) return 0;
+    int surround = 0;
+    if (!AudioObjectGetPropertyData(d, &pa, 0, NULL, &sz, l) && sz >= head &&
+        (l->mChannelLayoutTag != kAudioChannelLayoutTag_UseChannelDescriptions ||
+         l->mNumberChannelDescriptions <= (sz - head) / sizeof(AudioChannelDescription))) {
+        AudioChannelLayout in = {.mChannelLayoutTag = kAudioChannelLayoutTag_MPEG_5_1_A};
+        const AudioChannelLayout *pair[2] = {&in, l};
+        UInt32 msz = 0;
+        if (!AudioFormatGetPropertyInfo(kAudioFormatProperty_ChannelMap, sizeof pair, pair, &msz) && msz >= sizeof(SInt32)) {
+            SInt32 *map = malloc(msz);
+            if (map && !AudioFormatGetProperty(kAudioFormatProperty_ChannelMap, sizeof pair, pair, &msz, map)) {
+                UInt32 count = msz / (UInt32)sizeof *map;
+                if (count > (UInt32)channels) count = (UInt32)channels;
+                unsigned routed = 0;
+                for (UInt32 i = 0; i < count; i++)
+                    if (map[i] >= 0 && map[i] < 6) routed |= 1u << (unsigned)map[i];
+                // MPEG_5_1_A channels: 0=L 1=R 2=C 3=LFE 4=Ls 5=Rs; LFE (bit 3) is optional for 5.0
+                surround = (routed & 0x37u) == 0x37u;
+            }
+            free(map);
+        }
+    }
+    free(l);
+    return surround;
+}
 #endif
 // The route cache is updated by opens, resume and device listeners, including when no AudioUnit is open.
 // HLE entries already run on the host stack; a separate thread just to read Core Audio is unnecessary.
@@ -357,23 +393,27 @@ static int audio_output_channels(int *moved) {
 #else
     static pthread_once_t listener = PTHREAD_ONCE_INIT; pthread_once(&listener, route_listen);
     AudioDeviceID device = out_device();
-    AudioObjectPropertyAddress pa = {kAudioDevicePropertyStreamFormat, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
     if (device != g_route_device) {
-        if (g_route_device) AudioObjectRemovePropertyListener(g_route_device, &pa, route_device_changed, NULL);
-        if (device) {
-            OSStatus st = AudioObjectAddPropertyListener(device, &pa, route_device_changed, NULL);
-            if (st) LOG("[RED] audio: cannot listen for output channels (status %d)", (int)st);
+        static const AudioObjectPropertySelector watched[] = {kAudioDevicePropertyStreamFormat, kAudioDevicePropertyPreferredChannelLayout};
+        for (size_t i = 0; i < sizeof watched / sizeof *watched; i++) {
+            AudioObjectPropertyAddress pa = {watched[i], kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+            if (g_route_device) AudioObjectRemovePropertyListener(g_route_device, &pa, route_device_changed, NULL);
+            if (device) {
+                OSStatus st = AudioObjectAddPropertyListener(device, &pa, route_device_changed, NULL);
+                if (st && !(i && st == kAudioHardwareUnknownPropertyError))
+                    LOG("[RED] audio: cannot listen for output %s (status %d)", i ? "speaker layout" : "channels", (int)st);
+            }
         }
         device_changed = g_route_device != 0; g_route_device = device;
         if (device_changed) g_route_moved = 1;
     }
     char name[256]; int n = device_out_channels(device, name, sizeof name);
-    int ch = n >= 6 ? 6 : 2;
+    int ch = device_has_surround(device, n) ? 6 : 2;
     if (moved) { *moved = g_route_moved; g_route_moved = 0; }
 #endif
     int old = atomic_exchange(&g_route, ch);
 #if !TARGET_OS_IPHONE
-    if (ch != old || device_changed) LOG("audio output route: \"%s\" has %d channels, the host plays %s", name, n, ch == 6 ? "six (5.1)" : "stereo");
+    if (ch != old || device_changed) LOG("audio output route: \"%s\" has %d channels, the host plays %s", name, n, ch == 6 ? "six (5.1)" : n >= 5 ? "stereo (no 5.1 speaker layout: Audio MIDI Setup, Configure Speakers)" : "stereo");
 #endif
     // Signaling a kernel event takes the guest scheduler lock. Do it off the AudioUnit/registry locks,
     // after the cache is published, so a woken game reads the new count without a lock-order cycle.

@@ -44,6 +44,13 @@ int main(void) { @autoreleasepool {
         pso_key_fill(&key, vs, nil, formats, 0, 0, 1, 0);
         MTLRenderPipelineDescriptor *descriptor = pso_desc(&key, vs, nil, nil, 0);
         descriptor.rasterizationEnabled = NO;
+        // metal-tt (the offline compiler of the IPA's prewarm files) requires offset + size <= stride even under a constant step; the runtime does not check it
+        MTLVertexAttributeDescriptor *va = descriptor.vertexDescriptor.attributes[12];
+        checks++;
+        if (va.bufferIndex != 30 || va.offset + 16 > descriptor.vertexDescriptor.layouts[30].stride) {
+            failed++; fprintf(stderr, "FAIL type %d, mode %d: attribute 12 at buffer %lu offset %lu, slot 30 stride %lu\n", type, mode,
+                              (unsigned long)va.bufferIndex, (unsigned long)va.offset, (unsigned long)descriptor.vertexDescriptor.layouts[30].stride);
+        }
         id<MTLRenderPipelineState> pipeline = [g_dev newRenderPipelineStateWithDescriptor:descriptor error:&error];
         if (!pipeline) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 2; }
         MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];

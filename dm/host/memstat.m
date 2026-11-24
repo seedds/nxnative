@@ -1,4 +1,6 @@
 // Memory accounting: when DM_MEMSTAT=<tsv path> is set, one line is logged per second (common to Mac / iOS).
+//   DM_MEMSTAT_WALK=<N>: run the region walk below every N seconds (default 1); lines between walks repeat the last walk's class columns while the totals (task_info) stay per second (between walks, unattributed reflects the footprint delta since the last walk).
+//   The walk is the costly part: vm_region_recurse_64 over the whole address space (~9.4 M cycles/frame on another core in OoT), every second; setting DM_MEMSTAT_WALK=30 cuts the memstat thread's CPU ~25x while keeping per-second totals.
 //   Totals: phys_footprint (task_info TASK_VM_INFO, which the iOS memory limit is based on), os_proc_available_memory (iOS only), Metal currentAllocatedSize
 //   Breakdown: walk this process's VM regions (vm_region_recurse_64, VM_REGION_SUBMAP_INFO_64), classify by region, and for each class record
 //         virtual = address space size (reserved-only counts too), resident = pages_resident, charged = dirty pages + compressed/swapped-out pages, deduplicated by VM object (≈ the part that goes into phys_footprint)
@@ -10,6 +12,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <TargetConditionals.h>
+#include <limits.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
 #include <stdatomic.h>
@@ -140,30 +143,42 @@ void dm_vm_census(FILE *f) {
     fputc('\n', f);
 }
 
-static void sample(FILE *f, double t, id<MTLDevice> dev) {
-    task_vm_info_data_t vi; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+int dm_memstat_walk_interval(const char *s) {
+    if (!s || s[0] < '0' || s[0] > '9') return 1;
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v < 1 || v > INT_MAX) return 1;
+    return (int)v;
+}
+
+void dm_memstat_sample(FILE *f, double t, id<MTLDevice> dev, int walk) {
+    task_vm_info_data_t vi = {0}; mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
     uint64_t fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &n) == KERN_SUCCESS ? vi.phys_footprint : 0;
     uint64_t avail = 0;
 #if TARGET_OS_IPHONE
     avail = os_proc_available_memory();
 #endif
-    uint64_t virt[NC] = {0}, res[NC] = {0}, bill[NC] = {0};
-    static uint32_t seen[1 << 16]; static uint32_t gen; gen++; if (!gen) { memset(seen, 0, sizeof seen); gen = 1; }   // Objects already counted in this sample (open addressing)
-    vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; vm_size_t pg = vm_page_size;
-    for (;;) {
-        vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
-        if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
-        if (in.is_submap) { depth++; continue; }
-        int c = classify(a, &in);
-        virt[c] += sz; res[c] += (uint64_t)in.pages_resident * pg;
-        if (!in.external_pager) {                             // File pages are reclaimable and do not count toward footprint
-            static uint64_t key[1 << 16];                     // Key = (object id, offset within the object): the pieces of one object split apart by mprotect cover different pages and must not be merged
-            uint64_t k = (uint64_t)in.object_id << 32 ^ (in.offset >> 14);
-            uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 48), dup = 0;
-            while (seen[h] == gen) { if (key[h] == k) { dup = 1; break; } h = (h + 1) & 0xFFFF; }
-            if (!dup) { seen[h] = gen; key[h] = k; bill[c] += ((uint64_t)in.pages_dirtied + in.pages_swapped_out) * pg; }
+    static uint64_t virt[NC], res[NC], bill[NC];   // kept between walks: a line without a walk repeats the last one's classes
+    if (walk) {
+        memset(virt, 0, sizeof virt); memset(res, 0, sizeof res); memset(bill, 0, sizeof bill);
+        static uint32_t seen[1 << 16]; static uint32_t gen; gen++; if (!gen) { memset(seen, 0, sizeof seen); gen = 1; }   // Objects already counted in this sample (open addressing)
+        vm_address_t a = 0; vm_size_t sz; natural_t depth = 0; vm_size_t pg = vm_page_size;
+        for (;;) {
+            vm_region_submap_info_data_64_t in; mach_msg_type_number_t cnt = VM_REGION_SUBMAP_INFO_COUNT_64;
+            if (vm_region_recurse_64(mach_task_self(), &a, &sz, &depth, (vm_region_recurse_info_t)&in, &cnt) != KERN_SUCCESS) break;
+            if (in.is_submap) { depth++; continue; }
+            int c = classify(a, &in);
+            virt[c] += sz; res[c] += (uint64_t)in.pages_resident * pg;
+            if (!in.external_pager) {                             // File pages are reclaimable and do not count toward footprint
+                static uint64_t key[1 << 16];                     // Key = (object id, offset within the object): the pieces of one object split apart by mprotect cover different pages and must not be merged
+                uint64_t k = (uint64_t)in.object_id << 32 ^ (in.offset >> 14);
+                uint32_t h = (uint32_t)((k * 0x9E3779B97F4A7C15ull) >> 48), dup = 0;
+                while (seen[h] == gen) { if (key[h] == k) { dup = 1; break; } h = (h + 1) & 0xFFFF; }
+                if (!dup) { seen[h] = gen; key[h] = k; bill[c] += ((uint64_t)in.pages_dirtied + in.pages_swapped_out) * pg; }
+            }
+            a += sz;
         }
-        a += sz; continue;
     }
     uint64_t sum = 0; for (int c = 0; c < NC; c++) sum += bill[c];
     fprintf(f, "%.0f\t%llu\t%llu\t%llu\t%llu\t%llu\t%lld\t%lld", t, fp >> 20, avail >> 20, (unsigned long long)(dev.currentAllocatedSize >> 20),
@@ -174,28 +189,46 @@ static void sample(FILE *f, double t, id<MTLDevice> dev) {
     fflush(f);
 }
 
-static void *memstat_thread(void *p) {
-    FILE *f = fopen((const char *)p, "w");
-    if (!f) { LOG("memstat: cannot open %s", (const char *)p); return NULL; }
+typedef struct {
+    char *path;
+    int walk_every;
+} memstat_cfg_t;
+
+static void *memstat_thread(void *arg) {
+    memstat_cfg_t *cfg = (memstat_cfg_t *)arg;
+    pthread_setname_np("memstat");   // named, so DM_THRCPU and profiles show its cost
+    FILE *f = fopen(cfg->path, "w");
+    if (!f) { LOG("memstat: cannot open %s", cfg->path); free(cfg->path); free(cfg); return NULL; }
+    LOG("memstat: regions every %d s", cfg->walk_every);
     fprintf(f, "# unit MiB; kernel accounting internal / compressed / graphics ledger / headroom to the limit; class columns = virtual/resident/charged (deduplicated per object); charged total = Σ private charged; unattributed = phys_footprint − charged total\nseconds\tphys_footprint\tavailable\tmetal_alloc\tinternal\tcompressed\tgraphics\theadroom");
     for (int c = 0; c < NC; c++) fprintf(f, "\t%s", k_cls[c]);
     fprintf(f, "\tcharged total\tunattributed\n");
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();   // The same device object as the graphics backend (the system default device singleton)
     uint64_t t0 = now_ns();
     const char *ds = getenv("DM_MEMSTAT_DUMP"); int dump_at = ds ? atoi(ds) : -1;
-    char dp[1100]; snprintf(dp, sizeof dp, "%s.regions", (const char *)p);
-    for (int sec = 0;; sec++) { sample(f, (now_ns() - t0) / 1e9, dev); if (sec == dump_at) dump_regions(dp); sleep(1); }
+    char dp[1100]; snprintf(dp, sizeof dp, "%s.regions", cfg->path);
+    int walk_every = cfg->walk_every;
+    free(cfg->path); free(cfg);
+    for (int sec = 0;; sec++) { dm_memstat_sample(f, (now_ns() - t0) / 1e9, dev, sec % walk_every == 0); if (sec == dump_at) dump_regions(dp); sleep(1); }
     return NULL;
 }
 
 static void memstat_start(void) {
     const char *p = getenv("DM_MEMSTAT");
     if (!p || !*p) return;
-    char *path = strdup(p);
+    char *path = NULL;
 #if TARGET_OS_IPHONE
-    if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
+    if (*p != '/') { size_t n = strlen(getenv("HOME")) + strlen(p) + 16; path = malloc(n); if (path) snprintf(path, n, "%s/Documents/%s", getenv("HOME"), p); }   // Relative name → the container's Documents (the container path is not known before launch)
+    else
 #endif
-    pthread_t th; pthread_create(&th, NULL, memstat_thread, path); pthread_detach(th);
+    path = strdup(p);
+    memstat_cfg_t *cfg = malloc(sizeof *cfg);
+    if (!cfg || !path) { free(path); free(cfg); return; }
+    cfg->path = path;
+    cfg->walk_every = dm_memstat_walk_interval(getenv("DM_MEMSTAT_WALK"));
+    pthread_t th;
+    if (pthread_create(&th, NULL, memstat_thread, cfg) != 0) { free(cfg->path); free(cfg); return; }
+    pthread_detach(th);
 }
 
 // ---------- Per-thread CPU: DM_THRCPU=<tsv path>[,interval in seconds (default 10)] (common to Mac / iOS; on iOS a relative name → the container's Documents) ----------

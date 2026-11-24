@@ -50,9 +50,8 @@
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · CIVBSF (Firaxis, Civilization VI / VII): indexed NVBC / GLSLC or code/control payloads, see civbsf_shaders
-#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in the forge files' Oodle containers and in the loose ShaderDataNVN.bin) and
-#     versions 25 / 31 (Assassin's Creed: The Ezio Collection, control sections each followed by its code area in Oodle Leviathan / Mermaid blocks), decoded by the game's own decoder in the
-#     Mac host, see forge_jobs, forge_shaders and anvil_shaders
+#   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in Oodle containers and loose ShaderDataNVN.bin), versions 25 / 31 (Assassin's
+#     Creed: The Ezio Collection, control sections followed by code areas in Oodle blocks), and version 27 (Assassin's Creed III Remastered, BNSH in LZO1X blocks), see forge_jobs and forge_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
@@ -1373,14 +1372,25 @@ def cpk_jobs(files, parts=64):
         if cur: jobs.append((p, r, tuple(cur)))
     return jobs, {p for p, _, _ in with_head}
 
-def cpk_shaders(path, rel, ents, out):
-    """A range of CPK entries (cpk_jobs), each decoded (CRILAYLA or stored) and scanned like a loose file"""
-    import cpk
+def cpk_shaders(path, rel, ents, out, trees):
+    """Scan CPK entries, including Unity asset bundles, and return their pass pairs and entries needing borrowed trees."""
+    import cpk, unityfs
+    pairs, deferred = set(), []
     for e in ents:
         try: d = cpk.read(path, e)
         except (ValueError, IndexError) as x:   # a compression cpk.py does not decode: the entry is left out, and the split goes on
             print(f'[RED] /{rel}/{e[0]}: {x}; not scanned', flush=True); continue
-        scan_blob(d, f'/{rel}/{e[0]}', out)
+        where = f'/{rel}/{e[0]}'
+        if COMMON is None or not is_unity_asset(d):
+            scan_blob(d, where, out)
+            continue
+        member = []
+        try: pairs |= unity_shaders(d, where, member, trees)
+        except unityfs.NoTree:
+            deferred.append(e)
+            continue
+        out.extend(member)
+    return pairs, deferred
 
 MDB1 = b'MDB1'   # job tag: Media.Vision's MVGL archives (mvgl.py)
 def mvgl_jobs(files, parts=64):
@@ -3422,15 +3432,14 @@ FORGE, FORGE_DATA, ANVIL_CODE = b'scimitar\0', bytes.fromhex('33aafb5799fa0410')
 ANVIL_FORGE = 'Anvil forge'
 
 def forge_entries(f, label):
-    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py): version 28 (Immortals Fenyx Rising) or versions 25 / 31 (The Ezio Collection)."""
+    """The entries of a Ubisoft Anvil / Scimitar forge (forge.py)."""
     import forge
     f.seek(0)
     try: return forge.entries(f.read(), label)
     except ValueError as e: red(str(e))
 
 def forge_jobs(files, parts=64):
-    """Ubisoft Anvil / Scimitar forges (forge.py): version 28 (Immortals Fenyx Rising: GPUCODEONLY records) and versions 25 / 31 (Assassin's Creed: The Ezio Collection: control sections
-    followed by code areas in material templates). Every entry is Oodle-compressed and decoded by the game's own decoder in the Mac host.
+    """Ubisoft Anvil / Scimitar forges (forge.py), split into jobs in index order (offset order for v28).
     → ([(forge path, rel, (ANVIL_FORGE, version, entries)), …] in about equal stored sizes, plus error jobs for unknown-version / damaged forges; the forges taken)"""
     import forge
     from romfs import mmap
@@ -3476,9 +3485,7 @@ def anvil_shaders(d, label):
     return out
 
 def forge_shaders(path, rel, ver, ents, out):
-    """A range of one Ubisoft Anvil / Scimitar forge's entries (forge_jobs), each decoded with the game's Oodle.
-    Version 28 (Immortals Fenyx Rising): GPUCODEONLY records, labels /<forge>#<file ID>#GPUCODEONLY@<offset>.
-    Versions 25 / 31 (The Ezio Collection): control sections each followed by its code area (forge.nvn_shaders), labels /<forge>#SCIMITAR:<entry name>@<offset in its block>"""
+    """Decode a range of Anvil / Scimitar forge entries. V27 stores BNSH in LZO1X blocks. V28 stores GPUCODEONLY records and v25/v31 store adjacent control / code pairs, using Oodle."""
     import forge
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
@@ -3489,6 +3496,22 @@ def forge_shaders(path, rel, ver, ents, out):
                 except ValueError as e: red(str(e))
                 for b in blobs:
                     if ANVIL_CODE in b: out += anvil_shaders(b, label)
+        elif ver == forge.SCIMITAR_LZO_VERSION:
+            for off, size, name in ents:
+                label = f'/{rel}#SCIMITAR:{off:x}:{name}'
+                try: blobs = forge.read(d, off, size, None, label, version=ver)
+                except ValueError as e: red(str(e))
+                for i, blob in enumerate(blobs):
+                    if b'BNSH\0\0\0\0' not in blob: continue
+                    found = []
+                    scan_blob(blob, f'{label}/block{i}', found)
+                    counts = collections.Counter(where for where, _, _, _ in found)
+                    for where, stage, ctl, code in found:
+                        # AC III and Liberation store one stage per BNSH. Only genuine multi-stage variations supply their own pairs.
+                        if '#BNSH@' in where and counts[where] == 1:
+                            source, variation = where.rsplit('#var', 1)
+                            where = f'{source}#stage{variation}'
+                        out.append((where, stage, ctl, code))
         else:
             for off, size, name in ents:
                 label = f'/{rel}#SCIMITAR:{name}'
@@ -4204,6 +4227,10 @@ def unity_pass_pairs(o, programs):
                 pairs.update((v, f) for v in stages['vs'] for f in cover)
     return pairs
 
+def is_unity_asset(d):
+    import unityfs
+    return d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and unityfs.is_serialized(d))
+
 def unity_shaders(d, label, out, trees):
     """Shaders and compute shaders in a UnityFS bundle or serialized file → out and legacy pass pairs; raises NoTree when no type tree is available"""
     import unityfs
@@ -4465,7 +4492,7 @@ SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#N
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
 # each (Team Sonic Racing: 2,116 vertex and 2,399 pixel programs, sumo_shaders); Blizzard's: Diablo III's SNO assets (d3cpk_shaders) and Diablo II: Resurrected's SHAD containers, a file per stage
-# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v31): Assassin's Creed II binds its vertex and pixel
+# whose permutations the game binds per draw (shad_shaders); and Scimitar's material templates (forge_shaders v25/v27/v31): Assassin's Creed II binds its vertex and pixel
 # programs apart (BindProgram stage bits) and pairs them at draw time, so without the cover 8 pairs failed to link, the Ubisoft logo movie's among them (a black screen with its sound)
 def separable_pairs(keys):
     """Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw; Unreal combines its shaders per draw
@@ -4675,8 +4702,15 @@ def unreadable_why(e, name):
     why = str(e).removeprefix('[RED] ') if isinstance(e, SystemExit) else f'{type(e).__name__}: {e}'
     return why if why.lstrip('/').startswith(name.lstrip('/')) else f'{name}: {why}'   # most red lines name the file already
 
+class DeferredUnity:
+    """Unity scan inputs to retry after collecting type trees from other files."""
+
+    def __init__(self, args, trees):
+        self.args = args
+        self.trees = trees
+
 def scan_file(args):
-    """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, 'defer' (no type tree, scanned again in the second pass), or ('unreadable', first reason, files left out).
+    """→ (relative path, {key: …}, pairs, extra); extra = Unity type trees, a DeferredUnity scan, or ('unreadable', first reason, files left out).
     A file no reader can read (a format revision the reader does not know: its red line, or the exception it raised) is left out, and the split goes on: one such
     archive used to end the whole split with nothing written (PR #282: one of Mario Strikers: Battle League's 879 Next Level Games archives). main reports them"""
     try: return scan_file_in(args)
@@ -4836,8 +4870,9 @@ def scan_file_in(args):
         d3cpk_shaders(path, rel, args[2][1], args[2][2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
-        cpk_shaders(path, rel, args[2], found)
-        return rel, uniq_keys(found), var_pairs(found), trees
+        pairs, deferred = cpk_shaders(path, rel, args[2], found, trees if not TREES else dict(TREES))
+        extra = DeferredUnity((path, rel, tuple(deferred)), trees) if deferred else trees
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, extra
     if len(args) > 2 and args[2][0] == MDB1:   # .shad entries of a Media.Vision MVGL archive (mvgl_jobs)
         if args[2][1] is None: red(args[2][2])
         mvgl_shaders(path, rel, args[2][1], args[2][2], found)
@@ -4966,10 +5001,10 @@ def scan_file_in(args):
             d = head_d if len(head_d) >= struct.unpack_from('<I', d, 10)[0] else xnb_decompress(d)
         else:
             d = xnb_decompress(d)
-    if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
+    if is_unity_asset(d):
         import unityfs
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
-        except unityfs.NoTree: return rel, {}, set(), 'defer'
+        except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
@@ -5172,17 +5207,18 @@ def main():
         results += pooled(ex, big, n) + pooled(ex, files, n, len(big), chunk=16)
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
-        if extra == 'defer': defer.append(rel)
+        if isinstance(extra, DeferredUnity):
+            defer.append(extra.args)
+            trees.update(extra.trees)
         elif isinstance(extra, dict): trees.update(extra)
     if defer:
         # a hash no bundle supplied takes the layout unityfs.py has for it (KNOWN_TREES); only here, so files a bundle lends a tree to keep their place in the tables (Ace Attorney's built-ins)
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
-        byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, roots)) as ex: again = list(ex.map(scan_file, defer))
         for rel, uniq, pr, extra in again:
-            if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
-        results = [r for r in results if r[3] != 'defer'] + again
+            if isinstance(extra, DeferredUnity): red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
+        results += again
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()

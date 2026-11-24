@@ -1007,3 +1007,10 @@ t_sparse_shadow: t_sparse_shadow.m $(MTL_T_DEP)
 .PHONY: check_t_sparse_shadow
 check_t_sparse_shadow: t_sparse_shadow
 	MTL_DEBUG_LAYER=1 ./t_sparse_shadow
+
+# Cached texture view type and pixel format on treg_t (tex_fast_rid_meta)
+t_treg_meta: t_treg_meta.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_treg_meta.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_treg_meta
+check_t_treg_meta: t_treg_meta
+	MTL_DEBUG_LAYER=1 ./t_treg_meta

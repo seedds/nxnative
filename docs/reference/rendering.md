@@ -2389,6 +2389,15 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `make -C dm/gfx/tests GAME=010014E00DB56000 gl-imports` (`test_compressed_arrays`): BC7 sRGB arrays of two layers and three levels, partial and edge sub-images, an upload after a draw used the texture, immutable storage, levels allocated with no data and filled one after the other, and the red-line gaps.
 - **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, v851968, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416). Its startup also exposed [inactive uniforms getting GL locations](#inactive-gl-uniforms-get-locations). [DOOM 3](../../dm/games/010029D00E740000/README.md) streams its DXT images with `glCompressedTexSubImage2DARB`.
 
+### GL sample counts per format
+
+- **Symptom:** `DM_GL_MISSES=1` lists `glGetInternalformativ`, and `eglGetProcAddress` gives the game's loader a null pointer for it.
+- **Cause:** the GL layer did not implement the GL 4.2 query of the sample counts an internal format takes.
+- **Fix:** `glGetInternalformativ` in `hle_gl.m` answers `GL_NUM_SAMPLE_COUNTS` and `GL_SAMPLES` for a renderbuffer of a format GL counts as color-, depth- or stencil-renderable and `glRenderbufferStorage` makes: 8, 4 and 2, in descending order and no more than the caller's array holds. GL asks that the largest be at least the `GL_MAX_SAMPLES` the layer reports (8); 4 and 2 are the layer's choice. Luminance, alpha, integer (`GL_MAX_INTEGER_SAMPLES` reads 0) and compressed formats get none, as do the multisample texture targets (the layer has no `glTexStorage2DMultisample`, and `GL_MAX_COLOR_TEXTURE_SAMPLES` reads 0) and the single-sample ones. A target GL does not list records `GL_INVALID_ENUM`, a negative count `GL_INVALID_VALUE`; each other query of `ARB_internalformat_query2` gives a red line and leaves the array as it was.
+- **Limitations:** the layer still makes every multisampled renderbuffer with one sample (`glRenderbufferStorageMultisample`'s red line), so a game that takes 4 from this list renders without multisampling. **Open:** whether to report no counts instead, which would match what is drawn but not `GL_MAX_SAMPLES`.
+- **Check:** `t_gl_imports` (`test_internalformat_samples`): the loader's pointer, the counts for color and depth renderbuffers, a short array, the formats and targets that get none, and the two errors.
+- **Found on:** Tomb Raider I-III Remastered (`010024601BB16000`, provisional profile), [issue #2416](https://github.com/seedds/nxnative/issues/2416): its loader asks for the entry point. Which counts it queries, and what it does with them, has not been seen in a run.
+
 ### Extensions a GL renderer checks for, and its ARB names
 
 - **Symptom:** the game aborts about 2 s after `[gl] EGL context: OpenGL 4.5`, before it asks `eglGetProcAddress` for its buffer functions: `game called nn::diag abort: Result 0` with `main+0x26220` in the backtrace, no GL call red, nothing drawn. `main` holds strings such as `GL_ARB_fragment_program not available`.

@@ -1352,6 +1352,26 @@ static void test_swizzle_and_layout_binding(void) {
     puts("GL layout(binding) and GL_TEXTURE_SWIZZLE_RGBA GPU readback: OK");
 }
 
+// glGetInternalformativ (GitHub issue #2416): Tomb Raider I-III Remastered's loader gets it by name. Its sample counts agree with GL_MAX_SAMPLES for a renderable format
+// and a renderbuffer, in descending order and no more than params holds; none for other formats and targets; GL errors for a target GL does not list and a negative count
+static void test_internalformat_samples(void) {
+    void (*query)(GLenum, GLenum, GLenum, GLsizei, GLint *) = import("glGetInternalformativ");
+    assert(h_eglGetProcAddress("glGetInternalformativ") == (void *)query);
+    GLint max = 0; h_glGetIntegerv(GL_MAX_SAMPLES, &max);
+    GLint n = -1; query(GL_RENDERBUFFER, GL_RGBA8, 0x9380, 1, &n); assert(n == 3);   // NUM_SAMPLE_COUNTS
+    GLint v[4] = {-1, -1, -1, -1}; query(GL_RENDERBUFFER, GL_RGBA8, 0x80a9, 4, v); assert(v[0] == max && v[0] == 8 && v[1] == 4 && v[2] == 2 && v[3] == -1);   // SAMPLES
+    GLint two[3] = {-1, -1, -1}; query(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 0x80a9, 2, two); assert(two[0] == 8 && two[1] == 4 && two[2] == -1);
+    n = -1; query(GL_RENDERBUFFER, GL_RGBA16F, 0x9380, 1, &n); assert(n == 3);
+    n = -1; query(0x9100, GL_RGBA8, 0x9380, 1, &n); assert(n == 0);   // TEXTURE_2D_MULTISAMPLE: the layer makes no multisample textures
+    n = -1; query(GL_RENDERBUFFER, 0x8236, 0x9380, 1, &n); assert(n == 0);   // R32UI: GL_MAX_INTEGER_SAMPLES reads 0
+    n = -1; query(GL_RENDERBUFFER, GL_LUMINANCE, 0x9380, 1, &n); assert(n == 0);   // not renderable in GL
+    assert(h_glGetError() == GL_NO_ERROR);
+    n = -1; query(0x1234, GL_RGBA8, 0x9380, 1, &n); assert(n == -1 && h_glGetError() == GL_INVALID_ENUM);   // no such target
+    n = -1; query(GL_RENDERBUFFER, GL_RGBA8, 0x9380, -1, &n); assert(n == -1 && h_glGetError() == GL_INVALID_VALUE);
+    n = -1; query(GL_RENDERBUFFER, 0x8e8d, 0x9380, 1, &n); assert(n == 0);   // COMPRESSED_SRGB_ALPHA_BPTC_UNORM: not renderable
+    n = -1; query(GL_TEXTURE_2D, GL_RGBA8, 0x9380, 1, &n); assert(n == 0);   // a single-sample target
+    n = -1; query(GL_RENDERBUFFER, GL_RGBA8, 0x826f, 1, &n); assert(n == -1);   // INTERNALFORMAT_SUPPORTED (query2): not answered, params unchanged
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--srgb")) return test_framebuffer_srgb();
     if (argc == 2 && !strcmp(argv[1], "--capture")) return test_capture_shaders();
@@ -1367,6 +1387,7 @@ int main(int argc, char **argv) {
     test_fixed_function_caps();
     test_rg_texture_uploads();
     test_sync_names();
+    test_internalformat_samples();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
     assert((void *)create == (void *)h_glCreateShader);

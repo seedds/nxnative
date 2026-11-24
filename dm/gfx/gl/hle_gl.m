@@ -2753,6 +2753,28 @@ GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum p, GLint *v) {
     }
     RED1("glGetRenderbufferParameteriv(%#x) not implemented", p); *v = 0;
 }
+// glGetInternalformativ (GL 4.2): the sample counts a format takes. Tomb Raider I-III Remastered's GL loader asks for it (GitHub issue #2416). For a renderbuffer of a
+// format GL counts as color-, depth- or stencil-renderable and glRenderbufferStorage makes: 8, 4 and 2, in descending order. GL asks that the largest be at least the
+// GL_MAX_SAMPLES this layer reports (8); 4 and 2 are the layer's choice. None for luminance, alpha, integer (GL_MAX_INTEGER_SAMPLES reads 0) or compressed formats, nor for the
+// multisample texture targets: the layer has no glTexStorage2DMultisample, and GL_MAX_COLOR_TEXTURE_SAMPLES reads 0. The layer still makes every multisampled renderbuffer with
+// one sample (glRenderbufferStorageMultisample's red line). A negative count or a target GL does not list is a GL error; ARB_internalformat_query2's other queries a red line
+// each, the array left as it was
+GL(glGetInternalformativ, void, GLenum target, GLenum ifmt, GLenum pname, GLsizei count, GLint *params) {
+    static const GLint counts[] = {8, 4, 2};
+    enum { NUM_SAMPLE_COUNTS = 0x9380, SAMPLES = 0x80a9 };
+    static const GLenum targets[] = {0x0de0, 0x8c18, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP, 0x9009, 0x84f5, GL_TEXTURE_BUFFER, GL_RENDERBUFFER, 0x9100, 0x9102};   // GL 4.6 table 22.2 (1D, 1D array, cube-map array, rectangle, 2D multisample, its array)
+    int known = 0; for (size_t i = 0; i < sizeof targets / sizeof *targets; i++) known |= targets[i] == target;
+    if (!known) { gl_error(GL_INVALID_ENUM); return; }
+    if (count < 0) { gl_error(GL_INVALID_VALUE); return; }
+    int cv, f = fmt_pick((GLint)ifmt, GL_RGBA, GL_UNSIGNED_BYTE, &cv);
+    int n = target == GL_RENDERBUFFER && f >= 0 && f <= F_S8 && f != F_L8 && f != F_A8 && f != F_LA8 ? 3 : 0;
+    if (!params || !count) return;
+    if (pname == NUM_SAMPLE_COUNTS) { params[0] = n; return; }
+    if (pname == SAMPLES) { for (int i = 0; i < n && i < count; i++) params[i] = counts[i]; return; }
+    static GLenum seen[16]; static int nseen;
+    for (int i = 0; i < nseen; i++) if (seen[i] == pname) return;
+    if (nseen < 16) { seen[nseen++] = pname; GLOG("[RED] glGetInternalformativ(%#x, %#x, %#x) not implemented: params left as they were", target, ifmt, pname); }
+}
 GLB(glRenderbufferStorage, void, GLenum target, GLenum ifmt, GLsizei w, GLsizei h) {
     (void)target; rb_t *r = rb_of(S.rb);
     int cv, f = fmt_pick((GLint)ifmt, GL_RGBA, GL_UNSIGNED_BYTE, &cv);

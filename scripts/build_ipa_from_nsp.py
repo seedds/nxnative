@@ -1446,6 +1446,29 @@ def build_sources(repo, game, mods):
     return src
 
 
+def dlc_decoder_sources(repo, work, game, dlc_roms):
+    """Decoder-backed NVN archive sources across dlc_roms (profile_guess.py decoder_sources), kept in work/aoc.sources while every DLC root is an image file with unchanged
+    path, size and time, ExeFS/main is unchanged, and the readers are the same. Directory-backed DLC roots are read each time."""
+    if not dlc_roms:
+        return {'oodle_packs': (False, ''), 'ue_legacy': (False, '')}
+    main, memo, key = game / 'ExeFS/main', work / 'aoc.sources', None
+    if all(r.is_file() for r in dlc_roms):
+        imgs = [(str(r), st.st_size, st.st_mtime_ns) for r in dlc_roms for st in (r.stat(),)]
+        key = fingerprint('dlc-sources 1', imgs, ('files', [main]) if main.is_file() else None,
+                          ('files', python_tool_files(repo, 'dm/games/profile_guess.py', ('dm/games', 'dm/tools', 'dm/gfx/tools'))))
+        try:
+            k, _, text = memo.read_text().partition('\n')
+            if k == key: return {name: tuple(v) for name, v in json.loads(text).items()}
+        except (OSError, ValueError, AttributeError, TypeError): pass
+    src = pg.decoder_sources(dlc_roms, mains=[main] if main.is_file() else ())
+    try: text = json.dumps(src) if key and json.loads(json.dumps(src)) == {name: list(v) for name, v in src.items()} else None
+    except (TypeError, ValueError): text = None
+    with contextlib.suppress(OSError):
+        if key and text: atomic_text(memo, key + '\n' + text + '\n')
+        elif key: memo.unlink(missing_ok=True)
+    return src
+
+
 def check_formats(dirs):
     """Each extracted image's files whose bytes do not start as their names promise (romfs_image.format_mismatches: a .zs file that is not a zstd stream) stop the build, as a damaged
     NSP does: a NUP or a dump folder carries no NCA hashes, so this is where its damage shows. ALLOW_DAMAGED lists them and goes on. A NUP of Ocarina of Time held three .zs
@@ -3742,8 +3765,17 @@ def main(args=None):
                 cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl')
                 ios = build_gl_shaders(py, repo, roots + [cap], sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed)
     else:
-        # Trinity packs and legacy Unreal paks: the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile
-        oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if src['oodle_packs'][0] or src['ue_legacy'][0] else None
+        # Decoder-backed archives (Trinity, PKZ, GFPAK, UE3, Frostbite, TT Games DAT, Anvil / Scimitar .forge, legacy Unreal paks):
+        # the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile.
+        # Check DLC roots too when the program's own RomFS had none (The Ezio Collection's Brotherhood and Revelations keep their .forge files in DLC).
+        needs_oodle = src['oodle_packs'][0] or src['ue_legacy'][0]
+        if not needs_oodle and dlc_roms:
+            dlc_src = dlc_decoder_sources(repo, work, game, dlc_roms)
+            for k in ('oodle_packs', 'ue_legacy'):
+                if dlc_src[k][0]:
+                    say(f'DLC: {dlc_src[k][1]}')
+                    needs_oodle = True
+        oodle = (lambda: {'DM_OODLE_HOST': str(build_mac_host(repo, work / 'tools/dmhost', env, logs, g)), 'DM_OODLE_MODULES': str(patched)}) if needs_oodle else None
         own = bool(provisional or derived)   # the shader tables come from this build's split (the profile's are checked otherwise)
         def derive_shader_tables(reason):   # called only after the optional-content or additive-compute comparison passed
             nonlocal g, derived

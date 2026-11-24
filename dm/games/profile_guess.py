@@ -13,7 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
-from romfs import Path, os, open, is_image, source
+from romfs import Path, os, open, is_image, source, reuse_descriptors
 from romfs_image import ARTIFACTS   # a dump tool's files in a RomFS folder, not game files
 
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
@@ -376,6 +376,56 @@ def romfs_glsl_files(romfs):
     return n
 
 
+def decoder_archives(roots, mains=()):
+    """Count decoder-backed NVN archives across one or more RomFS roots (directories or .img images), in one walk per root."""
+    gfx_tools = str(HERE.parent / 'gfx/tools')
+    if gfx_tools not in sys.path: sys.path.insert(0, gfx_tools)
+    import forge, frostbite, ttdat, uepak
+    trinity = oodle_pkz = oodle_gfpak = oodle_ue3 = oodle_ttdat = anvil_forges = legacy_paks = 0
+    is_frostbite = False
+    for root in roots:
+        has_pak = False
+        with reuse_descriptors([str(root)]):
+            for d, _, names in os.walk(root):
+                for n in names:
+                    path = os.path.join(d, n)
+                    with open(path, 'rb') as f:
+                        head = f.read(0x20)
+                        if n.endswith('.trpfs'):
+                            trinity += head[:8] == b'ONEPACK\0'
+                        elif n.endswith('.pkz') and head[:4] == b'pkzl' and len(head) >= 0x1c:
+                            cnt, eo, nl = struct.unpack_from('<III', head, 0x10)
+                            f.seek(eo + 0x20 * cnt)
+                            oodle_pkz += b'OodleKraken\0' in f.read(nl)
+                        elif n.endswith('.gfpak') and head[:8] == b'GFLXPACK' and len(head) >= 0x20:
+                            cnt, _, tab = struct.unpack_from('<IIQ', head, 0x10)
+                            f.seek(tab)
+                            t = f.read(0x18 * cnt)   # the file table: 0x18 bytes per file, u16 compression at +2 (shader_split.py gfpak_members)
+                            oodle_gfpak += any(struct.unpack_from('<H', t, 0x18 * i + 2)[0] == 3 for i in range(len(t) // 0x18))
+                        elif n.endswith('.forge') and len(head) >= 13 and forge.is_forge(head):
+                            version = forge.version(head)
+                            anvil_forges += version in forge.KNOWN_VERSIONS and version != forge.SCIMITAR_LZO_VERSION   # v27 decodes LZO1X directly
+                        elif n.endswith('.pak'):
+                            has_pak = True
+                        if head[:4] == UE3_TAG:
+                            if len(head) == 0x20: head += f.read(0x1000 - len(head))
+                            oodle_ue3 += ue3_oodle_package(head)
+                    if n.lower().endswith('.dat'):
+                        oodle_ttdat += ttdat.needs_oodle(path)
+            if has_pak:
+                legacy_paks += len(uepak.unreal_paks(str(root), inline=True, mains=mains))
+            if not is_frostbite and frostbite.is_frostbite(str(root)):
+                is_frostbite = True
+    return dict(trinity_packs=trinity, legacy_paks=legacy_paks, oodle_pkz=oodle_pkz, oodle_gfpak=oodle_gfpak,
+                oodle_ue3=oodle_ue3, frostbite=is_frostbite, oodle_ttdat=oodle_ttdat, anvil_forges=anvil_forges)
+
+
+def decoder_sources(roots, mains=()):
+    """Decoder-backed NVN archive sources across one or more RomFS roots (directories or .img images): {'oodle_packs': (bool, reason), 'ue_legacy': (bool, reason)}."""
+    sources = shader_sources((), 0, (), 0, 0, **decoder_archives(roots, mains=mains))
+    return {'oodle_packs': sources['oodle_packs'], 'ue_legacy': sources['ue_legacy']}
+
+
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
@@ -389,16 +439,13 @@ def build_sources(exefs, romfs, modules):
     if 'glslcCompile' in nro_imp:   # an NRO compiles (Portal's materialsystem.nro): the GLSLC module is one nro_modules adds to a provisional profile, so any of the ExeFS's counts
         glslc_mods = sorted({*glslc_mods, *(p.name for p in exefs.iterdir() if p.name.startswith('subsdk') and defines(p.name))}, key=load_order)
     spirv, vk_named = 0, named_vulkan(main, imports)
-    sys.path.insert(0, str(HERE.parent / 'gfx/tools')); import uepak
+    gfx_tools = str(HERE.parent / 'gfx/tools')
+    if gfx_tools not in sys.path: sys.path.insert(0, gfx_tools)
+    import uepak
     if vk_named or any(re.match(r'vk[A-Z]', s) for s in imports):
         import vk_shaders
         spirv = sum(1 for _ in vk_shaders.spirv_files(str(romfs)))
         if not spirv and vk_named: spirv = int(next(vk_shaders.bgfx_modules(main), None) is not None)
-    trinity = 0
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.trpfs'):
-                with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
     gl_files = 0
     if gl_names or fixed_calls:
         from gl_shaders import is_standalone_glsl, paired_sources, text_of
@@ -409,41 +456,10 @@ def build_sources(exefs, romfs, modules):
                 elif low.endswith('.glsl'):
                     with open(os.path.join(d, n), 'rb') as f: gl_files += is_standalone_glsl(text_of(f.read()))
             gl_files += len(paired_sources(d, names))
-    oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.pkz'):
-                with open(os.path.join(d, n), 'rb') as f:
-                    h = f.read(0x20)
-                    if h[:4] == b'pkzl':
-                        cnt, eo, nl = struct.unpack_from('<III', h, 0x10); f.seek(eo + 0x20 * cnt); oodle_pkz += b'OodleKraken\0' in f.read(nl)
-    oodle_gfpak = 0   # Game Freak GFPAK archives with an Oodle Kraken entry (compression 3: Pokémon Legends: Arceus; Pokémon Sword's are LZ4): decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.gfpak'):
-                with open(os.path.join(d, n), 'rb') as f:
-                    h = f.read(0x20)
-                    if h[:8] == b'GFLXPACK':
-                        cnt, _, tab = struct.unpack_from('<IIQ', h, 0x10); f.seek(tab); t = f.read(0x18 * cnt)   # the file table: 0x18 bytes per file, u16 compression at +2 (shader_split.py gfpak_members)
-                        oodle_gfpak += any(struct.unpack_from('<H', t, 0x18 * i + 2)[0] == 3 for i in range(len(t) // 0x18))
-    oodle_ue3 = 0   # Unreal Engine 3 packages (shader_split.py ue3_package) whose first compressed block, found within the first 4 KB, is an Oodle one (8C; Batman: Arkham Knight): decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            with open(os.path.join(d, n), 'rb') as f: oodle_ue3 += ue3_oodle_package(f.read(0x1000))
-    import ttdat
-    oodle_ttdat = sum(ttdat.needs_oodle(os.path.join(d, n)) for d, _, names in os.walk(romfs) for n in names if n.lower().endswith('.dat'))
-    import forge
-    anvil_forges = 0   # The Oodle versions use the game's decoder. The v27 reader decodes LZO1X directly.
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.forge'):
-                with open(os.path.join(d, n), 'rb') as f: head = f.read(13)
-                if len(head) == 13 and forge.is_forge(head):
-                    version = forge.version(head)
-                    anvil_forges += version in forge.KNOWN_VERSIONS and version != forge.SCIMITAR_LZO_VERSION
-    import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat, gl_fixed_calls=fixed_calls, vk_named=vk_named, anvil_forges=anvil_forges)
+    dec = decoder_archives([romfs], mains=[exefs / 'main'])
+    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])),
+                          gl_names=gl_names, gl_src=gl_src, gl_files=gl_files, nro_imports=nro_imp,
+                          romfs_glsl=romfs_glsl, gl_fixed_calls=fixed_calls, vk_named=vk_named, **dec)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)

@@ -397,5 +397,84 @@ class ManifestProvenance(unittest.TestCase):
             self.assertEqual((rom['n'], rom['bytes'], rom['biggest']), (1, 916455424, (0, '')))
 
 
+class DecoderSources(unittest.TestCase):
+    """decoder_sources / decoder_archives must detect every Oodle/LZ5 archive format identically across directory- and .img-backed roots, and ignore LZO1X Scimitar v27."""
+
+    @staticmethod
+    def _forge(ver):
+        return b'scimitar\0' + struct.pack('<I', ver) + bytes(16)
+
+    @staticmethod
+    def _pkz(names):
+        return struct.pack('<4sIIIIIII', b'pkzl', 0, 0, 0, 1, 0x20, len(names), 0) + bytes(0x20) + names
+
+    @staticmethod
+    def _gfpak(comp):
+        return struct.pack('<8sIIIIQ', b'GFLXPACK', 0, 0, 1, 0, 0x20) + struct.pack('<HH20s', 0, comp, b'')
+
+    @staticmethod
+    def _ue_v4_pak():
+        return b'\0' + struct.pack('<IIQQ', 0x5A6F12E1, 4, 0, 0) + bytes(20)
+
+    def _roots(self, files):
+        sys.path.insert(0, str(REPO / 'dm/tools'))
+        import romfs_image
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name) / 'dir'
+        root.mkdir()
+        for rel, data in files.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+        img = Path(tmp.name) / '1.img'
+        romfs_image.pack(root, img)
+        return (('dir', root), ('img', img))
+
+    def test_forge_oodle_versions_vs_lzo_and_invalid_across_dir_and_image(self):
+        for ver in (25, 28, 31):
+            for kind, root in self._roots({'ACB/DataNX_extra.forge': self._forge(ver)}):
+                with self.subTest(ver=ver, kind=kind):
+                    got = pg.decoder_sources([root])
+                    self.assertTrue(got['oodle_packs'][0], got)
+                    self.assertIn('Anvil forge(s)', got['oodle_packs'][1])
+                    self.assertFalse(got['ue_legacy'][0])
+        for label, data in (('v27-lzo', self._forge(27)), ('unknown-ver', self._forge(99)), ('bad-magic', b'notforge' + bytes(16)), ('short', b'scimitar\0')):
+            for kind, root in self._roots({'AC3/DataNX.forge': data}):
+                with self.subTest(label=label, kind=kind):
+                    got = pg.decoder_sources([root])
+                    self.assertFalse(got['oodle_packs'][0], got)
+                    self.assertFalse(got['ue_legacy'][0])
+
+    def test_other_decoder_formats_across_dir_and_image(self):
+        ue3 = Ue3OodlePackages.pkg([(b'\x8c\x0a' + b'x' * 10, 0x40)], wide=False)
+        cases = (
+            ('trinity', {'arc/data.trpfs': b'ONEPACK\0' + bytes(16)}, 'oodle_packs', 'Trinity pack'),
+            ('pkz-oodle', {'data/a.pkz': self._pkz(b'OodleKraken\0')}, 'oodle_packs', 'PlatinumGames PKZ'),
+            ('gfpak-oodle', {'data/a.gfpak': self._gfpak(3)}, 'oodle_packs', 'GFPAK'),
+            ('ue3-oodle', {'cooked/shaders.upk': ue3}, 'oodle_packs', 'Unreal Engine 3'),
+            ('frostbite', {'Data/layout.toc': bytes.fromhex('00d1ce01') + bytes(16)}, 'oodle_packs', 'Frostbite'),
+            ('ue-v4-legacy', {'Paks/game.pak': self._ue_v4_pak()}, 'ue_legacy', 'Unreal pak'),
+        )
+        for label, files, key, snippet in cases:
+            for kind, root in self._roots(files):
+                with self.subTest(label=label, kind=kind):
+                    got = pg.decoder_sources([root])
+                    self.assertTrue(got[key][0], got)
+                    self.assertIn(snippet, got[key][1])
+        for label, files in (('pkz-zstd', {'data/a.pkz': self._pkz(b'ZStandard\0')}), ('gfpak-lz4', {'data/a.gfpak': self._gfpak(2)})):
+            for kind, root in self._roots(files):
+                with self.subTest(label=label, kind=kind):
+                    got = pg.decoder_sources([root])
+                    self.assertFalse(got['oodle_packs'][0], got)
+                    self.assertFalse(got['ue_legacy'][0])
+
+    def test_multiple_roots_combine_directory_and_image(self):
+        (_, empty_dir), (_, empty_img) = self._roots({'placeholder.txt': b'ok'})
+        (_, forge_dir), (_, forge_img) = self._roots({'ACB/a.forge': self._forge(25)})
+        counts = pg.decoder_archives([empty_dir, empty_img, forge_dir, forge_img])
+        self.assertEqual(counts['anvil_forges'], 2)
+
+
 if __name__ == '__main__':
     unittest.main()

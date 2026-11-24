@@ -553,6 +553,9 @@ t_pkg_edges_oom: t_pkg_edges_oom.m $(MTL_T_DEP)
 .PHONY: check_t_pso_admission
 check_t_pso_admission: t_pso_admission
 	@for mode in aggregate fragmented empty unknown map-fail exact ample native; do ./t_pso_admission $$mode || exit $$?; done
+t_fn4_once: t_fn4_once.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_fn4_once.m $(MTL_T_SRC) $(FW)
+check_t_fn4_once: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pso_stall: t_pso_stall.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_stall.m $(MTL_T_SRC) $(FW)
 check_t_pso_stall: RUN_ENV = MTL_DEBUG_LAYER=1

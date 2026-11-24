@@ -3686,6 +3686,57 @@ def ue3_shaders(d, label):
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
     return out
 
+
+def ue3_shared_buffers(d, label):
+    """UE3's UniShaderBuffer export (XCOM 2, main+0xcdf770): after the UObject fields and one word come three byte arrays, each length-prefixed, holding control, code and reflection."""
+    export, = field(d, '<I', 8, label)
+    if export < 12 or b'\x10\0\0\0UniShaderBuffer\0' not in d[:export]: red(f'{label}: no UniShaderBuffer export')
+    at, arrays = export + 0x30, []
+    data = memoryview(d)
+    for name in ('control', 'code', 'reflection'):
+        size, = field(data, '<I', at, f'{label}: {name} array size')
+        at += 4
+        arrays.append(span(data, at, size, f'{label}: {name} array'))
+        at += size
+    if at != len(d): red(f'{label}: UniShaderBuffer arrays do not fill the export')
+    return arrays[0], arrays[1]
+
+
+def ue3_shared_shaders(d, label, controls, codes):
+    """UNIS v1 cache records refer to the shared NVN buffers by offset (main+0xcca610). The reflection bytes and their offset are local to the record."""
+    out, seen = [], set()
+    for m in re.finditer(b'UNIS\x01\0\0\0', d):
+        off = m.start()
+        if off < 4 or off + 0x20 > len(d): continue
+        size, _, _, nk, k, nc, c, nr, r = struct.unpack_from('<9I', d, off - 4)
+        if size != 0x20 + r + nr or off + size > len(d) or k & 0xff or c & 7 or nk < 0x34 or nc < 0x760: continue
+        ref = (k, nk, c, nc)
+        if ref in seen: continue
+        seen.add(ref)
+        where = f'{label}#UE3@{off:x}'
+        ctl, code = bytes(span(controls, c, nc, where)), bytes(span(codes, k, nk, where))
+        st = glslc_stage(ctl, code)
+        why = check(where, st, ctl, code) if st else 'no shader stage in the referenced sections'
+        if why: red(f'{where}: {why}')
+        out.append((where, st, ctl, code))
+    return out
+
+
+def ue3_shared_cache(d, path, rel):
+    controls, codes = ue3_shared_buffers(d, '/' + rel)
+    platform = os.path.basename(path).removeprefix('UniShaderBuffer-').removesuffix('.upk')
+    out = []
+    for name in (f'GlobalShaderCache-{platform}.bin', f'RefShaderCache-{platform}.upk'):
+        cache = os.path.join(os.path.dirname(path), name)
+        if not os.path.isfile(cache): continue
+        label = '/' + os.path.join(os.path.dirname(rel), name)
+        with open(cache, 'rb') as f: data = f.read()
+        body = ue3_body(data, label) if ue3_package(data) else data
+        out.extend(ue3_shared_shaders(body, label, controls, codes))
+    if not out: red(f'/{rel}: no UNIS references in the sibling shader caches')
+    return out
+
+
 UE_LEGACY, UE_IO = 'UE legacy pak', 'UE IoStore'
 def ue_legacy_jobs(files, parts=64, mains=()):
     """Unreal paks whose shaders are inline in the cooked packages (uepak.inline_shaders): legacy paks (version 4, DRAGON QUEST XI S: pakchunk0-Switch.pak and pakchunk1-Switch.pak, 13.8 GB,
@@ -4989,7 +5040,12 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BMSG' or ue3_package(head):   # an Unreal Engine 3 global shader cache or package (ue3_body, ue3_shaders)
         with open(path, 'rb') as f: d = f.read()
-        found += ue3_shaders(ue3_body(d, '/' + rel) if d[:4] == UE3_TAG else d, '/' + rel)
+        if d[:4] == UE3_TAG:
+            d = ue3_body(d, '/' + rel)
+            if os.path.basename(path).startswith('UniShaderBuffer-') and ext == '.upk':
+                found += ue3_shared_cache(d, path, rel)
+                return rel, uniq_keys(found), var_pairs(found), trees
+        found += ue3_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         from romfs import mmap   # mapped, not read: Metroid Prime 4's packs reach 3.9 GB and only their MTRL resources are looked at

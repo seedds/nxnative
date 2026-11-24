@@ -807,9 +807,16 @@
 
 - **Symptom:** for a title ID with no profile, the newest update extracts successfully during `build ID lookup`, but the subsequent base-only probe fails its ExeFS hash check and stops the survey, even though the update supplies the code.
 - **Cause:** `same_build` tries the newest update's main build ID, then the base game's as a second guess. Both used the same fatal extraction call, making the optional base-only probe a required input. This lookup error is independent of why that base cannot be read; the reported base hash failure has not been diagnosed as damage or a sparse NCA.
-- **Fix:** `scripts/build_ipa_from_nsp.py` `same_build` catches `BuildError` only on the base-only probe after the newest update's extraction succeeded. It logs `[RED] the base game alone could not be read for the build ID lookup; the update supplies the code, so the survey goes on`, deletes the partial output and continues without an alias match. A failed update extraction, a failed base-only extraction when there is no update, and other exceptions still propagate. The extractor requires a matching update Program NCA and reads its complete ExeFS with integrity checks; its accepted sparse-base exit code 4 cannot occur with an update Program NCA. The survey and build's actual extractions remain strict. This is a general lookup rule, separate from [recognizing a sparse base](#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error); it does not disable integrity checks or repair the unreadable base.
+- **Fix:** `scripts/build_ipa_from_nsp.py` `same_build` catches `BuildError` only on the base-only probe after the newest update's extraction succeeded. It logs `[RED] the base game alone could not be read for the build ID lookup; the update supplies the code, so the survey goes on`, deletes the partial output and continues without an alias match. A failed update extraction, unexpected errors from the base probe when there is no update, and other exceptions still propagate. Exit code 4 is accepted only for a base-only probe with no readable main. The survey and build's actual extractions remain strict. See also [recognizing a sparse base](#the-surveys-build-id-lookup-stops-on-the-base-game-alone-with-a-hash-error).
 - **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md#files-and-shaders) ([PR #2701](https://github.com/seedds/nxnative/pull/2701)).
 - **Check:** `dm/tools/tests/test_nsp_alias.py` covers continuation after an unreadable optional base and preservation of the required base-only failure.
+
+### A program introduced by an NSP update has no base NCA
+
+- **Symptom:** selecting the new program with `--program` stops at `no Program NCA … in the base NSP`. Reading its update Program NCA directly opens the ExeFS but fails on the RomFS.
+- **Cause:** the program ships only in the update. Its RomFS uses BKTR, and all 6,237 relocations select the update's own storage. LibHac applies the relocation map through its patch-overlay API.
+- **Fix:** `nx_extract` accepts an explicitly selected program supplied by the update. For a BKTR section it checks every relocation before using the update as both inputs to LibHac's overlay. A relocation into base storage still requires the matching base NCA. ExeFS and RomFS extraction keep their integrity checks.
+- **Found on:** [XCOM 2 Collection](../../dm/games/0100D0B00FB74000/README.md) `v131072`, whose War of the Chosen program extracted all 5,317 RomFS files with strict integrity checks.
 
 ## Sparse base games
 

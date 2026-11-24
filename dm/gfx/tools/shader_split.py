@@ -43,6 +43,7 @@
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches, see rdhs_shaders and fzlc_shaders
+#   · REDengine 4 (Cyberpunk 2077 on the Switch 2): NVN2 code areas and control sections in its RDHS version 10 / 8 caches under engine/, see rdhs4_shaders
 #   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -4487,7 +4488,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@', '#NXSH@', '#SHDR#', '#SCIMITAR:')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@', '#NXSH@', '#SHDR#', '#SCIMITAR:', '#RDHS4@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -4773,6 +4774,39 @@ def fzlc_shaders(path, label):
         parts.append(p); at = end
     return glslc_shaders(b''.join(parts), label, need=False)
 
+def rdhs4_version(path):
+    """The footer version of a REDengine 4 shader cache (rdhs4_shaders): 10 for 'RDHS', u32 10 in the last 8 bytes, 8 for 'RDHS', u32 8, u64 hash in the last 16; else None.
+    The Witcher 3's version 3 caches end in 'RDHS', u32 3 and stay with rdhs_shaders"""
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2)
+        for back, version in ((8, 10), (16, 8)):
+            if size < back: continue
+            f.seek(size - back)
+            if struct.unpack('<4sI', f.read(8)) == (RDHS, version): return version
+    return None
+
+def rdhs4_shaders(path, label):
+    """REDengine 4's shader caches (Cyberpunk 2077 on the Switch 2, 0400DDB020648000, update v262144: engine/shaderemporium_final.cache, footer version 10, 18,567 material shaders;
+    engine/staticshaderemporium_final.cache, footer version 8, 530 engine shaders). Both store each shader as one NVN2 stage in the same layout: {u64 hash, u32 code length,
+    u32 control length, 0x20 bytes of the build machine's pointers, the code area, the control section}. The material cache runs these back to back up to its index, each behind
+    {u64 hash, u64 hash, u32 record length}; the static cache keeps them among its technique entries. So every control section is taken with the code area right before it, and
+    the lengths in the header before that code area must be the control section's own (+0x30) and its code area's (+0x44). A control section that fails this names the file unreadable"""
+    with open(path, 'rb') as f: d = f.read()
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start(); where = f'{label}: control section at {c:#x}'
+        if not nvn2_ctl(d[c:c + NVN2_KEY_CTL]): red(f'{where} is not an NVN2 control section')
+        cn, kn = struct.unpack_from('<I', d, c + 0x30)[0], struct.unpack_from('<I', d, c + 0x44)[0]
+        k = c - kn
+        if k < 0x30 or c + cn > len(d) or struct.unpack_from('<II', d, k - 0x28) != (kn, cn):
+            red(f'{where}: no record header names its code area ({kn:#x} bytes) and its own length ({cn:#x})')
+        ctl, code = d[c:c + cn], d[k:c]
+        st = glslc_stage(ctl, code)
+        why = check(label, st, ctl, code) if st else 'no stage in the control section or the SPH'
+        if why: red(f'{where}: {why}')
+        out.append((f'{label}#RDHS4@{c:#x}', st, ctl, code))
+    return out
+
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
@@ -4948,6 +4982,9 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == FZLC:   # REDengine 3's static shader cache (fzlc_shaders)
         found += fzlc_shaders(path, '/' + rel)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if rel.endswith('.cache') and rdhs4_version(path):   # REDengine 4's shader caches (rdhs4_shaders)
+        found += rdhs4_shaders(path, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[8:9] == b'\x01' or os.path.basename(rel) == 'shadernx.cache':   # require the footer even under the engine's filename, which also lets us diagnose a damaged first flag
         with open(path, 'rb') as f:

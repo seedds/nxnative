@@ -887,6 +887,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (v458752): 29,673 shaders (vertex 24,617, pixel 4,968, compute 46, geometry 22, domain 13, hull 7; 21,233 from `content`, 7,877 from the DLCs) in 80 s on an M1 Max, against 563 before.
 - **Check:** `dm/tools/tests/test_split_redengine.py` covers material records, static shader programs spanning chunks, an uncompressed DLC stub, wrong lengths, a damaged record flag, and zstd errors in both formats. A flag at +8 without the footer still goes through the plain reader.
 
+### REDengine 4 shader caches
+
+- **Symptom:** `the shader split found no shaders in main or the RomFS` on a game whose RomFS is mostly REDengine `.archive` files (`RDAR`).
+- **How it is stored:** the shaders are not in the archives. Two caches lie loose under `engine/`: `shaderemporium_final.cache` (the material shaders) and `staticshaderemporium_final.cache` (the engine's own, every compute shader among them). Neither is compressed. The material cache ends in `RDHS`, u32 10; the static one in `RDHS`, u32 8 and a u64 hash. Each shader is one NVN2 stage stored as {u64 hash, u32 code length, u32 control length, 0x20 bytes of the build machine's pointers, the code area, the control section}, sometimes followed by a few bytes. The material cache runs these records back to back up to its index, each behind {u64 hash, u64 hash, u32 record length}; the static cache keeps them among its technique entries.
+- **Fix:** `rdhs4_shaders` (`shader_split.py`) recognises a `.cache` file by either footer (`rdhs4_version`), takes every NVN2 control section with the code area right before it, and requires the record header before that code area to name both lengths (control +0x30 and +0x44). A control section that fails this makes the file unreadable. The shaders are single-stage programs (`#RDHS4@` in `SINGLE_STAGE`). The Witcher 3's version 3 footer stays with `rdhs_shaders`.
+- **Found on:** Cyberpunk 2077 (`0400DDB020648000`, update v262144, no profile yet): 18,567 records in the material cache and 530 in the static one, 6,754 distinct shaders (3,608 vertex, 2,803 pixel, 343 compute), against 0 before.
+- **Check:** `dm/tools/tests/test_split_redengine.py` covers both footers, trailing bytes after a control section, a repeated shader, a record header that disagrees with its control section, and a version 3 footer that is not taken.
+
 ## Control sections and code
 
 ### Code area and control section layout

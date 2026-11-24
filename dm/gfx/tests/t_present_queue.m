@@ -1,7 +1,8 @@
 // Presents of snapshots on their own queue (g_qpres, DM_PRESENT_QUEUE): real Metal 4 queues and offscreen drawables, the display link's callback called by hand (no window, no game
 // files). own: a present runs while the game's queue is held (a gate stands for the next frame's work and for the drawable wait in front of it). slot: the copy that reuses a ring
 // slot waits for the present that read it, though that present was processed (committed) and the game's queue is free. Run with DM_PRESENT_QUEUE=0, own fails: the present waits
-// behind the gate on g_q4. resize: a held present must not keep the texture retired by the preceding resize in the residency set.
+// behind the gate on g_q4. resize: a held present must not keep the texture retired by the preceding resize in the residency set. metalfx (DM_PRESENT_UPSCALE=metalfx): a
+// present through MetalFX stays on g_q4, as every present shares the scaler's textures; it waits behind a gate there and none goes on g_qpres.
 #include "../nvn/nvn_mtl.m"
 @interface FakeLinkUpdate : NSObject
 @property id<CAMetalDrawable> drawable;
@@ -28,8 +29,9 @@ static tex_t source(unsigned serial, unsigned height, uint8_t left, uint8_t righ
     t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8;
     serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
 }
+static unsigned g_dr_size = 8;   // the drawables' side
 static CAMetalLayer *offscreen_layer(void) {
-    CAMetalLayer *l = [CAMetalLayer layer]; l.device = g_dev; l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.framebufferOnly = NO; l.drawableSize = CGSizeMake(8, 8); return l;
+    CAMetalLayer *l = [CAMetalLayer layer]; l.device = g_dev; l.pixelFormat = MTLPixelFormatBGRA8Unorm; l.framebufferOnly = NO; l.drawableSize = CGSizeMake(g_dr_size, g_dr_size); return l;
 }
 static NSMutableArray *g_layers;
 static id<CAMetalDrawable> drawable(void) {   // a layer of its own per drawable (t_present_alloc), resident on both queues
@@ -132,6 +134,33 @@ static void resize_case(tex_t *a) {
     CHECK("the second texture leaves the residency set at the next reuse", ![g_snap_res containsAllocation:second] && !g_snap[0].old);
     copied(); tick(); CHECK("the final present ran", all_done(g_pq_in, 5.0));
 }
+static tex_t square_source(unsigned serial, unsigned n, uint8_t v) {   // an n x n grey picture, smaller than the drawables, so MetalFX scales it up
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:n height:n mipmapped:NO];
+    d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d]; NSMutableData *row = [NSMutableData dataWithLength:4 * n]; uint8_t *p = row.mutableBytes;
+    for (unsigned i = 0; i < n; i++) { p[4 * i] = p[4 * i + 1] = p[4 * i + 2] = v; p[4 * i + 3] = 255; }
+    for (unsigned y = 0; y < n; y++) [mt replaceRegion:MTLRegionMake2D(0, y, n, 1) mipmapLevel:0 withBytes:p bytesPerRow:4 * n];
+    tex_t t = {.magic=MAGIC('T','E','X',0), .serial=serial};
+    t.d.width = t.d.height = n; t.d.depth = t.d.levels = t.d.samples = 1;
+    t.d.target = NVN_TEXTURE_TARGET_2D; t.d.format = NVN_FORMAT_RGBA8;
+    serial_put(t.serial, mt); res_add(mt); res_commit(); return t;
+}
+static void metalfx_case(void) {
+    setenv("DM_FX_DIRECT", "0", 1);   // the scaler writes its own private output: these offscreen drawables are not private, which MetalFX requires of a texture it writes
+    g_dr_size = 512; tex_t a = square_source(92006, 256, 120);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL); copied(); tick();
+    CHECK("a first present ran", all_done(g_pq_in, 5.0));
+    CHECK("the present queue exists", g_qpres != nil);
+    CHECK("MetalFX made a spatial scaler for the present", g_fx_present.sc != nil);
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL); copied();
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    [g_q4 waitForEvent:gate value:1];   // the game's queue held: a present on it waits, one on g_qpres would run
+    uint64_t tk = g_pq_in; tick();
+    CHECK("the MetalFX present did not run while the game's queue was held (it is on that queue)", !all_done(tk, 0.5));
+    gate.signaledValue = 1;
+    CHECK("the MetalFX present ran once the game's queue went on", all_done(tk, 5.0));
+    CHECK("no present went on the present queue", g_qpres_n == 0);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(30); setbuf(stdout, NULL);
     if (argc != 2) return 2;
@@ -145,6 +174,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!strcmp(argv[1], "own")) own_case(&a);
     else if (!strcmp(argv[1], "slot")) slot_case(&a, &b, &c);
     else if (!strcmp(argv[1], "resize")) resize_case(&a);
+    else if (!strcmp(argv[1], "metalfx")) metalfx_case();
     else return 2;
     printf("present queue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

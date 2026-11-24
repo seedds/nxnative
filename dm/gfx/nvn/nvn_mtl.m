@@ -21098,7 +21098,8 @@ static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause 
 // fps, no change where the GPU or the CPU is the limit; docs/reference/frame-rate.md). On
 // g_qpres the present follows its snapshot's copy by g_snap_ev (a wait on the GPU only while the copy has not run when the present is encoded), and a copy that reuses a ring slot
 // follows the present that read it by g_pres_ev, which g_qpres signals with each present's ticket (snap_take; again only while that present has not run). A present of the game's
-// own texture (no snapshot, or the ring busy) stays on g_q4, whose order the swapchain's return relies on (mtl_present_wait). Its command buffers name the residency sets as every
+// own texture (no snapshot, or the ring busy) stays on g_q4, whose order the swapchain's return relies on (mtl_present_wait), and so does a present through MetalFX, whose
+// scaler textures every present shares (present_now). Its command buffers name the residency sets as every
 // other does (cb_end)
 static id<MTL4CommandQueue> g_qpres; static int g_qpres_mode = -1;
 static id<MTLSharedEvent> g_pres_ev;
@@ -21698,7 +21699,6 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     if (atomic_load(&g_gpu_lost) || atomic_load(&g_present_suspended)) return 0;
     CAMetalLayer *layer = (__bridge CAMetalLayer *)front_metal_layer();
     if (!layer) return 0;
-    id<MTL4CommandQueue> pq = snap_v && g_qpres && sw_on(g_qpres_mode) ? g_qpres : g_q4;
 #if TARGET_OS_OSX
     if (!layer.displaySyncEnabled) layer.displaySyncEnabled = YES;   // Windowed mode follows the display's vsync to prevent tearing
 #endif
@@ -21716,16 +21716,19 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }
     if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
-    // On g_qpres from here to its g_pres_ev signal below, on every path: a copy into this snapshot's ring slot may already wait on g_q4 for that signal (snap_take)
-    if (pq != g_q4) g_qpres_snap_waits += snap_order_present(pq, snap_v, ticket);
-    [pq waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
     int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     id<MTLResidencySet> drs = ((CAMetalLayer *)dr.layer).residencySet;   // the drawable's
-    if (!kind) { cb_end(cb, drs); [pq signalDrawable:dr]; if (pq != g_q4) [pq signalEvent:g_pres_ev value:ticket]; return 0; }
+    if (!kind) { cb_end(cb, drs); [g_q4 waitForDrawable:dr]; [g_q4 signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     cb_end(cb, drs);
+    // The queue is chosen once the present is encoded (a queue's drawable wait only has to come before the commit). A present through MetalFX stays on g_q4: every present
+    // shares g_fx_present's scaler and its input and output textures, and a present of the game's own texture (the ring busy) goes on g_q4, which g_qpres does not keep in order
+    id<MTL4CommandQueue> pq = snap_v && !fx_kind && g_qpres && sw_on(g_qpres_mode) ? g_qpres : g_q4;
+    // On g_qpres from here to its g_pres_ev signal below, with no return between: a copy into this snapshot's ring slot may already wait on g_q4 for that signal (snap_take)
+    if (pq != g_q4) g_qpres_snap_waits += snap_order_present(pq, snap_v, ticket);
+    [pq waitForDrawable:dr];
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }

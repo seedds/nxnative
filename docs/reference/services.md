@@ -818,6 +818,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [The Legend of Heroes: Trails into Reverie](../../dm/games/01008CB0156BC000/README.md) 1.0.4.
 - **Check:** `t_hid` checks both actuator positions on a disconnected npad and unknown info for an invalid handle.
 
+### JoyDual vibration handles on a whole controller
+
+- **Symptom:** no vibration on a Pro Controller, DualSense, or handheld controller even though `GetVibrationDeviceHandles` returns valid handles and `DM_RUMBLE_LOG=1` shows nonzero values sent to `0x5` / `0x10005` (or `0x2005` / `0x12005`) with `with no output` matching the send count.
+- **Cause:** `vib_valid` (`hle_hid.c`) required an exact style match on `KIND_PAD` except for cached FullKey handles on a Joy-Con style, so JoyDual handles (type 5) were rejected whenever the npad reported FullKey or Handheld. A game that builds its vibration graph once at boot using `STYLE_JOYDUAL` handles for every npad (`Handheld`, `No1..No8`) therefore had every send dropped on a whole controller.
+- **Fix:** `vib_valid` accepts `type == 5` (JoyDual) handles on `KIND_PAD` npads reporting `STYLE_FULLKEY` or `STYLE_HANDHELD`, routing device 0 to the left motor and device 1 to the right motor while keeping single-Joy-Con exposure and physical Joy-Con lifetime checks unchanged.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md) 1.1.0 ([PR #2580](https://github.com/seedds/nxnative/pull/2580), `main+0xaab6f8` requests only `STYLE_JOYDUAL` handles at boot; physical DualSense rumble was confirmed by the PR author with JoyDual routing).
+- **Check:** `t_hid` and `t_hid_tsan` verify JoyDual handles on docked FullKey, late-joining FullKey, Handheld, and single-Joy-Con-exposed pads.
+
 ### Controller haptic engines without advanced players
 
 - **Symptom:** a controller (an Xbox Wireless Controller, a GameSir Super Nova, a GameSir Cyclone) never vibrates in a game on the Mac or the iPhone, though iOS Settings' Identify buzzes it; the log repeats `[RED] haptics: controller left handle create player: Couldn’t communicate with a helper application. (NSCocoaErrorDomain 4097)`. The engine itself starts.

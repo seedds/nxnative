@@ -70,7 +70,7 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
-import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
+import base64, collections, concurrent.futures as cf, ctypes, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
 from contextlib import ExitStack
 from multiprocessing.util import Finalize
 from typing import NoReturn
@@ -4030,15 +4030,32 @@ def ungzip(d, label):
 
 YAZ0_RUNS = tuple((len(r[0]), tuple(map(len, r[1:]))) for r in (format(h, '08b').split('0') for h in range(256)))   # a group header's literal runs: before its first back-reference, and after each one
 YAZ0_REF = tuple((b >> 4 and (b >> 4) + 2, ((b & 15) << 8) + 1) for b in range(256))   # a back-reference's first byte: its length (0: one more byte + 0x12) and its distance less the second byte
+YAZ0_RATIO = 91   # the most one byte of a Yaz0 stream decodes to: a back-reference of 3 bytes copies at most 0x111
+
+
+@functools.cache
+def yaz0_native():
+    """dm_yaz0 of yaz0.c (beside this file) through ctypes, or None where it cannot be built or loaded (native_c.load): yaz0 then decodes in Python alone, with the same output"""
+    import native_c
+    lib = native_c.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'yaz0.c'))
+    if lib is None: return None
+    f = lib.dm_yaz0; f.restype = ctypes.c_int; f.argtypes = (ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t)
+    return f
 
 
 def yaz0(s, label='Yaz0'):
-    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0; Breath of the Wild's base RomFS: 31,304 Yaz0 files, 15.7 GB decoded). Pure Python, needs no extra dependency.
+    """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0; Breath of the Wild's base RomFS: 31,304 Yaz0 files, 15.7 GB decoded).
     Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period.
-    Whole groups go in batches: past the first 0x1000 bytes (no distance reaches before the start), g groups that can neither read past the stream (a group reads at most 1 + 8 * 3 bytes) nor pass n
+    The C decoder (yaz0.c) runs where it builds, into n bytes only when the stream can decode to that many (YAZ0_RATIO: a damaged header allocates no more than the item-by-item loop
+    could reach). The Python decoder below runs where it does not, and after any failure of the C one, which gives no message: the same output and the same errors either way.
+    In Python, whole groups go in batches: past the first 0x1000 bytes (no distance reaches before the start), g groups that can neither read past the stream (a group reads at most 1 + 8 * 3 bytes) nor pass n
     (it writes at most 8 * 0x111), each literal run one slice (YAZ0_RUNS). The rest, the start, the end and a damaged stream, goes item by item, with the same output and errors.
     About 70 MB/s per core on Breath of the Wild's files, twice the item-by-item loop (M5 Pro, Python 3.13; 79% of their items are literals, 31% of their headers 0xff)"""
-    n = int.from_bytes(s[4:8], 'big'); out = bytearray(); si = 16
+    n = int.from_bytes(s[4:8], 'big')
+    if n and n <= YAZ0_RATIO * (len(s) - 16) and (dec := yaz0_native()):
+        out = bytearray(n); src = s if isinstance(s, bytes) else bytes(s)
+        if not dec(src, len(src), ctypes.addressof(ctypes.c_char.from_buffer(out)), n): return bytes(out)
+    out = bytearray(); si = 16
     end, top = len(s) - 25, n - 0x888
     try:
         while len(out) < n:

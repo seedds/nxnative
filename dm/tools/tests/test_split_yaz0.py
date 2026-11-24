@@ -1,7 +1,11 @@
 """shader_split.yaz0 against the item-by-item decoder it replaced, kept here as the reference: the same bytes and the same red() text on generated streams
 (a small random encoder, overlapping copies at every short distance, both length forms up to 0x111, n = 0, n ending inside a group or a copy, truncated streams,
-back-references before the start), each as bytes, bytearray and memoryview. No game files needed."""
+back-references before the start), each as bytes, bytearray and memoryview, through yaz0 (the C decoder where it builds, the Python one after its failures) and
+through the Python decoder alone. Where the C decoder builds, its own result on each stream too: the reference's bytes, or the code of the reference's error,
+and nothing written past n. No game files needed."""
+import ctypes
 import random
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +15,16 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools/fuzz'))
 import fuzz_shader_split as fz
 ss = fz.ss
+NATIVE = ss.yaz0_native()
+GUARD = bytes(range(256)) * 2   # after the n bytes: longer than the longest copy (0x111), so one that passes n cannot jump it
+
+
+def python_only(): return mock.patch.object(ss, 'yaz0_native', lambda: None)
+
+
+def compiler():   # what native_c.load needs to build: Xcode's clang on a Mac, cc on Linux
+    if sys.platform == 'darwin': return subprocess.run(['xcode-select', '-p'], capture_output=True).returncode == 0
+    return sys.platform.startswith('linux') and subprocess.run(['sh', '-c', 'command -v cc'], capture_output=True).returncode == 0
 
 
 def reference(s, label='Yaz0'):
@@ -67,6 +81,18 @@ def run(fn, s):
     except SystemExit as e: return 'red', e.code
 
 
+def native(s):
+    """dm_yaz0's own result on s, without yaz0's fallback: ('ok', the n bytes) or ('code', 1 or 2), and whether the guard after n is intact"""
+    n = int.from_bytes(s[4:8], 'big'); out = bytearray(n) + GUARD
+    rc = NATIVE(bytes(s), len(s), ctypes.addressof(ctypes.c_char.from_buffer(out)), n)
+    return ('ok', bytes(out[:n])) if rc == 0 else ('code', rc), out[n:] == GUARD
+
+
+def code(want):   # the C decoder's code for the reference's result: 0 for its bytes, 1 when the stream ends, 2 for a back-reference before the start
+    if want[0] == 'ok': return 0
+    return 1 if 'stream ends' in str(want[1]) else 2 if 'before the start' in str(want[1]) else None
+
+
 def differ(got, want):
     """'' when they agree, else a short account (assertEqual would diff whole outputs)"""
     if got == want: return ''
@@ -79,11 +105,20 @@ class Yaz0(unittest.TestCase):
     streams = 0
 
     def same(self, s, expect=None):
-        """yaz0 and the reference agree on s as bytes, bytearray and memoryview; expect: 'ok' or 'red', what the reference must give"""
+        """yaz0, the Python decoder alone and the reference agree on s as bytes, bytearray and memoryview, and the C decoder gives the reference's bytes or the code
+        of its error; expect: 'ok' or 'red', what the reference must give"""
         want = run(reference, bytes(s)); Yaz0.streams += 1
         if expect: self.assertEqual(want[0], expect, want[1] if want[0] == 'red' else None)
         for kind in (bytes, bytearray, memoryview):
             if d := differ(run(ss.yaz0, kind(s)), want): self.fail(f'{kind.__name__}, {len(s):#x} bytes: {d}')
+            with python_only():
+                if d := differ(run(ss.yaz0, kind(s)), want): self.fail(f'the Python decoder, {kind.__name__}, {len(s):#x} bytes: {d}')
+        if NATIVE:
+            (kind, got), kept = native(s)
+            self.assertTrue(kept, f'the C decoder wrote past n, {len(s):#x} bytes')
+            if kind == 'ok' and want[0] == 'ok':
+                if d := differ(('ok', got), want): self.fail(f'the C decoder, {len(s):#x} bytes: {d}')
+            else: self.assertEqual(got if kind == 'code' else 0, code(want), f'the C decoder, {len(s):#x} bytes: {kind} {got if kind == "code" else len(got)}, the reference {want[0]} {want[1] if want[0] == "red" else ""}')
         return want
 
     def test_random_streams(self):
@@ -148,8 +183,30 @@ class Yaz0(unittest.TestCase):
         rnd = random.Random(6)
         for size, want in ((0x1887, False), (0x2000, True)):
             Counted.calls = 0
-            with mock.patch.object(ss, 'YAZ0_RUNS', Counted(ss.YAZ0_RUNS)): self.same(encode([rnd.randrange(256) for _ in range(size)]), 'ok')
+            with python_only(), mock.patch.object(ss, 'YAZ0_RUNS', Counted(ss.YAZ0_RUNS)): self.assertFalse(differ(run(ss.yaz0, s := encode([rnd.randrange(256) for _ in range(size)])), run(reference, s)))
             with self.subTest(size=size): self.assertEqual(Counted.calls > 0, want)
+
+    @unittest.skipUnless(compiler(), 'no C compiler: the Python decoder alone runs, and the tests above check it')
+    def test_native_built(self):
+        """Where a compiler is (a Mac with Xcode, the CI runners), the C decoder builds, so the tests above check it too"""
+        self.assertIsNotNone(NATIVE)
+
+    @unittest.skipUnless(NATIVE, 'the C decoder does not build here')
+    def test_native_runs(self):
+        """yaz0 hands the C decoder a stream with n bytes to decode when it can decode to that many, and keeps its bytes; n = 0, and n past what the stream can give, stay in Python"""
+        calls = []
+        def counted(*a): calls.append(rc := NATIVE(*a)); return rc
+        rnd = random.Random(7); items = random_items(rnd, 0x4000, 0.5, 16); s = encode(items)
+        cases = ((s, [0]), (encode(items, 0), []), (encode(items, ss.YAZ0_RATIO * (len(s) - 16) + 1), []), (encode(items, len(reference(s)) + 1), [1]), (encode([(1, 3)] + items), [2]))
+        for i, (t, want) in enumerate(cases):
+            calls.clear()
+            with self.subTest(i=i), mock.patch.object(ss, 'yaz0_native', lambda: counted):
+                self.assertFalse(differ(run(ss.yaz0, t), run(reference, t))); self.assertEqual(calls, want)
+
+    def test_ratio(self):
+        """YAZ0_RATIO bounds what a stream decodes to: groups of 3-byte back-references of 0x111 bytes come closest"""
+        s = encode([1] + [(1, 0x111)] * 800)
+        self.assertLessEqual(len(reference(s)), ss.YAZ0_RATIO * (len(s) - 16)); self.assertGreater(len(reference(s)), (ss.YAZ0_RATIO - 4) * (len(s) - 16))
 
     @classmethod
     def tearDownClass(cls): print(f'\n{cls.streams} streams compared', file=sys.stderr)

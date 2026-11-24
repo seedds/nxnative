@@ -209,6 +209,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Resident Evil 4](0400569027BF4000/README.md) | `0400569027BF4000` | v131072 (Switch 2) | 21.4.3 (Ounce) | RE Engine, Havok, Wwise | NVN2 | — |
 | [Return of the Obra Dinn](010032E00E6E2000/README.md) | `010032E00E6E2000` | 1.0.1 | 8.2.0 | Unity 2017.4.28f1 IL2CPP | NVN | — |
 | [Rhythm Heaven Groove](0100D9F01D474000/README.md) | `0100D9F01D474000` | 1.0.0 (base) | 21.4.0 | Nintendo's own 2D engine | NVN | — |
+| [RIVE: Ultimate Edition](010069C00401A000/README.md) | `010069C00401A000` | Base game + Update 1.22 | — | — | — | — |
 | [ROMANCE OF THE THREE KINGDOMS 8 REMAKE](0100C2A01A730000/README.md) | `0100C2A01A730000` | 1.1.3 | 17.5.3 | Koei Tecmo's KTGL | NVN | — |
 | [ROMANCE OF THE THREE KINGDOMS XIV: Diplomacy and Strategy Expansion Pack](0100ED7012DB2000/README.md) | `0100ED7012DB2000` | 1.0.10 | 10.4.1 | Koei Tecmo's KTGL | NVN | — |
 | [Sam & Max: The Devil's Playhouse](0100D5501857E000/README.md) | `0100D5501857E000` | 1.8.0 (provisional Mac profile) | 17.5.6 | Telltale Tool, FMOD | NVN | — |

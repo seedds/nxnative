@@ -131,6 +131,9 @@ void hle_bind_system_event(void *ev, int ac) {
     assert(ev == sdk_event && ac == 1 && event_destroys == 2 * event_binds + 1);   // after the open destroys the SDK's local event (each earlier Close destroyed one more)
     event_binds++;
 }
+static int event_clears;
+static void *last_cleared_ev;
+void hle_clear_system_event(void *ev) { event_clears++; last_cleared_ev = ev; }
 uint32_t hle_dup_readable_handle(uint32_t h) { assert(h == 0x1002); return 0x1003; }
 
 int main(void) {
@@ -215,42 +218,45 @@ int main(void) {
         h_ar_Close(handle[0], handle[1]);
     }
     // Explicit CPU + manual renderer (device 1, mode 1): driven by the game — no host render thread, no event replacement,
-    // no DeviceSink capture, no catch-up renders in Update, and ExecuteAudioRendererRendering forwards straight to the SDK.
+    // no DeviceSink capture, no event clearing in Update, and ExecuteAudioRendererRendering forwards straight to the SDK.
     *(int32_t *)(param + P_DEVICE) = 1; *(int32_t *)(param + P_MODE) = 1;
     assert(h_ar_WorkSize(param) == SDK_WORK);
-    int s_before = starts, j_before = joins, d_before = event_destroys, b_before = event_binds, at_before = attaches;
+    int s_before = starts, j_before = joins, d_before = event_destroys, b_before = event_binds, at_before = attaches, cl_before = event_clears;
     expect_game_event = 1;
     assert(!h_ar_Open(handle, event, param, work, SDK_WORK));
     expect_game_event = 0;
     assert(handle[0] == work && allocations == a && !map_key);
-    assert(starts == s_before && !g_ar[0].render_tt && g_ar[0].manual);
+    assert(starts == s_before && !g_ar[0].render_tt && g_ar[0].manual && !g_ar[0].ev && !g_ar[0].ev_kernel);
     assert(event_destroys == d_before && event_binds == b_before && attaches == at_before && !rev_find(handle[0]));
     uint8_t manual_impl[0x1100] = {0};   // impl_sys_off() decodes a 12-bit imm (<= 0xfff); keep manual_impl + offset in bounds under sanitizers
     uint8_t *manual_sys = manual_impl + impl_sys_off();
     for (int i = 0; i < 6; i++) assert(h_ars_Update(manual_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK);
-    assert(sdk_updates == 6 && atomic_load(&g_ar[0].catchups) == 0 && atomic_load(&g_ar[0].renders) == 0);
+    assert(sdk_updates == 6 && event_clears == cl_before && atomic_load(&g_ar[0].renders) == 0);
     assert(h_ar_ImplExec(manual_impl) == RES_OK && sdk_impl_execs == 1);
     assert(h_ars_Exec(manual_sys) == RES_OK && sdk_ars_execs == 1);
     assert(atomic_load(&g_ar[0].renders) == 0);
     h_ar_Close(handle[0], handle[1]);
     assert(joins == j_before && !g_ar[0].handle[0] && !g_ar[0].manual && event_destroys == d_before);
-    // Coexistence: explicit CPU+manual renderer opened beside an unbound DSP renderer still binds and forwards cleanly.
+    // Coexistence: explicit CPU+manual renderer opened beside an unbound DSP renderer still binds and forwards cleanly,
+    // and the DSP renderer records and clears its own bound event on Update.
     void *work2; assert(!posix_memalign(&work2, WORK_PAGE, SDK_WORK));
     void *handle2[2];
     multi_open = 1;
     assert(!h_ar_Open0(handle, param, work, SDK_WORK));   // slot 0: manual, no render thread
     assert(starts == s_before && g_ar[0].manual && !g_ar[0].sys);
     *(int32_t *)(param + P_DEVICE) = 0; *(int32_t *)(param + P_MODE) = 0;
-    assert(!h_ar_Open0(handle2, param, work2, SDK_WORK));   // slot 1: DSP, starts render thread
-    assert(starts == s_before + 1 && !g_ar[1].manual && !g_ar[1].sys);
+    assert(!h_ar_Open(handle2, event, param, work2, SDK_WORK));   // slot 1: DSP with event, starts render thread
+    assert(starts == s_before + 1 && !g_ar[1].manual && !g_ar[1].sys && g_ar[1].ev == sdk_event && g_ar[1].ev_kernel);
     assert(h_ars_Exec(manual_sys) == RES_OK && sdk_ars_execs == 2);
     assert(g_ar[0].sys == manual_sys && !g_ar[1].sys);
-    assert(h_ars_Update(manual_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK && sdk_updates == 7);
-    assert(atomic_load(&g_ar[0].catchups) == 0 && atomic_load(&g_ar[1].catchups) == 0);
+    assert(h_ars_Update(manual_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK && sdk_updates == 7 && event_clears == cl_before);
+    uint8_t dsp_sys = 0;
+    assert(h_ars_Update(&dsp_sys, NULL, 0, NULL, 0, NULL, 0) == RES_OK && sdk_updates == 8);
+    assert(g_ar[1].sys == &dsp_sys && event_clears == cl_before + 1 && last_cleared_ev == sdk_event);
     h_ar_Close(handle[0], handle[1]);
     assert(joins == j_before && !g_ar[0].handle[0] && !g_ar[0].manual);
     h_ar_Close(handle2[0], handle2[1]);
-    assert(joins == j_before + 1 && !g_ar[1].handle[0]);
+    assert(joins == j_before + 1 && !g_ar[1].handle[0] && !g_ar[1].ev && !g_ar[1].ev_kernel);
     multi_open = 0;
     free(work2);
     free(work);

@@ -591,6 +591,7 @@ void own_prog_pin(uint64_t serial) {
     os_unfair_lock_unlock(&g_prog_pin_lk);
 }
 
+uint64_t own_alias_seen_locked(const alias_key *k) { return (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, k); }   // the submission of k's last lookup or creation (0: none): the memory breakdown's idle count (DM_NVN_MEM_BREAKDOWN)
 own_alias_unheld own_alias_unheld_locked(void) {
     own_alias_unheld s = {0}; uint64_t now = own_hook_submission();
     CFMutableSetRef sized = CFSetCreateMutable(NULL, 0, NULL);   // the textures counted

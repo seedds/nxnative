@@ -2481,6 +2481,10 @@ static void dump_frame(void) {
 counts_done:
     // Every 300 frames read resident memory for the graphics layer's memory report (mtl_mem_stat). Memory watchdog: when resident memory exceeds the cap, log a failure and exit on its own. On by default only on the Mac host (24 GB: runaway host memory
     // drags the whole machine into a kernel panic, which happened twice with other programs on the same machine), or set for tests with DM_MEM_CAP_GB=<integer>; the player's iOS app has no cap (exiting before the system kills it is pointless and only adds another kind of crash)
+    // DM_NVN_MEM_BREAKDOWN=<every N frames> (off by default): bytes per host cache / pool (mtl_mem_breakdown)
+    { static long every = -1; if (every < 0) { const char *e = getenv("DM_NVN_MEM_BREAKDOWN"); every = e ? atol(e) : 0; }
+      if (every > 0 && g_frame % (uint64_t)every == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { void mtl_mem_breakdown(unsigned long long, unsigned long long); mtl_mem_breakdown(g_frame, (unsigned long long)(vi.phys_footprint >> 20)); } } }
     if (g_frame % 300 == 0) { task_vm_info_data_t vi; mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
         if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &cnt) == KERN_SUCCESS) { unsigned long long mb = (unsigned long long)(vi.phys_footprint >> 20); void mtl_mem_stat(unsigned long long, unsigned long long); mtl_mem_stat(g_frame, mb);
             static long cap = -1; if (cap < 0) { const char *e = getenv("DM_MEM_CAP_GB"); cap = e ? atol(e) : DM_MEM_CAP_DEFAULT_GB; }
@@ -2611,6 +2615,8 @@ static void tsummary(uint64_t frame) {
     }
     LOG("[nvn] timing up to frame %llu:%s", frame, line);
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
+    { int mtl_pso_look_line(char *, size_t); char xl[2048];   // DM_PSO_LOOKTIME / DM_PSO_SIGNALLOG / DM_PSO_PREDICT_ASYNC, DM_PSO_SUBMIT_NOLOOKUP: nothing when off
+      if (mtl_pso_look_line(xl, sizeof xl)) LOG("[pso-look] up to frame %llu: %s", frame, xl); }
     double tgt = 1000.0 / (atomic_load(&g_fs_fine) ? 30 : mtl_fps_target());   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 or at a 30 cap whose late frames the 60 Hz link shows (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;

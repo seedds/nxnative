@@ -224,6 +224,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SteamWorld Dig 2](0100CA9002322000/README.md) | `0100CA9002322000` | 4.1.1 | 3.4.0 | Image & Form's own engine (SteamWorld) | NVN | — |
 | [SteamWorld Heist II](010089C01E9CA000/README.md) | `010089C01E9CA000` | 1.5.1 | 17.5.6 | Thunderful's own engine (SteamWorld) | NVN | — |
 | [SteamWorld Heist: Ultimate Edition](010016100A186000/README.md) | `010016100A186000` | 2.2.1 | 4.5.0 | Image & Form's own engine (SteamWorld) | NVN | — |
+| [STORY OF SEASONS: Friends of Mineral Town](0100ED400EEC2000/README.md) | `0100ED400EEC2000` | 1.0.5 | 8.2.0 | — | NVN | — |
 | [Streets of Rage 4](0100EC9010258000/README.md) | `0100EC9010258000` | 1.0.9 | 9.3.1 | MonoGame (C# → C++ by BRUTE) | NVN | — |
 | [Subnautica](0100429011144000/README.md) | `0100429011144000` | 1.23.83358 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |
 | [Subnautica: Below Zero](010014C011146000/README.md) | `010014C011146000` | 1.23.55063 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |

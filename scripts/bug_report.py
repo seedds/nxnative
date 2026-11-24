@@ -21,6 +21,9 @@ CHAIN_H = 'dm/gfx/nvn/dmsh_chain.h'
 TOTAL_CAP = 20 * 1024 * 1024    # the zip's text content, before compression
 FILE_CAP = 4 * 1024 * 1024      # one file: longer ones keep the first and last half of this
 CRASH_MAX, CRASH_DAYS = 3, 7
+GPU_EVENT_MAX = 10
+GPU_EVENT_MARGIN = 120          # seconds after a log's last line in which macOS may still write the run's report
+SYSTEM_REPORTS = '/Library/Logs/DiagnosticReports'
 
 # The allow-list: the only things this script reads into the bundle. Anything else (RomFS, NSO, NSP, NCA, .metallib, .metal, shader .json, saves, pso_*, screenshots, keys)
 # is not on it, so it cannot get in by a new file type turning up.
@@ -32,6 +35,7 @@ ALLOWED = (
     '<NSP folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the NSP folder)',
     'the file given with --ios-log (a text file other than .keys)',
     '~/Library/Logs/DiagnosticReports/ crash reports (.ips, .crash) of dmhost or the app, the newest 3 of the last 7 days',
+    '/Library/Logs/DiagnosticReports/ and ~/Library/Logs/DiagnosticReports/ GPU fault reports (gpuEvent-<process>-*.ips) of dmhost or the app written during this game\'s last two Mac app runs (with no Mac app log, of the last 7 days, marked as not matched), the newest 10',
     'Info.plist of the app (a few keys), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
 )
 
@@ -198,7 +202,31 @@ def crash_reports(home, names, now=None):
     return sorted(items, key=lambda p: p.stat().st_mtime, reverse=True)[:CRASH_MAX]
 
 
-def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_CAP):
+def run_windows(home, tid):
+    """(start, end) of this title's last two Mac app runs, from the two logs the launcher keeps: it starts a new file at each start. Every packed app's process is called nxnative and its host dmhost,
+    so a report's name does not say which game it is of, and its time is what tells them apart"""
+    out = []
+    for name in (f'{tid}.log', f'{tid}.prev.log'):
+        try: st = (Path(home) / 'Library/Logs/nxnative' / name).stat()
+        except OSError: continue
+        out.append((getattr(st, 'st_birthtime', st.st_mtime), st.st_mtime + GPU_EVENT_MARGIN))
+    return out
+
+
+def gpu_event_reports(home, names, system=SYSTEM_REPORTS, now=None, windows=()):
+    """the reports macOS writes for a GPU hang or page fault of the host (gpuEvent-<process, 16 characters>-*.ips), from the system's folder and the user's, of the last CRASH_DAYS days: with windows, only those
+    written during one of them. Returns (the newest GPU_EVENT_MAX, how many others of these processes the windows left out)"""
+    now = now or datetime.datetime.now().timestamp()
+    pre = tuple(f'gpuEvent-{n[:16]}-' for n in names)
+    items = []
+    for d in (Path(system), Path(home) / 'Library/Logs/DiagnosticReports'):
+        try: items += [p for p in d.iterdir() if p.suffix == '.ips' and p.name.startswith(pre) and p.is_file() and not p.is_symlink() and now - p.stat().st_mtime <= CRASH_DAYS * 86400]
+        except OSError: continue
+    kept = [p for p in items if any(a <= p.stat().st_mtime <= b for a, b in windows)] if windows else items
+    return sorted(kept, key=lambda p: p.stat().st_mtime, reverse=True)[:GPU_EVENT_MAX], len(items) - len(kept)
+
+
+def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_CAP, system_reports=SYSTEM_REPORTS):
     """the bundle for target: (Bundle, report.md text)"""
     home = home or str(Path.home())
     b = Bundle(home, total_cap, file_cap)
@@ -235,6 +263,10 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     cr = crash_reports(home, [e for e in exe if e])
     if not cr: b.notes.append('Crash reports: none of dmhost or the app in the last 7 days')
     for p in cr: b.add_file(f'crash/{p.name}', p, f'crash report {p.name}')
+    windows = run_windows(home, tid)
+    gpu, other = gpu_event_reports(home, [e for e in exe if e], system_reports, windows=windows)
+    for p in gpu: b.add_file(f'crash/{p.name}', p, f'GPU fault report {p.name}' + ('' if windows else ' (not matched to this game: it has no Mac app log)'))
+    if other: b.notes.append(f'GPU fault reports: {other} from outside this game\'s last two Mac app runs left out')
 
     # settings
     prefs = read_prefs(bundle_id)

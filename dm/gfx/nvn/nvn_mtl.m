@@ -1003,30 +1003,65 @@ static void defer_idle_commit(void) {
     if (res_pending()) defer_kick();
 }
 
-// A profile list of shader keys the host asks the next shader build for (bf_want.tsv): each key appended once to the file the environment names. A shader's key is
-// its 16 hex digits, with or without the route suffix (NvShader keys are "<key>_b"), as dmsh_build.py reads the list
-typedef struct { const char *env; pthread_mutex_t mu; char **keys; size_t n, cap; int loaded; } want_list;
+// A list of shader keys the host keeps for the next shader build: each key appended once to the file the environment names (bf_want.tsv, shader_missing.txt). A shader's key is
+// its 16 hex digits, with or without the route suffix (NvShader keys are "<key>_b"), as dmsh_build.py reads the list. The keys are held in a table, not a list searched per note: a missing
+// shader is noted for every program that asks for it, and a large game's file can hold tens of thousands (Pokopia's map has 131,426). The file is only appended to, each key in one write
+// with O_APPEND, so two hosts of one title cannot interleave a line; a line a stopped host or a full disk left half written is not read as a key and gets its newline before the next one
+typedef struct { const char *env; pthread_mutex_t mu; uint64_t *tab; size_t n, cap; int has0, loaded, torn, warned; } want_list;
+static int want_hex(const char *s, uint64_t *out) {   // s starts with 16 hex digits
+    uint64_t v = 0;
+    for (int i = 0; i < 16; i++) { char c = s[i]; int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return 0;
+        v = v << 4 | (uint64_t)d; }
+    *out = v; return 1;
+}
+static int want_add(want_list *w, uint64_t k) {   // 1 when k is new. Open addressing, 0 is an empty slot (key 0 has a flag), at most half full
+    if (!k) { int fresh = !w->has0; w->has0 = 1; return fresh; }
+    if ((w->n + 1) * 2 > w->cap) {
+        size_t cap = w->cap ? w->cap * 2 : 256; uint64_t *t = realloc_or_die(NULL, cap * sizeof *t, "the shader key list"); memset(t, 0, cap * sizeof *t);
+        for (size_t i = 0; i < w->cap; i++) if (w->tab[i]) { size_t j = (size_t)(w->tab[i] * 0x9E3779B97F4A7C15ull >> 20) & (cap - 1); while (t[j]) j = (j + 1) & (cap - 1); t[j] = w->tab[i]; }
+        free(w->tab); w->tab = t; w->cap = cap;
+    }
+    for (size_t i = (size_t)(k * 0x9E3779B97F4A7C15ull >> 20) & (w->cap - 1);; i = (i + 1) & (w->cap - 1)) {
+        if (w->tab[i] == k) return 0;
+        if (!w->tab[i]) { w->tab[i] = k; w->n++; return 1; }
+    }
+}
 static void want_note(want_list *w, const char *key) {
-    const char *path = getenv(w->env);
-    if (!path || !key || strlen(key) < 16 || (key[16] && key[16] != '_')) return;
-    for (int i = 0; i < 16; i++) if (!((key[i] >= '0' && key[i] <= '9') || (key[i] >= 'a' && key[i] <= 'f') || (key[i] >= 'A' && key[i] <= 'F'))) return;
-    char k16[17]; memcpy(k16, key, 16); k16[16] = 0;
+    const char *path = getenv(w->env); uint64_t k;
+    if (!path || !key || strlen(key) < 16 || (key[16] && key[16] != '_') || !want_hex(key, &k)) return;
     pthread_mutex_lock(&w->mu);
     if (!w->loaded) {
-        FILE *f = fopen(path, "r"); char line[64];
-        if (f) { while (fgets(line, sizeof line, f)) { char *e = strpbrk(line, "\r\n"); if (e) *e = 0; if (strlen(line) != 16) continue;
-                if (w->n == w->cap) { w->cap = w->cap ? w->cap * 2 : 64; w->keys = realloc_or_die(w->keys, w->cap * sizeof *w->keys, "the shader key list"); }
-                w->keys[w->n++] = strdup(line); } fclose(f); }
+        FILE *f = fopen(path, "r"); char line[64]; uint64_t v;
+        if (f) { while (fgets(line, sizeof line, f)) { size_t l = strcspn(line, "\r\n"); w->torn = !line[l]; if (l == 16 && line[l] && want_hex(line, &v)) want_add(w, v); } fclose(f); }
         w->loaded = 1;
     }
-    for (size_t i = 0; i < w->n; i++) if (!strcmp(w->keys[i], k16)) { pthread_mutex_unlock(&w->mu); return; }
-    if (w->n == w->cap) { w->cap = w->cap ? w->cap * 2 : 64; w->keys = realloc_or_die(w->keys, w->cap * sizeof *w->keys, "the shader key list"); }
-    w->keys[w->n++] = strdup(k16);
-    FILE *f = fopen(path, "a"); if (f) { fprintf(f, "%s\n", k16); fclose(f); }
+    if (want_add(w, k)) {
+        char line[18]; int n = 0;
+        if (w->torn) line[n++] = '\n';
+        memcpy(line + n, key, 16); n += 16; line[n++] = '\n';
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644), err = errno;
+        ssize_t put = fd >= 0 ? write(fd, line, (size_t)n) : -1;
+        if (fd >= 0) { if (put < 0) err = errno; close(fd); }
+        if (put == n) w->torn = 0;
+        else {
+            if (put > 0) w->torn = 1;
+            if (!w->warned) { w->warned = 1; MLOG("[RED] cannot add shader key %.16s to %s: %s", key, path, put < 0 ? strerror(err) : "short write"); }
+        }
+    }
     pthread_mutex_unlock(&w->mu);
 }
 static want_list g_bf_want = {"DM_NVN_BF_WANT", PTHREAD_MUTEX_INITIALIZER};
 void bf_want_note(const char *key) { want_note(&g_bf_want, key); }
+// The shaders the library lacked, kept for the next --seen-shaders build (scripts/build_ipa_from_nsp.py seen_lists). The same two red lines say so, but only in a log: the Mac launcher renames
+// the log at every start and keeps one earlier log, and the run command's tee starts its file again, so a key was gone after two more starts, one of them perhaps only opening the settings
+// window (GitHub issue #1519). Written when the shader is missed, so no later start has to search a log. Only <key> or <key>_b, what those lines name: the geometry routes' libraries
+// (<key>_bg<n>, _bgv, _bl<n>) and rt_library_b are not keys of the shader map. DM_NVN_MISSING_KEYS: the launcher and the partial run command set it, so an iPhone never writes one
+static want_list g_missing_want = {"DM_NVN_MISSING_KEYS", PTHREAD_MUTEX_INITIALIZER};
+static void shader_missing_note(const char *key) {
+    size_t l = strlen(key);
+    if (l == 16 || (l == 18 && !strcmp(key + 16, "_b"))) want_note(&g_missing_want, key);
+}
 
 // ---------- Memory pools ----------
 // How far a pool entry's buffer reaches (BIG_MIN): REACH_WHOLE a large pool's whole-pool buffer; REACH_END to its pool's end (an ordinary pool, or a chunk that reaches the end); REACH_SHORT a chunk
@@ -7686,7 +7721,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 2 && !j) return nil;   // missing geometry translation: the caller's red line says so
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
     id<MTLLibrary> lib = lib_from_file(lp, &e);
-    if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); return nil; }
+    if (!lib || !j) { MLOG("[RED] failed to load shader %s: %s", pc.UTF8String, e ? e.localizedDescription.UTF8String : "no reflection json"); shader_missing_note(pc.UTF8String); return nil; }
     if (![j[@"chain"] isEqual:@DMSH_CHAIN]) { MLOG("[RED] shader %s has translation chain version %s, but this host expects %s", pc.UTF8String, [[j[@"chain"] description] UTF8String], DMSH_CHAIN); return nil; }
     if (layer && !j[@"entry_layer"]) { MLOG("[RED] vertex shader %s has no layer entry points", pc.UTF8String); return nil; }
     NvShader *o = [NvShader new]; o->gs_loc = o->lay_loc = -1;
@@ -7911,7 +7946,7 @@ static void *prog_get_ref(const prog_t *cp) {   // Called only on the submit thr
         if (st >= 6) MDIE("[RED] ray-tracing modules require a ray-tracing program builder");
         o->stages |= prog_stage_bit(stage);
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
-        if (sh) o->sh[st] = sh; else MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String);
+        if (sh) o->sh[st] = sh; else { MLOG("[RED] shader %s (%s) failed to load: build the shaders with dm/gfx/tools/dmsh_build.py first", k.UTF8String, stage.UTF8String); shader_missing_note(k.UTF8String); }
         if (sh && st == 5) up_mfx_read_color(sh, &p->sd[i]);
         if (!sh && st == 2) strlcpy(o->gs_miss, k.UTF8String, sizeof o->gs_miss);
     }

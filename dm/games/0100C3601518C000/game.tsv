@@ -1,0 +1,41 @@
+# Sid Meier's Civilization VII 1.5.0.1, Firaxis's engine, Coherent Gameface / V8, Wwise, NVN.
+# Mac gameplay tested. The V8 cage does not fit iOS without extended virtual addressing (README.md).
+
+# ---- Identity ----
+title_id	0100C3601518C000
+program_id	0100C3601518C000
+
+# ---- App ----
+name	Sid Meier's Civilization VII
+ipa	SidMeiersCivilizationVII.ipa
+app_category	public.app-category.strategy-games
+
+# ---- Versions ----
+build	v1638400	1.5.0.1	main=5d9401301ab2bb4917bafd939e5b3dd8	sdk=df7a3960c74c3a4803f826c587153252
+package	v1638400
+shader_versions	v1638400
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	Base/modules/core/movies/2160/civ7-cinematic.webm
+zip_store	.bs:.cache:.civ7save:.dat:.nro:.otf:.png:.ttf:.webm:.metallib
+
+# ---- Memory ----
+# 3.125 GB heap region for the measured 3.01 GB request, 256 MB stacks and 8.375 GB alias region.
+# V8 retains an 8 GB reservation to obtain a 4 GB-aligned pointer-compression cage.
+# The Mac's automatic 64 GB alias region ran this same heap/stack partition. This 12 GB layout does not fit iOS.
+mem_reserve	0x300000000
+mem_alias	0x218000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 2 MB of system resource
+sys_resource	0x200000
+
+# ---- Shader split ----
+shader_groups	/Base/=base /DLC/=dlc /.nrr/=nrr /nro/=nro
+shader_note	Sid Meier's Civilization VII shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero

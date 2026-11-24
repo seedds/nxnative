@@ -27,7 +27,7 @@ void dm_host_helper_qos(qos_class_t q) { (void)q; }   // hle_thread.c: the helpe
 typedef struct {
     void *out;
     aout *a;
-    gbuf *bufs;
+    aout_buf *bufs;
     uint8_t (*data)[MAX_SIZE];
     uint8_t *scratch;
     uint32_t *sizes;
@@ -88,7 +88,7 @@ static void *consumer(void *p) {
 static void *release_reader(void *p) {
     test_ctx *t = p;
     for (int i = 0; i < NBUF; ) {
-        gbuf *b = h_au_Released(t->out);
+        aout_buf *b = h_au_Released(t->out);
         if (!b) { sched_yield(); continue; }
         if (b != &t->bufs[i]) atomic_store(&t->failed, 1);
         i++;
@@ -98,7 +98,7 @@ static void *release_reader(void *p) {
 }
 
 static int stop_pending(void) {
-    char out[64], ev[64]; uint8_t prm[16], bytes[5][8] = {{0}}, played[13]; gbuf buffers[5] = {0};
+    char out[64], ev[64]; uint8_t prm[16], bytes[5][8] = {{0}}, played[13]; aout_buf buffers[5] = {0};
     h_au_InitParam(prm); if (h_au_Open(out, ev, NULL, prm)) return 1;
     aout *a = ao(out); atomic_store(&a->state, STATE_STARTED);   // deterministic callback, no backend thread
     atomic_store(&a->q_head, UINT32_MAX-2); atomic_store(&a->q_tail, UINT32_MAX-2);
@@ -145,3 +145,5 @@ int main(void) {
     free(t.scratch); free(t.sizes); free(t.data); free(t.bufs);
     return released != NBUF || failed || sig < 1 || !after;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

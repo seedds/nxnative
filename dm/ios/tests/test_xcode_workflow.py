@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,10 +39,11 @@ class XcodePipelineTests(unittest.TestCase):
             base.touch()
             update.touch()
             registered = game.load('0100A6301214E000')
-            profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=root / 'profile' / registered.id,
+            profile_dir = root / 'profile' / registered.id
+            profile = SimpleNamespace(id=registered.id, title_id=registered.title_id, dir=profile_dir, table=lambda name: profile_dir / name,
                                       get=registered.get, words=registered.words, modules_in=registered.modules_in,
                                       builds=lambda: {'v0': {'display': '1.0.0', 'main': 'other-build'}})
-            sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'ue_decode', 'oodle_packs', 'ue_legacy')}
+            sources = {key: (False, '') for key in ('glslc_capture', 'vk_capture', 'gl_capture', 'gl_fixed', 'ue_decode', 'oodle_packs', 'ue_legacy')}
             sources['graphics'] = (graphics, 'fixture')
             fam = {'base': base, 'updates': [] if derived else [(327680, update)], 'dlc': []}
             version = 'v0' if derived else 'v327680'
@@ -95,6 +97,8 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
             self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')
             self.assertEqual(environment['GFXAPI'], graphics)
+            self.assertEqual(environment['DM_PYTHON'], sys.executable)
+            self.assertNotIn('FONT_PY', environment)
             self.assertEqual(environment['DM_BUNDLE_ID'], 'com.example.saved')
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
             self.assertEqual(Path(environment['DM_XCODE_PROJECT_DIR']), root / f'{registered.id}_build/xcode')
@@ -104,7 +108,7 @@ class XcodePipelineTests(unittest.TestCase):
                 self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
-                self.assertTrue(builder.call_args.kwargs['reuse'])
+                self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused
             warnings = [event.get('msg', '') for event in events]
             self.assertEqual(any('this Xcode project uses' in message for message in warnings), derived)
             if derived:
@@ -130,6 +134,41 @@ class BuildEnvFileTests(unittest.TestCase):
 
 
 class ResourceStagingTests(unittest.TestCase):
+    def test_external_dlc_updates_even_when_size_and_mtime_match(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ios, romfs, shader, aoc = [root / name for name in ('xcode', 'romfs', 'gl', 'aoc')]
+            for folder in (ios / 'Gen', romfs, shader, aoc): folder.mkdir(parents=True)
+            (ios / 'Gen/dm.xcconfig').touch()
+            (romfs / 'marker').touch()
+            (shader / 'k.metallib').touch()
+            image = aoc / '1.img'; image.write_bytes(b'original')
+            retired = aoc / '2.img'; retired.write_bytes(b'remove')
+            app = root / 'products/Game.app'
+            environment = dict(os.environ, SRCROOT=str(ios), TARGET_BUILD_DIR=str(app.parent),
+                               UNLOCALIZED_RESOURCES_FOLDER_PATH=app.name, PLATFORM_NAME='iphoneos')
+
+            def stage(source):
+                argv = ['gen_resources.py', str(ios), str(romfs), 'marker', str(shader), 'gl', source, str(root / 'dd'), 'unused']
+                with patch.object(sys, 'argv', argv), patch.dict(os.environ, {'DM_RESOURCE_AOC_CHECKSUM': 'YES'}):
+                    gen_resources.main()
+                result = subprocess.run(['bash', str(REPO / 'dm/ios/tools/stage_resources.sh')],
+                                        env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            stage(str(aoc))
+            self.assertEqual((app / 'aoc/1.img').read_bytes(), b'original')
+            self.assertTrue((app / 'aoc/2.img').is_file())
+            previous = image.stat()
+            image.write_bytes(b'replaced')
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            retired.unlink()
+            stage(str(aoc))
+            self.assertEqual((app / 'aoc/1.img').read_bytes(), b'replaced')
+            self.assertFalse((app / 'aoc/2.img').exists())
+            stage('')
+            self.assertFalse((app / 'aoc').exists())
+
     def test_nvn_vulkan_gl_and_incremental_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve() / "Game's $ literal `ticks`"
@@ -238,6 +277,12 @@ class ImageStaging(unittest.TestCase):
             environment['DM_COPY_ROMFS'] = 'NO'; stage(); self.assertFalse((app / 'romfs.img').exists())
             self.assertTrue(romfs_image.same_identity((app / 'romfs.id').read_text(), romfs_image.identity(image)))   # the slim build names the image it needs
             environment.pop('DM_COPY_ROMFS'); stage(); self.assertTrue((app / 'romfs.img').is_file()); self.assertFalse((app / 'romfs.id').exists())
+            # the other programs' RomFS beside the image (scripts/pack_nup.py), where the host mounts them by program index: staged with the RomFS, also in the slim build (main.m names it)
+            programs = root / 'romfs_programs'; programs.mkdir(); (programs / '0.img').write_bytes(b'switch 1 data')
+            stage(); self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data')
+            (programs / '0.img').write_bytes(b'switch 1 data, updated'); environment['DM_COPY_ROMFS'] = 'NO'; stage()
+            self.assertEqual((app / 'romfs_programs/0.img').read_bytes(), b'switch 1 data, updated')
+            environment.pop('DM_COPY_ROMFS'); shutil.rmtree(programs); stage(); self.assertFalse((app / 'romfs_programs').exists())
 
     def test_one_library_file_is_staged_as_it_is(self):   # an NVN game's libraries (dm/tools/shader_lib.py), and the folder of a build from before them, each replacing the other
         import romfs_image
@@ -258,8 +303,23 @@ class ImageStaging(unittest.TestCase):
                 result = subprocess.run(['bash', str(ios / 'tools/stage_resources.sh')], env=environment, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
             stage(packed)
-            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img']); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'library file')
-            packed.write_bytes(b'newer'); stage(packed); self.assertEqual((app / 'msl/b-abc.img').read_bytes(), b'newer')
+            staged_romfs, staged_shaders = app / 'romfs.img', app / 'msl/b-abc.img'
+            self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
+            self.assertEqual(staged_shaders.read_bytes(), b'library file')
+            romfs_inode, shader_inode = staged_romfs.stat().st_ino, staged_shaders.stat().st_ino
+            stage(packed)
+            self.assertEqual(staged_romfs.stat().st_ino, romfs_inode)
+            self.assertEqual(staged_shaders.stat().st_ino, shader_inode)
+
+            previous = image.stat()
+            (source / 'marker').write_text('updated!')
+            romfs_image.pack(source, image)
+            self.assertEqual(image.stat().st_size, previous.st_size)
+            os.utime(image, ns=(previous.st_atime_ns, previous.st_mtime_ns + 2_000_000_000))
+            packed.write_bytes(b'newer')
+            stage(packed)
+            self.assertEqual(staged_romfs.read_bytes(), image.read_bytes())
+            self.assertEqual(staged_shaders.read_bytes(), b'newer')
             stage(folder); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc']); self.assertEqual((app / 'msl/b-abc/k_b.metallib').read_text(), 'loose')
             stage(packed); self.assertEqual([p.name for p in (app / 'msl').iterdir()], ['b-abc.img'])
 

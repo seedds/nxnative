@@ -71,11 +71,12 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     }
                 }
 
-                GotoElimination.Eliminate(context.GetGotos());
+                GotoElimination.Eliminate(context.GetGotos(), context.NewTemp);
 
                 LoopExitCohort.Apply(context.CurrentFunction.MainBlock, callee => callee >= 0 && callee < subgroupFunctions.Length && subgroupFunctions[callee]);
 
-                AstOptimizer.Optimize(context);
+                // nxnative: SPIR-V has no else-if construct; keep nested Else { If } blocks instead of flattening to ElseIf for GLSL syntax.
+                AstOptimizer.Optimize(context, flattenElseIf: targetLanguage != TargetLanguage.Spirv);
 
                 context.LeaveFunction();
             }
@@ -155,6 +156,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                     if (index - 1 < inArgsCount)
                     {
                         AstOperand argTemp = context.NewTemp(FuncParameterType);
+                        argTemp.AddressTaken = true;
                         context.AddNode(new AstAssignment(argTemp, source));
                         sources[index] = argTemp;
                     }
@@ -177,15 +179,19 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 AstOperand oper = context.GetOperand(operation.GetDest(1 + index));
 
                 oper.VarType = InstructionInfo.GetSrcVarType(inst, sourcesCount + index);
+                if (inst == Instruction.Call)
+                {
+                    oper.AddressTaken = true;
+                }
 
                 sources[sourcesCount + index] = oper;
             }
 
             AstTextureOperation GetAstTextureOperation(TextureOperation texOp)
             {
-                if ((texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer)
+                if ((texOp.Type & SamplerType.Mask) == SamplerType.TextureBuffer || texOp.Flags.HasFlag(TextureFlags.RowWrap))
                 {
-                    context.ResourceManager.NoteBufferResource(inst.IsImage(), texOp.Set, texOp.Binding);   // nxnative: buffer image and buffer texture offsets
+                    context.ResourceManager.NoteBufferResource(inst.IsImage(), texOp.Set, texOp.Binding, texOp.Flags.HasFlag(TextureFlags.RowWrap));   // nxnative: buffer image and buffer texture offsets
                 }
 
                 return new AstTextureOperation(

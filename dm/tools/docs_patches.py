@@ -6,7 +6,7 @@
 # FRAME_STEP function against a recording context (no game files). Run it after changing a patch file, a build-keyed host table or a profile key; --check only reports whether the page is
 # current (dm/tools/tests/test_docs.py runs it).
 # Usage: docs_patches.py [--check]
-import importlib.util, re, subprocess, sys, pathlib, types
+import importlib.util, inspect, re, subprocess, sys, pathlib, types
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / 'dm/tools')); sys.path.insert(0, str(REPO / 'dm/games'))
@@ -19,7 +19,7 @@ HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
 TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
-NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource'}
+NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'shader_versions', 'shader_covers'}
 
 # ---- Binding: what a patch's correctness is anchored to, from the loosest (GitHub issue #635). A patch is at its goal when its binding is the loosest it could have; the gap between the two
 # is the work list. A patch file's BINDING is a list of {'what', 'now', 'goal', 'purpose', 'why'} with an optional 'blocked' (why the gap cannot close yet) or 'kept' (why it stays
@@ -74,8 +74,6 @@ HOST_BINDING = [
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_locks', 'Criterion', '', {'what': "Criterion's 60 fps mode, frame ticks and game step at fixed addresses", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
-    ('k_locks', 'FIFA', '', {'what': "Frostbite's frame regulator at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
-     'why': "engine code other Frostbite games ship (the simulation's own rate is already set by name)", 'blocked': 'one Frostbite game here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
@@ -107,6 +105,8 @@ SWITCH_BINDING = [
      'why': 'unified memory semantics; off by default because a flushed range could cover an image a shader writes: tracking GPU writes would make it safe for every game'}),
     ('tex_dirty_upload', '', {'what': 'CPU-written textures uploaded without a flush', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'as tex_flush_upload, for pools the CPU writes without a flush'}),
+    ('tex_copy_staging', '', {'what': 'record-time copy of CPU staging bytes at one verified buffer-to-texture upload site', 'now': 'build', 'goal': 'host', 'purpose': 'rendering',
+     'why': 'a main build ID and return address identify one CPU upload site because NVN also supports GPU-written buffer-to-texture copies; tracking GPU-written ranges would make staging capture general'}),
     ('tex_dyn_slots', '', {'what': "buffer-texture handles indexed through c2's tables", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',
      'why': "right only where the handle comes from c2's tables: the translator could prove that per shader"}),
     ('feedback_snap', '', {'what': 'draws that sample their own colour attachment read a snapshot', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
@@ -119,7 +119,7 @@ SWITCH_BINDING = [
      'why': "the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code"}),
     ('game_env', 'DOTNET_GCRegionRange=', {'what': ".NET's garbage-collector region range", 'now': 'game', 'goal': 'game', 'purpose': 'address space', 'why': "measured for the game's regions"}),
     ('stdalloc_cap', '', {'what': "StandardAllocator's address space", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
-     'why': "what the regions after it need, measured by the NSP script's region check; the host's cap is the default"}),
+     'why': "what the regions after it need, measured by the NSP script's region check, or 1 GB from its heap check; the host's cap is the default"}),
     ('shader_key_skip', '', {'what': 'control-section bytes left out of shader keys', 'now': 'game', 'goal': 'game', 'purpose': 'shaders',
      'why': "the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key"}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),
@@ -128,6 +128,7 @@ SWITCH_BINDING = [
     ('present_interval', '', {'what': 'one frame per display tick', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'right only for games whose logic does not count frames'}),
     ('fps_hold', '', {'what': 'no frame held past the cap', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's pacing"}),
     ('fps_target', '', {'what': 'frame rate target', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'a choice per game'}),
+    ('fps_max', '', {'what': '120 fps ceiling', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': 'enabled per game only after verifying its speed at 120 against 60 over the same inputs'}),
     ('ue_fps_cvar', '', {'what': "the game's own Unreal frame-limit variable", 'now': 'game', 'goal': 'game', 'purpose': 'frame rate', 'why': "the game's own variable, which its settings apply to t.MaxFPS; the rewriter finds it by name (ue_cvar.py)"}),
     ('perf_mode', '', {'what': 'Boost whatever the operation mode', 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'a combination a Switch 1 never reports: a choice per game'}),
     ('launch_param', '', {'what': 'the launch parameter its launcher program passes', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
@@ -173,18 +174,19 @@ def build_rows(gs):   # {build ID: [(game, display version, module)]}
     return out
 
 
-OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 16 MB apart, so their sites read as offsets in them; its patch area starts at 0x6000000,
-                          # within a b's reach (128 MB) of a main's sites below it and of up to six other functions above
+OTHER_STEP = 0x200000
+OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's other functions, 2 MB apart, so their sites read as offsets in them; its patch area starts at 0x6000000,
+                          # within a b's reach (128 MB) of a main's sites below it and of up to forty-eight other functions above
 
 
 def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
     pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
     def emit(w): pos[0] += 4
-    at = {label: OTHER_BASE + i * 0x1000000 for i, label in enumerate(others)}
+    at = {label: OTHER_BASE + i * OTHER_STEP for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
-                                others=at, found=found, capabilities=set(), address=lambda off: 0)
+                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
     fn(ctx)
-    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + 0x1000000) for label, a in at.items()}
+    in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + OTHER_STEP) for label, a in at.items()}
     return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
 
 
@@ -232,7 +234,7 @@ def shader_rules():   # (file, line, comment) of translator rules keyed by a sha
 
 
 def switches(gs):   # [(key, value, [games])] of every profile key set away from its default in game.py
-    src = (REPO / 'dm/games/game.py').read_text(); src = src[src.find('def header('):]; src = re.split(r'\n(?=\S)', src)[0]   # the keys the host's header takes (to the next top-level line)
+    src = inspect.getsource(game.header) + '\n' + inspect.getsource(game.header_one)
     defaults = {}
     for k, d in re.findall(r'g\.(?:get|words)\(\s*[\'"](\w+)[\'"]\s*,\s*[\'"]([^\'"]*)[\'"]\s*\)', src): defaults.setdefault(k, d)
     out = {}
@@ -282,7 +284,7 @@ def page():
         m = mods.get(g.id)
         if not m and g.id not in host_games: continue
         text = files[g.id].read_text() if m else ''
-        cuts, obs, fs, st, mc, mfs, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'CAPABILITIES'))
+        cuts, obs, fs, st, mc, mfs, mst, caps = (getattr(m, k, {}) for k in ('CUTS', 'OBS', 'FRAME_STEP', 'STUBS', 'MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS', 'CAPABILITIES'))
         bids = list(dict.fromkeys([*cuts, *obs, *fs, *st, *caps, *sorted(host_games.get(g.id, ()))]))
         n_fs = 0; lines = [f'### {name(g)}', '', f'{note(g)}, `{g.id}`' + (f', {link(files[g.id])}' if m else '') + '.', '']
         es = list(bound(m, rel(files[g.id]), own=True)) if m else []
@@ -329,6 +331,19 @@ def page():
                              + ''.join(f'; {label}, a function of {r["others"][label]["size"]:#x} bytes, ' + ', '.join(f'`+{off:#x}`' for off, _ in got) + ' in it'
                                        for label, got in in_others.items())
                              + (f'; launcher capabilities: {", ".join(fs_caps)}' if fs_caps else ''))
+        for module, rules in mst.items():
+            for i, r in enumerate(rules):
+                if 'calls' in r:
+                    got = [frame_step_sites(r['stub'], found=f) for f in r['reviewed']]
+                    n_fs += len(got[0][0]) * (i == 0)
+                    lines.append(f'- **anchored stub** (`{module}` of builds without STUBS): {r["name"]}: the one function that calls `{r["calls"]}`, '
+                                 + 'on the reviewed builds ' + '; '.join(', '.join(f'`+{off:#x}`' for off, _ in g[0]) for g in got) + ' in it')
+                    continue
+                sites, _, in_others, _ = frame_step_sites(r['stub'], others=r.get('others', {}))
+                n_fs += (len(sites) + sum(map(len, in_others.values()))) * (i == 0)
+                lines.append(f'- **function-matched stub** (`{module}` of builds without STUBS): {r["name"]}: a function of {r["size"]:#x} bytes, '
+                             + ', '.join(f'`+{off:#x}`' for off, _ in sites) + ' in it'
+                             + ('; native frame targets require the complete correction' if r.get('fps_required') else ''))
         sections += lines + ['']
         n_host = sum(len(host.get(b, [])) for b in bids)
         kinds = {}
@@ -362,12 +377,13 @@ def page():
         sdk_lines.append(f'- **sdk** {short(bid)} ({link(SDK, lineno(sdk_text, repr(bid)))}): ' + (', '.join(shipped) if shipped else 'no profile registers this build: see the comment above it'))
         for off, ob, nb, why in cuts: sdk_lines.append(f'  - cut `+{off:#x}`: {why}')
     rule_lines, comment = [], ''
+    sdk_kinds = {'node': 'node area 1 GB → 62 MB', 'align': 'regions of 4 MB and more aligned to 2 MB, as SDK 20', 'vamm': sdk.old_vamm}
     block = sdk_text[sdk_text.find("MATCH_CUTS = {'sdk'"):]
     for line in block.split('\n')[1:]:
         s = line.strip()
         if s.startswith('#'): comment = (comment + ' ' if comment else '') + s.lstrip('# ')
-        elif s.startswith(('node(', 'align(')):
-            rule_lines.append(f'- {"node area 1 GB → 62 MB" if s.startswith("node(") else "regions of 4 MB and more aligned to 2 MB, as SDK 20"}: {comment}'); comment = ''
+        elif kind := sdk_kinds.get(s.partition('(')[0]):
+            rule_lines.append(f'- {kind}: {comment}'); comment = ''
         elif s.startswith(']}'): break
     n_rules = sum(len(v) for v in getattr(sdk, 'MATCH_CUTS', {}).values())
     assert len(rule_lines) == n_rules, f'sdk_patches.py MATCH_CUTS: {len(rule_lines)} commented rules of {n_rules}'

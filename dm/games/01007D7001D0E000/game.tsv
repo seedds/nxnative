@@ -1,0 +1,35 @@
+# Oceanhorn: Monster of Uncharted Seas (Cornfox & Bros. engine), SDK 3.7.0, NVN.
+
+# ---- Identity ----
+title_id	01007D7001D0E000
+program_id	01007D7001D0E000
+
+# ---- App ----
+name	Oceanhorn
+ipa	Oceanhorn.ipa
+app_category	public.app-category.adventure-games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=3ad80bd8cfcb3423e2e865f4147c7e99	sdk=8f06e98711bb2331400286dae19db452	subsdk0=8f06e98711bb2331400286dae19db452
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# This update's subsdk0 is a byte-identical copy of sdk.
+modules	main sdk
+romfs_marker	data.vfs
+zip_store	.bfsar:.opus:.vfs:.metallib
+
+# ---- Memory ----
+# The game requests a 2.96 GB heap and declares zero system resource in main.npdm.
+mem_reserve	0xf0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/data.vfs/effects/=effects
+shader_note	Oceanhorn shaders
+# The game selects near=0 at run time. Prebuild the same vertex entry point.
+depth_mode	zero

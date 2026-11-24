@@ -23,7 +23,7 @@ if capstone.cs_version()[0] != 5:   # the rewriter uses Capstone 5's names (CS_A
     sys.exit(f'[RED] Capstone {capstone.__version__} is unsupported; the rewriter requires Capstone 5.x. Run: {shlex.join([sys.executable, "-m", "pip", "install", "capstone>=5,<6"])}')
 from capstone import *
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_MEM, ARM64_OP_REG
-import nso, nso_asm
+import mod_layout, nso, nso_asm, nso_syms
 from nso_asm import *   # the instruction encoders (B, ADRP, LDRX, ...), shared with the per-build patch files
 
 # The NSP script terminates a failed or cancelled rewrite with SIGTERM. Exit through the pool's context manager so it reaps the workers too.
@@ -36,6 +36,11 @@ src, outdir, NAME = sys.argv[1], sys.argv[2], sys.argv[3]
 # An NSO, or an NRO (a module the game loads at run time with nn::ro, Super Smash Bros. Ultimate's fighter code), rewritten as an NSO of the same layout would be. nso.py checks the file
 # against its header before anything is allocated (a damaged module stops here with a [RED] line)
 MOD = nso.cli_read(src)
+ORIG_TEXT = bytes(MOD.image[:MOD.text_end])   # the text as the file has it, before any relayout, cut or site: <name>.changed.tsv compares against it
+# Horizon maps modules at 4 KB, Apple hosts at 16 KB (W^X / signed __TEXT): move writable data up by whole 4 KB pages when it would share the code's 16 KB page (mod_layout.py)
+try: MOD, _relayout_D, _relayout_notes = mod_layout.relayout_module(MOD)
+except mod_layout.Error as e: sys.exit(f'[RED] {NAME}: {e}')
+if _relayout_D: print(f'{NAME}: ' + '; '.join(_relayout_notes))
 bss = MOD.bss
 # Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
 # The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
@@ -53,9 +58,8 @@ BIG_TEXT = FAR and MOD.text_end + FRONT > 0x8000000 - 0x10000
 # SPLIT is also no lower than the lowest site the back area reaches with the same margin (BACK_MIN): when ro, data and bss after the text are large (Hello Kitty Party Land: 151.8 MB
 # of text, 98 MB more before BACK_OFF), a 16 MB front area would hand the back area sites more than 128 MB below it, so the front area's first pass takes the gap up to BACK_MIN instead
 TWO = BIG_TEXT and MOD.text_end > 0x8000000 - 0x10000
-# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072, 185 MB of text and 90 MB of ro, data and bss after it, so BACK_MIN is 148.5 MB), no split puts every site
-# in reach of its area: the front area keeps its 16 MB and its split, and the sites between the split and BACK_MIN take the back area, each branch that does not reach going through a hop
-# (reach_via(): one b in the alignment padding between two functions, within reach of both ends)
+# When BACK_MIN is beyond the front area's reach too (GAP: Resident Evil 4 v131072), branches that cannot reach their area go through a hop in function alignment padding.
+# The gap's sites are split between the two areas according to how many hop locations each area can reach. Putting them all at the back exhausts its padding on Minecraft 1.26.62.
 BACK_MIN, GAP = 0, False   # TWO: BACK_OFF (set below) less the reach, plus the margin
 if TWO:
     BACK_MIN = ((((len(MOD.image) + bss + 0x3FFF) & ~0x3FFF) + 0x8000 + 0xFFFF) & ~0xFFFF) - 0x8000000 + 0x100000
@@ -64,7 +68,6 @@ if TWO:
 elif BIG_TEXT: FRONT = int(os.environ.get('DM_PATCH_FRONT', '0'), 0) or (0x8000000 - 0x10000 - MOD.text_end) & ~0xFFFF
 SPLIT = (0x8000000 - FRONT - 0x100000 if GAP else max(0x8000000 - FRONT - 0x100000, BACK_MIN)) if TWO else None
 IMG = MOD.image
-ORIG_TEXT = bytes(IMG[:MOD.text_end])   # the text as the file has it, before any cut or site: <name>.changed.tsv compares against it
 if not FAR: IMG.extend(bytes(bss))
 TEXT_END = MOD.text_end
 RO_OFF, DATA_OFF = MOD.segments[1][0], MOD.segments[2][0]
@@ -84,10 +87,15 @@ else:
 # (a game's own modules: its profile's builds). Every file is loaded, whatever the game, so a module gets the patches of its build wherever it comes from; a build ID claimed twice stops the rewrite.
 # A file may define:
 #   CUTS = {build ID: [(offset, original bytes, new bytes, reason)]}: before rewriting, the original bytes are asserted one by one and any mismatch aborts (listed in <name>.cuts.tsv)
+#   ALIAS_CUTS = {build ID: [offset, ...]}: those of the build's CUTS that exist only to fit an iPhone's small alias region (a MATCH_CUTS rule marks the same with alias_only=True).
+#     The rewriter records each applied one as an ALIAS_CUT row in <name>.fixups.tsv, and the Mac loader restores its original bytes at load when the alias region is at least the
+#     Switch's 64 GB (loader.c undo_alias_cuts; a smaller DM_ALIAS_SIZE or DM_KEEP_ALIAS_CUTS=1 keeps them)
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
 #   STUBS = {build ID: function(ctx)}: code a fix needs in the patch area, branched to from its sites ("Stubs" below)
+#   MATCH_STUBS = {module: [rule, ...]}: STUBS placed by the same function matcher as MATCH_FRAME_STEP, without a frame-step state page. A rule with fps_required=True disables
+#     native engine frame targets unless its stub sets ctx.fps_ready=True after installing every required correction; an unmatched future build keeps its original speed.
 #   MATCH_FRAME_STEP = {'main': [{name, size, fingerprints, stub}, ...]}: the frame step stubs of any main without FRAME_STEP, placed by the function they patch (nso_match.locate_stub:
 #     one complete unwind function of that size and fingerprint, or no stubs and a red line); stub(ctx) writes its sites at ctx.base + offsets inside that function. Rules are
 #     one patch's reviewed implementations (one name). Only the profile selected by DM_GAME participates, as for MATCH_CUTS. A rule's others = {label: {size, fingerprints}}
@@ -114,7 +122,7 @@ patch_paths = {}
 for path in PATCH_FILES: patch_paths.setdefault(os.path.realpath(path), path)   # repeated roots and symlinks name the same file, not competing build claims
 PATCH_FILES = list(patch_paths.values())
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
+    tables, where = {'CUTS': {}, 'ALIAS_CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'STUBS': {}, 'MATCH_CUTS': {}, 'MATCH_FRAME_STEP': {}, 'MATCH_STUBS': {}, 'SDK_MATCH_CUTS': {}, 'CAPABILITIES': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -122,7 +130,7 @@ def load_patches():
             if kind == 'MATCH_CUTS' and os.path.basename(path) in SHARED:   # SDK-wide and engine-wide
                 for mod, rules in getattr(m, kind, {}).items(): tables['SDK_MATCH_CUTS'].setdefault(mod, []).extend(rules)
                 continue
-            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP'):
+            if kind in ('MATCH_CUTS', 'MATCH_FRAME_STEP', 'MATCH_STUBS'):
                 if os.path.basename(path) in SHARED: continue
                 profile = os.path.basename(os.path.dirname(path))
                 roots = [os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games')] + [d for d in os.environ.get('DM_GAMES_DIR', '').split(os.pathsep) if d]
@@ -137,6 +145,8 @@ def load_patches():
 PATCHES, PATCH_WHERE = load_patches()
 BUILD_ID = MOD.build_id[:0x10].hex()
 cuts = list(PATCHES['CUTS'].get(BUILD_ID, []))
+ALIAS_OFFS = set(PATCHES['ALIAS_CUTS'].get(BUILD_ID, ()))
+assert ALIAS_OFFS <= {c[0] for c in PATCHES['CUTS'].get(BUILD_ID, [])}, f'ALIAS_CUTS of build {BUILD_ID} name offsets that are not among its CUTS: {sorted(ALIAS_OFFS - {c[0] for c in PATCHES["CUTS"].get(BUILD_ID, [])})}'
 if BUILD_ID not in PATCHES['CUTS']:
     from nso_match import resolve
     profile = os.path.basename(os.environ.get('DM_GAME', '').rstrip('/'))
@@ -153,8 +163,8 @@ if BUILD_ID not in PATCHES['CUTS']:
             if bid: own.add(bid)
             if bid and bid != BUILD_ID and PATCHES['CUTS'].get(bid): known.append((bid, c[2], len(PATCHES['CUTS'][bid])))
     outcomes, sdk_outcomes = [], []
-    cuts += resolve(IMG, TEXT_END, PATCHES['MATCH_CUTS'].get(profile, {}).get(NAME, []), outcomes=outcomes)
-    cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False)
+    cuts += resolve(IMG, TEXT_END, PATCHES['MATCH_CUTS'].get(profile, {}).get(NAME, []), outcomes=outcomes, alias_only=ALIAS_OFFS)
+    cuts += resolve(IMG, TEXT_END, PATCHES['SDK_MATCH_CUTS'].get(NAME, []), outcomes=sdk_outcomes, red=False, alias_only=ALIAS_OFFS)
     if BUILD_ID not in own and (known or outcomes or sdk_outcomes):   # a build the game was brought up on lost nothing
         os.makedirs(outdir, exist_ok=True)
         with open(os.path.join(outdir, NAME + '.match.tsv'), 'w') as f:
@@ -167,14 +177,26 @@ FS_MATCH = None
 if NAME == 'main' and BUILD_ID not in PATCHES['FRAME_STEP']:
     from nso_match import locate_stub
     FS_MATCH = locate_stub(IMG, TEXT_END, PATCHES['MATCH_FRAME_STEP'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, []))
+# Ordinary matched stubs do not declare a frame step. Keep their FPS dependency
+# separate: finding the engine interval alone does not prove every consumer scales.
+STUB_RULES = PATCHES['MATCH_STUBS'].get(os.path.basename(os.environ.get('DM_GAME', '').rstrip('/')), {}).get(NAME, [])
+assert all(isinstance(r.get('fps_required', False), bool) for r in STUB_RULES), 'fps_required must be a bool'
+NATIVE_FPS_BLOCKED = any(r.get('fps_required', False) for r in STUB_RULES)
+STUB_MATCH = None
+if STUB_RULES and BUILD_ID not in PATCHES['STUBS']:
+    from nso_match import locate_stub
+    STUB_MATCH = locate_stub(IMG, TEXT_END, [{k: v for k, v in r.items() if k != 'fps_required'} for r in STUB_RULES])
 # The frame step state page is the page after the key page. An appended patch area starts on the first 64 KB boundary after the key page, which is that page itself when the key
 # page ends on such a boundary (Hades II's v0 main): a main that gets the state page then starts its patch area 64 KB later. Nothing has been written to the patch area yet, and
 # every other module keeps its layout
 if (BUILD_ID in PATCHES['FRAME_STEP'] or FS_MATCH) and NAME == 'main' and not FAR and PATCH_OFF < KEY_PAGE_OFF + 0x4000 + 0x1000:
     PATCH_OFF += 0x10000
+ALIAS_APPLIED = [c for c in cuts if c[0] in ALIAS_OFFS]
+assert len(ALIAS_APPLIED) <= 32, f'too many ALIAS_CUTS ({len(ALIAS_APPLIED)} > 32)'
 for off, ob, nb, why in cuts:
     ob, nb = bytes.fromhex(ob), bytes.fromhex(nb)
     assert len(ob) == len(nb) and IMG[off:off + len(ob)] == ob, f'cut original bytes mismatch {off:#x}: {bytes(IMG[off:off + len(ob)]).hex()}'
+    if off in ALIAS_OFFS: assert len(ob) <= 16 and off + len(ob) <= TEXT_END, f'ALIAS_CUT at {off:#x} exceeds loader bounds'
     IMG[off:off + len(nb)] = nb
 # Key page indices are fixed; the key page content is written by the loader as "actual key number × 8".
 KEYS = {'K18': 508, 'KTLS': 509, 'KTLR': 510, 'KGATE': 511}
@@ -194,6 +216,12 @@ import fps_target
 FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, None, '')
 if FPS_TARGET_PTR is not None: print(f'{NAME}: {fps_target_why} (fps_target.py)')
 elif fps_target_why.startswith('[RED] '): print(f'[RED] {NAME}: {fps_target_why[6:]}: the host cannot write it')
+
+# ---- Monolith's native interval (the wait and simulation step share it; no game/build offsets) ----
+import monolith_fps
+MONOLITH_INTERVAL, monolith_why = monolith_fps.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, '')
+if MONOLITH_INTERVAL is not None: print(f'{NAME}: {monolith_why} (monolith_fps.py)')
+elif monolith_why.startswith('[RED] '): print(f'[RED] {NAME}: {monolith_why[6:]}: the host cannot write it')
 
 # ---- Unreal's fixed frame rate (main: dm/tools/ue_fixed_rate.py finds UEngine::FixedFrameRate and bUseFixedFrameRate by their reflection entries and GEngine where the engine is made, without a build ID) ----
 # The fixups table names GEngine's offset, the property's and the flag's (UE_FIXED_RATE_PTR, UE_FIXED_RATE_FIELD, UE_FIXED_RATE_FLAG); the host writes the profile's fps_target there while the flag is set (hle_fpslock.c)
@@ -296,17 +324,6 @@ def written_w(p):
 def writes_reg(p, reg):
     """Whether p changes the general-purpose register reg (xN or wN): a write of wN clears the upper half of xN too, and a compare only sets the flags"""
     return p.mnemonic not in ('cmp', 'cmn', 'tst') and 'w' + reg[1:] in written_w(p)
-def null_base(p, n):
-    """Whether p sets a table base to a constant inside page zero, so that a table load of n entries through it reads that page. Horizon never maps page zero, so the load would fault on the
-    console too: no path of a working game carries such a write to the load, and a walk back for the base's writer chain goes past it. Cuphead 1.3.7 main+0x59dc90 (Unity 2017.4) interleaves
-    four dispatch loops that share registers: x12 is the base of one (adrp + add at +0x59dba4) and the constant 1 of another (mov w12,#1 at +0x59dbdc, whose block leaves by b to its own
-    dispatch), kept apart only by the value of w8. Since the walks see a write of wN (e5620b1a), that mov ended the chain and the site stopped at the jump table assertion (issue #1532)"""
-    if p.mnemonic != 'mov' or len(p.operands) != 2: return False
-    v = 0 if p.op_str.endswith(('wzr', 'xzr')) else p.operands[1].imm if p.operands[1].type == ARM64_OP_IMM else None
-    return v is not None and 0 <= v and v + 4 * n <= 0x1000
-def writes_reg_any(p, regs):
-    """writes_reg for a set of wN names"""
-    return p.mnemonic not in ('cmp', 'cmn', 'tst') and bool(written_w(p) & regs)
 def has18(ins): return re.search(r'\b[xw]18\b', ins.op_str) is not None
 def regs_in(ins):
     s = {int(n) for n in re.findall(r'\b[xw](\d+)\b', ins.op_str)}
@@ -352,6 +369,65 @@ def site_plain(ins):
     emit(STRX(S, T))                 # Always write back: capstone can miss reporting a write (the adds w18 instance)
     emit(LDP(S, T, 31, save - dlt)); emit(BX(here(), ins.address + 4))
     return start
+
+def select_x18(ins):
+    """A CSEL with one guest x18 source and a normal register destination."""
+    word = struct.unpack('<I', ins.bytes)[0]
+    rd, rn, rm, cond = word & 31, (word >> 5) & 31, (word >> 16) & 31, (word >> 12) & 15
+    if word & 0x7FE00C00 != 0x1A800000 or rd in (18, 31) or (rn == 18) == (rm == 18) or cond >= 14: return None
+    return rd, (rm if rn == 18 else rn), (cond ^ (rn == 18)), bool(word >> 31)
+
+
+# Only these instructions can carry a proof of a dead register across them. The first operand of a writer is a full xN/wN definition unless the instruction
+# also reads it (including as an address register). A wN definition zeros the high half of xN. Stores, compares and NOP can never end a register's lifetime.
+SELECT_WRITES = set('adr adrp add adds and ands asr bic csel eor ldr ldrb ldrh ldrsb ldrsh ldrsw ldur lsl lsr mov movn movz mul orn orr sbfx sub subs ubfx'.split())
+SELECT_READS = {'cmp', 'cmn', 'tst', 'nop', 'str', 'strb', 'strh', 'stur', 'sturb', 'sturh'}
+
+
+def select_scratch(at, by_address, function_end, rd):
+    """One dead AAPCS64 temporary for a select, or None. The old value must be overwritten before a read on every path, or reach a normal return
+    inside the same unwind function. Keep x0–x8, callee-saved registers and LR out of the search. Calls, unknown instructions, outgoing branches and
+    an exhausted search budget give no proof."""
+    budget = 64
+
+    def dead_after(pc, pending):
+        nonlocal budget
+        if not pending or budget == 0 or pc >= function_end or (ins := by_address.get(pc)) is None: return set()
+        budget -= 1
+        m = ins.mnemonic
+        if m == 'ret' and not ins.op_str: return pending
+        if m == 'b': return dead_after(ins.operands[-1].imm, pending)
+        if m.startswith('b.') or m in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+            pending = pending - regs_in(ins)
+            return dead_after(pc + 4, pending) & dead_after(ins.operands[-1].imm, pending)
+        if m not in SELECT_WRITES and m not in SELECT_READS: return set()
+        dead = set()
+        if m in SELECT_WRITES and not ins.writeback:
+            dst, _, sources = ins.op_str.partition(',')
+            dst_n = num(dst)
+            if dst_n in pending:
+                reads, _ = regset(ins)
+                if not any(num(name) == dst_n for name in reads | set(re.findall(r'\b[xw]\d+\b', sources))):
+                    dead.add(dst_n)
+        return dead | dead_after(pc + 4, pending - regs_in(ins))
+
+    return min(dead_after(at + 4, set(range(9, 18)) - {rd}), default=None)
+
+
+def site_select(ins, args, temp):
+    """Split CSEL on its original flags. Only the arm selecting x18 needs the key page. In that arm the destination's old value is dead,
+    so the destination and one dead temporary can load K18 without touching the guest stack."""
+    rd, other, other_cond, wide = args
+    start, skip = here(), len(patch)
+    emit(NOP)  # filled with the conditional branch once the other arm's address is known
+    emit(MRS_TPIDRRO(temp)); emit_slot_addr(temp, rd, 'K18')
+    emit(LDRX(rd, temp) if wide else 0xB9400000 | (temp << 5) | rd)  # ldr wD,[xT] zero-extends the result
+    emit(BX(here(), ins.address + 4))
+    struct.pack_into('<I', patch, skip, BEQ(start, here()) | other_cond)
+    if not wide or rd != other: emit(MOVX(rd, other) if wide else MOVX(rd, other) & 0x7FFFFFFF)
+    emit(BX(here(), ins.address + 4))
+    return start
+
 
 def site_sp(ins):
     """Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
@@ -690,26 +766,61 @@ def site_retry_window(parts):
         emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(BX(here(), t)); emit(NOP)
     return start
 
-# ---- Function boundaries (eh_frame_hdr) ----
+# ---- Function boundaries (eh_frame_hdr, or .eh_frame when a module has no .eh_frame_hdr) ----
 m0 = struct.unpack_from('<I', IMG, 4)[0]
 assert IMG[m0:m0 + 4] == b'MOD0'
-ehs = m0 + struct.unpack_from('<i', IMG, m0 + 16)[0]
+ehs_rel, ehe_rel = struct.unpack_from('<ii', IMG, m0 + 16)
+ehs, ehe = m0 + ehs_rel, m0 + ehe_rel
 def rd(o, enc):
     fmt, app = enc & 0xF, enc & 0x70
-    v, sz = {0x3: (struct.unpack_from('<I', IMG, o)[0], 4), 0xB: (struct.unpack_from('<i', IMG, o)[0], 4),
-             0x4: (struct.unpack_from('<Q', IMG, o)[0], 8)}[fmt]
+    spec, sz = {0x0: ('<Q', 8), 0x2: ('<H', 2), 0x3: ('<I', 4), 0x4: ('<Q', 8),
+                0xA: ('<h', 2), 0xB: ('<i', 4), 0xC: ('<q', 8)}[fmt]
+    v = struct.unpack_from(spec, IMG, o)[0]
     if app == 0x10: v += o
     if app == 0x30: v += ehs
     return v, sz
-_, penc, cenc, tenc = IMG[ehs:ehs + 4]
-o = ehs + 4
-_, s = rd(o, penc); o += s
-nfde, s = rd(o, cenc); o += s
 starts = set()
-for _ in range(nfde):
-    a, s = rd(o, tenc); o += s
-    _, s = rd(o, tenc); o += s
-    starts.add(a)
+if ehe > ehs:
+    _, penc, cenc, tenc = IMG[ehs:ehs + 4]
+    o = ehs + 4
+    _, s = rd(o, penc); o += s
+    nfde, s = rd(o, cenc); o += s
+    for _ in range(nfde):
+        a, s = rd(o, tenc); o += s
+        _, s = rd(o, tenc); o += s
+        starts.add(a)
+elif ehs_rel != 0:
+    # No .eh_frame_hdr (empty range in MOD0): devkitA64-linked modules (exlaunch plugins) point both ends at .eh_frame itself.
+    # Walk CIE/FDE records up to the zero terminator, indexing each CIE's 'R' pointer encoding by its offset.
+    cies, o = {}, ehs
+    while o + 8 <= len(IMG):
+        ln = struct.unpack_from('<I', IMG, o)[0]
+        if ln in (0, 0xFFFFFFFF) or ln < 4 or o + 4 + ln > len(IMG): break
+        cid = struct.unpack_from('<I', IMG, o + 4)[0]
+        if cid == 0:
+            ver = IMG[o + 8]
+            p = o + 9; aug = IMG[p:IMG.index(b'\0', p)].decode('latin1'); p += len(aug) + 1
+            if ver >= 4: p += 2   # address_size, segment_selector_size
+            for _ in range(2):    # code_alignment_factor (uleb), data_alignment_factor (sleb)
+                while IMG[p] & 0x80: p += 1
+                p += 1
+            if ver == 1: p += 1   # return_address_register
+            else:
+                while IMG[p] & 0x80: p += 1
+                p += 1
+            fenc = 0x00
+            if aug.startswith('z'):
+                while IMG[p] & 0x80: p += 1
+                p += 1
+                for c in aug[1:]:
+                    if c == 'R': fenc = IMG[p]; p += 1
+                    elif c == 'P': pe = IMG[p]; p += 1 + rd(p + 1, pe)[1]
+                    elif c == 'L': p += 1
+            cies[o] = fenc
+        else:
+            fenc = cies.get(o + 4 - cid)
+            if fenc is not None and fenc != 0xFF: starts.add(rd(o + 8, fenc)[0])
+        o += 4 + ln
 starts = sorted(x for x in starts if x < TEXT_END)
 
 # ---- Linear scan to find all rewrite points (not relying on register read/write reports) ----
@@ -937,376 +1048,6 @@ def func_of(a):
     if i >= 0: return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END)
     return (max((e for s, e in DATA_BLOCKS if e <= a), default=0), starts[0]) if starts else (a, a + 4)
 done = set(); windows = []; jumps = {}; tabjumps = {}; tailcalls = set(); retries = []
-def guarded_count(ctx, kc, kl):
-    """How many entries the compare ctx[kc] (cmp index,#N) lets the table load ctx[kl] read, or None when no branch on its flags guards the load. A compare bounds the index only
-    through the branch that acts on it: cmp w18,#4; b.hi exit; cmp w18,#1; ldrsw x18,[x4,x18,lsl #2] has a nearer compare that bounds nothing, and taking it read 2 entries of a table of 5
-    with no error (GitHub issue #977). Between the compare and the load, the first branch on an unsigned condition decides, with the flags still the compare's (no instruction that sets
-    them, and no call, in between; one that only reads them, or a cbz / tbz, changes nothing):
-      b.hi out → N + 1 entries, b.hs / b.cs out → N: the dispatch is the fall-through, and the branch leaves it (its target is not between itself and the load);
-      b.ls in → N + 1, b.lo / b.cc in → N: the branch enters the dispatch (its target is after itself, at or before the load) and the instruction before that target is a b, br or ret,
-      so the path that failed the check does not fall into it.
-    Any other branch on the flags (b.eq, b.ge, ...) is no bounds check, and so is a compare with none.
-    Of the 165 sites of the 27 modules scanned for #977 (6 games), every one is cmp; b.hi, one of them with a store between the two (Super Smash Bros. Ultimate 13.0.5 main+0x39be740)"""
-    n, ld = int(ctx[kc].op_str.split('#')[1], 0), ctx[kl]
-    sets_flags = ('cmp', 'cmn', 'tst', 'ccmp', 'ccmn', 'fcmp', 'fcmpe', 'fccmp', 'fccmpe', 'adds', 'subs', 'ands', 'bics', 'adcs', 'sbcs', 'negs', 'ngcs', 'msr', 'bl', 'blr')
-    for q in range(kc + 1, kl):
-        p = ctx[q]
-        if p.mnemonic in ('b.hi', 'b.hs', 'b.cs', 'b.ls', 'b.lo', 'b.cc'):
-            t = p.operands[0].imm; inside = p.address < t <= ld.address
-            if p.mnemonic in ('b.hi', 'b.hs', 'b.cs'): return None if inside else n + (p.mnemonic == 'b.hi')
-            before = next((x for x in ctx[q + 1:kl + 1] if x.address == t - 4), None)
-            return n + (p.mnemonic == 'b.ls') if inside and before is not None and before.mnemonic in ('b', 'br', 'ret') else None
-        if p.mnemonic in sets_flags or p.mnemonic.startswith('b.') or p.mnemonic in ('b', 'br', 'ret'): return None
-    return None
-def check_before_copy(insl, ctx, ld, idx):
-    """The index copied from the checked register before the check, far back (DRAGON QUEST XI S main+0x2dd8cd0: mov w0,w18, then 41 instructions with two other jump tables on x0, then
-    cmp w18,#4; b.hi; ldrsw x18,[x11,x0,lsl #2]; add x18,x18,x11; br x18). Accepted when the cmp and its b.hi come right before the load and the mov is the last writer of the index and of the
-    checked register before them. Kingdom Battle's GLSLC (subsdk0+0x7340b8) copies w17 into w18 71 instructions before the load, across two switches that preserve both registers: an arbitrary
-    64-instruction limit missed that copy. Follow the writers to the function's start, stopping at calls that can clobber either register or at gaps in decoded code. Blocks in between that branch out
-    and back (main+0x2dd8ce0 → main+0x2dd8cb8) write neither. Tried only when every other form has failed (jump_offsets copy_first), so sites that rewrote before come out the same:
-    the one br x18 of its kind among the 25,508 x18 sites of that main. → the cmp, or None"""
-    k = ctx.index(ld)
-    if k < 2 or ctx[k - 1].mnemonic != 'b.hi' or ctx[k - 2].mnemonic != 'cmp': return None
-    m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', ctx[k - 2].op_str)
-    if not m: return None
-    src, kl = m.group(1), insl.index(ld)
-    def writes(p):   # capstone lists a compare's first operand as written (cmp w18,#4 at main+0x2dd8c30); it only sets the flags
-        return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else written_w(p)
-    for q in range(kl - 3, -1, -1):
-        p = insl[q]
-        if p.address + 4 != insl[q + 1].address: return None
-        if p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx | {src}): return None
-        mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if mm and mm.group(1) in idx and mm.group(2) == src: break
-        if writes(p) & (idx | {src}): return None
-    else: return None
-    return ctx[k - 2]
-def jump_offsets(insl, j, copy_first=False, far_base=False, forward_base=False):
-    """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
-    The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
-    sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
-    The entry may also be loaded into another register and only the add writes x18: Cuphead (Unity 2017.4, main+0x1bb872c) has cmp w17,#7; ldrsw x17,[x15,x17,lsl #2]; add x18,x17,x15
-    (found by armyja, GitHub pull request #1).
-    For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. With far_base, a base that nothing writes in those
-    256 instructions was set further back, and its writer chain is followed to the function's start (table_base far), every target an instruction of the function: ASTRAL CHAIN main+0x6db498
-    and +0x6db70c load bases set 441 and 549 instructions before, x24 in the function's first block and x3 after it, which the loop around their dispatches keeps. A function-wide search
-    for the one adrp + add pair that fits (table_cands, as jump_adr_offsets does) finds two for x3 there, the other a table of its own further on. Returns all targets, or None if not recognized"""
-    ctx = insl[max(0, j - 16):j]
-    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    _, t, rb = add.op_str.split(', ')   # t = the loaded entry, rb = the table base
-    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)
-    if not ld: return None
-    # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
-    idx = {'w' + re.fullmatch(rf'{t}, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}   # pyright: ignore[reportOptionalMemberAccess]  # ld was chosen by this match
-    masked = None   # (source, mask, position) when the index is "source & mask"
-    k0 = ctx.index(ld); cmp = None; n = 0; copies = set(); changed = False
-    def wname(r): return 'w' + r[1:]
-    for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
-        p = ctx[i]
-        m = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if m and m.group(1) in idx: idx.remove(m.group(1)); idx.add(m.group(2)); copies.add(m.group(1)); continue   # a copy replaces the index: a check of its old value bounds nothing
-        m = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
-        if m and wname(m.group(1)) in idx and masked is None: masked = (wname(m.group(2)), int(m.group(3), 0), i); continue
-        # A 64-bit check of the index bounds it as well (OCTOPATH TRAVELER 1.0.5 main+0x1676f30: cmp x22,#0x10; ...; b.hi; adrp x18 + add x18; mov x0,x18; ldrsw x18,[x0,x22,lsl #2];
-        # add x18,x18,x0, the base copied, so only far_base reads it); taken only in the last attempt, so sites that rewrote before come out the same
-        m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)' if far_base else r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-        if not m:
-            # Capstone lists only x30 as a call's write, so a call counts for the caller-saved registers
-            if writes_reg_any(p, idx) or (p.mnemonic in ('bl', 'blr') and any(int(r[1:]) <= 18 for r in idx)): changed = True
-            continue
-        # Only a compare a branch acts on bounds the index (guarded_count): one that guards nothing only sets the flags, and the walk goes on to the check before it
-        if wname(m.group(1)) in idx:
-            g = guarded_count(ctx, i, k0)
-            if g is None: continue
-            cmp = p; n = g; break
-        if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
-            for q in range(i - 1, -1, -1):
-                if wname(m.group(1)) not in written_w(ctx[q]): continue
-                mm = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', ctx[q].op_str) if ctx[q].mnemonic == 'and' else None
-                if mm and wname(mm.group(2)) == masked[0] and int(mm.group(3), 0) == masked[1] and \
-                   not any(masked[0] in written_w(ctx[z]) for z in range(q + 1, masked[2])):
-                    g = guarded_count(ctx, i, k0)
-                    if g is not None: cmp = p; n = g
-                break
-            if cmp: break
-    if cmp and changed: return None   # the index changes after the check. Before a check it does not matter, so this waits for the walk to find one
-    if not cmp and copy_first:
-        cmp = check_before_copy(insl, ctx, ld, idx | copies)   # cmp; b.hi right before the load
-        if cmp: n = int(cmp.op_str.split('#')[1], 0) + 1
-    if not cmp: return None
-    k = insl.index(ld); lo = page = None
-    for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base
-        if not writes_reg(p, rb): continue
-        if lo is None and null_base(p, n): continue   # page zero as the base: it reaches no load of a working game
-        if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
-        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
-        break
-    else:
-        if lo is None and far_base:   # nothing writes the base in the window
-            tb = table_base(insl, k, rb, far=True)
-            if tb is None: tb = copied_base(insl, k, rb)   # built further back and copied on its way (below)
-            if tb is None and forward_base: tb = forward_table_base(insl, k, rb, n)
-            if tb is None or tb + 4 * n > len(IMG): return None
-            t = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-            fa, fb = insl[0].address, insl[-1].address + 4
-            return t if all(fa <= x < fb and x % 4 == 0 for x in t) else None
-    if page is None and far_base:
-        # The base was built further back and passed through other registers on its way (Super Smash Bros. Ultimate 13.0.5 main+0x2b74458: adrp x7 + add x7,x7,#0x40c
-        # 688 instructions before, then mov x30,x7 ... mov x7,x30 around a loop), so the walk back meets a mov. Follow the copies back to the function's start (copied_base);
-        # every target must be an instruction of this function. A function-wide search for the one adrp + add pair (table_cands) finds two for x7 there, the other a table of its own
-        # further on. Only the last attempt (far_base) gets here, i.e. only a site the rewriter could not handle before
-        tb = copied_base(insl, k, rb)
-        if tb is None or tb + 4 * n > len(IMG): return None
-        t = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-        fa, fb = insl[0].address, insl[-1].address + 4
-        return t if all(fa <= x < fb and x % 4 == 0 for x in t) else None
-    if page is None: return None
-    tb = page + lo
-    return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-def jump_zero_extended(insl, j):
-    """cmp wS,#N; b.hi exit; and xI,xS,#0xffffffff; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Mario Tennis Aces 1.0.0 main+0x35837c zero-extends the checked value rather than checking another masked copy. Require straight-line data flow from the guard to the br,
-    with no entry past the check, and decoded targets outside that run. Tried after every older recognizer, so previously recognized tables keep their targets."""
-    ctx = insl[max(0, j - 16):j + 1]
-    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
-    ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{ent}, \[{base}, x\d+, lsl #2\]', p.op_str)), None)
-    if not ld: return None
-    kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
-    if base in (ent, idx): return None
-    mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #0xffffffff', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask); src = mask.op_str.split(', ')[1]
-    check = next((p for p in reversed(ctx[:km]) if p.mnemonic == 'cmp' and re.fullmatch(rf'w{src[1:]}, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not check: return None
-    kc = ctx.index(check); branch = ctx[kc + 1]
-    if branch.mnemonic != 'b.hi': return None
-    run = ctx[kc:]; head, end = check.address, insl[j].address
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    if head <= branch.operands[0].imm <= end: return None
-    # Calls and system calls can overwrite registers without appearing in Capstone's register writes. Reject control flow and traps after the guard.
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'eret', 'drps') or p.mnemonic.startswith('b.') for p in ctx[kc + 2:-1]): return None
-    def writes(p, reg):   # Capstone lists a compare's first operand as written; only its flags change.
-        names = [p.reg_name(r) for r in p.regs_access()[1]]
-        return p.mnemonic not in ('cmp', 'cmn', 'tst') and any(name is None or name in (reg, 'w' + reg[1:], {'x29': 'fp', 'x30': 'lr'}.get(reg)) for name in names)
-    if any(writes(p, src) for p in ctx[kc + 2:km]) or any(writes(p, idx) for p in ctx[km + 1:kl]) or \
-       any(writes(p, ent) or writes(p, base) for p in ctx[kl + 1:ka]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    for p in insl:
-        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
-            if head < p.operands[-1].imm <= end: return None
-    if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
-    if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
-    tb = copied_base(insl, insl.index(ld), base); n = int(check.op_str.split('#')[1], 0) + 1
-    if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
-    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-    addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
-def forward_table_base(insl, k, rb, n):
-    """A loop's base initialized after its dispatch in address order (Blasphemous 1.0.8 main+0xae95f8: x17 is set at +0xae96dc, then the block branches backward).
-    Used only after every older recognizer failed. Require exactly two writers of the full base in the function, an adjacent adrp + add after the load, no call that can clobber it,
-    and no known entry into the add that bypasses the adrp. Other values, 32-bit writes and multiple initializations are unproven and refused."""
-    if k < 2 or k + 2 >= len(insl): return None
-    guard, branch, load, add, jump = insl[k - 2:k + 3]
-    m = re.fullmatch(rf'(x\d+), \[{rb}, x(\d+), lsl #2\]', load.op_str)
-    if load.mnemonic != 'ldrsw' or not m or guard.mnemonic != 'cmp': return None
-    bound = re.fullmatch(rf'w{m.group(2)}, #(0x[0-9a-f]+|\d+)', guard.op_str)
-    if not bound or int(bound.group(1), 0) != n - 1: return None
-    if branch.mnemonic != 'b.hi' or add.mnemonic != 'add' or add.op_str != f'x18, {m.group(1)}, {rb}' or jump.mnemonic != 'br' or jump.op_str != 'x18': return None
-    if any(b.address != a.address + 4 for a, b in zip(insl[k - 2:k + 3], insl[k - 1:k + 3])): return None
-    protected = {p.address for p in insl[k - 1:k + 3]}
-    if any(p.mnemonic in ('bl', 'blr') for p in insl) and int(rb[1:]) <= 18: return None
-    base_names = {rb, 'w' + rb[1:]} | {alias for alias, reg in {'lr': 'x30', 'fp': 'x29'}.items() if reg == rb}
-    writers = [(i, p) for i, p in enumerate(insl) if p.mnemonic not in ('cmp', 'cmn', 'tst') and
-               any(p.reg_name(r) in base_names for r in p.regs_access()[1])]
-    if len(writers) != 2: return None
-    (i, p), (_, q) = writers
-    if i <= k or q.address != p.address + 4 or p.mnemonic != 'adrp' or not p.op_str.startswith(rb + ','): return None
-    m = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', q.op_str) if q.mnemonic == 'add' else None
-    if not m: return None
-    protected.add(q.address)
-    for x in insl:
-        if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
-            if x.operands[-1].imm in protected: return None
-    if any(protected.intersection(targets) for targets in tabjumps.values()): return None
-    if any(any(base <= x < base + 4 * width for x in protected) for base, width in jumps.values()): return None
-    tb = p.operands[1].imm + int(m.group(1), 0)
-    if not 0 <= tb <= len(IMG) - 4 * n: return None
-    targets = {tb + struct.unpack_from('<i', IMG, tb + 4 * z)[0] for z in range(n)}
-    return tb if not protected.intersection(targets) and targets <= {x.address for x in insl} else None
-def table_base(insl, k, rb, far=False):
-    """Address the table-base register rb holds at insl[k]: its writer chain before k must be add rb,rb,#lo after adrp rb (as in jump_offsets); None otherwise.
-    The chain is searched 256 instructions back, or with far to the function's start, through no call when rb is caller-saved (capstone lists only x30 as a call's write; a call between
-    means the code before it in address order is not the path that set rb)"""
-    lo = None
-    for p in reversed(insl[0 if far else max(0, k - 256):k]):
-        if far and p.mnemonic in ('bl', 'blr') and num(rb) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
-        if not writes_reg(p, rb): continue
-        if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
-        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): return p.operands[1].imm + lo
-        return None
-    return None
-def copied_base(insl, k, rb):
-    """Address rb holds at insl[k] when it was built by adrp + add and then only copied between registers (mov xD, xS): the writer chain is walked back in address order to the
-    function's start, switching to the source register at each copy, through no call while the register followed is caller-saved; None for any other writer"""
-    canon = {'lr': 'x30', 'fp': 'x29'}   # capstone's reg_name calls x30 lr and x29 fp
-    lo, r = None, canon.get(rb, rb)
-    for p in reversed(insl[:k]):
-        if p.mnemonic in ('bl', 'blr') and num(r) <= 18: return None   # pyright: ignore[reportOptionalOperand]  # a table base register, always xN
-        _, w = p.regs_access()
-        # A write to wN zeroes the upper half of xN too; it is a clobber, never a copy of the 64-bit base.
-        if not any(canon.get(p.reg_name(x), p.reg_name(x)).replace('w', 'x', 1) == r for x in w): continue
-        ops = [canon.get(o, o) for o in p.op_str.split(', ')]
-        if lo is None and p.mnemonic == 'mov' and len(ops) == 2 and ops[0] == r and re.fullmatch(r'x\d+', ops[1]): r = ops[1]; continue
-        if lo is None and p.mnemonic == 'add' and len(ops) == 3 and ops[:2] == [r, r] and re.fullmatch(r'#(0x[0-9a-f]+|\d+)', ops[2]): lo = int(ops[2][1:], 0); continue
-        if lo is not None and p.mnemonic == 'adrp' and ops[0] == r: return p.operands[1].imm + lo
-        return None
-    return None
-def jump_masked_not(insl, j):
-    """A zero-guarded complemented index: tst wS,#M; b.eq exit; mvn wS,wS; and xI,xS,#M; ldrsw xE,[xB,xI,lsl #2]; add x18,xE,xB; br x18.
-    Return of the Obra Dinn 1.0.1 main+0x6eea88 / +0x6eeac0 (Unity 2017.4) has seven entries, not eight: M is 7, the tst excludes zero, and the complement maps 1..7 to 6..0.
-    Read exactly M entries for a contiguous low-bit mask, only after the older recognizers fail. Straight-line data flow and no entry past the guard are required."""
-    ctx = insl[max(0, j - 16):j + 1]
-    add = next((p for p in reversed(ctx[:-1]) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    _, ent, base = add.op_str.split(', '); ka = ctx.index(add)
-    ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{ent}, \[{base}, x\d+, lsl #2\]', p.op_str)), None)
-    if not ld: return None
-    kl = ctx.index(ld); idx = ld.op_str.split(', ')[2]
-    if base in (ent, idx): return None
-    mask = next((p for p in reversed(ctx[:kl]) if p.mnemonic == 'and' and re.fullmatch(rf'{idx}, x\d+, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not mask: return None
-    km = ctx.index(mask)
-    if km < 3: return None
-    _, src, imm = mask.op_str.split(', '); n = int(imm[1:], 0)
-    if not n or n & (n + 1) or n > 0xffffffff: return None
-    test, branch, invert = ctx[km - 3:km]
-    if test.mnemonic != 'tst' or test.op_str != f'w{src[1:]}, {imm}' or branch.mnemonic != 'b.eq' or \
-       invert.mnemonic != 'mvn' or invert.op_str != f'w{src[1:]}, w{src[1:]}': return None
-    run = ctx[km - 3:]
-    if any(b.address != a.address + 4 for a, b in zip(run, run[1:])): return None
-    head, end = test.address, insl[j].address
-    if head <= branch.operands[0].imm <= end: return None
-    def writes(p, reg):
-        if p.mnemonic in ('bl', 'blr') and int(reg[1:]) <= 18: return True
-        return writes_reg(p, reg)
-    if any(writes(p, idx) for p in ctx[km + 1:kl]) or any(writes(p, ent) for p in ctx[kl + 1:ka]) or \
-       any(writes(p, base) for p in ctx[kl + 1:ka + 1]) or any(writes(p, 'x18') for p in ctx[ka + 1:-1]): return None
-    if any(p.mnemonic in ('b', 'bl', 'br', 'blr', 'ret', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.') for p in ctx[km + 1:-1]): return None
-    for p in insl:
-        if p.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.'):
-            if head < p.operands[-1].imm <= end: return None
-    if any(head < t <= end for targets in tabjumps.values() for t in targets): return None
-    if any(b <= end and b + 4 * width > head + 4 for b, width in jumps.values()): return None
-    tb = copied_base(insl, insl.index(ld), base)
-    if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
-    targets = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-    addresses = {p.address for p in insl}
-    return targets if all(t in addresses and not head < t <= end for t in targets) else None
-def jump_adr_offsets(insl, j):
-    """Entries relative to an adr rather than to the table (Tears of the Kingdom main+0x393bb0): cmp w0,#5; b.hi; ...; adr x18,#L; ldrsw x1,[x17,x0,lsl #2];
-    add x18,x18,x1; br x18 → target = L + entry, with the table base x17 from adrp + add. Tried only where jump_offsets finds nothing. Returns all targets, or None if not recognized"""
-    ctx = insl[max(0, j - 16):j]
-    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x\d+, x\d+', p.op_str)), None)
-    if not add: return None
-    ka = ctx.index(add); ops = add.op_str.split(', ')[1:]
-    for e, a in (ops, ops[::-1]):   # e = the loaded entry, a = the adr base
-        ld = next((p for p in reversed(ctx[:ka]) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'{e}, \[x\d+, x\d+, lsl #2\]', p.op_str)), None)
-        wa = next((p for p in reversed(ctx[:ka]) if writes_reg(p, a)), None)   # the nearest writer of a
-        if not ld or not wa or wa.mnemonic != 'adr': continue
-        tb_reg, ix = re.fullmatch(rf'{e}, \[(x\d+), x(\d+), lsl #2\]', ld.op_str).groups()
-        idx, cmp, n, kl = {'w' + ix}, None, 0, ctx.index(ld)   # the index and the registers copied into it (main+0x596d30: cmp w15,#8; b.hi; mov w16,w15; ...; ldrsw x0,[x17,x16,lsl #2])
-        for i in range(kl - 1, -1, -1):   # walk back from the load to the bounds check
-            p = ctx[i]
-            m = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-            if m and m.group(1) in idx: idx.remove(m.group(1)); idx.add(m.group(2)); continue
-            # A check of the full xN index bounds the same table (DRAGON QUEST I & II main+0x30ee50c: cmp x9,#4). As in jump_offsets, only a compare a branch acts on
-            # bounds the index (guarded_count); one that guards nothing only sets the flags, and the walk goes on to the check before it
-            m = re.fullmatch(r'([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-            if m and 'w' + m.group(1)[1:] in idx:
-                g = guarded_count(ctx, i, kl)
-                if g is None: continue
-                cmp = p; n = g; break
-            if written_w(p) & idx: return None   # the index changes after the check
-        if cmp is None: return None
-        at = wa.operands[1].imm
-        def targets(tb): return [at + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)] if 0 <= tb and tb + 4 * n <= len(IMG) else None
-        tb = table_base(insl, insl.index(ld), tb_reg)
-        if tb is not None: return targets(tb)
-        # The base register was loaded further away (main+0x5f2a9c: hoisted out of the dispatch block): take every adrp + add pair in the function that builds it,
-        # and accept the table only if exactly one candidate makes every target an instruction of this function
-        fa, fb = insl[0].address, insl[-1].address + 4
-        ok = [tb for tb in table_cands(insl, tb_reg) if (t := targets(tb)) and all(fa <= x < fb and x % 4 == 0 for x in t)]
-        return targets(ok[0]) if len(ok) == 1 else None
-    return None
-def table_cands(insl, rb):
-    """Every address an adrp rb + add rb,rb,#lo pair in the function builds, sorted"""
-    cands = set()
-    for k, p in enumerate(insl):
-        if p.mnemonic != 'adrp' or not p.op_str.startswith(rb + ','): continue
-        q = next((x for x in insl[k + 1:k + 9] if writes_reg(x, rb)), None)
-        m = re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', q.op_str) if q is not None and q.mnemonic == 'add' else None
-        if m: cands.add(p.operands[1].imm + int(m.group(1), 0))
-    return sorted(cands)
-def jump_masked_pred(insl, j):
-    """The offset-table form whose bounds check is on a masked copy of the index made in the block itself, while the index register was masked in the one block that branches here
-    (FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition 1.0.0 main+0x2d103cc: and x6,x17,#0x7ff; ubfx w18,w17,#0xb,#2; cbz w18,#0x2d103b8 at main+0x2d1024c, then at main+0x2d103b8
-    and w18,w17,#0x7ff; cmp w18,#3; b.hi; ldrsw x18,[x27,x6,lsl #2]; add x18,x18,x27; br x18, with x27 from adrp + add 1,500 instructions back). Its neighbour main+0x2d10590
-    (predecessor main+0x2d102d4: and x6,x17,#0x7ff; ...; cbz w18,#0x2d10548) builds the base and moves registers inside the block: and w18,w17,#0x7ff; cmp w18,#3; b.hi; adrp x24 +
-    add x24,x24,#0x88c; mov x22,x30; ldrsw x18,[x24,x6,lsl #2]; add x18,x18,x24; then 10 register moves before br x18. The two ands give the same value (a mask below 2^32 makes the
-    64-bit and equal to the zero-extended 32-bit one), so the check bounds the index. Accepted only when the block, at most 32 instructions, is and wC,wS,#M; cmp wC,#N; b.hi, then
-    straight-line code (no branch, call or return) holding the ldrsw and the add, with the index unchanged from the b.hi to the load, the base unchanged and x18 untouched from the load
-    to the add and x18 untouched from the add to the br; the block is entered by branches alone (the instruction before it is b / br / ret, and no branch lands inside it after its and, nor any jump table already resolved in the function anywhere in it),
-    and every branch to it follows, within its own straight-line run, "and xI, xS, #M" with the check's source and mask and neither register written in between. The table base is found
-    as jump_offsets' far_base finds it, and every target must be an instruction of the function. Tried only after every other form has failed, so sites that rewrote before come out
-    the same. Returns all targets, or None if not recognized"""
-    def is_branch(p): return p.mnemonic in ('b', 'cbz', 'cbnz', 'tbz', 'tbnz') or p.mnemonic.startswith('b.')
-    def is_cf(p): return is_branch(p) or p.mnemonic in ('br', 'blr', 'bl', 'ret')
-    def writes(p):   # capstone lists a compare's first operand as written; it only sets the flags
-        return set() if p.mnemonic in ('cmp', 'cmn', 'tst') else {num({'lr': 'x30', 'fp': 'x29'}.get(p.reg_name(r), p.reg_name(r))) for r in p.regs_access()[1]}
-    kh = next((q for q in range(j - 1, max(0, j - 32) - 1, -1) if is_cf(insl[q])), None)   # the block's b.hi: the nearest control flow before the br
-    if kh is None or kh < 3 or insl[kh].mnemonic != 'b.hi': return None
-    k, a_, c_ = kh - 2, insl[kh - 2], insl[kh - 1]
-    ma = re.fullmatch(r'(w\d+), (w\d+), #(0x[0-9a-f]+|\d+)', a_.op_str) if a_.mnemonic == 'and' else None
-    mc = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', c_.op_str) if c_.mnemonic == 'cmp' else None
-    if not (ma and mc and ma.group(1) == mc.group(1)): return None
-    if any(insl[q + 1].address != insl[q].address + 4 for q in range(k - 1, j)): return None   # an undecodable word may hide a write or a branch
-    kl = next((q for q in range(kh + 1, j) if insl[q].mnemonic == 'ldrsw' and insl[q].op_str.startswith('x18, ')), None)
-    ml = re.fullmatch(r'x18, \[(x\d+), x(\d+), lsl #2\]', insl[kl].op_str) if kl is not None else None
-    if not ml: return None
-    rb, ix = ml.group(1), int(ml.group(2))
-    src, mask, n = num(ma.group(2)), int(ma.group(3), 0), int(mc.group(2), 0) + 1
-    if ix in (src, num(ma.group(1)), 18) or num(rb) in (ix, 18) or mask >> 32: return None
-    if any(ix in writes(p) for p in insl[kh + 1:kl]): return None   # the index changes between the check and the load
-    ka = next((q for q in range(kl + 1, j) if 18 in writes(insl[q])), None)   # the first write of x18 after the load must be the add
-    if ka is None or insl[ka].mnemonic != 'add' or insl[ka].op_str != f'x18, x18, {rb}': return None
-    if any(num(rb) in writes(p) for p in insl[kl + 1:ka]) or any(18 in writes(p) for p in insl[ka + 1:j]): return None
-    if insl[k - 1].mnemonic not in ('b', 'br', 'ret'): return None   # no fall-through into the block
-    brs = [q for q, p in enumerate(insl) if (is_branch(p) or p.mnemonic == 'bl') and p.operands[-1].type == ARM64_OP_IMM]
-    into = {insl[q].operands[-1].imm for q in brs}
-    if any(p.address in into for p in insl[k + 1:j + 1]): return None   # a branch into the block past its and
-    tabs = {t for tgt in tabjumps.values() for t in tgt}   # a jump table already resolved in this function may land anywhere in the block, with any index value
-    def table_target(a): return a in tabs or any(b <= a < b + 4 * w for b, w in jumps.values())
-    if any(table_target(p.address) for p in insl[k:j + 1]): return None
-    preds = [q for q in brs if insl[q].operands[-1].imm == a_.address]
-    if not preds or any(insl[q].mnemonic == 'bl' for q in preds): return None
-    for q in preds:   # each predecessor must have masked the index the same way, in its own straight-line run
-        for i in range(q - 1, max(0, q - 16) - 1, -1):
-            p = insl[i]
-            m = re.fullmatch(r'([xw]\d+), ([xw]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
-            if m and num(m.group(1)) == ix:
-                if num(m.group(2)) != src or int(m.group(3), 0) != mask: return None
-                if any(x.address in into or table_target(x.address) for x in insl[i + 1:q + 1]): return None   # a direct branch, call or table must not bypass the mask
-                if any(insl[z + 1].address != insl[z].address + 4 for z in range(i, q)): return None
-                break
-            if is_cf(p) or writes(p) & {ix, src}: return None
-        else: return None
-    tb = copied_base(insl, kl, rb)   # follows adrp + add too, rejecting wN clobbers of xN and calls through volatile bases
-    if tb is None or tb < 0 or tb + 4 * n > len(IMG): return None
-    t = [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
-    addresses = {p.address for p in insl}
-    return t if all(x in addresses for x in t) else None
 def tail_call_at_end(insl, j):
     """The br x18 is an indirect tail call, not a jump table: the last write of x18 before it is a plain pointer load and the br ends the function. Ace Attorney Investigations Collection
     (Unity 2022.3 IL2CPP) main+0x1d271bc: ldr x18,[x0,#0x18]; ...; ldr x16,[sp]; ...; br x18, a thunk that moves stack arguments and jumps to the method pointer at +0x18"""
@@ -1316,8 +1057,8 @@ def tail_call_at_end(insl, j):
         return p.mnemonic == 'ldr' and bool(re.fullmatch(r'x18, \[(x\d+|sp)(, #(0x[0-9a-f]+|\d+))?\]', p.op_str))
     return False
 def tail_call_padded(insl, j):
-    """An unframed, straight-line pointer thunk ending in br x18 and zero trap padding."""
-    if j + 1 >= len(insl) or any(p.mnemonic != 'udf' or p.op_str != '#0' for p in insl[j + 1:]): return False
+    """An unframed, straight-line pointer thunk ending in br x18 and unreachable NOP or zero trap padding."""
+    if j + 1 >= len(insl) or any(not (p.mnemonic == 'nop' or p.mnemonic == 'udf' and p.op_str == '#0') for p in insl[j + 1:]): return False
     if any(b.address != a.address + 4 for a, b in zip(insl, insl[1:])): return False
     for p in insl[:j]:
         if p.mnemonic not in ('mov', 'ldr', 'ldrh', 'ldp', 'add', 'str', 'stp'): return False
@@ -1413,9 +1154,10 @@ def tail_call(insl, j):
     # Nothing re-enters the frame's setup, or lands past the restore: the frame's end is what the proof rests on. A guard may skip a reload of x18 (Subnautica main+0x24f210 through x2)
     return not any(t < setup_end or insl[restore].address < t <= after_br for t in targets)
 
-def jump_bytes_far(insl, j):
+def jump_bytes_far(insl, j, half):
     """The byte / halfword table form with its add further back (Octopath Traveler 0 main+0x37f9bc8: adr x18,#L; ldrb w0,[x17,x15]; add x18,x18,x0,lsl #2, then 17 register moves before br x18).
-    Up to 32 instructions back, and x18 must not change between the add and the br. Tried only where the 16-instruction search and the offset forms find nothing. Returns (base, width) or None"""
+    Up to 32 instructions back, and x18 must not change between the add and the br. Tried only where the 16-instruction search and the offset forms find nothing. Returns (base, width) or None;
+    half(base): the pads a halfword table needs (half_pads)"""
     ctx = insl[max(0, j - 32):j]
     for k in range(len(ctx) - 1, -1, -1):
         p = ctx[k]
@@ -1426,35 +1168,7 @@ def jump_bytes_far(insl, j):
     base = next((q.operands[1].imm for q in reversed(ctx[:k]) if q.mnemonic == 'adr' and q.op_str.startswith('x18,')), None)
     ld = next((q for q in reversed(ctx[:k]) if q.mnemonic in ('ldrb', 'ldrsb', 'ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx), None)
     if base is None or ld is None: return None
-    return base, 256 if ld.mnemonic in ('ldrb', 'ldrsb') else half_count(insl, ld, base) or 65536
-def half_count(insl, ld, base):
-    """Landing pads a halfword table needs (ldrh wE,[xT,xI,lsl #1]; ...; adr x18,#L; add x18,x18,xE,lsl #2; br x18: target = L + 4 × entry). site_br gives every possible entry a pad,
-    65,536 of them (768 KB), whatever the switch's size: Animal Crossing: New Horizons 3.0.3 main has 51 such tables, 40 MB, which put its patch area's end beyond the ±128 MB a B reaches
-    (a B() assertion at its spin waits), and Tears of the Kingdom's main has 11. The table is read as jump_adr_offsets reads one: the index's bounds check (following register copies),
-    then the table base from adrp + add, or the one candidate in the function whose every target is an instruction of it → the largest entry + 1, or None (all 65,536, as before).
-    Byte tables keep their 256 pads (3 KB)"""
-    m = re.fullmatch(r'w\d+, \[(x\d+), [wx](\d+), (?:lsl|uxtw) #1\]', ld.op_str) if ld.mnemonic == 'ldrh' else None
-    if not m: return None
-    tb_reg, k = m.group(1), insl.index(ld)
-    idx, cmp = {'w' + m.group(2)}, None
-    for p in reversed(insl[max(0, k - 32):k]):   # walk back from the load to the bounds check
-        mm = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
-        if mm and mm.group(1) in idx: idx.remove(mm.group(1)); idx.add(mm.group(2)); continue   # a copy replaces the index: a check of its old value bounds nothing
-        mm = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
-        if mm and mm.group(1) in idx: cmp = p; break
-        if written_w(p) & idx: return None   # the index changes after the check
-    kc = insl.index(cmp) if cmp is not None else -1
-    if kc < 0 or insl[kc + 1].mnemonic not in ('b.hi', 'b.hs', 'b.cs'): return None   # only a compare that guards the dispatch bounds the index (b.hs: one entry more than needed)
-    n = int(cmp.op_str.split('#')[1], 0) + 1
-    fa, fb = insl[0].address, insl[-1].address + 4
-    def entries(tb): return struct.unpack_from(f'<{n}H', IMG, tb) if 0 <= tb and tb + 2 * n <= len(IMG) else None
-    def fits(e): return e is not None and all(fa <= base + 4 * x < fb for x in e)
-    tb = table_base(insl, k, tb_reg)
-    if tb is None:
-        ok = [c for c in table_cands(insl, tb_reg) if fits(entries(c))]
-        tb = ok[0] if len(ok) == 1 else None
-    e = entries(tb) if tb is not None else None
-    return max(e) + 1 if fits(e) else None
+    return base, 256 if ld.mnemonic in ('ldrb', 'ldrsb') else half(base) or 65536
 def disasm_fn(fa, fb):
     """A function's instructions. Capstone stops at the first word it cannot decode, so go on after it: Monster Hunter Rise main+0x6b34540 is a trap word (0xe7ffdefe)
     in the middle of a function, and the br x18 jump table after it (main+0x6b346d0) was never seen"""
@@ -1509,13 +1223,85 @@ if any(fb - fa > BIG_FN for fa, fb in funcs):
         split += [(p, q) for p, q in ps if bisect.bisect_left(sites18, p) < bisect.bisect_left(sites18, q)]   # the pieces that hold x18 sites
         print(f'function {fa:#x}..{fb:#x} ({(fb - fa) / 2**20:.2f} MB, no unwind entries) analysed in {len(ps)} pieces')
     funcs = split
+# Offset tables (ldrsw / ldrb / ldrh + add + br x18) are proved by jump_solver, over each function's (or piece's) control flow: the values the index can take at the
+# load and the base on every path, every dispatch of the function together (see docs/reference/rewriter.md, "Jump tables proved over control flow"). Direct branches from
+# the rest of the module are entries of the functions they land in; targets of tables elsewhere are checked once every function is done
+import jump_solver
+def branch_entries(ranges):
+    """Direct branches (b, bl, b.cond, cbz / cbnz, tbz / tbnz) from anywhere in the module's code into each range from outside it: {range: {target}}. A data word that
+    decodes as a branch only adds an entry, which makes a proof stricter. Only the words whose top byte is a branch's are decoded (found with bytes.translate and re, in
+    C): b / bl in the whole text, the conditional branches, which reach 1 MB, only near the ranges (2.9 s for the 130 MB text of Sonic Superstars' main)"""
+    out = {r: set() for r in ranges}
+    if not ranges: return out
+    lo_ = [a for a, _ in ranges]
+    def marks(tops):
+        b = bytearray(256)
+        for t in tops: b[t] = 1
+        return bytes(b)
+    far, near = marks([*range(0x14, 0x18), *range(0x94, 0x98)]), marks([0x54, 0x34, 0x35, 0xB4, 0xB5, 0x36, 0x37, 0xB6, 0xB7])
+    def scan(start, end, mark):
+        n = (end - start) // 4
+        if n <= 0: return
+        data = bytes(IMG[start:start + 4 * n]); words = memoryview(data).cast('I')
+        for m_ in re.finditer(b'\x01', data[3::4].translate(mark)):
+            i = m_.start(); w = words[i]; t = w >> 24
+            if t == 0x54 or t & 0x7E == 0x34:
+                if t == 0x54 and w & 0x10: continue
+                d = (w >> 5) & 0x7FFFF; d -= (d & 0x40000) << 1
+            elif t & 0x7E == 0x36: d = (w >> 5) & 0x3FFF; d -= (d & 0x2000) << 1
+            else: d = w & 0x3FFFFFF; d -= (d & 0x2000000) << 1
+            at = start + 4 * i; dest = at + 4 * d
+            k = bisect.bisect_right(lo_, dest) - 1
+            if k >= 0 and dest < ranges[k][1] and not ranges[k][0] <= at < ranges[k][1]: out[ranges[k]].add(dest)
+    windows = []
+    for a, b in ranges:   # merged windows a conditional branch can reach the ranges from
+        a, b = max(0, a - (1 << 20)) & ~3, b + (1 << 20)
+        if windows and a <= windows[-1][1]: windows[-1][1] = max(windows[-1][1], b)
+        else: windows.append([a, b])
+    for start, end in CODE_RANGES:
+        scan(start, end, far)
+        for a, b in windows:
+            if max(start, a) < min(end, b): scan(max(start, a), min(end, b), near)
+    return out
+def code_ok(a): return any(s_ <= a < e_ for s_, e_ in CODE_RANGES)
+solved, entries_in, pad_starts, pads_at = {}, {}, [], {}
+fde_starts = set(starts)
+def solve_fn(fa, fb, insl, outside=()):
+    global pad_starts
+    if not solved and not entries_in:
+        entries_in.update(branch_entries(funcs))
+        pads_at.update(nso_code.landing_pads(IMG)); pad_starts = sorted(pads_at)   # C++ exception landing pads and the calls they catch
+    i, j = bisect.bisect_left(pad_starts, fa), bisect.bisect_left(pad_starts, fb)
+    landing = {a: pads_at[a] for a in pad_starts[i:j]}
+    unwound = (fa, fb) == func_of(fa) and fa in fde_starts   # a function its FDE describes, not a piece of text without unwind entries
+    solved[(fa, fb)] = jump_solver.solve(insl, IMG, code_ok, entries_in.get((fa, fb), ()), outside, landing, unwound)
+    return solved[(fa, fb)]
+def table_at(fa, fb, insl, at):
+    """(targets, None) for the table the br at at reads, or (None, why)"""
+    found, failed = solved[(fa, fb)] if (fa, fb) in solved else solve_fn(fa, fb, insl)
+    return found.get(at), failed.get(at, 'not a dispatch')
+def half_pads(fa, fb, insl, at, base):
+    """Landing pads a halfword table needs (ldrh wE,[xT,xI,lsl #1]; ...; adr x18,#L; add x18,x18,xE,lsl #2; br x18: target = L + 4 x entry): its largest entry + 1, from the
+    table the solver read, or None (site_br then gives all 65,536 entries a pad, 768 KB: Animal Crossing: New Horizons 3.0.3 main has 51 such tables, 40 MB, which put its patch
+    area's end beyond the +-128 MB a B reaches). Byte tables keep their 256 pads (3 KB)"""
+    tgt, _ = table_at(fa, fb, insl, at)
+    if not tgt or any(t < base or (t - base) % 4 for t in tgt): return None
+    return max(t - base for t in tgt) // 4 + 1
+selects = {}
+function_ends = dict(nso_code.fde_ranges(IMG))
 for fa, fb in funcs:
     insl = disasm_fn(fa, fb)
+    by_address = None
     ws = find_windows(insl)
     for wseg in ws:
         windows.append(wseg); done |= {x.address for x in wseg}
         if any(x.mnemonic == 'b' for x in wseg): newly_accepted.add(wseg[0].address)
     for j, ins in enumerate(insl):
+        if ins.mnemonic == 'csel' and fa in function_ends and ins.address < function_ends[fa] <= fb and ins.address not in done:
+            if args := select_x18(ins):
+                if by_address is None: by_address = {p.address: p for p in insl}
+                temp = select_scratch(ins.address, by_address, function_ends[fa], args[0])
+                if temp is not None: selects[ins.address] = args, temp
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
             # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
@@ -1528,19 +1314,14 @@ for fa, fb in funcs:
                     rn = p.reg_name(p.operands[2].reg); idx = {'lr': 30, 'fp': 29}.get(rn, num(rn))
                     for q in reversed(ctx):
                         if q.mnemonic in ('ldrb', 'ldrsb') and num(q.reg_name(q.operands[0].reg)) == idx: width = 256
-                        if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = half_count(insl, q, base) or 65536 if base else 65536
+                        if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = (half_pads(fa, fb, insl, ins.address, base) if q.mnemonic == 'ldrh' else None) or 65536 if base else 65536
                         if width: break
                     break
             if not (base and width):
-                tgt = jump_offsets(insl, j) or jump_adr_offsets(insl, j)
+                if (far := jump_bytes_far(insl, j, lambda b, fa=fa, fb=fb, insl=insl, at=ins.address: half_pads(fa, fb, insl, at, b))): jumps[ins.address] = far; continue   # a byte or halfword table keeps its pads wherever its add is
+                tgt, why = table_at(fa, fb, insl, ins.address)
                 if not tgt and tail_call(insl, j): tailcalls.add(ins.address); continue
-                if not tgt and (far := jump_bytes_far(insl, j)): jumps[ins.address] = far; continue
-                if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True)   # the index copied before the check (check_before_copy) or the base set far back, only where every other form failed
-                if not tgt: tgt = jump_masked_pred(insl, j)   # the check on a masked copy made in the block, the index masked in the block that branches to it
-                if not tgt: tgt = jump_masked_not(insl, j)   # a complemented low-bit index with its zero case branched away: exactly mask entries
-                if not tgt: tgt = jump_offsets(insl, j, copy_first=True, far_base=True, forward_base=True)   # a unique base initialized in a later block that branches backward
-                if not tgt: tgt = jump_zero_extended(insl, j)   # a 32-bit checked value zero-extended into the index, with its full path to the br verified
-                assert tgt, f'jump table {ins.address:x}'
+                assert tgt, f'jump table {ins.address:x}: {why}'
                 tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
     # No jump may land in the middle of a window, except a retry block's branch onto the window's store-exclusive (retry_block), which gets a copy of its own
@@ -1580,6 +1361,25 @@ for w in windows:
     if w[0].address in newly_accepted:
         assert all(b.address == a.address + 4 for a, b in zip(w, w[1:])), f'noncontiguous window {w[0].address:x}'
 new_mid = {x.address for w in windows if w[0].address in newly_accepted for x in w[1:]}
+# A table's targets in another function (or piece) are entries there that its proof did not see: prove those functions again with them
+fstarts = [fa for fa, _ in funcs]
+def range_of(a):
+    i = bisect.bisect_right(fstarts, a) - 1
+    return funcs[i] if i >= 0 and a < funcs[i][1] else None
+outside = {}
+for at, tgt in tabjumps.items():
+    for t in tgt:
+        if (r := range_of(t)) is not None and r != range_of(at): outside.setdefault(r, set()).add(t)
+for at, (b, width) in jumps.items():
+    if (r0 := range_of(at)) is None: continue
+    for t in range(b, b + 4 * width, 4):
+        if (r := range_of(t)) is not None and r != r0: outside.setdefault(r, set()).add(t)
+for (fa, fb), ts in outside.items():
+    if (fa, fb) not in solved: continue
+    before = solved[(fa, fb)][0]
+    found, _ = solve_fn(fa, fb, disasm_fn(fa, fb), ts)
+    for at in before:
+        if at in tabjumps: assert set(found.get(at) or ()) == set(tabjumps[at]), f'jump table {at:x}: an entry from another function is not proved'
 if new_mid:
     for start, end in CODE_RANGES:
         for at in range(start, end - 3, 4):
@@ -1590,6 +1390,20 @@ if new_mid:
             else: continue
             dest = at + 4 * d
             if dest in new_mid: assert func_of(at) == func_of(dest), f'branch into window from another function {at:x}'
+
+if GAP:
+    _holes = hop_holes()
+    front_holes = bisect.bisect_right(_holes, PATCH_OFF + REACH)
+    back_holes = len(_holes) - bisect.bisect_left(_holes, BACK_MIN - 0x100000)
+    gap_sites = sorted(a for a in (
+        *(w[0].address for w in windows), *(p[0][0][0].address for p in retries),
+        *(a for a in kinds if a not in done),
+    ) if SPLIT <= a < BACK_MIN)
+    if gap_sites and front_holes:
+        toward_front = len(gap_sites) * front_holes // (front_holes + back_holes)
+        SPLIT = gap_sites[toward_front] if toward_front < len(gap_sites) else BACK_MIN
+        print(f'{NAME}: {len(gap_sites)} sites in the branch gap, split at {SPLIT:#x} ({front_holes} front and {back_holes} back padding words)', flush=True)
+
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, BX(at, to))
 for wseg in windows:
@@ -1610,6 +1424,7 @@ for a in sorted(kinds):
         elif m == 'blr': st = site_blr(ins); stat('blr')
         elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
         elif casp_pair18(ins): st = site_casp(ins); stat('casp')
+        elif a in selects: st = site_select(ins, *selects[a]); stat('select')
         elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
@@ -1694,8 +1509,9 @@ obs += region_obs
 # its stubs run them at the cap, and the host only paces its presents (its patches.py).
 # State page = the page after the key page (zero in the file, read-write in both loaders): +0 float target fps written by the loader (fps_target, DM_FPS_TARGET; 0 = every stub
 # runs the original instructions), +4 30 fps movie/cinematic flag, +8 double lead (TOTK), +0x10 float render scale (TOTK, BotW), +0x18 double game seconds (TOTK),
-# +0x20 u32 step in vsyncs (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
-# its first stub (0 = off), +0x30 u64 vsyncs stepped (the stubs; logged by the host to check the game's speed), +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
+# +0x20 u32 step in vsyncs, or in the unit at +0x38 (host; 0 = not decided yet), +0x24 u32 a step the game fixes itself (BotW's VFR override; 0 = none), +0x28 u32 AoC's vsyncs per update, marked by
+# its first stub (0 = off), +0x30 u64 units stepped (the stubs; logged by the host to check the game's speed), +0x38 u32 the step's unit in ticks a second: 120 for a stub that
+# declares the FRAME_STEP_120 capability (Ocarina of Time's ratio stub; written by the loader, fixed for the run), 0 = vsyncs of 1/60 s, +0x40 u32 1 = the game's own dynamic resolution runs, 0 = its
 # stub holds full resolution (DM_DYNAMIC_RESOLUTION, written by the loader; the stub declares the DYNAMIC_RESOLUTION capability). Stub bodies assembled with clang
 # A build's stubs are FRAME_STEP[build ID](ctx) in its patches.py: ctx.here() / ctx.emit(word) assemble into the patch area, ctx.site(offset, original bytes) asserts a site and that it is
 # no rewrite site, ctx.put(offset, words, reason) writes it (listed with the cuts), ctx.state is the state page's offset, ctx.render_scale = n marks a render-scale stub that takes scales up to n (1: it only lowers the game's size),
@@ -1726,12 +1542,14 @@ def stub_put(off, words, why, kind):
     old = bytes(IMG[off:off + 4 * len(words)])
     for i, w in enumerate(words): struct.pack_into('<I', IMG, off + 4 * i, w)
     cuts.append((off, old.hex(), bytes(IMG[off:off + 4 * len(words)]).hex(), why)); stat(kind)
-def stub_address(off, what):   # the data address the adrp at off and the add / unsigned-offset load or store right after it (on the adrp's register) make, from the original text
-    a, b = struct.unpack_from('<2I', ORIG_TEXT, off)
+def stub_address(off, what, lo_off=None):   # ADRP and its low instruction (adjacent unless explicitly supplied), read from the original text
+    lo_off = off + 4 if lo_off is None else lo_off
+    assert lo_off > off and not (off | lo_off) & 3, f'{what}: invalid address instruction offsets'
+    a, b = struct.unpack_from('<I', ORIG_TEXT, off)[0], struct.unpack_from('<I', ORIG_TEXT, lo_off)[0]
     assert a & 0x9f000000 == 0x90000000, f'{what}: no adrp at {off:#x}'
     imm = (((a >> 5) & 0x7ffff) << 2 | (a >> 29) & 3) << 12
     page = (off & ~0xfff) + (imm - (1 << 33) if imm & 1 << 32 else imm)
-    assert (b >> 5) & 31 == a & 31, f'{what}: the instruction after the adrp at {off:#x} does not use its register'
+    assert (b >> 5) & 31 == a & 31, f'{what}: the low instruction at {lo_off:#x} does not use the adrp register'
     if b & 0xffc00000 == 0x91000000: return page + ((b >> 10) & 0xfff)                       # add xD, xN, #imm
     assert b & 0x3b000000 == 0x39000000, f'{what}: no add, load or store after the adrp at {off:#x}'
     return page + ((b >> 10) & 0xfff) * (1 << (b >> 30)) * (16 if b & 0x04800000 == 0x04800000 and b >> 30 == 0 else 1)   # scaled by the access size (q: 16)
@@ -1739,7 +1557,7 @@ if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those 
     use_area(0); fs = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'frame step'),
                                             put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if FS_MATCH else ''), 'frame_step'),
                                             state=FS_STATE_OFF, render_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
-                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'))
+                                            found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off, lo_off=None: stub_address(off, 'frame step', lo_off))
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
 
 # ---- Stubs (the modules whose patch file has STUBS of their build) ----
@@ -1748,9 +1566,16 @@ if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those 
 # the main for one with a frame step). A stub's code must hold nothing the rewriter would rewrite (x18, svc, tpidr, exclusive pairs), since it is not scanned.
 # Ori and the Will of the Wisps 1.2.1 serializes the users of Unity's shared constant-buffer table this way (its patches.py)
 STUBS = PATCHES['STUBS']
-if BUILD_ID in STUBS:
-    use_area(0); STUBS[BUILD_ID](types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'stub'),
-                                                       put=lambda off, words, why: stub_put(off, words, why, 'stub'), address=lambda off: stub_address(off, 'stub')))
+if BUILD_ID in STUBS or STUB_MATCH:
+    use_area(0)
+    st = types.SimpleNamespace(here=here, emit=emit, site=lambda off, orig: stub_site(off, orig, 'stub'),
+                              put=lambda off, words, why: stub_put(off, words, why + (' [function match]' if STUB_MATCH else ''), 'stub'),
+                              address=lambda off, lo_off=None: stub_address(off, 'stub', lo_off),
+                              base=STUB_MATCH[1] if STUB_MATCH else 0, others=STUB_MATCH[2] if STUB_MATCH else {},
+                              found=STUB_MATCH[3] if STUB_MATCH else None, fps_ready=False)
+    (STUB_MATCH[0]['stub'] if STUB_MATCH else STUBS[BUILD_ID])(st)
+    if st.fps_ready: NATIVE_FPS_BLOCKED = False
+if NATIVE_FPS_BLOCKED: print(f'[RED] {NAME}: native frame target disabled: a required timing correction did not match')
 
 # ---- Spin waits (every module) ----
 # A guest loop that polls memory until another thread changes it fills only its own core on the Switch, where any higher-priority thread pinned there preempts it, so the
@@ -1779,6 +1604,9 @@ SPIN_PATHS, SPIN_STEPS, SPIN_STORES = 256, 4096, 4   # complete paths back to T;
 SPIN_LSE = ('ldadd', 'ldclr', 'ldeor', 'ldset', 'ldsmax', 'ldsmin', 'ldumax', 'ldumin')
 SPIN_BAD = {'bl', 'blr', 'br', 'ret', 'eret', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'mrs', 'msr', 'sys', 'sysl', 'wfe', 'wfi', 'sev', 'sevl', 'clrex', 'dc', 'ic', 'at',
             'tlbi', 'drps', 'dcps1', 'dcps2', 'dcps3', 'blraa', 'blrab', 'blraaz', 'blrabz', 'braa', 'brab', 'braaz', 'brabz', 'retaa', 'retab', 'eretaa', 'eretab'}
+# Per-head decode cache for spin_region: cleared in spin_region's finally block, so it holds at most the ~135 instructions in [T - 4, hi + 20] for the head being analysed
+# (kept across heads, one 0.5-2.6 KB capstone object per instruction passed 24 GB on EA SPORTS FC 27 1.8e's 185 MB main; the parallel search strides heads by 8 * WORKERS,
+# so cross-head reuse is effectively zero). Returned regions keep the instruction objects they need, and spin_emit decodes nothing.
 spin_dec = {}
 def spin_ins(a):
     if a not in spin_dec: spin_dec[a] = next(md.disasm(bytes(IMG[a:a + 4]), a), None)
@@ -1835,36 +1663,40 @@ def spin_lock(a):
            ld(a)xr wA,[xN]; cmp wA,#k; b.ne <the load>; st(l)xr wS,wzr,[xN]; cbnz wS,<the load>           the same without clrex
     'tst'  ldr|ldrb|ldrh wA,[xN{,#imm}]; cmp wA,#k; b.eq|b.ne <the load>                                 a test loop that only another thread ends
     The forms without clrex retry the exclusive load at once: the next exclusive load replaces the reservation the failed test left"""
-    l = [spin_ins(a + 4 * i) for i in range(6)]
-    if l[0] is None: return None
+    x0 = spin_ins(a)
+    if x0 is None: return None
     r = lambda x, i: x.reg_name(x.operands[i].reg)
     plain = lambda x, i: x.operands[i].type == ARM64_OP_MEM and not x.operands[i].mem.index and not x.operands[i].mem.disp
-    m0 = l[0].mnemonic
-    if m0 in ('ldxr', 'ldaxr') and None not in l and r(l[0], 0).startswith('w') and plain(l[0], 1):
-        base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
-        if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
-                and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
-                and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
-            return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
-        if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
-                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
-            return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
-        if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
-                and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
-                and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
-            return ('acq', bn, l, 0, 6, {bn, spin_norm(r(l[4], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[4], 0))})
-        p = spin_ins(a - 4)
-        if (p is not None and p.mnemonic == 'clrex' and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-                and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a - 4 and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
-                and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
-            return ('rel', bn, [p] + l[:5], 1, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
-    if m0 == 'stlr' and len(l[0].operands) == 2 and r(l[0], 0) in ('wzr', 'xzr') and plain(l[0], 1):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('rel', bn, l[:1], 0, 1, {bn}, set())
-    if (m0 in ('ldr', 'ldrb', 'ldrh') and None not in l[:3] and len(l[0].operands) == 2 and r(l[0], 0).startswith('w') and l[0].operands[1].type == ARM64_OP_MEM
-            and not l[0].operands[1].mem.index and not l[0].writeback and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
-            and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
-        bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l[:3], 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
+    m0 = x0.mnemonic
+    if m0 == 'stlr' and len(x0.operands) == 2 and r(x0, 0) in ('wzr', 'xzr') and plain(x0, 1):
+        bn = spin_norm(x0.reg_name(x0.operands[1].mem.base)); return ('rel', bn, [x0], 0, 1, {bn}, set())
+    if m0 in ('ldxr', 'ldaxr') and r(x0, 0).startswith('w') and plain(x0, 1):
+        l = [x0] + [spin_ins(a + 4 * i) for i in range(1, 6)]
+        if None not in l:
+            base = l[0].operands[1].mem.base; bn = spin_norm(l[0].reg_name(base))
+            if (l[1].mnemonic == 'cbnz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a
+                    and l[2].mnemonic in ('stxr', 'stlxr') and plain(l[2], 2) and l[2].operands[2].mem.base == base and r(l[2], 1) not in ('wzr', 'xzr')
+                    and l[3].mnemonic == 'cbnz' and r(l[3], 0) == r(l[2], 0) and l[3].operands[1].imm == a):
+                return ('acq', bn, l[:4], 0, 4, {bn, spin_norm(r(l[2], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[2], 0))})
+            if (l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                    and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                    and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+                return ('rel', bn, l[:5], 0, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
+            if (l[1].mnemonic == 'cbz' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].imm == a + 16 and l[2].mnemonic == 'clrex' and l[3].mnemonic == 'b' and l[3].operands[0].imm == a
+                    and l[4].mnemonic in ('stxr', 'stlxr') and plain(l[4], 2) and l[4].operands[2].mem.base == base and r(l[4], 1) not in ('wzr', 'xzr')
+                    and l[5].mnemonic == 'cbnz' and r(l[5], 0) == r(l[4], 0) and l[5].operands[1].imm == a):
+                return ('acq', bn, l, 0, 6, {bn, spin_norm(r(l[4], 1))}, {spin_norm(r(l[0], 0)), spin_norm(r(l[4], 0))})
+            p = spin_ins(a - 4)
+            if (p is not None and p.mnemonic == 'clrex' and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                    and l[2].mnemonic == 'b.ne' and l[2].operands[0].imm == a - 4 and l[3].mnemonic in ('stxr', 'stlxr') and r(l[3], 1) == 'wzr'
+                    and plain(l[3], 2) and l[3].operands[2].mem.base == base and l[4].mnemonic == 'cbnz' and r(l[4], 0) == r(l[3], 0) and l[4].operands[1].imm == a):
+                return ('rel', bn, [p] + l[:5], 1, 5, {bn}, {spin_norm(r(l[0], 0)), spin_norm(r(l[3], 0)), 'nzcv'})
+    if (m0 in ('ldr', 'ldrb', 'ldrh') and len(x0.operands) == 2 and r(x0, 0).startswith('w') and x0.operands[1].type == ARM64_OP_MEM
+            and not x0.operands[1].mem.index and not x0.writeback):
+        l = [x0, spin_ins(a + 4), spin_ins(a + 8)]
+        if (None not in l and l[1].mnemonic == 'cmp' and r(l[1], 0) == r(l[0], 0) and l[1].operands[1].type == ARM64_OP_IMM
+                and l[2].mnemonic in ('b.eq', 'b.ne') and l[2].operands[0].imm == a):
+            bn = spin_norm(l[0].reg_name(l[0].operands[1].mem.base)); return ('tst', bn, l, 0, 3, {bn}, {spin_norm(r(l[0], 0)), 'nzcv'})
     return None
 def spin_store(ins):
     """str / strb / strh / stur / sturb / sturh of a w register or zr to [xN{,#imm}] (no writeback, no register offset) → (value register or None for zr, base register), or None"""
@@ -1911,20 +1743,24 @@ def spin_region(T, bes):
     through stores bring in a register that a pass changes, the region is looked for once more with every store ending its path, as before stores could be part of one.
     A lock sequence at T is one node of a poll that it heads (its own branches back to T stay inside it); when there is no such poll, T is the head of the sequence's own retry
     loop (a lock's wait for its holder, ld(a)xr; cbnz <the load>), found as plain instructions as before the lock rules"""
-    lk = spin_lock(T)
-    for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
-        ban = set()
-        for _ in range(8):
-            g = spin_region1(T, bes, ban, True, head)
-            if not isinstance(g, set): break
-            ban |= g
-        old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
-        g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
-        if g: break
-    return g
-def spin_region1(T, bes, ban, stores, head):
     hi = max(bes)
     if any(s < hi + 4 and T < e for s, e in DATA_BLOCKS) or not spin_quick(T, hi): return None
+    try:
+        lk = spin_lock(T)
+        for head in (True, False) if lk and lk[0] in ('acq', 'rel') else (True,):
+            ban = set()
+            for _ in range(8):
+                g = spin_region1(T, bes, ban, True, head)
+                if not isinstance(g, set): break
+                ban |= g
+            old = spin_region1(T, bes, set(), False, head)   # the region without stores, which the search took before: the wider one only when it covers its back-edges
+            g = g if isinstance(g, dict) and (not old or old['valid'] <= g['valid']) else old
+            if g: break
+        return g
+    finally:
+        spin_dec.clear()
+def spin_region1(T, bes, ban, stores, head):
+    hi = max(bes)
     nodes, back, bad, inner = {}, set(), set(), set()
     todo = [T]
     while todo:
@@ -1938,8 +1774,8 @@ def spin_region1(T, bes, ban, stores, head):
             n = {'kind': 'rmw', 'base': rmw[0], 'k': rmw[1], 'ins': rmw[3], 'uses': {rmw[0]}, 'defs': rmw[2], 'succ': [a + 16]}
         elif lk:
             n = {'kind': lk[0], 'base': lk[1], 'k': {'acq': 1, 'rel': -1, 'tst': 0}[lk[0]], 'ins': lk[2], 'pre': lk[3], 'uses': lk[5], 'defs': lk[6], 'succ': [a + 4 * lk[4]]}
-        elif stores and spin_store(spin_ins(a)):
-            x = spin_ins(a); st = spin_store(x); n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
+        elif stores and (st := spin_store(x := spin_ins(a))):
+            n = {'kind': 'stc', 'st': st, 'ins': [x], 'uses': {st[1]} | ({st[0]} - {None}), 'defs': set(), 'succ': [a + 4]}
         else:
             x = spin_ins(a); k = spin_kind(x)
             if k is None: bad.add(a); continue
@@ -2065,7 +1901,7 @@ def find_spin_regions():
     heads = []
     for found in in_parallel(spin_heads_with_region, [(first, step) for first in range(step)]):
         heads += found
-    return [spin_region(T, spin_cand[T]) for T in sorted(heads)]
+    return [g for T in sorted(heads) if (g := spin_region(T, spin_cand[T]))]
 
 spin_regions = find_spin_regions()   # all found on the unchanged image first: emitting patches back-edges
 spin_sites = [(g['T'], sorted(g['valid']), sum(len(g['nodes'][a]['ins']) for a in g['R'])) for g in spin_regions]
@@ -2091,8 +1927,32 @@ if FAR:   # patch area before the base: file = text + ro + data (padded to 16K) 
 else:
     open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
+def movie_native_color_keys():
+    # NintendoSDK_movie 7.3.2 rotates hw-buf-ColorSpace right by five, then accepts values 1 through 4 as-is.
+    # SDK 4.4.1 adds one. Match the reviewed converter at its export and verify what key the result is written to.
+    key = b'nv12-colorspace\0'
+    symbol = '_ZN5movie25convertMessageToMediaDataERKN7android2spINS0_8AMessageEEEPNS_9MediaDataE'
+    if IMG.find(key, RO_OFF, DATA_OFF) < 0 or IMG.find(symbol.encode() + b'\0', RO_OFF, DATA_OFF) < 0:
+        return False
+    start, size = nso_syms.defined(IMG).get(symbol, (0, 0))
+    if not 0 < start < start + size <= TEXT_END:
+        return False
+    signature = struct.pack('<4I', 0x13881508, 0x51000509, 0x7100113f, 0x1a9f3102)
+    at = ORIG_TEXT.find(signature, start, start + size)
+    if at < 0 or at % 4 or at + 24 > start + size or ORIG_TEXT.find(signature, at + 4, start + size) >= 0:
+        return False
+    pair = list(md.disasm(ORIG_TEXT[at + 16:at + 24], at + 16))
+    if len(pair) != 2 or pair[0].mnemonic != 'adrp' or pair[1].mnemonic != 'add':
+        return False
+    page, low = pair[0].operands, pair[1].operands
+    if (len(low) != 3 or low[2].type != ARM64_OP_IMM or low[2].shift.value or
+            any(md.reg_name(op.reg) != 'x1' for op in (page[0], low[0], low[1]))):
+        return False
+    target = page[1].imm + low[2].imm
+    return RO_OFF <= target < DATA_OFF and IMG[target:target + len(key)] == key
+
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:   # the same for every module: the rewriter and every patch file, by path from dm/tools
-    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
+    for src_ in (os.path.abspath(__file__), nso.__file__, nso_code.__file__, nso_asm.__file__, nso_syms.__file__, ue_cvar.__file__, ue_malloc.__file__, fps_target.__file__, monolith_fps.__file__, ue_fixed_rate.__file__, unity_fps.__file__, unity_bucket.__file__, ue_region.__file__, ue_ring.__file__, snowdrop_pools.__file__, os.path.join(os.path.dirname(ue_malloc.__file__), 'loader_census.py'), *PATCH_FILES): f.write(hashlib.sha256(open(src_, 'rb').read()).hexdigest() + f'  {os.path.relpath(os.path.abspath(src_), os.path.dirname(os.path.abspath(__file__)))}\n')
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
@@ -2101,9 +1961,12 @@ with open(P('fixups.tsv'), 'w') as f:
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
+    if MONOLITH_INTERVAL is not None: f.write(f'# MONOLITH_INTERVAL\t{MONOLITH_INTERVAL:#x}\n')   # native wait and simulation interval (monolith_fps.py)
+    if NATIVE_FPS_BLOCKED: f.write('# NATIVE_FPS_BLOCKED\t0x1\n')   # a required matched timing correction was not installed
     if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)
     if 'target' in UNITY_FPS: f.write(f"# UNITY_TARGET_FPS\t{UNITY_FPS['target']:#x}\n")   # Unity's Application.targetFrameRate (unity_fps.py)
     if 'qs' in UNITY_FPS: f.write(''.join(f'# UNITY_QS_{k}\t{v:#x}\n' for k, v in zip(('PTR', 'IDX', 'ARR', 'SIZE', 'VSYNC'), UNITY_FPS['qs'])))   # its QualitySettings' vSyncCount (unity_fps.py)
+    if movie_native_color_keys(): f.write('# MOVIE_NATIVE_COLOR_KEYS\t0x1\n')
     for n, o in UE_CVARS.items(): f.write(f'# UE_CVAR:{n}\t{o:#x}\n')   # Unreal console variables (ue_cvar.py): the TAutoConsoleVariable registered under each name
     if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
         assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
@@ -2115,6 +1978,10 @@ with open(P('fixups.tsv'), 'w') as f:
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'
             f.write(f'# {capability}\t1\n')
+    for off, ob, nb, why in ALIAS_APPLIED:
+        nbb = bytes.fromhex(nb)
+        assert IMG[off:off + len(nbb)] == nbb, f'ALIAS_CUT at {off:#x} was modified by a later rewriter pass: {bytes(IMG[off:off + len(nbb)]).hex()}'
+        f.write(f'# ALIAS_CUT\t{off:#x}\t{ob}\t{nb}\n')   # iOS-only alias cut the Mac loader undoes at load when alias >= 64 GB
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')

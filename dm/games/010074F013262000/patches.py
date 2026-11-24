@@ -23,6 +23,13 @@ CUTS = {
     ],
 }
 
+# All six cuts exist only to fit an iPhone's 4.375 GB alias region (mem_alias). On the Mac, whose
+# alias region is the Switch's 64 GB, the loader restores the original instructions at load so the
+# game keeps Monolith's 60 GB layout (docs/reference/memory.md, Cuts that only fit an iPhone's alias region).
+ALIAS_CUTS = {
+    '82d187fe9ef9be921b8e1b1cddf7bd28': [0x128e58c, 0x1241870, 0x1241880, 0x12418d8, 0x12418dc, 0x12418e8],
+}
+
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fuzz dm/gfx/tools/uepak.py's readers of Unreal Engine files: Pak (the footer, a version 11 index with its encoded entries and directory index, a legacy version 4 index) and
-Pak.read of every file it lists, archive / lz4_shaders / decoded_archive (a version 2 shader code archive) and lslg (a decoded shader record).
-Seeds: a version 11 pak (a stored, a Zlib and an LZ4 file), a version 4 pak (a stored and a Zlib file), a shader code archive with a stored and an LZ4-compressed LSLG record,
-and an LSLG record. Index encryption is left out (no key is given: an encrypted index is the ValueError Pak raises for it; the AES path uses macOS's CommonCrypto).
+Pak.read of every file it lists, version 1 and 2 shader code archives, and lslg (a decoded shader record).
+Seeds: v11, v4 and short v8 paks, Zlib and LZ4 shader code archives, and an LSLG record. Index encryption is left out (no key is given: an encrypted index is the ValueError Pak raises for it;
+the AES path uses macOS's CommonCrypto).
 Clean rejection: ValueError, which every reader raises for what it does not read, KeyError for a path the index does not list, zlib.error and LZ4BlockError from a block that
 does not decode, and lslg's None. Any other exception (struct.error from a read past the end of a table, for one) and an oversized allocation are findings. Usage: see fuzzlib.py"""
 import struct
@@ -38,6 +38,12 @@ def archive():
     return d + b''.join(stored)
 
 
+def archive_v1():
+    raw = lslg()
+    stored = zlib.compress(raw)
+    return struct.pack('<II', 1, 1) + bytes(20) + struct.pack('<QIIB', 0, len(stored), len(raw), 0) + stored
+
+
 def pak11(files):
     """Version 11: the data (each file behind a 53-byte FPakEntry, a compressed one's block table after it), the index, the directory index, the footer (magic 0xcc from the end)"""
     data, enc_entries, dirs = bytearray(), bytearray(), []
@@ -57,22 +63,28 @@ def pak11(files):
     return bytes(data) + index + dirindex + bytes(4) + foot   # 4 spare bytes before the GUID: the reader takes back + 21 bytes
 
 
-def pak4(files):
-    """Legacy version 4: the data, then per file its name and FPakEntry (blocks from the file start), then the 0x2d-byte footer"""
+def legacy_pak(files, short=False):
+    """Legacy v4 or short v8: the data, then each name and FPakEntry, then the footer."""
     data, index = bytearray(), fstr('../../../') + struct.pack('<i', len(files))
     for name, raw, meth in files:
         stored = zlib.compress(raw) if meth else raw
-        at = len(data); head = 53 + (4 + 16 if meth else 0); data += bytes(head) + stored
-        index += fstr(name) + struct.pack('<qqqi', at, len(stored), len(raw), meth) + bytes(20)
-        if meth: index += struct.pack('<i', 1) + struct.pack('<qq', at + head, at + head + len(stored))
+        at = len(data); head = (50 if short else 53) + (4 + 16 if meth else 0); data += bytes(head) + stored
+        index += fstr(name) + struct.pack('<qqqB' if short else '<qqqi', at, len(stored), len(raw), meth) + bytes(20)
+        if meth:
+            block = head if short else at + head   # v8 stores entry-relative block offsets
+            index += struct.pack('<i', 1) + struct.pack('<qq', block, block + len(stored))
         index += struct.pack('<BI', 0, 0x10000)
-    return bytes(data) + index + b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 4, len(data), len(index)) + bytes(20)
+    foot = b'\0' + struct.pack('<IIQQ', uepak.PAK_MAGIC, 8 if short else 4, len(data), len(index)) + bytes(20)
+    if short: foot = bytes(16) + foot + b'Zlib'.ljust(128, b'\0')
+    return bytes(data) + index + foot
 
 
 def seeds():
     body = b'fuzz file body ' * 20
+    legacy = [('Engine/a.txt', body, 0), ('Engine/b.bin', body * 2, 1)]
     return {'pak11': pak11([('Content/a.txt', body, 0), ('Content/z.bin', body * 3, 1), ('Content/l.bin', body * 2, 2)]),
-            'pak4': pak4([('Engine/a.txt', body, 0), ('Engine/b.bin', body * 2, 1)]), 'archive': archive(), 'lslg': lslg()}
+            'pak4': legacy_pak(legacy), 'pak8-short': legacy_pak(legacy, short=True),
+            'archive': archive(), 'archive-v1': archive_v1(), 'lslg': lslg()}
 
 
 _file = fuzzlib.InputFile('pakchunk0-Switch.pak')
@@ -82,6 +94,8 @@ CLEAN = (ValueError, KeyError, zlib.error, lz4.block.LZ4BlockError)
 def check(data):
     try:
         if data[:4] == b'LSLG': uepak.lslg(data); return
+        if data[:4] == b'\x01\0\0\0':
+            data = uepak.archive_v1_decoded(data, 'fuzz archive')
         if data[:4] == struct.pack('<I', 2):
             a = uepak.archive(data); raws = uepak.lz4_shaders(data, a)
             if raws is not None:

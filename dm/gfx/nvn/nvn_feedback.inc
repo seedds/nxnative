@@ -87,7 +87,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
     }
     if (!g_tf_prepare) {
         NSError *e=nil; id<MTLLibrary> lib=host_lib("tf",&e);
-        if (lib) g_tf_prepare=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"tf_prepare"] error:&e];
+        if (lib) g_tf_prepare=dev_cps([lib newFunctionWithName:@"tf_prepare"], &e);
         if (!g_tf_prepare) { MLOG("[RED] transform feedback prepare: %s",e.localizedDescription.UTF8String); return 0; }
     }
     rp_end(); ubd_land();
@@ -195,7 +195,7 @@ static void tf_draw(NvProg *pr,const p_draw *dw,const p_draw_idx *di) {
         g_tf_enc=enc_r_begin(rd);g_tf_npass++;
     }
     id<MTL4RenderCommandEncoder> en=g_tf_enc;enc_r_pso(en,ps);
-    {int bad=bind_vbufs(en,&vs->rf);if(bad>=0){RED_ONCE(158,"vertex stream %d's buffer %#llx is in no memory pool; draw skipped",bad,(unsigned long long)S.vbuf[bad].address);tf_pass_end();return;}}
+    {int bad=bind_vbufs(en,&vs->rf,dw,NULL);if(bad>=0){RED_ONCE(158,"vertex stream %d's buffer %#llx is in no memory pool; draw skipped",bad,(unsigned long long)S.vbuf[bad].address);tf_pass_end();return;}}
     vconv_bind(en,vs,1,dw,NULL);
     args_dirty_all();encode_args(en,vs,0,1);enc_r_vbuf(en,14,job);
     for(int b=0;b<4;b++)if(vs->tf_stride[b])enc_r_vbuf(en,TF_SLOT+b,dst[b]);

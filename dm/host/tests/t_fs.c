@@ -182,6 +182,26 @@ int main(void) {
         const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
         f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
         CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        {   // one mount name for the cache storages in turn, unmounted in between (Taiko no Tatsujin: Rhythm Festival mounts index 1, unmounts, mounts index 2, all as "MyIndexCache")
+            char got[16], f1[1300], f2[1300]; int before = g_nmnt;
+            snprintf(c, sizeof c, "%s_cache11", temp); mkdir(c, 0755); snprintf(f1, sizeof f1, "%s/song", c); put(f1, "one");
+            snprintf(c, sizeof c, "%s_cache12", temp); mkdir(c, 0755); snprintf(f2, sizeof f2, "%s/song", c); put(f2, "two");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: the first index under a name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_PATH_EXISTS && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: another index under a name still in use is refused, as on Horizon");
+            h_fs_Unmount("MyCache"); CHECK(!h_fs_IsMounted("MyCache"), "cache storage mount: Unmount releases the name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: the next index under that name shows its own files (got %s)", got);
+            h_fs_Unmount("MyCache");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one") && g_nmnt == before + 2,
+                  "cache storage mount: the first index again takes its entry back (%d entries for two storages)", g_nmnt - before);
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK, "cache storage mount: the same index again under a name in use is harmless");
+            h_fs_Unmount("MyCache"); h_fs_Unmount("MyCache");   // an unmount of a name not mounted is a no-op
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: and the second");
+            h_fs_Unmount("MyCache");
+            snprintf(c, sizeof c, "%s_cache13", temp); mkdir(c, 0755);
+            CHECK(mount("PermCache", c, 0) == RES_OK && h_fs_MountCache("PermCache", 13) == RES_OK, "cache storage mount: repeating a permanent mount of the same folder succeeds");
+            h_fs_Unmount("PermCache");
+            CHECK(h_fs_IsMounted("PermCache"), "cache storage mount: repeating a permanent mount does not make it releasable");
+        }
         unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
     }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
@@ -251,6 +271,15 @@ int main(void) {
         CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
         h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
+        {   // another program's RomFS by its index (Super Mario Bros. Wonder's Switch 2 program mounts its Switch 1 program's, index 0): romfs_programs/<index>.img beside DM_ROMFS
+            char pd[1100], pd2[1100]; snprintf(pd, sizeof pd, "%s/romfs_programs", root); snprintf(pd2, sizeof pd2, "%s/progs", root); mkdir(pd, 0755); mkdir(pd2, 0755);
+            memcpy(img + 32, "HELLO", 5); snprintf(fn, sizeof fn, "%s/0.img", pd); f = fopen(fn, "wb"); fwrite(img, 1, sizeof img, f); fclose(f); memcpy(img + 32, "hello", 5);
+            CHECK(h_fs_MountRomIdx("content", 0, NULL, 0) == RES_OK && read_fs("content:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "MountRom with a program index mounts that program's image (got %s)", got);
+            CHECK(h_fs_MountRomIdx("own", 1, NULL, 0) == RES_OK && read_fs("own:/data/a", got, sizeof got) && !strcmp(got, "hello"), "an index with no image mounts this program's own RomFS (got %s)", got);
+            snprintf(fn, sizeof fn, "%s/0.img", pd2); CHECK(!link(ip, fn), "stage a program image elsewhere"); setenv("DM_ROMFS_PROGRAMS", pd2, 1);
+            CHECK(h_fs_MountRomIdx("content2", 0, NULL, 0) == RES_OK && read_fs("content2:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DM_ROMFS_PROGRAMS names the folder (the iOS app's, when its RomFS is in Documents)");
+            unsetenv("DM_ROMFS_PROGRAMS"); g_nmnt = 0;
+        }
         snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
@@ -265,9 +294,10 @@ int main(void) {
             h_fs_Unmount("AVC");
             CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_nmnt == before + 2,
                   "the first add-on again takes its entry back (%d entries for two add-ons)", g_nmnt - before);
-            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "a name still in use keeps its target, as before");
+            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_PATH_EXISTS && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "another add-on under a name still in use is refused, as on Horizon");
+            CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "the same add-on again under a name in use is harmless");
             CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the RomFS"); h_fs_Unmount("rom");
-            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every mount but an add-on's");
+            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every non-releasable mount");
         }
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
         {   // a file written as read from a damaged NSP (nx_extract --allow-damaged) still reads, and the mount counts it and the first open names it once

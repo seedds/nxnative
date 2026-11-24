@@ -32,6 +32,7 @@ zip_store	.bank:.bik:.blk:.bsm:.fsb:.ibf:.lbf:.nx:.swf:.u:.metallib
 mem_reserve	0x100000000
 mem_alias	0x10000000
 mem_stack	0x10000000
+app_pool	0xCD500000
 sys_resource	0x0
 
 # ---- Shader split ----

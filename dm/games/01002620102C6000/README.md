@@ -14,7 +14,7 @@ against hardware ([What is open](#what-is-open)). Nothing here was run on an iPh
 | Setting | Where | Why |
 |---|---|---|
 | `romfs_marker bulkcontent/bulkpatch2.blk` | [`game.tsv`](game.tsv) | the RomFS's largest archive; the game has no small file that names it |
-| memory keys: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource, so `main` sets its own heap of at most the pool less 64 MB |
+| memory keys: `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `sys_resource 0x0` | `game.tsv` | the NPDM declares no system resource, so `main` sets its own heap of at most the pool less 64 MB |
 | `shader_groups` | `game.tsv` | the split's grouping of the RomFS folders |
 | the `shadercache.nx` reader, both container versions | `dm/gfx/tools/shader_split.py` (`shadercache_nx_framing`, `shadercache_nx`) | this title's caches are version 28, whose blocks carry a raw length as well ([Shaders](#shaders)) |
 | the web view's answer to `window.close()` | `dm/host/web_apple.m` | both legal pages end with the browser's `close()` ([The legal pages](#the-legal-pages)) |

@@ -320,6 +320,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [An IPA without prewarm files since absent attributes read offset 16](../../../docs/reference/rendering.md#an-ipa-without-prewarm-files-since-absent-attributes-read-offset-16). Resolved: on host `62f65f7` an iPhone 17 Pro build got no prewarm files and its first start compiled 5,832 bases in a 446 s prepare step; with slot 30 at a stride of 32, `metal-tt` built all 13 files for `applegpu_g18p`.
 - [Autoreleased temporaries collect during background pipeline builds](../../../docs/reference/memory.md#autoreleased-temporaries-collect-during-background-pipeline-builds). The audit finding is resolved in the host.
 - [The display link started before fullscreen's mode switch](../../../docs/reference/frame-rate.md#the-display-link-started-before-fullscreens-mode-switch): startup silences and rescues on a variable-refresh screen, and repeated fullscreen mode switches / stale variable-refresh flags ([Fullscreen switches the screen to a rate the frame rate divides](../../../docs/reference/frame-rate.md#fullscreen-switches-the-screen-to-a-rate-the-frame-rate-divides)).
 - [Upload retirement can block Metal 4 feedback](../../../docs/reference/memory.md#upload-retirement-can-block-metal-4-feedback). NX18 reported a freeze on an iPhone 18 Pro Max after loading a save. A synthetic lock stall reproduced the feedback blockage. The cause of the device freeze remains open.

@@ -1174,6 +1174,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `t_default_attrib` checks float, signed, and unsigned native inputs (beyond `S.nattr`, explicitly absent, and unknown format) as well as shadow-input pipelines with both active shadowed and absent attributes. `t_pull` checks the pulling default, missing buffers, invalid streams, and unknown formats alongside its format comparisons.
 - **Found on:** [Splatoon Raiders](../../dm/games/0400380020056000/README.md#rendering), the Slosher projectile's alpha-tested depth pass ([#3181](https://github.com/seedds/nxnative/issues/3181)).
 
+### An IPA without prewarm files since absent attributes read offset 16
+
+- **Symptom:** an iPhone build logs `[RED] pso_offline: prewarm: [RED] pso_offline: metal-tt failed for applegpu_g18p (exit 1): applegpu-nt: error: Attribute at index 2: the attribute offset (16) + attribute size (16) must be <= the stride of the buffer (16) at buffer index 4294967295.`, then `the app has no prewarm files`, and the IPA's `pso/` holds the pair archive alone. The first start on the phone compiles the prewarm list's bases before the first frame, and again after every iOS update.
+- **Cause:** [Absent vertex attributes lose W](#absent-vertex-attributes-lose-w) bound an absent attribute to offset 16 of slot 30, whose layout `ZERO_ATTR` declared with a stride of 16. The step is constant, so the runtime reads the right bytes and neither Metal's runtime nor its validation layer objects; `metal-tt` checks offset + size against the stride for every layout and refuses the pipeline, and with more than 8 failures in a group `pso_offline.py` drops every prewarm file.
+- **Fix:** `ZERO_ATTR` declares slot 30 with a stride of 32, the end of the default vector, within `vertex_constants`' 64 bytes. No read moves; the descriptors of pipelines that use slot 30 change, so their bases are built once more.
+- **Check:** `t_default_attrib` checks that each absent or unknown attribute it builds ends within slot 30's stride (6 of 21 checks fail with a stride of 16).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), v131072 on an iPhone 17 Pro: 36 of the 5,443 prewarm descriptors with a vertex layout had an absent attribute. Without the files the first start compiled 5,832 bases in a 446 s prepare step; with the fix `metal-tt` built all 13 files (868 MB) with none left out.
+
 ### Float32 vertex padding through integer inputs
 
 - **Symptom:** a fullscreen post-process draw writes no color, then a later blur composite darkens scenery while the character remains visible.

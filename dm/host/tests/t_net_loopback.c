@@ -103,5 +103,71 @@ int main(void) {
     assert(h_sk_Recv(wildcard, data, sizeof data, SK_MSG_DONTWAIT) == -1 && h_sk_GetLastError() == SK_EAGAIN);
     int clash = h_nsk_Socket(2, 2, 0); assert(clash >= 0 && h_nsk_Bind(clash, b, 16) == -1 && h_sk_GetLastError() == SK_EADDRINUSE);
     assert(h_sk_Close(clash) == 0 && h_sk_Close(specific) == 0 && h_sk_Close(wildcard) == 0);
+
+    // Scatter/gather SendMsg/RecvMsg: multi-iovec payload, MSG_TRUNC, MSG_PEEK, source address, and error validation.
+    int s1 = bound(0x7f000001, a), s2 = bound(0x7f000001, b);
+    char p1[] = "hel", p2[] = "lo ", p3[] = "world";
+    sk_iovec siov[3] = {{p1, 3}, {p2, 3}, {p3, 5}};
+    sk_msghdr smsg = {.msg_name = b, .msg_namelen = 16, .msg_iov = siov, .msg_iovlen = 3};
+    assert(h_sk_SendMsg(s1, &smsg, 0) == 11);
+    char r1[5] = {0}, r2[4] = {0};
+    sk_iovec riov_short[2] = {{r1, 4}, {r2, 4}};
+    memset(from, 0, sizeof from);
+    sk_msghdr rmsg = {.msg_name = from, .msg_namelen = sizeof from, .msg_iov = riov_short, .msg_iovlen = 2, .msg_controllen = 99, .msg_flags = 0x7f};
+    assert(h_sk_RecvMsg(s2, &rmsg, SK_MSG_PEEK) == 8 && !memcmp(r1, "hell", 4) && !memcmp(r2, "o wo", 4));
+    assert(rmsg.msg_flags == SK_MSG_TRUNC && rmsg.msg_controllen == 0 && rmsg.msg_namelen == 16 && !memcmp(from, a, 16));
+    char r3[8] = {0};
+    sk_iovec riov_full[2] = {{r1, 5}, {r3, 8}};
+    rmsg = (sk_msghdr){.msg_name = from, .msg_namelen = sizeof from, .msg_iov = riov_full, .msg_iovlen = 2};
+    assert(h_sk_RecvMsg(s2, &rmsg, SK_MSG_DONTWAIT) == 11 && !memcmp(r1, "hello", 5) && !memcmp(r3, " world", 6));
+    assert(rmsg.msg_flags == 0 && rmsg.msg_namelen == 16 && !memcmp(from, a, 16));
+    assert(h_sk_RecvMsg(s2, &rmsg, SK_MSG_DONTWAIT) == -1 && h_sk_GetLastError() == SK_EAGAIN);
+    assert(h_sk_SendMsg(s1, NULL, 0) == -1 && h_sk_GetLastError() == SK_EINVAL);
+    sk_msghdr bad_msg = {.msg_iov = NULL, .msg_iovlen = 1};
+    assert(h_sk_SendMsg(s1, &bad_msg, 0) == -1 && h_sk_GetLastError() == SK_EINVAL);
+    assert(h_sk_RecvMsg(s2, &bad_msg, 0) == -1 && h_sk_GetLastError() == SK_EINVAL);
+    sk_iovec huge_iov = {data, SK_UDP_MAX + 1};
+    sk_msghdr huge_msg = {.msg_name = b, .msg_namelen = 16, .msg_iov = &huge_iov, .msg_iovlen = 1};
+    assert(h_sk_SendMsg(s1, &huge_msg, 0) == -1 && h_sk_GetLastError() == SK_EMSGSIZE);
+    smsg.msg_name = remote; smsg.msg_namelen = 16;
+    assert(h_sk_SendMsg(s1, &smsg, 0) == -1 && h_sk_GetLastError() == SK_ENETDOWN);
+
+    // 32-bit millisecond SO_RCVTIMEO/SO_SNDTIMEO, SO_NOSIGPIPE, and SetLastError/GetLastError symmetry.
+    uint32_t ms_in = 20, ms_out = 0; n = sizeof ms_out;
+    assert(h_nsk_SetSockOpt(s2, 0xffff, 0x1006, &ms_in, sizeof ms_in) == 0);
+    assert(h_nsk_GetSockOpt(s2, 0xffff, 0x1006, &ms_out, &n) == 0 && n == sizeof ms_out && ms_out == 20);
+    int64_t tv_out[2] = {0}; n = sizeof tv_out;
+    assert(h_nsk_GetSockOpt(s2, 0xffff, 0x1006, tv_out, &n) == 0 && n == sizeof tv_out && tv_out[0] == 0 && tv_out[1] == 20000);
+    start = guest_ns(); assert(h_sk_Recv(s2, data, sizeof data, 0) == -1 && h_sk_GetLastError() == SK_EAGAIN && guest_ns() - start >= 15000000);
+    v = 1; assert(h_nsk_SetSockOpt(s2, 0xffff, 0x800, &v, sizeof v) == 0);
+    v = 0; n = sizeof v; assert(h_nsk_GetSockOpt(s2, 0xffff, 0x800, &v, &n) == 0 && n == sizeof v && v == 1);
+    h_sk_SetLastError(SK_EINVAL); assert(h_sk_GetLastError() == SK_EINVAL);
+
+    // Loopback-only GetAddrInfo supports both POSIX (ai_addr @+24) and FreeBSD (ai_addr @+32) layouts while keeping remote names offline.
+    void *ai_posix = NULL, *ai_bsd = NULL, *ai_passive = NULL, *ai_remote = (void *)1;
+    assert(h_sk_GetAddrInfo("127.0.0.1", "12345", NULL, &ai_posix) == 0 && ai_posix != NULL);
+    const sk_addrinfo_node *pn = ai_posix;
+    assert(pn->ai_family == 2 && pn->ai_socktype == 2 && pn->ai_protocol == 17 && pn->ai_addrlen == 16);
+    assert(pn->ptr24 == pn->addr_buf && pn->ptr32 == pn->canon_buf && port_of(pn->ptr24) == 12345 && ((const uint8_t *)pn->ptr24)[4] == 127);
+    h_sk_FreeAddrInfo(ai_posix);
+
+    assert(dm_sk_getaddrinfo("localhost", "54321", NULL, &ai_bsd, 0) == 0 && ai_bsd != NULL);
+    const sk_addrinfo_node *bn = ai_bsd;
+    assert(bn->ptr24 == bn->canon_buf && bn->ptr32 == bn->addr_buf && port_of(bn->ptr32) == 54321 && ((const uint8_t *)bn->ptr32)[4] == 127);
+    dm_sk_freeaddrinfo(ai_bsd);
+
+    int32_t hint_passive[4] = {SK_AI_PASSIVE, 2, 2, 17};
+    assert(h_sk_GetAddrInfo(NULL, "0", hint_passive, &ai_passive) == 0 && ai_passive != NULL);
+    const sk_addrinfo_node *an = ai_passive;
+    assert(((const uint8_t *)an->ptr24)[4] == 0 && port_of(an->ptr24) == 0);
+    int s3 = h_nsk_Socket(an->ai_family, an->ai_socktype, an->ai_protocol);
+    assert(s3 >= 0 && h_nsk_Bind(s3, an->ptr24, an->ai_addrlen) == 0 && h_sk_Close(s3) == 0);
+    h_sk_FreeAddrInfo(ai_passive);
+
+    int32_t hint_tcp[4] = {0, 2, 1, 6};
+    assert(h_sk_GetAddrInfo("example.com", "80", NULL, &ai_remote) == SK_EAI_FAIL && ai_remote == NULL);
+    assert(h_sk_GetAddrInfo("8.8.8.8", "53", NULL, &ai_remote) == SK_EAI_FAIL && ai_remote == NULL);
+    assert(h_sk_GetAddrInfo("127.0.0.1", "80", hint_tcp, &ai_remote) == SK_EAI_FAIL && ai_remote == NULL);
+    assert(h_sk_Close(s1) == 0 && h_sk_Close(s2) == 0);
     puts("ok t_net_loopback"); return 0;
 }

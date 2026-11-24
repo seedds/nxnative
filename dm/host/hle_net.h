@@ -12,8 +12,13 @@ int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size
 int dm_sk_fcntl(int fd, int command, int value);
 long dm_sk_recvfrom(int fd, void *data, unsigned long size, int flags, void *addr, unsigned *addr_size);
 long dm_sk_sendto(int fd, const void *data, unsigned long size, int flags, const void *addr, unsigned addr_size);
+long dm_sk_recvmsg(int fd, void *msg, int flags);
+long dm_sk_sendmsg(int fd, const void *msg, int flags);
 long dm_sk_read(int fd, void *data, unsigned long size);
 long dm_sk_write(int fd, const void *data, unsigned long size);
 int dm_sk_poll(void *fds, uint64_t count, int milliseconds);
 int dm_sk_select(int nfds, uint64_t *read, uint64_t *write, uint64_t *except, const int64_t *timeout);
+int dm_sk_getaddrinfo(const char *host, const char *service, const void *hint, void **res, int posix_layout);
+void dm_sk_freeaddrinfo(void *ai);
 int dm_sk_errno(void);
+void dm_sk_set_errno(int error);

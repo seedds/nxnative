@@ -42,6 +42,7 @@ static __thread int t_skerr = SK_ENETDOWN;
 static int sk_error(int error) { t_skerr = error; return -1; }
 static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
 int dm_sk_errno(void) { return t_skerr; }
+void dm_sk_set_errno(int error) { t_skerr = error; }
 #define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
 void dm_guest_sleep_ns(int64_t ns);
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);
@@ -49,13 +50,20 @@ static int sk_idle(int64_t ms) { dm_guest_sleep_ns((ms < 0 ? 100 : ms) * 1000000
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 enum { EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_POLLNVAL = 0x20,
        SK_EBADF = 9, SK_EAGAIN = 35, SK_EINVAL = 22, SK_EMSGSIZE = 40, SK_EOPNOTSUPP = 45, SK_EADDRINUSE = 48, SK_ENOTCONN = 57,
-       SK_NONBLOCK = 0x800, SK_MSG_PEEK = 2, SK_MSG_DONTWAIT = 0x80, SK_UDP = 2, SK_EFD = 1,
-       SK_UDP_MAX = 65507, SK_QUEUE_MAX = 1024 * 1024, SK_PACKET_MAX = 256, SK_DEFAULT_BUF = 256 * 1024 };
+       SK_NONBLOCK = 0x800, SK_MSG_PEEK = 2, SK_MSG_TRUNC = 0x10, SK_MSG_DONTWAIT = 0x80, SK_UDP = 2, SK_EFD = 1,
+       SK_IOV_MAX = 1024, SK_UDP_MAX = 65507, SK_QUEUE_MAX = 1024 * 1024, SK_PACKET_MAX = 256, SK_DEFAULT_BUF = 256 * 1024,
+       SK_EAI_FAIL = 4, SK_AI_PASSIVE = 1 };
+typedef struct { void *iov_base; size_t iov_len; } sk_iovec;
+typedef struct {
+    void *msg_name; uint32_t msg_namelen; uint32_t _pad0;
+    sk_iovec *msg_iov; int32_t msg_iovlen; uint32_t _pad1;
+    void *msg_control; uint32_t msg_controllen; int32_t msg_flags;
+} sk_msghdr;
 typedef struct sk_packet { struct sk_packet *next; uint32_t addr; uint16_t port; size_t size; uint8_t data[]; } sk_packet;
 static struct {
     uint64_t count, generation; int used, flags, fdflags;
     uint32_t addr, peer_addr; uint16_t port, peer_port;
-    int connected, shut_read, shut_write, reuse, broadcast, rcvbuf, sndbuf;
+    int connected, shut_read, shut_write, reuse, broadcast, nosigpipe, rcvbuf, sndbuf;
     int64_t recv_timeout, send_timeout; sk_packet *head, *tail; size_t queued; unsigned packets;
 } g_efd[EFD_MAX];
 static uint64_t g_sk_generation;
@@ -184,15 +192,23 @@ int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size
     if (!value) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
-    else if (level == 0xffff && (option == 0x1006 || option == 0x1005) && size >= 16) {
-        int64_t tv[2]; memcpy(tv, value, sizeof tv);
-        if (tv[0] < 0 || tv[0] > INT64_MAX / 1000000000 - 1 || tv[1] < 0 || tv[1] >= 1000000) r = sk_error(SK_EINVAL);
-        else if (option == 0x1006) g_efd[fd].recv_timeout = tv[0] * 1000000000 + tv[1] * 1000;
-        else g_efd[fd].send_timeout = tv[0] * 1000000000 + tv[1] * 1000;
+    else if (level == 0xffff && (option == 0x1006 || option == 0x1005) && (size >= 16 || size == sizeof(uint32_t))) {
+        int64_t ns;
+        if (size >= 16) {
+            int64_t tv[2]; memcpy(tv, value, sizeof tv);
+            if (tv[0] < 0 || tv[0] > INT64_MAX / 1000000000 - 1 || tv[1] < 0 || tv[1] >= 1000000) { r = sk_error(SK_EINVAL); ns = 0; }
+            else ns = tv[0] * 1000000000 + tv[1] * 1000;
+        } else {
+            // Horizon SDKs also pass SO_RCVTIMEO/SO_SNDTIMEO as a 32-bit millisecond count.
+            uint32_t ms; memcpy(&ms, value, sizeof ms);
+            ns = (int64_t)ms * 1000000;
+        }
+        if (!r) { if (option == 0x1006) g_efd[fd].recv_timeout = ns; else g_efd[fd].send_timeout = ns; }
     } else if (level == 0xffff && size >= sizeof(int)) {
         int v; memcpy(&v, value, sizeof v);
         if (option == 4 || option == 0x200) { g_efd[fd].reuse &= ~option; if (v) g_efd[fd].reuse |= option; }
         else if (option == 0x20) g_efd[fd].broadcast = !!v;
+        else if (option == 0x800) g_efd[fd].nosigpipe = !!v;
         else if (option == 0x1001 || option == 0x1002) {
             if (v <= 0) r = sk_error(SK_EINVAL);
             else { if (v > SK_QUEUE_MAX) v = SK_QUEUE_MAX; if (option == 0x1001) g_efd[fd].sndbuf = v; else g_efd[fd].rcvbuf = v; }
@@ -205,14 +221,21 @@ int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size) {
     dm_host_mutex_lock(&g_efd_m); int r = 0, v = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
     else if (level != 0xffff) r = sk_error(42);
-    else if ((option == 0x1006 || option == 0x1005) && *size >= 16) {
+    else if ((option == 0x1006 || option == 0x1005) && (*size >= 16 || *size >= sizeof(uint32_t))) {
         int64_t ns = option == 0x1006 ? g_efd[fd].recv_timeout : g_efd[fd].send_timeout;
-        int64_t tv[2] = {ns / 1000000000, ns % 1000000000 / 1000}; memcpy(value, tv, sizeof tv); *size = sizeof tv;
+        if (*size >= 16) {
+            int64_t tv[2] = {ns / 1000000000, ns % 1000000000 / 1000}; memcpy(value, tv, sizeof tv); *size = sizeof tv;
+        } else {
+            uint64_t ms = (uint64_t)(ns / 1000000);
+            uint32_t ms32 = ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+            memcpy(value, &ms32, sizeof ms32); *size = sizeof ms32;
+        }
     } else if (*size < sizeof v) r = sk_error(SK_EINVAL);
     else {
         if (option == 0x1008) v = 2; else if (option == 0x1007) v = 0; else if (option == 0x1016) v = 17;
         else if (option == 4 || option == 0x200) v = !!(g_efd[fd].reuse & option);
         else if (option == 0x20) v = g_efd[fd].broadcast;
+        else if (option == 0x800) v = g_efd[fd].nosigpipe;
         else if (option == 0x1001) v = g_efd[fd].sndbuf; else if (option == 0x1002) v = g_efd[fd].rcvbuf;
         else r = sk_error(42);
         if (!r) { memcpy(value, &v, sizeof v); *size = sizeof v; }
@@ -263,9 +286,11 @@ long dm_sk_write(int fd, const void *data, unsigned long size) {
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; memcpy(&v, data, sizeof v); return efd_write(fd, v) ? -1 : (long)sizeof v;
 }
-long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al) {
-    if ((!data && n) || (a && !al)) return sk_error(SK_EINVAL);
+static long bsd_recv_iov(int fd, const sk_iovec *iov, int iovlen, int flags, void *a, unsigned *al, int32_t *out_flags) {
+    if ((iovlen < 0 || iovlen > SK_IOV_MAX) || (iovlen && !iov) || (a && !al)) return sk_error(SK_EINVAL);
+    for (int i = 0; i < iovlen; i++) if (!iov[i].iov_base && iov[i].iov_len) return sk_error(SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | SK_MSG_PEEK)) return sk_error(SK_EOPNOTSUPP);
+    if (out_flags) *out_flags = 0;
     dm_host_mutex_lock(&g_efd_m); long r = -1;
     if (!sk_udp_locked(fd)) { t_skerr = SK_EBADF; goto done; }
     uint64_t gen = g_efd[fd].generation, start = guest_ns();
@@ -273,7 +298,14 @@ long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, uns
         if (!sk_udp_locked(fd) || g_efd[fd].generation != gen) { t_skerr = SK_EBADF; break; }
         sk_packet *p = g_efd[fd].head;
         if (p) {
-            size_t copied = n < p->size ? n : p->size; if (copied) memcpy(data, p->data, copied); sk_addr_write(a, al, p->addr, p->port); r = (long)copied;
+            size_t copied = 0;
+            for (int i = 0; i < iovlen && copied < p->size; i++) {
+                size_t take = p->size - copied;
+                if (take > iov[i].iov_len) take = iov[i].iov_len;
+                if (take) { memcpy(iov[i].iov_base, p->data + copied, take); copied += take; }
+            }
+            if (out_flags && copied < p->size) *out_flags = SK_MSG_TRUNC;
+            sk_addr_write(a, al, p->addr, p->port); r = (long)copied;
             if (!(flags & SK_MSG_PEEK)) { g_efd[fd].head = p->next; if (!p->next) g_efd[fd].tail = NULL; g_efd[fd].queued -= p->size; g_efd[fd].packets--; free(p); }
             break;
         }
@@ -286,6 +318,103 @@ long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, uns
     }
 done:
     pthread_mutex_unlock(&g_efd_m); return r;
+}
+long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al) {
+    if (!data && n) return sk_error(SK_EINVAL);
+    sk_iovec iov = {data, n};
+    return bsd_recv_iov(fd, &iov, 1, flags, a, al, NULL);
+}
+long dm_sk_recvmsg(int fd, void *msg_ptr, int flags) {
+    if (!msg_ptr) return sk_error(SK_EINVAL);
+    sk_msghdr *m = msg_ptr;
+    unsigned al = m->msg_name ? m->msg_namelen : 0;
+    int32_t mflags = 0;
+    long r = bsd_recv_iov(fd, m->msg_iov, m->msg_iovlen, flags, m->msg_name, m->msg_name ? &al : NULL, &mflags);
+    if (r >= 0) {
+        if (m->msg_name) m->msg_namelen = al;
+        m->msg_controllen = 0;
+        m->msg_flags = mflags;
+    }
+    return r;
+}
+long dm_sk_sendmsg(int fd, const void *msg_ptr, int flags) {
+    if (!msg_ptr) return sk_error(SK_EINVAL);
+    const sk_msghdr *m = msg_ptr;
+    if (m->msg_iovlen < 0 || m->msg_iovlen > SK_IOV_MAX || (m->msg_iovlen && !m->msg_iov) || (m->msg_namelen && !m->msg_name)) return sk_error(SK_EINVAL);
+    size_t total = 0;
+    for (int i = 0; i < m->msg_iovlen; i++) {
+        if (!m->msg_iov[i].iov_base && m->msg_iov[i].iov_len) return sk_error(SK_EINVAL);
+        if (m->msg_iov[i].iov_len > SK_UDP_MAX - total) return sk_error(SK_EMSGSIZE);
+        total += m->msg_iov[i].iov_len;
+    }
+    const void *dst = m->msg_name;
+    unsigned dst_len = dst ? m->msg_namelen : 0;
+    if (m->msg_iovlen == 0) return dm_sk_sendto(fd, NULL, 0, flags, dst, dst_len);
+    if (m->msg_iovlen == 1) return dm_sk_sendto(fd, m->msg_iov[0].iov_base, m->msg_iov[0].iov_len, flags, dst, dst_len);
+    uint8_t *buf = total ? malloc(total) : NULL;
+    if (total && !buf) return sk_error(55);   // ENOBUFS
+    size_t off = 0;
+    for (int i = 0; i < m->msg_iovlen; i++) if (m->msg_iov[i].iov_len) {
+        memcpy(buf + off, m->msg_iov[i].iov_base, m->msg_iov[i].iov_len);
+        off += m->msg_iov[i].iov_len;
+    }
+    long r = dm_sk_sendto(fd, buf, total, flags, dst, dst_len);
+    free(buf);
+    return r;
+}
+// Loopback-only GetAddrInfo: resolves "127.0.0.1", "localhost", or NULL (AI_PASSIVE -> 0.0.0.0, else 127.0.0.1) without opening host sockets or DNS.
+// Supports both AArch64 ABI layouts: POSIX (nn::socket::AddrInfo / struct addrinfo: ai_addr @+24, ai_canonname @+32) and FreeBSD/Horizon (nnsocketGetAddrInfo: ai_canonname @+24, ai_addr @+32).
+typedef struct sk_addrinfo_node {
+    int32_t ai_flags, ai_family, ai_socktype, ai_protocol;
+    uint32_t ai_addrlen, _pad;
+    void *ptr24, *ptr32;
+    struct sk_addrinfo_node *ai_next;
+    uint8_t addr_buf[16];
+    char canon_buf[16];
+} sk_addrinfo_node;
+int dm_sk_getaddrinfo(const char *host, const char *service, const void *hint, void **res, int posix_layout) {
+    if (!res) return SK_EAI_FAIL;
+    *res = NULL;
+    int32_t hflags = 0, hfam = 0, htype = 0, hproto = 0;
+    if (hint) {
+        const int32_t *hi = hint;
+        hflags = hi[0]; hfam = hi[1]; htype = hi[2]; hproto = hi[3];
+    }
+    if ((hfam && hfam != 2) || (htype && htype != 2) || (hproto && hproto != 17)) return SK_EAI_FAIL;
+    uint32_t ip = 0;
+    if (!host || !*host) {
+        if (!service || !*service) return SK_EAI_FAIL;
+        ip = (hflags & SK_AI_PASSIVE) ? 0u : 0x7f000001u;
+    } else if (!strcmp(host, "127.0.0.1") || !strcasecmp(host, "localhost")) {
+        ip = 0x7f000001u;
+    } else {
+        return SK_EAI_FAIL;   // remote hosts stay offline
+    }
+    uint16_t port = 0;
+    if (service && *service) {
+        char *end = NULL;
+        unsigned long p = strtoul(service, &end, 10);
+        if (!end || *end != '\0' || p > 65535) return SK_EAI_FAIL;
+        port = (uint16_t)p;
+    }
+    sk_addrinfo_node *ai = calloc(1, sizeof *ai);
+    if (!ai) return SK_EAI_FAIL;
+    ai->ai_flags = hflags;
+    ai->ai_family = 2;
+    ai->ai_socktype = 2;
+    ai->ai_protocol = 17;
+    ai->ai_addrlen = 16;
+    unsigned al = sizeof ai->addr_buf;
+    sk_addr_write(ai->addr_buf, &al, ip, port);
+    snprintf(ai->canon_buf, sizeof ai->canon_buf, "%s", ip ? "localhost" : "0.0.0.0");
+    if (posix_layout) { ai->ptr24 = ai->addr_buf; ai->ptr32 = ai->canon_buf; }
+    else { ai->ptr24 = ai->canon_buf; ai->ptr32 = ai->addr_buf; }
+    *res = ai;
+    return 0;
+}
+void dm_sk_freeaddrinfo(void *ai) {
+    sk_addrinfo_node *cur = ai;
+    while (cur) { sk_addrinfo_node *next = cur->ai_next; free(cur); cur = next; }
 }
 // Closed/reused descriptors from this wait report POLLNVAL. Descriptors the host never made retain the prior offline behavior: nothing ready at the timeout.
 static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t generation[EFD_MAX]) {
@@ -366,13 +495,16 @@ SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOption
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }
 HLE_FORCE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "local UDP (offline BSD service)", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
+HLE_FORCE("_ZN2nn6socket7RecvMsgEiPNS0_6MsgHdrENS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_RecvMsg, int s, void *m, int f) { return dm_sk_recvmsg(s, m, f); }
 HLE_FORCE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
-HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
-    (void)h; (void)s; (void)hint; if (res) *res = NULL; return 4;   // EAI_FAIL
+HLE_FORCE("_ZN2nn6socket7SendMsgEiPKNS0_6MsgHdrENS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_SendMsg, int s, const void *m, int f) { return dm_sk_sendmsg(s, m, f); }
+HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "loopback name resolution (offline BSD service); remote hosts return EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
+    return dm_sk_getaddrinfo(h, s, hint, res, 1);
 }
-HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo (cut)", void, h_sk_FreeAddrInfo, void *ai) { (void)ai; }
+HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "pairs with GetAddrInfo", void, h_sk_FreeAddrInfo, void *ai) { dm_sk_freeaddrinfo(ai); }
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "name resolution (cut): NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host", int, h_sk_GetLastError, void) { return t_skerr; }
+HLE_FORCE("_ZN2nn6socket12SetLastErrorENS0_5ErrnoE", "socket error code kept by the host", void, h_sk_SetLastError, int e) { t_skerr = e; }
 // C interface
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }

@@ -821,8 +821,8 @@ static void res_check(id r, const char *what, int reg) {
         MLOG("[RED] missing residency #%d: %s slot %d %s %p (parent chain %d deep) allocated %lu B storage mode %lu%s", nbad, what, reg, is_tex ? "texture" : "buffer", (__bridge void *)a, hops, (unsigned long)a.allocatedSize, (unsigned long)a.storageMode,
              t ? [NSString stringWithFormat:@" format %lu %lux%lu type %lu usage %#lx", (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.textureType, (unsigned long)t.usage].UTF8String : ""); }
 }
-// Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
-// done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set.
+// Applies and commits every change made before the call. A change another thread's commit took is in the set and released when this returns too: that commit holds g_res_commit_mu
+// until it has committed and dropped its queue references. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set.
 // Upload staging is queued with the commit lock held so this caller also owns the removal references through their release.
 static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autoreleasepool {
     pthread_mutex_lock(&g_res_commit_mu);
@@ -840,7 +840,6 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
     }
     file_unwire(fw, nfw);   // after the commit that made those buffers resident; under g_res_commit_mu, so a later commit cannot run before them
-    pthread_mutex_unlock(&g_res_commit_mu);
     uint64_t slow = n && dt >= g_slow_commit_ns ? slow_commit_log_number(&g_slow_res_commits) : 0;
     uint64_t adds = 0, removes = 0, added_bytes = 0, removed_bytes = 0;
     if (slow) for (size_t i = 0; i < n; i++) {
@@ -848,8 +847,11 @@ static void res_commit_retiring(NSArray<id<MTLAllocation>> *staging) { @autorele
         if (q[i].add) { adds++; added_bytes += size; }
         else { removes++; removed_bytes += size; }
     }
-    for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
+    // Release the queue's references before unlocking g_res_commit_mu (never holding g_res_mu, so dealloc -> rh_wait/res_remove keeps the lock order).
+    // Otherwise a concurrent res_commit (e.g. submit thread or test after defer_kick) can return while another thread still holds the last ref to removed textures and their recycled heaps.
+    @autoreleasepool { for (size_t i = 0; i < n; i++) CFRelease(q[i].o); }
     free(q);
+    pthread_mutex_unlock(&g_res_commit_mu);
     if (slow) {
         char th[64]; commit_thread_name(th, sizeof th);
         MLOG("[RED] slow residency commit: %.1f ms (adds %llu, %.1f MB; removes %llu, %.1f MB) on thread %s%s (#%llu)",

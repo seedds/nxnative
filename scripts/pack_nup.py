@@ -313,7 +313,13 @@ def scan(n, program=None):
     app, base, vers = layout.pop(program)
     n.application, n.siblings = owner[app], layout
     newest = [vers[v] for v in sorted(vers, reverse=True)] + ([base] if base else []) + [k for _, b, vs in layout.values() for k in [*vs.values(), *([b] if b else [])]]
-    n.aoc_base = next((a for k in newest if (a := nacp_ids(k)[1]) is not None), n.application + 0x1000)
+    n.aoc_base = next((a for k in newest if (a := nacp_ids(k)[1]) is not None), None)
+    if n.aoc_base is None:
+        n.aoc_base = n.application + 0x1000
+        # No NACP: a Switch 2 Edition's upgrade add-on keeps the Switch 1 application's ID (01xx...), which the Switch 2 program's ID (04xx...) does not give
+        s1 = (n.application & ~(0xFF << 56) | 0x01 << 56) + 0x1000
+        addons = [k.title_id for k in n.packages if k.kind == ADDON]
+        if n.application >> 56 == 0x04 and addons and all(0 < t - s1 <= 2000 for t in addons): n.aoc_base = s1
     dlc = {}
     for k in n.packages:
         if k.kind != ADDON: continue

@@ -871,6 +871,14 @@ Games read this count as a position in their own command memory and size their h
 - **Also:** Pokémon Pokopia gives nearly every texture `IMAGE` (flags 0x4), its icons BC1 / BC7 in a `CPU_UNCACHED` pool: with `IMAGE` excluding them, a new icon over storage another icon had used got that icon's picture (in the store and the Pokédex, once storage was reused). `IMAGE` now keeps only uncompressed textures out. Found and fixed by xFractals/pokopia-native (issue #1).
 - **Also found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) (GitHub issue #1011): its particle steering fields are 10x10x10 RGBA8 and RGBA16F 3D textures, flags 0, that the CPU writes before first use. As GPU textures of zeros they steered every send-off particle along (-1, -1, -1), so the particles sank diagonally into the ground instead of rising. `t_initial_uncached.m` also covers a 4x4x4 RGBA8 3D texture (each slice holds the CPU's texels at first use) and a 3D `IMAGE` texture (left alone).
 
+### A copy's Finalize took the texture out of the CPU-write poll
+
+- **Symptom:** none seen in a game. Expected from it, in a profile with `tex_flush_upload`: a texture the CPU fills again later keeps its old content, after the game finalized a copy of its texture object.
+- **Cause:** `NVNtexture` is plain data, and engines finalize copies of it while the object the texture was initialized in lives on: that ends only the copy (`own_tex_end_locked`, `nvn_owner.m`). `nvnTextureFinalize` dropped the texture's registration for the CPU's writes (`ft_del`, `hle_nvn.c`) before `mtl_tex_release` decided whether the texture ended, so any copy's Finalize took a live texture out of the poll (`nvn_ft_poll`) and the first-use check (`nvn_ft_written`). A texture object initialized again, without a Finalize, kept the old serial's registration for good.
+- **Fix:** `mtl_tex_release` returns whether it ended the texture, and both callers in `hle_nvn.c` drop the registration only then. Found on the path GitHub issue #2975 asks about; it is not shown to be that issue's growth.
+- **Check:** `copy_finalize_keeps_registration` in `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_cpu_tex` (a profile with `tex_dirty_upload`): after a copy's Finalize and a copy initialized again, the texture stays registered and the CPU's next rewrite is uploaded; its own Finalize, or its own object initialized again, ends the registration. 4 checks fail without the fix.
+- **Found on:** code reading for [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([GitHub issue #2975](https://github.com/seedds/nxnative/issues/2975)); not run on a game.
+
 ### Mapped-range flushes taken as uploads (`tex_flush_upload`)
 
 - **Symptom:** a movie plays black (Age of Calamity: its intro movie under the "+ Skip" prompt).

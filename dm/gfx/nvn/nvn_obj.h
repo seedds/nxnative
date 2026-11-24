@@ -342,7 +342,7 @@ int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void); int mtl_snap_acquir
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped
 // Texture release (at Finalize)
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
-void mtl_tex_release(tex_t *t);
+int mtl_tex_release(tex_t *t);         // → 0 when the texture lives on (a copy's Finalize: the object it was initialized in still holds it), else 1
 void mtl_tex_pin(uint64_t serial);
 void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);

@@ -67,6 +67,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_movie_avc
 	$(B)/t_nv
 	$(B)/t_objmap
+	$(B)/t_stack_alloc
 	$(B)/t_vi_history $(QUIET)
 	$(B)/t_nfc
 	$(B)/t_motion
@@ -299,6 +300,9 @@ $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 run: $(B)/t_objmap
 $(B)/t_objmap: t_objmap.c ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_objmap.c
+run: $(B)/t_stack_alloc
+$(B)/t_stack_alloc: t_stack_alloc.c ../hle_stack_alloc.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_stack_alloc.c ../hle_bigstack.c
 # nn::nfc answered without nfc:user (NFC disabled), beside the nfp no-tag answers
 run: $(B)/t_nfc
 $(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)

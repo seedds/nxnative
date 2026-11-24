@@ -155,6 +155,7 @@ dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit 
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
+dm/host/hle_stack_alloc.c	svc:*	deterministic stack-region placement
 dm/host/thread.c	svc:*	threads
 dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading

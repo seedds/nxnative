@@ -701,6 +701,107 @@ static void heap_regrow(void) {
     for (size_t i = 0; i < P; ++i) assert(((uint8_t *)heap)[3 * 1024 * 1024 + i] == 0);
     assert(!resize(0));
 }
+typedef struct { uint64_t addr; size_t size, guard; } pending_probe_t;
+static void *pending_probe_worker(void *arg) {
+    pending_probe_t *p = arg;
+    p->addr = dm_stack_alloc(p->size, P, 0, p->guard);
+    return NULL;
+}
+static void assert_stack_guards_free(uint64_t dst, size_t size, size_t guard) {
+    memory_info lo = query(dst - guard), hi = query(dst + size);
+    assert(lo.state == 0 && lo.base <= dst - guard && lo.base + lo.size >= dst);
+    assert(hi.state == 0 && hi.base <= dst + size && hi.base + hi.size >= dst + size + guard);
+}
+static void stack_placement(void) {
+    const size_t G = 0x10000, M = 1024 * 1024;
+    size_t pg = memory_getpagesize();
+    assert(dm_stack_region_matches(stack, stack + DM_GAME_MEM_STACK));
+    assert(!dm_stack_region_matches(stack, stack + DM_GAME_MEM_STACK - P));
+    assert(!dm_stack_region_matches(alias, alias + DM_GAME_MEM_ALIAS));
+    assert(!dm_stack_region_matches(heap, heap + g_heap_cap));
+    assert(!dm_stack_alloc(0, P, 0, G) && !dm_stack_alloc(P, 0, 0, G) && !dm_stack_alloc(P, 0x800, 0, G) && !dm_stack_alloc(DM_GAME_MEM_STACK, P, 0, G));
+
+    // Back 14 MB in the alias region (APP_POOL 16 MB - MEM_USED 2 MB) inside the 20 MB test stack region.
+    assert(!pages(1, alias, 14 * M));
+
+    // Dual-ended packing: small stacks (< 2 MB) pack bottom-up, large stacks (>= 2 MB) top-down,
+    // each host-page aligned with exact guard pages verified through QueryMemory.
+    uint64_t s0 = dm_stack_alloc(M, P, 0, G);
+    assert(s0 == stack + G && !(s0 & (pg - 1)) && !map(s0, alias, M));
+    assert_stack_guards_free(s0, M, G);
+
+    uint64_t big0 = dm_stack_alloc(2 * M, P, 0, G);
+    assert(big0 == stack + DM_GAME_MEM_STACK - G - 2 * M && !(big0 & (pg - 1)) && !map(big0, alias + M, 2 * M));
+    assert_stack_guards_free(big0, 2 * M, G);
+
+    uint64_t s1 = dm_stack_alloc(M, P, 0, G);
+    assert(s1 == s0 + M + G && !(s1 & (pg - 1)) && !map(s1, alias + 3 * M, M));
+    assert_stack_guards_free(s1, M, G);
+
+    uint64_t big1 = dm_stack_alloc(2 * M, P, 0, G);
+    assert(big1 == big0 - G - 2 * M && !(big1 & (pg - 1)) && !map(big1, alias + 4 * M, 2 * M));
+    assert_stack_guards_free(big1, 2 * M, G);
+
+    // Churn small and large stacks across waves: 20 MB region holds 14 MB live (four 2 MB + six 1 MB) without fragmentation failure.
+    uint64_t smalls[6] = {s0, s1}, bigs[4] = {big0, big1};
+    uint64_t ssrc[6] = {alias, alias + 3 * M}, bsrc[4] = {alias + M, alias + 4 * M};
+    for (int i = 2; i < 6; ++i) {
+        ssrc[i] = alias + (6 + (size_t)(i - 2)) * M;
+        smalls[i] = dm_stack_alloc(M, P, 0, G);
+        assert(smalls[i] && !map(smalls[i], ssrc[i], M));
+        assert_stack_guards_free(smalls[i], M, G);
+    }
+    for (int i = 2; i < 4; ++i) {
+        bsrc[i] = alias + (10 + 2 * (size_t)(i - 2)) * M;
+        bigs[i] = dm_stack_alloc(2 * M, P, 0, G);
+        assert(bigs[i] && !map(bigs[i], bsrc[i], 2 * M));
+        assert_stack_guards_free(bigs[i], 2 * M, G);
+    }
+
+    // Exhaustion: 14 MB + 10 guards live in 20 MB leaves ~5.3 MB contiguous, so a 6 MB stack returns 0 cleanly.
+    assert(!dm_stack_alloc(6 * M, P, 0, G));
+
+    // Unmap alternating small/large stacks and reallocate repeatedly: freed gaps are reused cleanly.
+    for (int round = 0; round < 16; ++round) {
+        int si = round % 6, bi = round % 4;
+        assert(!unmap(smalls[si], ssrc[si], M));
+        assert(!unmap(bigs[bi], bsrc[bi], 2 * M));
+        smalls[si] = dm_stack_alloc(M, P, 0, G);
+        bigs[bi] = dm_stack_alloc(2 * M, P, 0, G);
+        assert(smalls[si] && bigs[bi]);
+        assert(!map(smalls[si], ssrc[si], M) && !map(bigs[bi], bsrc[bi], 2 * M));
+        assert_stack_guards_free(smalls[si], M, G);
+        assert_stack_guards_free(bigs[bi], 2 * M, G);
+    }
+    for (int i = 0; i < 6; ++i) assert(!unmap(smalls[i], ssrc[i], M));
+    for (int i = 0; i < 4; ++i) assert(!unmap(bigs[i], bsrc[i], 2 * M));
+
+    // Concurrent in-flight hint: a second thread asking before the first maps gets a disjoint slot,
+    // and both MapMemory calls succeed without collision.
+    pending_probe_t probe = {.size = 2 * M, .guard = G};
+    pthread_t pt; assert(!pthread_create(&pt, NULL, pending_probe_worker, &probe));
+    assert(!pthread_join(pt, NULL));
+    assert(probe.addr != 0);
+    uint64_t second = dm_stack_alloc(2 * M, P, 0, G);
+    assert(second && (second + 2 * M + G <= probe.addr || probe.addr + 2 * M + G <= second));
+    assert(!map(probe.addr, alias, 2 * M) && !map(second, alias + 2 * M, 2 * M));
+    assert(!unmap(probe.addr, alias, 2 * M) && !unmap(second, alias + 2 * M, 2 * M));
+
+    // Pass-2 fallback: a stale pending hint from an exited thread cannot cause false OOM when the region needs that space.
+    pending_probe_t stale = {.size = 11 * M, .guard = G};
+    assert(!pthread_create(&pt, NULL, pending_probe_worker, &stale));
+    assert(!pthread_join(pt, NULL));
+    assert(stale.addr != 0);
+    uint64_t reclaim = dm_stack_alloc(11 * M, P, 0, G);
+    assert(reclaim && !map(reclaim, alias, 11 * M) && !unmap(reclaim, alias, 11 * M));
+
+    // Explicit non-zero align_offset is respected (SDK 12+ AllocateSpace contract).
+    uint64_t aligned = dm_stack_alloc(P, 0x10000, 0x3000, 0x4000);
+    assert(aligned && ((aligned - 0x3000) % 0x10000) == 0 && !map(aligned, alias, P) && !unmap(aligned, alias, P));
+
+    assert(!pages(0, alias, 14 * M));
+    assert(!g_nmap && !g_alias_mapped);
+}
 // Exercise the real host helper through SDK-shaped test entry points. Its stack
 // allocation must reach MapMemory as guest backing and outlive SDK copyback.
 #include "../hle_guestthread.c"
@@ -784,7 +885,7 @@ int main(int argc, char **argv) {
     }
 #endif
     layout_order(); readonly_shared_memory(); transfer_memory_setup();
-    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
+    lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); stack_placement(); concurrency(); fragmented_queries();
     guest_helper();
     if (!mem_map_limit_on()) metadata_limit();
 #ifdef TEST_REAL_DIRTY

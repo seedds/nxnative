@@ -230,6 +230,8 @@ void dm_res_report_register(void (*fn)(uint32_t tick, const char *why));   // Re
 void (*dm_res_report_cb(void))(uint32_t tick, const char *why);   // Get the registered resource count callback (null if not registered)
 void dm_guest_write_prepare(void *addr, size_t len);
 int dm_guest_as_contains(uintptr_t a);   // hle_svc.c: the address lies in the reserved guest address block
+int dm_stack_region_matches(uint64_t start, uint64_t end);   // hle_svc.c: [start, end) is the guest stack region
+uint64_t dm_stack_alloc(size_t size, size_t align, size_t align_offset, size_t guard_size);   // hle_svc.c: deterministic placement in the guest stack region (0 when none fits)
 // hle_exl.c: exlaunch code plugins (a mod's exefs/subsdk<N>). The process handle GetInfo 65001 answers; the stand-in rtld below the modules and its QueryMemory regions;
 // the writable views of module code MapProcessMemory makes, written back into the code on unmap and after each module's DT_INIT
 extern const uint32_t dm_exl_process_handle;

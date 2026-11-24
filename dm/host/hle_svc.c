@@ -417,6 +417,30 @@ static unsigned g_shared_maps;   // under g_map_lock
 static int g_nmap;
 static hle_transfer_mapping *g_transfer_mappings;   // in-place service mappings, under g_map_lock
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
+// In-flight stack placements handed out by dm_stack_alloc before the caller's svcMapMemory adds them to g_map:
+// prevents concurrent CreateThread / fiber setup from picking the same slot and hitting [RED] MapMemory refused.
+// Cleared on svcMapMemory (success or refusal) and used only as a pass-1 avoidance hint so a stale entry never causes OOM.
+#define STACK_PENDING_MAX 64
+static struct { pthread_t tid; uint64_t base, size; int used; } g_stack_pending[STACK_PENDING_MAX];
+static unsigned g_stack_pending_rr;
+
+static void stack_pending_clear(pthread_t tid, uint64_t dst, uint64_t size) {
+    for (int i = 0; i < STACK_PENDING_MAX; i++) {
+        if (!g_stack_pending[i].used) continue;
+        int same_tid = pthread_equal(g_stack_pending[i].tid, tid);
+        int overlap = size && dst < g_stack_pending[i].base + g_stack_pending[i].size && g_stack_pending[i].base < dst + size;
+        if (same_tid || overlap) g_stack_pending[i].used = 0;
+    }
+}
+static void stack_pending_set(pthread_t tid, uint64_t base, uint64_t size) {
+    int slot = -1;
+    for (int i = 0; i < STACK_PENDING_MAX; i++) {
+        if (g_stack_pending[i].used && pthread_equal(g_stack_pending[i].tid, tid)) { slot = i; break; }
+        if (!g_stack_pending[i].used && slot < 0) slot = i;
+    }
+    if (slot < 0) slot = (int)(g_stack_pending_rr++ % STACK_PENDING_MAX);
+    g_stack_pending[slot] = (typeof(g_stack_pending[0])){tid, base, size, 1};
+}
 // Punch the alias region's host pages that the game gave back before the last sweep and has not mapped again since (g_alias_aged), then age the ones given back since. Under g_map_lock,
 // so no MapPhysicalMemory opens a page while it is punched. Called by guest_file_thread every 10 s
 static void guest_file_sweep(void) {
@@ -462,6 +486,142 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {   // ca
     g_map[g_nmap++] = (typeof(g_map[0])){b, n, src, st};
 }
 static void map_del(int i) { g_map[i] = g_map[--g_nmap]; }   // caller holds g_map_lock
+
+// ---- Deterministic stack-region placement (hle_stack_alloc.c) ----
+// Horizon gives a 39-bit process a 2 GB stack region, where the SDK's AddressSpaceAllocator probes up to 512 random addresses via QueryMemory with no fallback.
+// In the host's compact guest block (256 MB default mem_stack, sized for iOS's 5 GB reservation limit), a few 8 MB Unity worker stacks plus dozens of 1 MB stacks fragment
+// random placement until no 8 MB gap remains (issues #1809, #2012; Super Monkey Ball Banana Rumble). Placing stacks deterministically against g_map eliminates random
+// fragmentation without shrinking mem_alias: large stacks (>= 2 MB) pack top-down and smaller stacks pack bottom-up so short-lived thread churn does not fragment large-stack room.
+typedef struct { uint64_t lo, hi; } stack_span_t;
+static int stack_span_cmp(const void *a, const void *b) {
+    const stack_span_t *x = a, *y = b;
+    if (x->lo != y->lo) return x->lo < y->lo ? -1 : 1;
+    return x->hi < y->hi ? -1 : x->hi > y->hi ? 1 : 0;
+}
+static uint64_t stack_align_up(uint64_t lo, uint64_t align, uint64_t off) {
+    uint64_t rem_off = off % align;
+    if (lo <= off) return off;
+    uint64_t rem = (lo - rem_off) % align;
+    if (!rem) return lo;
+    uint64_t add = align - rem;
+    return lo > UINT64_MAX - add ? 0 : lo + add;
+}
+static uint64_t stack_align_down(uint64_t hi, uint64_t align, uint64_t off) {
+    if (hi < off) return 0;
+    return hi - ((hi - (off % align)) % align);
+}
+// Find a slot [cand, cand + size) in [sb, se) disjoint from sorted, merged occupied spans[0..n-1] with guard bytes free on both sides.
+static uint64_t stack_find_gap(const stack_span_t *spans, int n, uint64_t sb, uint64_t se,
+                               uint64_t size, uint64_t align, uint64_t off, uint64_t guard, int top_down) {
+    if (se <= sb || guard > (se - sb) / 2 || se - sb - 2 * guard < size) return 0;
+    uint64_t lo_lim = sb + guard, hi_lim = se - guard;
+    if (off > lo_lim) lo_lim = off;
+    if (lo_lim > hi_lim || hi_lim - lo_lim < size) return 0;
+    if (!top_down) {
+        uint64_t cur = lo_lim;
+        for (int i = 0; i <= n; i++) {
+            uint64_t gap_hi = hi_lim;
+            if (i < n) {
+                uint64_t edge = spans[i].lo > guard ? spans[i].lo - guard : 0;
+                if (edge < gap_hi) gap_hi = edge;
+            }
+            if (cur <= gap_hi && gap_hi - cur >= size) {
+                uint64_t cand = stack_align_up(cur, align, off);
+                if (cand && cand <= gap_hi && gap_hi - cand >= size) return cand;
+            }
+            if (i < n) {
+                uint64_t next = spans[i].hi > UINT64_MAX - guard ? UINT64_MAX : spans[i].hi + guard;
+                if (next > cur) cur = next;
+            }
+        }
+        return 0;
+    }
+    uint64_t cur = hi_lim;
+    for (int i = n - 1; i >= -1; i--) {
+        uint64_t gap_lo = lo_lim;
+        if (i >= 0) {
+            uint64_t edge = spans[i].hi > UINT64_MAX - guard ? UINT64_MAX : spans[i].hi + guard;
+            if (edge > gap_lo) gap_lo = edge;
+        }
+        if (cur >= size && cur - size >= gap_lo) {
+            uint64_t cand = stack_align_down(cur - size, align, off);
+            if (cand >= gap_lo && cand <= cur - size) return cand;
+        }
+        if (i >= 0) {
+            uint64_t next = spans[i].lo > guard ? spans[i].lo - guard : 0;
+            if (next < cur) cur = next;
+        }
+    }
+    return 0;
+}
+static uint64_t stack_try_place(uint64_t sb, uint64_t se, uint64_t sz, uint64_t align, uint64_t off,
+                                uint64_t guard, int with_pending, int *live_out, uint64_t *bytes_out) {
+    static stack_span_t spans[MAX_MAP + STACK_PENDING_MAX];   // caller holds g_map_lock
+    int n = 0, live = 0; uint64_t live_bytes = 0;
+    for (int i = 0; i < g_nmap; i++) {
+        uint64_t lo = g_map[i].base, hi = lo + g_map[i].size;
+        if (hi <= sb || lo >= se) continue;
+        if (lo < sb) lo = sb;
+        if (hi > se) hi = se;
+        spans[n++] = (stack_span_t){lo, hi};
+        live++; live_bytes += hi - lo;
+    }
+    if (live_out) *live_out = live;
+    if (bytes_out) *bytes_out = live_bytes;
+    if (with_pending) {
+        pthread_t self = pthread_self();
+        for (int i = 0; i < STACK_PENDING_MAX; i++) {
+            if (!g_stack_pending[i].used || pthread_equal(g_stack_pending[i].tid, self)) continue;
+            uint64_t lo = g_stack_pending[i].base, hi = lo + g_stack_pending[i].size;
+            if (hi <= sb || lo >= se) continue;
+            if (lo < sb) lo = sb;
+            if (hi > se) hi = se;
+            spans[n++] = (stack_span_t){lo, hi};
+        }
+    }
+    if (n > 1) {
+        qsort(spans, (size_t)n, sizeof spans[0], stack_span_cmp);
+        int m = 0;
+        for (int i = 1; i < n; i++) {
+            if (spans[i].lo <= spans[m].hi) { if (spans[i].hi > spans[m].hi) spans[m].hi = spans[i].hi; }
+            else spans[++m] = spans[i];
+        }
+        n = m + 1;
+    }
+    int top_down = sz >= (2u << 20);
+    size_t pg = (size_t)getpagesize();
+    // Prefer host-page (16 KB) alignment when compatible so UnmapMemory reclaims every host page cleanly without edge-page sharing.
+    if (!off && align < pg && (pg % align) == 0) {
+        uint64_t dst = stack_find_gap(spans, n, sb, se, sz, pg, 0, guard, top_down);
+        if (dst) return dst;
+    }
+    return stack_find_gap(spans, n, sb, se, sz, align, off, guard, top_down);
+}
+int dm_stack_region_matches(uint64_t start, uint64_t end) {
+    mem_init();
+    uint64_t sb = (uintptr_t)g_stack;
+    return g_stack && start == sb && end == sb + g_stack_cap;
+}
+uint64_t dm_stack_alloc(size_t size, size_t align, size_t align_offset, size_t guard_size) {
+    mem_init();
+    if (!size || size > UINT64_MAX - 0xfff || !align || (align & 0xfff) || (align_offset & 0xfff) || guard_size > UINT64_MAX - 0xfff) return 0;
+    uint64_t sz = (size + 0xfffull) & ~0xfffull;
+    uint64_t guard = (guard_size + 0xfffull) & ~0xfffull;
+    uint64_t sb = (uintptr_t)g_stack, se = sb + g_stack_cap;
+    int live = 0; uint64_t live_bytes = 0;
+    pthread_mutex_lock(&g_map_lock);
+    uint64_t dst = stack_try_place(sb, se, sz, align, align_offset, guard, 1, &live, &live_bytes);
+    if (!dst) dst = stack_try_place(sb, se, sz, align, align_offset, guard, 0, &live, &live_bytes);
+    if (dst) stack_pending_set(pthread_self(), dst, sz);
+    pthread_mutex_unlock(&g_map_lock);
+    if (!dst) {
+        static _Atomic int nred;
+        if (atomic_fetch_add(&nred, 1) < 8)
+            LOG("[RED] [mem] stack region full: request %#llx bytes (align %#zx, guard %#llx) in %.1f MB stack region (%d live stacks, %.1f MB mapped)",
+                (unsigned long long)sz, align, (unsigned long long)guard, g_stack_cap / 1048576.0, live, live_bytes / 1048576.0);
+    }
+    return dst;
+}
 
 // One bit per 4 KB page of the alias region (mapped = 1): Map sets bits, Unmap clears them; returns the number of pages whose state really changed (signed: positive for Map, negative for Unmap)
 static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
@@ -953,7 +1113,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         pthread_mutex_lock(&g_map_lock);
         if (map_find(dst, size) || map_source_busy(src, size) || !map_source_backed(src, size)) result = 0xD401;
         else if (g_nmap == MAX_MAP) result = 0xCE01;
-        if (result) { pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
+        if (result) { stack_pending_clear(pthread_self(), 0, 0); pthread_mutex_unlock(&g_map_lock); regs[0] = result; LOG("[RED] MapMemory refused (%#x): %#llx <- %#llx +%#llx", result, (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size); return 0; }
         // Apple pages are 16K, Horizon pages 4K: the accessible region is extended to a 16K boundary (the extra pages opened are unused pages of the same region, semantics unaffected)
         uint64_t mask = (size_t)getpagesize() - 1;
         uint64_t lo = dst & ~mask, hi = (dst + size + mask) & ~mask;
@@ -961,6 +1121,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         dm_guest_write_prepare((void *)lo, hi - lo);
         memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
+        stack_pending_clear(pthread_self(), dst, size);
         pthread_mutex_unlock(&g_map_lock);
         if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;

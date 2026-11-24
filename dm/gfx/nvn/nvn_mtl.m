@@ -571,11 +571,73 @@ static void rh_wait(id<MTLHeap> heap) {
 @implementation NvRecycledHeap
 - (void)dealloc { rh_wait(heap); }
 @end
-@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; } @end   // a resolution family's heap (image_texture)
+typedef struct { uint64_t serial, wh; } fam_pool_ser;
+@interface NvImageHeap : NSObject { @public id<MTLHeap> heap; _Atomic uint64_t valid_wh; uint8_t compressed; os_unfair_lock pool_lk; fam_pool_ser *pool_sers; uint32_t npool_sers, cappool_sers; } @end   // a resolution family's heap (image_texture)
 @implementation NvImageHeap
-- (void)dealloc { rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+- (void)dealloc { free(pool_sers); rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key, g_rh_owner_key;
+static void args_dirty_all(void);
+// Resolution-family lossless compression (image_texture): kept on by default with per-heap valid-geometry tracking so no size decodes another size's compressed blocks;
+// DM_NVN_FAMILY_NOCOMPRESS=1 forces uncompressed allocations (for A/B testing or diagnostics)
+static int fam_nocomp(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_FAMILY_NOCOMPRESS"); v = e && !strcmp(e, "1");
+        if (v) MLOG("DM_NVN_FAMILY_NOCOMPRESS=1: resolution families are allocated uncompressed"); }
+    return v;
+}
+static inline NvImageHeap *fam_owner(id<MTLTexture> t0, uint64_t *wh_out) {
+    id<MTLTexture> t = t0;
+    if (!t) return nil;
+    while (t.parentTexture) t = t.parentTexture;
+    NvImageHeap *o = objc_getAssociatedObject(t, &g_image_heap_owner_key);
+    if (!o) return nil;
+    if (wh_out) { uint32_t m = t.sampleCount == 4 ? 2u : 1u; *wh_out = ((uint64_t)((uint32_t)t.width * m) << 32) | ((uint32_t)t.height * m); }   // 4-sample storage pair aliases its 2W x 2H layout
+    return o;
+}
+static inline int fam_is_valid(id<MTLTexture> t) {
+    uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
+    return !o || !o->compressed || atomic_load_explicit(&o->valid_wh, memory_order_acquire) == wh;
+}
+static void fam_track_pool_serial(NvImageHeap *o, uint64_t serial, uint64_t wh) {
+    if (!o || !serial) return;
+    os_unfair_lock_lock(&o->pool_lk);
+    for (uint32_t i = 0; i < o->npool_sers; i++) if (o->pool_sers[i].serial == serial) { o->pool_sers[i].wh = wh; os_unfair_lock_unlock(&o->pool_lk); return; }
+    if (o->npool_sers == o->cappool_sers) {
+        o->cappool_sers = o->cappool_sers ? o->cappool_sers * 2 : 8;
+        o->pool_sers = realloc_or_die(o->pool_sers, o->cappool_sers * sizeof *o->pool_sers, "resolution family pool serials");
+    }
+    o->pool_sers[o->npool_sers++] = (fam_pool_ser){serial, wh};
+    os_unfair_lock_unlock(&o->pool_lk);
+}
+static void fam_set_valid(NvImageHeap *o, uint64_t wh) {
+    if (!o || !o->compressed) return;
+    uint64_t prev = atomic_load_explicit(&o->valid_wh, memory_order_acquire);
+    if (prev == wh) return;
+    atomic_store_explicit(&o->valid_wh, wh, memory_order_release);
+    args_dirty_all();
+    uint64_t stack_s[32], *sers = stack_s; uint32_t ns = 0, cap = 32;
+    os_unfair_lock_lock(&o->pool_lk);
+    for (uint32_t i = 0; i < o->npool_sers; i++) {
+        uint64_t ewh = o->pool_sers[i].wh;
+        if (ewh != prev && ewh != wh) continue;
+        if (ns == cap) {
+            cap *= 2;
+            uint64_t *nb = sers == stack_s ? malloc(cap * sizeof *nb) : realloc(sers, cap * sizeof *nb);
+            if (!nb) break;
+            if (sers == stack_s) memcpy(nb, stack_s, ns * sizeof *nb);
+            sers = nb;
+        }
+        sers[ns++] = o->pool_sers[i].serial;
+    }
+    os_unfair_lock_unlock(&o->pool_lk);
+    for (uint32_t i = 0; i < ns; i++) own_note(sers[i]);
+    if (sers != stack_s) free(sers);
+}
+static inline void fam_mark_valid(id<MTLTexture> t) {
+    uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
+    if (o) fam_set_valid(o, wh);
+}
 // A waiting heap can cover a nearby dynamic-resolution size. For new heaps, cap the extra space so a single large target does not keep tens of MB resident for reuse.
 enum { RH_SLACK = 4u << 20 };
 static id<MTLHeap> rh_heap(uint64_t size, MTLStorageMode sm, MTLCPUCacheMode cm, MTLHazardTrackingMode hm, int *reused) {
@@ -3688,6 +3750,7 @@ static inline void tex_lsize(const tex_t *t, unsigned l, uint32_t *w, uint32_t *
 // In-place upgrade: when the original texture was not created with PixelFormatView (off by default, to keep Apple GPU lossless compression) but a different-format view is needed, create a new one with the original spec + PixelFormatView, copy over every slice × level, and replace the registration.
 // Count: across the 4 screens character select / camp / wilderness / combat, 17473 textures needed a different-format view 0 times, so this is a fallback and does not rely on predicting which textures need it
 // The same upgrade adds render-target usage for a whole-level clear (clear_tex) of a texture made without it: Monster Hunter Rise clears a 32x80 packaged one
+static void tex_zero_fill(id<MTLTexture> mt);
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);
     // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
@@ -3714,9 +3777,11 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
     if (!upgraded) { RED_ONCE(45, "texture upgrade failed ser=%llu format %lu → %lu usage %#lx", t->serial, (unsigned long)base.pixelFormat, (unsigned long)view_pf, (unsigned long)d.usage); return base; }
     if (!reinterpret) res_add(upgraded);
     id<MTLTexture> upgraded_view = nil;
-    id<MTL4ComputeCommandEncoder> b = backing ? nil : blit();   // shared backing already contains the pixels; copying it onto itself would overlap
+    int copy_src = !backing && fam_is_valid(base);
+    if (!backing && !copy_src) tex_zero_fill(upgraded);
+    id<MTL4ComputeCommandEncoder> b = copy_src ? blit() : nil;   // shared backing already contains the pixels; copying it onto itself would overlap; an invalid compressed family member is zeroed instead
     NSUInteger slices = base.textureType == MTLTextureType3D ? 1 : base.arrayLength * (base.textureType == MTLTextureTypeCube || base.textureType == MTLTextureTypeCubeArray ? 6 : 1);
-    for (NSUInteger l = 0; !backing && l < base.mipmapLevelCount; l++) {
+    for (NSUInteger l = 0; copy_src && l < base.mipmapLevelCount; l++) {
         NSUInteger w = MAX(base.width >> l, 1u), h = MAX(base.height >> l, 1u), z = base.textureType == MTLTextureType3D ? MAX(base.depth >> l, 1u) : 1;
         if (base.textureType == MTLTextureType3D)
             enc_b_copy_texture(b, base, 0, l, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, z), upgraded, 0, l, MTLOriginMake(0, 0, 0));
@@ -5593,16 +5658,61 @@ static id<MTLTexture> pair_texture(const tex_t *t, MTLTextureDescriptor *d0) {
                                     (unsigned long long)(heap.size >> 20), (int)d.allowGPUOptimizedContents);
     return mt;
 }
+// Clear a compressed resolution-family texture to zero in command order before a partial write or a cross-size copy destination, so every tile holds valid compressed zero blocks for its geometry
+static void fam_clear_whole(id<MTLTexture> t0) {
+    id<MTLTexture> base = t0; if (!base) return;
+    while (base.parentTexture) base = base.parentTexture;
+    uint64_t wh = 0; NvImageHeap *o = fam_owner(base, &wh);
+    rp_end();
+    if (base.usage & MTLTextureUsageRenderTarget) {
+        if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+        MTLPixelFormat pf = base.pixelFormat;
+        int depth = pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth32Float_Stencil8;
+        int stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
+        MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
+        if (!depth && !stencil) {
+            rp.colorAttachments[0].texture = base; rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+        }
+        if (depth) {
+            rp.depthAttachment.texture = base; rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore; rp.depthAttachment.clearDepth = 0;
+        }
+        if (stencil) {
+            rp.stencilAttachment.texture = base; rp.stencilAttachment.loadAction = MTLLoadActionClear;
+            rp.stencilAttachment.storeAction = MTLStoreActionStore; rp.stencilAttachment.clearStencil = 0;
+        }
+        ser_gate(); enc_r_end(enc_r_begin(rp));
+    } else {
+        size_t bpp = mtl_pf_bytes(base.pixelFormat);
+        size_t row = (size_t)base.width * bpp;
+        id<MTLBuffer> zb = bpp ? zero_buf(row) : nil;
+        if (zb) {
+            NSUInteger step = MAX((NSUInteger)1, MIN(base.height, (NSUInteger)(zb.length / row)));
+            for (NSUInteger y = 0; y < base.height; y += step) {
+                NSUInteger n = MIN(step, base.height - y);
+                enc_b_copy_buffer_texture(blit(), zb, 0, row, row * n, MTLSizeMake(base.width, n, 1), base, 0, 0, MTLOriginMake(0, y, 0));
+            }
+        }
+    }
+    if (o) fam_set_valid(o, wh);
+}
+static void fam_prepare_write(id<MTLTexture> t, int full) {
+    uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
+    if (!o || !o->compressed || atomic_load_explicit(&o->valid_wh, memory_order_acquire) == wh) return;
+    if (full) fam_set_valid(o, wh);
+    else fam_clear_whole(t);
+}
 // Distinct compressible image descriptions at one NVN address alias physical memory, even while all their descriptor objects are live (LM3's resolution families).
 // Single-description storage keeps the ordinary allocation. Families share an exact-sized placement heap, found through the existing alias table rather than a pool-lifetime owner.
 // Different formats, offsets, CPU-visible, sparse, linear, display, layered and multisample images keep their existing path. Inherited texels are not translated between incompatible
 // layouts: a changed layout is initialized by its GPU writer. Creating its descriptor must not zero another alias's live content in the earlier upload batch.
 static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     if (!image_shape(t) || !t->pool->mem || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) || nvn_sparse_pool(t->pool)) return nil;
-    // Family members are written uncompressed (DM_NVN_FAMILY_NOCOMPRESS, on unless =0). With lossless compression a member read after another resolution wrote the shared bytes
-    // decodes the other's compressed blocks as garbage: ASTRAL CHAIN's 1600x900 HDR targets (loaded, never cleared) came back from the 1440x810 pause menu with 1.1M non-finite
-    // pixels, which bloom spread into a strobing pink / white glow. Uncompressed, the inherited bytes are only misplaced texels of the same format, as on the console
-    static int nocomp = -1; if (nocomp < 0) { const char *e = getenv("DM_NVN_FAMILY_NOCOMPRESS"); nocomp = !(e && !strcmp(e, "0")); }
+    // Resolution families keep Metal's lossless compression by default (DM_NVN_FAMILY_NOCOMPRESS=1 forces uncompressed). Each family heap tracks the geometry whose compressed blocks
+    // currently live in it (valid_wh): cross-size render-pass loads clear to 0 instead of decoding another size's compressed blocks (ASTRAL CHAIN's 1600x900 HDR glow after the 1440x810
+    // pause menu, and Ocarina of Time's bloom chain), partial cross-size writes zero first, and cross-size reads return zeros without disturbing the live size
+    int nocomp = fam_nocomp();
     MTLTextureDescriptor *d = d0; if (nocomp) { d = [d0 copy]; d.allowGPUOptimizedContents = NO; }
     MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (!need.size) return nil;
@@ -5630,7 +5740,7 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     if (fresh) {
         if (!family) return nil;
         int reused; id<MTLHeap> heap = rh_heap(capacity, d.storageMode, d.cpuCacheMode, d.hazardTrackingMode, &reused); if (!heap) return nil;   // from the recycled heaps
-        owner = [NvImageHeap new]; owner->heap = heap; atomic_fetch_add(&g_image_heap_n, 1);
+        owner = [NvImageHeap new]; owner->heap = heap; owner->compressed = (uint8_t)!nocomp; atomic_store_explicit(&owner->valid_wh, 0, memory_order_relaxed); atomic_fetch_add(&g_image_heap_n, 1);
     }
     id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:0]; if (!mt) return nil;
     objc_setAssociatedObject(mt, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -6314,7 +6424,7 @@ void ts_after(void);
 void ms_after(void);
 // ---------- Attachment stores: at pass end, an attachment this pass did not change is not written back ----------
 // On TBDR every attachment is written back to memory in full when the pass ends; Switch (Maxwell immediate-mode rendering) has no such cost.
-typedef struct { uint64_t ser, bytes; uint32_t lv, sl; int idx; uint8_t depth, state, ridx, drawn, why, load, wrote, wwhy, img, rast; const char *wkey; int wslot; } sd_att;   // depth: 0 color 1 depth 2 stencil (the two parts of a combined depth-stencil texture are decided separately)   // state 0 undecided 1 needed 2 redundant; idx: color attachment index, -1 for depth
+typedef struct { uint64_t ser, bytes; uint32_t lv, sl; int idx; uint8_t depth, state, ridx, drawn, why, load, wrote, wwhy, img, rast, fam_san; const char *wkey; int wslot; void *fam_tex; } sd_att;   // depth: 0 color 1 depth 2 stencil (the two parts of a combined depth-stencil texture are decided separately)   // state 0 undecided 1 needed 2 redundant; idx: color attachment index, -1 for depth
 // Depth and stencil have independent store decisions, even in one combined texture.
 // Eight color targets therefore need ten records (XC2 uses the full set).
 enum { SD_ATT_MAX = 8 + 2 };
@@ -6887,9 +6997,23 @@ static void *rp_begin_ex_(int clear_only) {
         }
         return NULL;
     }
+    // A compressed resolution-family attachment whose heap was last written by another size cannot load its compressed blocks without decoding garbage (ASTRAL CHAIN #1935, OoT bloom):
+    // rewrite cross-size loads to Clear(0). Keeping load=1 in g_sd lets a read-only pass still elide its store without disturbing the live owner; a stored pass initializes valid blocks
+    uint8_t fam_san_c[8] = {0}, fam_san_d = 0, fam_san_s = 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) {
+        MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i];
+        if (!c.texture || bcrt_is(c.texture) || c.loadAction != MTLLoadActionLoad || fam_is_valid(c.texture)) continue;
+        c.loadAction = MTLLoadActionClear; c.clearColor = MTLClearColorMake(0, 0, 0, 0); fam_san_c[i] = 1;
+    }
+    if (pd.depthAttachment.texture && pd.depthAttachment.loadAction == MTLLoadActionLoad && !fam_is_valid(pd.depthAttachment.texture)) {
+        pd.depthAttachment.loadAction = MTLLoadActionClear; pd.depthAttachment.clearDepth = 0; fam_san_d = 1;
+    }
+    if (pd.stencilAttachment.texture && pd.stencilAttachment.loadAction == MTLLoadActionLoad && !fam_is_valid(pd.stencilAttachment.texture)) {
+        pd.stencilAttachment.loadAction = MTLLoadActionClear; pd.stencilAttachment.clearStencil = 0; fam_san_s = 1;
+    }
     g_rp_aw = g_rp_ah = 0;
-    if (rpa_on() && !g_rp_whole && !clear_only && R.has_sc && !g_rp_layered && !R.clear_d && !R.clear_s) {
-        int cl = 0; for (int i = 0; i < 8; i++) cl |= R.clear_c[i];
+    if (rpa_on() && !g_rp_whole && !clear_only && R.has_sc && !g_rp_layered && !R.clear_d && !R.clear_s && !fam_san_d && !fam_san_s) {
+        int cl = 0; for (int i = 0; i < 8; i++) cl |= R.clear_c[i] | fam_san_c[i];
         NSUInteger tw = 0, th = 0; if (!cl) rt_dims(&tw, &th);
         if (tw * th >= (1u << 24)) { NSUInteger w = MIN(tw, (NSUInteger)MAX((long)R.sc.x + R.sc.w, 1)), h = MIN(th, (NSUInteger)MAX((long)R.sc.y + R.sc.h, 1));
             if (w * h * 2 <= tw * th) { pd.renderTargetWidth = w; pd.renderTargetHeight = h; g_rp_aw = w; g_rp_ah = h; } } }
@@ -6910,16 +7034,17 @@ static void *rp_begin_ex_(int clear_only) {
             if (nl > 1) cp.renderTargetArrayLength = nl;
             if (!ds) { MTLRenderPassColorAttachmentDescriptor *c = cp.colorAttachments[0], *o = pd.colorAttachments[i];
                 c.texture = o.texture; c.level = o.level; c.slice = o.slice; c.depthPlane = o.depthPlane; c.clearColor = o.clearColor; c.loadAction = MTLLoadActionClear; c.storeAction = MTLStoreActionStore;
-                o.loadAction = MTLLoadActionLoad; }
+                o.loadAction = MTLLoadActionLoad; fam_san_c[i] = 0; }
             else {
                 if (cd) { MTLRenderPassDepthAttachmentDescriptor *d = cp.depthAttachment, *o = pd.depthAttachment;
-                    d.texture = o.texture; d.level = o.level; d.slice = o.slice; d.clearDepth = o.clearDepth; d.loadAction = MTLLoadActionClear; d.storeAction = MTLStoreActionStore; o.loadAction = MTLLoadActionLoad; }
+                    d.texture = o.texture; d.level = o.level; d.slice = o.slice; d.clearDepth = o.clearDepth; d.loadAction = MTLLoadActionClear; d.storeAction = MTLStoreActionStore; o.loadAction = MTLLoadActionLoad; fam_san_d = 0; }
                 if (cs) { MTLRenderPassStencilAttachmentDescriptor *s = cp.stencilAttachment, *o = pd.stencilAttachment;
-                    s.texture = o.texture; s.level = o.level; s.slice = o.slice; s.clearStencil = o.clearStencil; s.loadAction = MTLLoadActionClear; s.storeAction = MTLStoreActionStore; o.loadAction = MTLLoadActionLoad; }
+                    s.texture = o.texture; s.level = o.level; s.slice = o.slice; s.clearStencil = o.clearStencil; s.loadAction = MTLLoadActionClear; s.storeAction = MTLStoreActionStore; o.loadAction = MTLLoadActionLoad; fam_san_s = 0; }
             }
             PD("C %llu %s%lu cleared in a pass of its own (%lux%lu, %lu layers; the pass covers %lux%lu)", g_stat_pass + 1, ds ? "d" : "c", (unsigned long)i, (unsigned long)mip_extent(a.texture.width, a.level),
                (unsigned long)mip_extent(a.texture.height, a.level), (unsigned long)nl, (unsigned long)pw, (unsigned long)ph);
             ser_gate(); enc_r_end(enc_r_begin(cp));
+            fam_mark_valid(a.texture);
         }
     }
     // Bandwidth ledger: attachments with Load count as load, all attachments count as store (currently always Store)
@@ -6950,14 +7075,14 @@ static void *rp_begin_ex_(int clear_only) {
     {
         // A standalone clear has already stored before this pass; only a clear load action here writes this pass's tiles.
         for (int i = 0; i < R.rt.n && i < 8; i++) { MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[i]; if (!c.texture || bcrt_is(c.texture)) continue;
-            g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.color[i]->serial; g_sd[g_nsd].bytes = att_bytes(c.texture, c.level); g_sd[g_nsd].lv = (uint32_t)c.level; g_sd[g_nsd].sl = (uint32_t)(c.texture.textureType == MTLTextureType3D ? c.depthPlane : c.slice); g_sd[g_nsd].idx = i; g_sd[g_nsd].load = c.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_c[i] != 0; g_sd[g_nsd].rast = c.loadAction == MTLLoadActionClear; g_nsd++;
+            g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.color[i]->serial; g_sd[g_nsd].bytes = att_bytes(c.texture, c.level); g_sd[g_nsd].lv = (uint32_t)c.level; g_sd[g_nsd].sl = (uint32_t)(c.texture.textureType == MTLTextureType3D ? c.depthPlane : c.slice); g_sd[g_nsd].idx = i; g_sd[g_nsd].load = c.loadAction == MTLLoadActionLoad || fam_san_c[i]; g_sd[g_nsd].wrote = R.clear_c[i] != 0; g_sd[g_nsd].rast = c.loadAction == MTLLoadActionClear && !fam_san_c[i]; g_sd[g_nsd].fam_san = fam_san_c[i]; g_sd[g_nsd].fam_tex = (__bridge void *)c.texture; g_nsd++;
             c.storeAction = MTLStoreActionUnknown; }
         id<MTLTexture> dt = pd.depthAttachment.texture, stt = pd.stencilAttachment.texture;
         uint64_t db = att_bytes(dt, pd.depthAttachment.level), sb = 0;
         if (stt) { int comb = stt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8; sb = att_bytes(stt, pd.stencilAttachment.level) / (comb ? 5 : 1); if (stt == dt) db -= sb; }   // Combined format 5 bytes = depth 4 + stencil 1 (when only stencil is attached, only 1 is counted)
-        if (dt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = db; g_sd[g_nsd].lv = (uint32_t)pd.depthAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.depthAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 1; g_sd[g_nsd].load = pd.depthAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_d != 0; g_nsd++;
+        if (dt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = db; g_sd[g_nsd].lv = (uint32_t)pd.depthAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.depthAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 1; g_sd[g_nsd].load = pd.depthAttachment.loadAction == MTLLoadActionLoad || fam_san_d; g_sd[g_nsd].wrote = R.clear_d != 0; g_sd[g_nsd].fam_san = fam_san_d; g_sd[g_nsd].fam_tex = (__bridge void *)dt; g_nsd++;
                   pd.depthAttachment.storeAction = MTLStoreActionUnknown; }
-        if (stt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad; g_sd[g_nsd].wrote = R.clear_s != 0; g_nsd++;
+        if (stt) { g_sd[g_nsd] = (sd_att){0}; g_sd[g_nsd].ser = R.rt.depth->serial; g_sd[g_nsd].bytes = sb; g_sd[g_nsd].lv = (uint32_t)pd.stencilAttachment.level; g_sd[g_nsd].sl = (uint32_t)pd.stencilAttachment.slice; g_sd[g_nsd].idx = -1; g_sd[g_nsd].depth = 2; g_sd[g_nsd].load = pd.stencilAttachment.loadAction == MTLLoadActionLoad || fam_san_s; g_sd[g_nsd].wrote = R.clear_s != 0; g_sd[g_nsd].fam_san = fam_san_s; g_sd[g_nsd].fam_tex = (__bridge void *)stt; g_nsd++;
                    pd.stencilAttachment.storeAction = MTLStoreActionUnknown; }
     }
     uint32_t ds_clear = (R.clear_d && pd.depthAttachment.texture ? FB_DS_DEPTH : 0) |
@@ -7052,6 +7177,7 @@ static int clear_rect_zero(int i) {
     size_t row = (size_t)(x1 - x0) * bpp;
     id<MTLBuffer> zb = zero_buf(row); if (!zb) return 0;   // in pieces of rows, so the zero buffer stays at its 4 MB (tex_zero_fill)
     lc_land(); rp_flush();   // waiting clears, then a pending full clear on the same attachment, must land first (oldest first), or they would overwrite this one
+    if (!fam_is_valid(mt)) return 0;   // a compressed family member whose heap holds another size falls through to clear_color_tri/rp_begin_ex_ to sanitize the whole surface
     // A GPU write as a pass's would be (attach): noted for the sparse and use bookkeeping, a side of a compressed-alias pair filled first and copied into its other side after, the
     // rectangle stored into storage the CPU can read (rt_mirror_flush stores a pass's)
     sparse_gpu_wrote(t); tu_wrote(mt); tex_t pair; int paired = bcp_before(t, mt, &pair);
@@ -13457,6 +13583,8 @@ static void pool_seen_scan(void) {
             if (!g_treg[id_].view && !pkg_shared(&g_treg[id_].t) && !tex_get(g_treg[id_].t.serial)) { if (g_walk_req >= POOL_REQ_BYTES) return; g_walk_req += pool_tex_size(&g_treg[id_].t); }
             g_seen_todo[i] &= ~(1u << b);
             void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (!tv || !tr) continue;
+            { uint64_t fwh = 0; NvImageHeap *fo = fam_owner((__bridge id<MTLTexture>)tv, &fwh);
+              if (fo && fo->compressed) { fam_track_pool_serial(fo, g_treg[id_].t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) continue; } }
             MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents) continue;
@@ -13551,6 +13679,8 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
     void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv);
     if (!tv) return 0;
+    { uint64_t fwh = 0; NvImageHeap *fo = fam_owner((__bridge id<MTLTexture>)tv, &fwh);
+      if (fo && fo->compressed) { fam_track_pool_serial(fo, r->t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) return 0; } }
     MTLTextureType got = ((__bridge id<MTLTexture>)tv).textureType; g_treg[id_].tt1 = (uint8_t)got + 1;
     if (got != (MTLTextureType)dtt) {   // a view when a shader read the ID through this table's type (pool_fit); else the dummy
         uint64_t b = pool_bridge_pair((int)got, dtt) && pool_seen_t(id_, dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, dtt) : 0;
@@ -13920,6 +14050,8 @@ static int img_pool_elem(int tid, const nvn_rbind *b, uint64_t *rid, uint32_t *l
     void *tv = NULL; uint64_t tr = tex_fast_rid(tid, &tv);
     id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
     if (!t || !tr) return 0;
+    { uint64_t fwh = 0; NvImageHeap *fo = fam_owner(t, &fwh);
+      if (fo && fo->compressed) { fam_track_pool_serial(fo, r->t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) return 0; } }
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     int swz_only = !(t.usage & MTLTextureUsageShaderWrite) && (base.usage & MTLTextureUsageShaderWrite);
@@ -14001,6 +14133,7 @@ static void image_prepare_one(int tid, const nvn_rbind *b) {
     int upgrade = base && (!(base.usage & MTLTextureUsageShaderWrite) || reinterpret);
     os_unfair_lock_unlock(&g_rmu);
     bcp_wrote(&image, base);   // propagate image stores to a compressed-alias pair
+    if (base && !fam_is_valid(base)) fam_prepare_write(base, 0);   // clear a mismatched compressed family target before shader image writes
     if (!upgrade) return;
     rp_end();
     os_unfair_lock_lock(&g_rmu);
@@ -14423,6 +14556,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
         if (samp) { int sid = c2s == SAMP_FROM_UBO_HANDLES ? ubo_samp_id(w[k * 2]) : c2s; if (samp_known(sid) && samp_fast(sid)) r = samp_rid(sid); }
         else { int tid = ubo_tex_id(w[k * 2]); if (tid > 0 && tid < g_ntreg && g_treg[tid].ok && (g_treg[tid].view || (!g_treg[tid].gone && tex_storage_live(&g_treg[tid].t)))) {   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint64_t tr = tex_fast_rid(tid, &tv); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && !fam_is_valid(t)) { t = nil; tr = 0; }
                 if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; t = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); tr = t ? r2 : 0; }   // a handle the shader does not pick here may be another kind
                 if (t && b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) lead[k] = tbuf_lead(tid, t);
                 if (t) { r = tr; p->ser[k] = g_treg[tid].t.serial; } } }
@@ -14767,6 +14901,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 int tid = ubo_tex_id(ubo_handle(nvn_stage, reg, b->off + 8 * k)); if (tid >= g_ntreg || !g_treg[tid].ok) tid = 0;   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
                 if (t && t.textureType == MTLTextureTypeTextureBuffer && b->dtt == MTLTextureType2D && b->f1d) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_rows_binding(tid, t, b, k, tbias, &r2); if (v) { t = v; trid = r2; } }
                 if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); t = v; trid = v ? r2 : 0; }   // a handle the shader does not pick here may be another kind
                 if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; } else real |= 1ull << k;
@@ -14793,6 +14928,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             int snap = fb_snapshot_slot(nvn_stage, t);
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
+            else if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
             if (t && passdump() && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
@@ -14827,6 +14963,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             id<MTLTexture> t = img_binding(tid, b, &trid, &real);
             int snap = real && g_fb_n && !b->rw && !b->atom && fb_image_view(tid, b, t) ? fb_snapshot_slot(nvn_stage, t) : -1;
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
+            else if (real && !b->rw && !b->atom && !fam_is_valid(t)) { t = dummy_img(b->dtt, b->dpf); trid = t.gpuResourceID._impl; real = 0; }
             else if (real && t.textureType == MTLTextureTypeTextureBuffer) {   // a buffer image: its view starts before its offset, and the shader moves its coordinates by the elements in between (tbuf_lead)
                 uint32_t lead = tbuf_lead(tid, t);
                 if (b->tbx) { if (tbias) tbias[b->tbx - 1] = lead; }
@@ -14870,6 +15007,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 uint64_t hk = k < 128 ? (S.tex[nvn_stage][k] ? S.tex[nvn_stage][k] : S.tex[nvn_stage][NVN_SEPTEX_SLOT0 + k]) : 0; int tid = (int)(bound_handle(hk) & 0xfffff);
                 void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
                 if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) {
                     if (t && t.textureType != MTLTextureTypeTextureBuffer) t = nil;   // a slot the shader does not pick here may hold another kind of texture
                     if (!t) { t = dummy_tbuf(b->dpf); trid = g_dummy_tbuf_rid[b->dpf & 3]; }
@@ -14908,6 +15046,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 int tid = (int)(c2_handle(nvn_stage, b->off + 8u * k) & 0xfffff);   // a separate sampler word ORed in (soff) holds only a sampler ID
                 void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
+                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
                 if (t && t.textureType == MTLTextureTypeTextureBuffer && b->dtt == MTLTextureType2D && b->f1d) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_rows_binding(tid, t, b, k, tbias, &r2); if (v) { t = v; trid = r2; } }
                 if (t && t.textureType != (MTLTextureType)b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); t = v; trid = v ? r2 : 0; }   // an element the shader does not pick here may be another kind
                 if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; } else if (k < 64) real |= 1ull << k;
@@ -15151,13 +15290,19 @@ static void sd_finish(void) {
     if (!g_nsd) return;
     // Unchanged, loaded attachments already have their content in memory. Their proof depends only on writes in this pass, independently of future bindless readers or the optional lookahead.
     for (int i = 0; i < g_nsd; i++) sd_need(&g_sd[i], 6);   // Pass ended outside the list / index unavailable: always write back
+    // If a combined depth-stencil compressed family attachment was cross-size sanitized on one plane and the other plane is stored, store both planes so both hold valid compressed blocks
+    int ds_store = 0; void *ds_tex = NULL;
+    for (int i = 0; i < g_nsd; i++) { sd_att *t = &g_sd[i]; if (t->depth && t->fam_san) ds_tex = t->fam_tex; }
+    if (ds_tex) for (int i = 0; i < g_nsd; i++) { sd_att *t = &g_sd[i]; if (t->depth && t->fam_tex == ds_tex && !(udc_on() && t->load && !t->wrote)) ds_store = 1; }
     for (int i = 0; i < g_nsd; i++) {
         sd_att *t = &g_sd[i]; int udc_dead = udc_on() && t->load && !t->wrote;
         // A loaded color tile with no raster output or clear holds only the old memory contents. Storing it can overwrite image writes to the same texture
         // (Dark Souls' image-only AO pass). This is required for correctness even when store optimizations are disabled; mixed tile/image writers retain their store.
         int img_dead = t->depth == 0 && t->load && t->img && !t->rast;
-        int dead = udc_dead || img_dead; MTLStoreAction sa = dead ? MTLStoreActionDontCare : MTLStoreActionStore;
+        int dead = (udc_dead || img_dead) && !(ds_store && t->depth && t->fam_tex == ds_tex);
+        MTLStoreAction sa = dead ? MTLStoreActionDontCare : MTLStoreActionStore;
         if (t->depth == 1) [g_enc setDepthStoreAction:sa]; else if (t->depth == 2) [g_enc setStencilStoreAction:sa]; else [g_enc setColorStoreAction:sa atIndex:(NSUInteger)t->idx];
+        if (!dead && t->fam_tex) fam_mark_valid((__bridge id<MTLTexture>)t->fam_tex);
         g_sd_n_all++; if (dead) { g_sd_n_dead++; g_sd_dead_bytes += t->bytes; g_bw_store -= t->bytes; if (udc_dead) g_udc_saved_bytes += t->bytes; }
         if (!t->state) t->why = 5;
         PD("Z %llu %s ser=%llu lv%u sl%u %s why=%d by=%s slot=%d", g_stat_pass, t->depth == 1 ? "d" : t->depth == 2 ? "s" : "c", (unsigned long long)t->ser, t->lv, t->sl, dead ? "dontcare" : "store", dead ? 0 : t->why, t->why == 1 && t->wkey ? t->wkey : "-", t->wslot);
@@ -16478,9 +16623,12 @@ static void fb_prepare(NvProg *pr) {
             uint32_t miss = need & ~e->lvm;   // a snapshot taken since the last barrier lacks levels an earlier draw did not reach: copy those too
             if (miss) {
                 rp_flush();   // ends the pass, or lands a clear still waiting to be its load action: the snapshot holds the cleared content (fb_snap)
-                id<MTL4ComputeCommandEncoder> be = blit();
-                for (int m = 0; m < n; m++) if (miss >> m & 1) for (NSUInteger q = 0; q < tn; q++)
-                    enc_b_copy_texture(be, base, ts + q, tl + (NSUInteger)m, MTLOriginMake(0, 0, 0), MTLSizeMake(MAX(w >> m, 1ul), MAX(h >> m, 1ul), 1), snap, q, (NSUInteger)m, MTLOriginMake(0, 0, 0));
+                if (!fam_is_valid(base)) { fam_clear_whole(snap); }
+                else {
+                    id<MTL4ComputeCommandEncoder> be = blit();
+                    for (int m = 0; m < n; m++) if (miss >> m & 1) for (NSUInteger q = 0; q < tn; q++)
+                        enc_b_copy_texture(be, base, ts + q, tl + (NSUInteger)m, MTLOriginMake(0, 0, 0), MTLSizeMake(MAX(w >> m, 1ul), MAX(h >> m, 1ul), 1), snap, q, (NSUInteger)m, MTLOriginMake(0, 0, 0));
+                }
                 e->lvm |= miss;
             } else if (g_enc && (g_fb_rmask >> k & 1)) rp_end();   // an earlier draw of this pass read the attachment directly: it must not see this pass's writes
             if (!g_enc) fb_pass_sync();
@@ -18271,6 +18419,7 @@ static void copy_t2b(const p_copy_b2t *c, uint32_t size) {
     void *mb; uint64_t mo;
     if (!mtl_addr(c->src, img * nz, &mb, &mo)) { RED_ONCE(31, "texture→buffer copy destination is in no memory pool"); return; }
     sbw_note(c->src, img * nz, SBW_GPU);
+    if (!fam_is_valid(t)) { mtl_sub_fill(c->src, img * nz, 0); return; }   // cross-size read of a compressed family: zero without decoding another size's blocks or disturbing the live size
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
         enc_b_copy_texture_buffer(b, t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset), MTLSizeMake(c->r.width, c->r.height, nz), (__bridge id<MTLBuffer>)mb, mo, row, img);
@@ -18343,7 +18492,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     int in_storage = 0; AP_B;
     id<MTLTexture> mt = tex_mtl_(t, &in_storage); AP_E(4);
     if (in_storage) { read_texels_storage(t, level, layer0, r, dst, row, img); return; }
-    if (!mt || !tex_level_ok(mt, level, "CPU readback")) { memset(dst, 0, img * nz); return; }
+    if (!mt || !tex_level_ok(mt, level, "CPU readback") || !fam_is_valid(mt)) { memset(dst, 0, img * nz); return; }
     mtl_finish_gpu_at(WS_READTEX);
     id<MTLBuffer> buf = [g_dev newBufferWithLength:wb * hb * nz options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = enc_b_begin(cb);
@@ -18421,6 +18570,8 @@ static void copy_b2t(const p_copy_b2t *c, uint32_t size) {
         if (rb_swap_gpu(sb.gpuAddress + mo, row, img, ab.gpuAddress + ao, wb, wb * rows, wb, rows, nz, shift)) { sb = ab; mo = ao; row = wb; img = wb * rows; }
         else RED_ONCE(7, "RGB565-family buffer→texture copy left in the guest's order: red and blue exchanged");
     }
+    int fam_full = !c->r.xoffset && !c->r.yoffset && (NSUInteger)c->r.width == MAX(t.width >> level, 1ul) && (NSUInteger)c->r.height == MAX(t.height >> level, 1ul);
+    fam_prepare_write(t, fam_full);
     id<MTL4ComputeCommandEncoder> b = blit();
     if (is3d)
         enc_b_copy_buffer_texture(b, sb, mo, row, img, MTLSizeMake(c->r.width, c->r.height, nz), t, 0, level, MTLOriginMake(c->r.xoffset, c->r.yoffset, c->r.zoffset));
@@ -18543,6 +18694,7 @@ static void draw_tex(const p_draw_tex *c) {
     os_unfair_lock_unlock(&g_rmu);
     if (!t || !ss) { RED_ONCE(122, "DrawTexture: texture handle %#llx has no texture or sampler", (unsigned long long)c->h); return; }
     if (t.textureType != MTLTextureType2D || fmt_int_or_ds(t.pixelFormat)) { RED_ONCE(123, "DrawTexture: source type %lu format %lu not drawn (2D float / unorm only)", (unsigned long)t.textureType, (unsigned long)t.pixelFormat); return; }
+    if (!fam_is_valid(t)) t = dummy_tex(MTLTextureType2D, NVN_DPF_FLOAT);
     if (S.color.blend_en) RED_ONCE(124, "DrawTexture with blending on (targets %#x): drawn without it", (unsigned)S.color.blend_en);
     rp_flush(); rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // pending clears of the targets land first, as for copy_t2t
     for (int k = 0; k < R.rt.n && k < 8; k++) {
@@ -18575,7 +18727,7 @@ static void draw_tex(const p_draw_tex *c) {
         q[0] = c->d.x0; q[1] = c->d.y0; q[2] = (c->s.x1 - c->s.x0) / dw; q[3] = (c->s.y1 - c->s.y0) / dh;
         q[4] = c->s.x0; q[5] = c->s.y0; q[6] = (float)t.width; q[7] = (float)t.height;
         MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new]; MTLRenderPassColorAttachmentDescriptor *a = rp.colorAttachments[0];
-        a.texture = d; a.level = lv; a.slice = sl; a.loadAction = MTLLoadActionLoad; a.storeAction = MTLStoreActionStore;
+        a.texture = d; a.level = lv; a.slice = sl; a.loadAction = fam_is_valid(d) ? MTLLoadActionLoad : MTLLoadActionClear; a.clearColor = MTLClearColorMake(0, 0, 0, 0); a.storeAction = MTLStoreActionStore;
         if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // (a fill or the previous target's copies, above)
         ser_gate(); id<MTL4RenderCommandEncoder> en = enc_r_begin(rp);
         [en setArgumentTable:at atStages:MTLRenderStageFragment];
@@ -18583,6 +18735,7 @@ static void draw_tex(const p_draw_tex *c) {
         [en setViewport:(MTLViewport){0, 0, tw, th, 0, 1}];
         [en setScissorRect:(MTLScissorRect){sx, sy, ex - sx, ey - sy}];
         [en setRenderPipelineState:ps]; [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; enc_r_end(en);
+        fam_mark_valid(d);
         { NVNcopyRegion rr = {(int)sx, (int)sy, 0, (int)(ex - sx), (int)(ey - sy), 1}; gsb_store(rt, d, (unsigned)lv, (unsigned)sl, 1, &rr); if (paired) bcp_after_to(rt, &pair, (unsigned)lv, &rr); }
         PD("T %llu draw texture id %d → target %d ser=%llu region %g,%g..%g,%g from %g,%g..%g,%g", g_stat_pass, (int)(c->h & 0xfffff), k, (unsigned long long)rt->serial, c->d.x0, c->d.y0, c->d.x1, c->d.y1, c->s.x0, c->s.y0, c->s.x1, c->s.y1);
         { static int once; if (!once++) MLOG("DrawTexture: first case %gx%g texels of a %lux%lu texture (format %lu) → %gx%g pixels of target %d (%lux%lu, format %lu)", c->s.x1 - c->s.x0, c->s.y1 - c->s.y0,
@@ -18837,6 +18990,27 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
     id<MTLTexture> d = tex_mtl_all(c->dst); sparse_gpu_wrote(c->dst); tu_wrote(d);
     if (!d || !tex_level_ok(d, dl, "texture copy destination")) return nil;
     { tex_t pair; bcp_before(c->dst, d, &pair); }   // a side of a compressed-alias pair: filled first, the copied region goes into its other side after (copy_t2t)
+    int fam_full_d = (c->flags & DM_COPY_RESOLVE)
+        ? (MAX(s.width >> sl, 1ul) >= MAX(d.width >> dl, 1ul) && MAX(s.height >> sl, 1ul) >= MAX(d.height >> dl, 1ul))
+        : (!c->dr.xoffset && !c->dr.yoffset && (NSUInteger)c->dr.width == MAX(d.width >> dl, 1ul) && (NSUInteger)c->dr.height == MAX(d.height >> dl, 1ul));
+    if (!fam_is_valid(s)) {
+        if (fam_full_d) { fam_clear_whole(d); return d; }
+        fam_prepare_write(d, 0);
+        size_t dbpp = mtl_pf_bytes(d.pixelFormat);
+        if (dbpp && c->dst->d.target != 2 && c->dr.width > 0 && c->dr.height > 0) {
+            size_t row = (size_t)c->dr.width * dbpp; id<MTLBuffer> zb = zero_buf(row);
+            if (zb) {
+                NSUInteger step = MAX((NSUInteger)1, MIN((NSUInteger)c->dr.height, (NSUInteger)(zb.length / row)));
+                int nz0 = c->dr.depth ? c->dr.depth : 1;
+                for (int z = 0; z < nz0; z++) for (NSUInteger y = 0; y < (NSUInteger)c->dr.height; y += step) {
+                    NSUInteger n = MIN(step, (NSUInteger)c->dr.height - y);
+                    enc_b_copy_buffer_texture(blit(), zb, 0, row, row * n, MTLSizeMake((NSUInteger)c->dr.width, n, 1), d, dz0 + c->dr.zoffset + z, dl, MTLOriginMake((NSUInteger)c->dr.xoffset, (NSUInteger)c->dr.yoffset + y, 0));
+                }
+            }
+        }
+        return d;
+    }
+    if (!fam_full_d && fam_owner(s, NULL) != fam_owner(d, NULL)) fam_prepare_write(d, 0);
     if (c->flags & DM_COPY_RESOLVE) {   // Downsample: multisample resolve into the single-sample destination (depth takes sample 0); with equal sample counts it is a plain whole copy
         NSUInteger sw = MAX(s.width >> sl, 1ul), sh = MAX(s.height >> sl, 1ul), dw = MAX(d.width >> dl, 1ul), dh = MAX(d.height >> dl, 1ul);
         if (s.sampleCount == d.sampleCount && s.pixelFormat == d.pixelFormat && sw == dw && sh == dh) {
@@ -18958,6 +19132,7 @@ static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {
 // other's layers from the view's first
 static void copy_t2t(const p_copy_t2t *c) {
     id<MTLTexture> d = copy_t2t_enc(c);
+    if (d) fam_mark_valid(d);
     if (d) bcp_after(c->dst, c->has_dv && c->dv.set_levels ? c->dv.base_level : 0, &c->dr);
     if (d) gsb_store(c->dst, d, c->has_dv && c->dv.set_levels ? c->dv.base_level : 0, (c->dst->d.target == NVN_TEXTURE_TARGET_3D ? 0 : c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0) + (unsigned)c->dr.zoffset,
                      (unsigned)(c->dr.depth ? c->dr.depth : 1), &c->dr);
@@ -19134,6 +19309,8 @@ static void dlss_eval(const p_dlss *c) {
             p[8] = sx + 0.5f; p[9] = sy + 0.5f; p[10] = sx + iw - 0.5f; p[11] = sy + ih - 0.5f;
         }
     }
+    int dlss_full = !a.base[DLSS_OUTPUT][0] && !a.base[DLSS_OUTPUT][1] && ow == out.width && oh == out.height;
+    fam_prepare_write(out, dlss_full);
     // On the real command buffer, the scaler's state set with it: on the encoding thread when it runs (the recording's stand-in has none of MetalFX's calls), where a later
     // evaluation through the same scaler may already have been recorded
     rec_cb_block(g_cb, ^(id<MTL4CommandBuffer> cb) {
@@ -19209,6 +19386,7 @@ static void clear_tex(const p_clear_tex *c) {
     if (c->r.xoffset || c->r.yoffset || (NSUInteger)c->r.width != w || (NSUInteger)c->r.height != h || (c->mask & mtl_pf_chmask(pf)) != mtl_pf_chmask(pf)
         || !(t.usage & MTLTextureUsageRenderTarget)) {
         if (!depth && !stencil && (t.usage & MTLTextureUsageRenderTarget)) {
+            fam_prepare_write(whole, 0);
             clear_tex_tri(t, lv, l0, c);
             gsb_store(c->tex, whole, lv, (is3d ? 0 : l0) + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);   // the clear writes the storage too, as a render pass does (rt_mirror_flush)
             if (paired) bcp_after_to(c->tex, &pair, lv, &c->r);
@@ -19231,6 +19409,7 @@ static void clear_tex(const p_clear_tex *c) {
         else rp.colorAttachments[0].clearColor = c->is_uint ? MTLClearColorMake(c->c.u[0], c->c.u[1], c->c.u[2], c->c.u[3]) : MTLClearColorMake(c->c.f[0], c->c.f[1], c->c.f[2], c->c.f[3]);
         ser_gate(); enc_r_end(enc_r_begin(rp));
     }
+    fam_mark_valid(whole);
     if (depth || stencil) return;
     gsb_store(c->tex, whole, lv, (is3d ? 0 : l0) + (unsigned)c->r.zoffset, (unsigned)nz, &c->r);
     if (paired) bcp_after_to(c->tex, &pair, lv, &c->r);

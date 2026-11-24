@@ -1900,8 +1900,11 @@ def pg_sized_shader(d, label):
     return [(f'{label}#PGSO', st, ctl, code)]
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
-def _zlib_header(d):
-    return len(d) >= 2 and (d[0] & 0xf) == 8 and (d[0] >> 4) <= 7 and (d[0] * 256 + d[1]) % 31 == 0
+def _zlib_header(d, at=0):
+    """Check the RFC 1950 zlib header at `at` for deflate, a window up to 32 KiB and valid FCHECK."""
+    if at + 2 > len(d): return False
+    b0, b1 = d[at], d[at + 1]
+    return (b0 & 0x0f) == 8 and (b0 >> 4) <= 7 and ((b0 << 8) | b1) % 31 == 0
 
 def mtarc_members(d, label):
     """Capcom's MT Framework archive: 'ARC\\0', u16 version, u16 entry count, then one entry per file. → (path, data) of each entry.
@@ -4826,12 +4829,6 @@ def fzlc_shaders(path, label):
         if len(p) != raw: red(f'{where} decompresses to {len(p)} bytes, its entry says {raw}')
         parts.append(p); at = end
     return glslc_shaders(b''.join(parts), label, need=False)
-
-def _zlib_header(d, at):
-    """RFC 1950 2-byte zlib header check at offset `at`: deflate method (8), window <= 32 KiB, and valid FCHECK (% 31 == 0)"""
-    if at + 2 > len(d): return False
-    b0, b1 = d[at], d[at + 1]
-    return (b0 & 0x0f) == 8 and (b0 >> 4) <= 7 and ((b0 << 8) | b1) % 31 == 0
 
 def shadercache_nx_framing(d):
     """The block framing of a RomFS shadercache.nx / startupshadercache.nx, or None when the file is not one. Two exist: version 13's blocks are

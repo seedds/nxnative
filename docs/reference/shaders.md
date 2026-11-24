@@ -946,6 +946,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 
 ## Translation
 
+### else-if chains in the SPIR-V back end
+
+- **Symptom:** with `XLATE_DEBUG=0`, a shader with an `if / else if / else` (or `if / else if`) chain loses its `else if` and trailing `else` branches: the `ElseIf` and `Else` blocks are unreachable in the SPIR-V (still accepted by `spirv-val`) and SPIRV-Cross drops them from the MSL.
+- **Cause:** `AstOptimizer.RemoveEmptyBlocks` turns an `Else` whose only content is an `If` (and optional trailing `Else`) into an `AstBlockType.ElseIf` sibling — a GLSL pretty-printing transform that SPIR-V has no construct for. `SpirvGenerator` accepted only `AstBlockType.Else` as an `If` block's false target with no `BlockEntered` handler for `ElseIf`, so the `If`'s false edge branched straight to the merge block, leaving the `ElseIf` and any trailing `Else` unreachable. Default `XLATE_DEBUG=1` builds emit an `AstComment` per decoded instruction, so decoded `Else` blocks are not singleton and no `ElseIf` forms there.
+- **Fix:** `StructuredProgram.MakeStructuredProgram` disables `ElseIf` flattening in `AstOptimizer.RemoveEmptyBlocks` when targeting SPIR-V (`flattenElseIf: targetLanguage != TargetLanguage.Spirv`), keeping nested `Else { If }` blocks that `SpirvGenerator` already emits as nested SPIR-V selections; `SpirvGenerator` throws `InvalidOperationException` if an `ElseIf` block ever reaches it.
+- **Check:** `dm/gfx/tests/test_spirv_else_if.py` translates three synthetic sm86 pixel programs (three-way `if / else if / else`, four-way `if / else if / else if / else`, and `if / else if` without trailing `else`) through `dmsh_xlate` in normal and debug modes, checking that every block is reachable, `spirv-val` validates every module, and SPIRV-Cross MSL retains every branch result.
+- **Found on:** synthetic programs (`test_spirv_else_if.py`); triggered by code that computes an `if / else if` chain's predicates before its first branch under `XLATE_DEBUG=0` (or comment-free IR).
+
 ### Optimized shader calls and memory snapshots
 
 - **Symptom:** with shader job `debug = false`, SPIR-V generation throws `GetLocalPointer` / `KeyNotFoundException` or casts an `AstOperation` to an `AstOperand`. Other inputs compile but read a call's output before calling it, lose an unused-return call's side effects, or read local memory after an intervening store instead of preserving its earlier value.

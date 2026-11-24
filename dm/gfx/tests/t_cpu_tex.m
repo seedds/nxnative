@@ -1,6 +1,7 @@
 // The set of CPU-written textures (mtl_tex_cpu_written, tex_cpu_written, mtl_tex_release): membership, no duplicates, a released texture leaving it, and lookups of textures
 // not in it staying cheap with thousands of consecutive serials in it (a CFSet that hashed serials as numbers probed a whole bucket run per miss: half of Batman: Arkham Knight's
 // rendering thread with 6,442 CPU-written textures)
+#include <err.h>
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -459,9 +460,14 @@ static void write_texels_bounds(void) {
 }
 // Direct linear movie upload (issue #497): queued GPU upload keeps its complete frame after the next write,
 // works for both block-linear and LINEAR | VIDEO_DECODE textures, updates registered descriptors, and serves ReadTexels
+static id<MTLBuffer> new_readback_buffer(size_t bytes) {
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!rb) errx(EXIT_FAILURE, "could not allocate a %zu-byte movie readback buffer", bytes);
+    return rb;
+}
 static void readback_tex(id<MTLTexture> tex, int w, int h, void *dst) {
     size_t row = (size_t)w * 4, bytes = row * (size_t)h;
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> rb = new_readback_buffer(bytes);
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
     [e copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake((NSUInteger)w, (NSUInteger)h, 1)
               toBuffer:rb destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:bytes];
@@ -604,9 +610,9 @@ static void upload_tear_stress(int rounds, int linear) {
     CHECK(h_nvnTextureInitialize(&tex, &tb), "stress texture");
     uint32_t *first = malloc((size_t)W * H * 4); for (size_t i = 0; i < (size_t)W * H; i++) first[i] = 0xff000000u;
     nvn_host_write_texture(&tex, first, W, H, W * 4, NULL, NULL); free(first);
+    id<MTLBuffer> rb = new_readback_buffer((size_t)W * H * 4);
     atomic_store(&g_st_stop, 0); atomic_store(&g_st_writes, 0); atomic_store(&g_st_write_ns, 0);
     g_st_tex = &tex; pthread_t th; pthread_create(&th, NULL, st_writer, NULL);
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:(NSUInteger)W * H * 4 options:MTLResourceStorageModeShared];
     int torn = 0, done = 0, firstrow = -1, changed = 0; uint32_t last = 0; uint64_t bytes0 = mtl_upload_bytes(), rs0 = 0;
     mtl_upload_ns_take();
     for (int r = 0; r < rounds; r++) { @autoreleasepool {

@@ -58,3 +58,19 @@ static inline int ds4_motion_decode(pro_motion *s, const uint8_t *r, size_t len,
     out[0] = (pro_motion_sample){{-v[3] * g, v[5] * g, -v[4] * g}, {v[0] * rad, -v[2] * rad, v[1] * rad}, now};
     return 1;
 }
+// 8BitDo Ultimate 2 Wireless (2DC8:6012) over Bluetooth (issue #2997, PR #1836, PR #1934): GameController exposes no GCMotion, but firmware 1.03+
+// streams 34-byte input report 0x01 carrying six signed little-endian int16 from byte 15 (acceleration x, y, z then rotation x, y, z) at 4096 counts/G
+// and 2000 deg/s over 32767 (SDL's SDL_hidapi_8bitdo.c). Firmware 1.02 sends 12-byte reports without sensors. Raw axes match the Pro Controller's
+// (x toward shoulders, y left, z out of face; acceleration is specific force). One sample per report, stamped on arrival.
+static inline int abitdo_motion_decode(pro_motion *s, const uint8_t *r, size_t len, uint64_t now, pro_motion_sample out[3]) {
+    if (len < 34 || r[0] != 0x01) return 0;
+    if (s->seen && (now < s->received || now - s->received > PRO_MOTION_STALE_NS)) *s = (pro_motion){0};
+    int16_t v[6]; int data = 0;
+    for (int i = 0; i < 6; i++) { v[i] = (int16_t)((uint16_t)r[15 + 2 * i] | (uint16_t)r[16 + 2 * i] << 8); data |= v[i] != 0; }
+    s->seen = 1; s->received = now;
+    if (!s->live && !data) return 0;   // an advertised but empty stream is not a motion source
+    s->live = 1;
+    const float g = 1.f / 4096.f, rad = 2000.f / 32767.f * (float)M_PI / 180.f;
+    out[0] = (pro_motion_sample){{v[1] * g, -v[0] * g, -v[2] * g}, {-v[4] * rad, v[3] * rad, v[5] * rad}, now};
+    return 1;
+}

@@ -439,7 +439,7 @@ static uint32_t prepare(DmTlsConnection *c) {
     c.handshaking = YES; uint32_t result = status_result(c, s);
     trace(c, DM_TLS_PREPARE, result, s, v); return result;
 }
-static BOOL verify_peer(DmTlsConnection *c) {
+static BOOL verify_peer(DmTlsConnection *c, unsigned *reason) {
     SecTrustRef trust = NULL; if (SSLCopyPeerTrust(c->tls, &trust) || !trust) return NO;
     if (c.policyPinned) {
         SecCertificateRef leaf = SecTrustGetCertificateAtIndex(trust, 0);
@@ -464,6 +464,7 @@ static BOOL verify_peer(DmTlsConnection *c) {
         CFErrorRef failure = NULL;
         dm_guest_host_wait_begin();
         BOOL valid = !result && SecTrustEvaluateWithError(trust, &failure);
+        if (!valid) *reason = DM_TLS_VERIFY_PLATFORM_TRUST;
         if (valid) {
             CFIndex count = SecTrustGetCertificateCount(trust);
             NSMutableArray<NSData *> *data = [NSMutableArray new];
@@ -477,6 +478,7 @@ static BOOL verify_peer(DmTlsConnection *c) {
             }
             if (valid) valid = dm_nextendo_x509_verify(c.peerName.UTF8String, c.policyAnchor.bytes,
                 c.policyAnchor.length, chain, sizes, (size_t)count);
+            if (!valid) *reason = DM_TLS_VERIFY_STRICT_X509;
         }
         dm_guest_host_wait_end();
         if (failure) CFRelease(failure); CFRelease(trust); return valid;
@@ -503,14 +505,16 @@ static uint32_t handshake_locked(DmTlsConnection *c) {
         if (atomic_load(&c->closed)) return error(c, DM_SSL_BAD_SOCKET);
         c->wanted = POLLIN; OSStatus status = SSLHandshake(c->tls);
         if (status == errSSLServerAuthCompleted) {
-            BOOL valid = verify_peer(c); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, 0);
+            unsigned reason = 0;
+            BOOL valid = verify_peer(c, &reason); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, reason);
             if (!valid) { c.rejected = YES; c.verifyError = DM_SSL_FAIL; SSLSetError(c->tls, errSSLXCertChainInvalid); return error(c, DM_SSL_FAIL); }
             c.verified = YES;
             continue;
         }
         if (!status) {
             if (!c.verified) {
-                BOOL valid = verify_peer(c); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, 0);
+                unsigned reason = 0;
+                BOOL valid = verify_peer(c, &reason); trace(c, DM_TLS_VERIFY, valid ? 0 : DM_SSL_FAIL, status, reason);
                 if (!valid) { c.rejected = YES; c.verifyError = DM_SSL_FAIL; SSLSetError(c->tls, errSSLXCertChainInvalid); return error(c, DM_SSL_FAIL); }
             }
             c.verified = YES; c.established = YES; trace(c, DM_TLS_HANDSHAKE, 0, 0, 0); return error(c, 0);

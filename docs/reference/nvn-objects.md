@@ -1373,3 +1373,17 @@ CPU-only comparison with main `2925d7af` on an Apple M6, macOS 27.2 build 26B123
 A single repeated pool costs about 1.2–1.3 ns more; alternating among four or eight late pools avoids main's repeated scans. Miss-heavy differences are small enough not to claim a speedup. The cache adds 384 bytes of entries and an insertion counter per querying thread. These are synthetic component measurements: Mario Kart World's actual cache hit rate and frame-time effect remain unmeasured.
 
 The MKW NSP folder's `0400C3F00006E000-work/analysis/dirty-range-cache-20261117/` keeps the fixture, source snapshots, compiler identity, hashes and individual samples. `python3 run_bench.py` recompiles those snapshots and repeats the comparison without game data.
+
+### Live pool-table mutations and cross-submission stale tables
+
+- **Symptom:** intermittent GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`) followed by ignored submissions (`SubmissionsIgnored`) during play, especially during area streaming or transitions that register textures, materialize first-read textures or stand-ins, or finalize memory pools.
+- **Cause:** three host NVN residency/lifetime gaps in `dm/gfx/nvn/nvn_mtl.m`:
+  1. `pool_seen_scan` and `pool_stand_scan` overwrote `g_psnap[k].buf.contents[at]` in place on a `MTLStorageModeShared` table buffer actively read by an in-flight submission; newly created textures (queued in `g_res_q` before `res_commit()`) or newly allocated stand-in heaps were not resident for that already-executing submission.
+  2. Past `POOL_SUB_MS`, `pool_walk` returned an existing table `p->buf` across submissions even when registrations or storage had changed since `p` was built and `p` could not be patched (for example after `own_epoch()` on pool finalization), exposing `gpuResourceID`s of textures or views already drained from `g_res` in earlier submissions (including placement-heap textures removed individually from `g_res` on `defer_drain`).
+  3. `res_check` (`DM_RES_CHECK=1`) tested only `a.heap` when `a.heap` was non-nil, missing placement-heap textures (`MTLHeapTypePlacement`) removed from `g_res` while their recycled heap stayed resident.
+- **Fix:** general, in the host (`nvn_mtl.m`):
+  1. `pool_snap_set` updates live pool tables via copy-on-write (forking each modified table at most once per `pool_seen_scan` / `pool_stand_scan` via `pool_patch_take` and retiring the prior buffer via `pool_table_give`, bumping `g_psnap_gen`).
+  2. `pool_snap.sync_sub` tracks the last submission in which a table was validated; the `POOL_SUB_MS` shortcut only reuses `p->buf` when `p->sync_sub == g_sub_serial` (so anything retired since waits behind this submission's fence) or when `p->reg == rg && p->ser == sg`.
+  3. `res_check` requires both `a.heap` and `a` in `g_res_objects` for `MTLHeapTypePlacement` resources while keeping the heap-only check for `MTLHeapTypeAutomatic` stand-in heaps.
+- **Check:** `t_pool_cow_residency` (`MTL_DEBUG_LAYER=1`, `DM_NVN_ENC_THREAD=0/1`) plus updated `t_pool_standin`, `t_pool_typebridge`, `t_pool_notes`, `t_pool_replay`, `t_pool_seen_replace`, `t_pool_retire`, `t_tbuf_live`, `t_res_commit`, `t_res_cb`, and `t_pool_standin_sparse`.
+- **Found on:** audited while investigating [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([issue #1810](https://github.com/seedds/nxnative/issues/1810)). **Open:** confirmation on the reporter's cave-revisit save in #1810 awaits retest.

@@ -1025,3 +1025,11 @@ t_treg_meta: t_treg_meta.m $(MTL_T_DEP)
 .PHONY: check_t_treg_meta
 check_t_treg_meta: t_treg_meta
 	MTL_DEBUG_LAYER=1 ./t_treg_meta
+
+# Pool-table copy-on-write, cross-submission POOL_SUB_MS validation, and placed-texture res_check (Refs #1810)
+t_pool_cow_residency: t_pool_cow_residency.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_cow_residency.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_pool_cow_residency
+check_t_pool_cow_residency: t_pool_cow_residency
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_cow_residency
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_cow_residency

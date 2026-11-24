@@ -563,6 +563,24 @@ static void t_script_hold(void) {
     CHECK(lx_of(0) == -0x7000, "the scripted stick wins over controller drift");
     CHECK(atomic_load(&g_shake_on), "controller updates do not stop a scripted shake");
 }
+// DM_TOUCH_TOGGLE (GitHub issue #2620): the button names it takes, and the latch the touch gamepad puts between its fingers and the game: a press holds a latching button,
+// the next lets it go, a finger kept down changes nothing, and the other buttons pass as pressed
+static void t_touch_latch(void) {
+    int bad = -1;
+    CHECK(dm_input_names("ZL", &bad) == DM_BTN_ZL && bad == 0, "one name");
+    CHECK(dm_input_names("zl,ZR + plus Down", &bad) == (DM_BTN_ZL | DM_BTN_ZR | DM_BTN_PLUS | DM_BTN_DOWN) && bad == 0, "names in any case, by comma, plus or space");
+    CHECK(dm_input_names("L,Z,LS,,", &bad) == (DM_BTN_L | DM_BTN_LS) && bad == 1, "an unknown name is counted, a name is never matched by its prefix");
+    CHECK(dm_input_names(NULL, &bad) == 0 && bad == 0 && dm_input_names("", NULL) == 0, "no list, no buttons");
+    uint64_t prev = 0, held = 0, mask = DM_BTN_ZL;
+    CHECK(dm_input_latch(DM_BTN_ZL, &prev, mask, &held) == DM_BTN_ZL, "the first press holds ZL");
+    CHECK(dm_input_latch(DM_BTN_ZL | DM_BTN_A, &prev, mask, &held) == (DM_BTN_ZL | DM_BTN_A), "the finger still down: ZL stays held, A passes");
+    CHECK(dm_input_latch(DM_BTN_A, &prev, mask, &held) == (DM_BTN_ZL | DM_BTN_A), "the finger lifted: ZL stays held");
+    CHECK(dm_input_latch(0, &prev, mask, &held) == DM_BTN_ZL, "no finger: ZL held, A let go as it was released");
+    CHECK(dm_input_latch(DM_BTN_ZL, &prev, mask, &held) == 0, "the second press lets ZL go");
+    CHECK(dm_input_latch(0, &prev, mask, &held) == 0 && held == 0, "and it stays let go");
+    prev = held = 0;
+    CHECK(dm_input_latch(DM_BTN_ZL | DM_BTN_ZR, &prev, 0, &held) == (DM_BTN_ZL | DM_BTN_ZR) && dm_input_latch(0, &prev, 0, &held) == 0, "no latching buttons: every button as pressed");
+}
 static void t_script(void) {
     g_mode = 1; dm_pad_players(1);
     dm_pad_set(0, 0, 0, 0, 0); buttons_of(0, STYLE_FULLKEY);
@@ -1849,6 +1867,7 @@ int main(void) {
     t_slots();
     t_npads();
     t_script();
+    t_touch_latch();
     t_vibration();
     t_opmode();
     t_joycons();

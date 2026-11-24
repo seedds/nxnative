@@ -880,7 +880,10 @@ def pacx4_unchunk(d, at, chunks, n, where):
     out = bytearray()
     for c, u in chunks:
         raw = span(d, at, c, where)
-        out += raw if c == u else lz4.block.decompress(raw, uncompressed_size=u)
+        if c != u:
+            try: raw = lz4.block.decompress(raw, uncompressed_size=u)
+            except lz4.block.LZ4BlockError as e: red(f'{where}: invalid LZ4 chunk at {at:#x}: {e}')
+        out += raw
         at += c
     if len(out) != n: red(f'{where}: its chunks give {len(out):#x} bytes, its length is {n:#x}')
     return bytes(out)

@@ -45,6 +45,7 @@ static id<MTLBuffer> run_buffer(const tex_t *t, uint64_t size) {
 // The texels the GPU holds: an uploaded texture is private storage
 static void read_texture(id<MTLTexture> t, uint8_t *out, unsigned rows) {
     id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLBuffer> b = [g_dev newBufferWithLength:ROW * rows options:MTLResourceStorageModeShared];
+    if (!b) { CHECK("a readback buffer", 0); memset(out, 0, ROW * rows); return; }
     id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
     [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(t.width, rows, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:ROW destinationBytesPerImage:ROW * rows];
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted]; memcpy(out, b.contents, ROW * rows);

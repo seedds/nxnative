@@ -373,5 +373,29 @@ class Ue3OodlePackages(unittest.TestCase):
         self.assertFalse(pg.ue3_oodle_package(wide[:28]))
 
 
+class ManifestProvenance(unittest.TestCase):
+    """Multi-program NUP manifests tag sibling rows in an optional fourth column: combined inventory stays whole, while biggest (romfs_marker) stays in the packed program."""
+    def test_sibling_rows_contribute_to_inventory_but_not_biggest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            exefs = root / 'ExeFS'; exefs.mkdir()
+            manifest = root / 'romfs_manifest.tsv'
+            manifest.write_text(
+                '# path\tbytes\tfirst 32 bytes (hex)\n'
+                f'/dummy.bin\t5\t{b"12345".hex()}\n'
+                f'/sound/jp.pck\t916455424\t{b"AKPK".hex()}\tprogram:0\n'
+            )
+            self.assertEqual(list(pg.romfs_files(manifest)), [('/dummy.bin', 5, b'12345'), ('/sound/jp.pck', 916455424, b'AKPK')])
+            rom = pg.facts_of(exefs, manifest)['romfs']
+            self.assertEqual((rom['n'], rom['bytes']), (2, 916455429))
+            self.assertEqual(rom['mags']['Wwise pck'], 1)
+            self.assertEqual(rom['dirs']['sound'], 1)
+            self.assertEqual(rom['biggest'], (5, 'dummy.bin'))
+
+            manifest.write_text(f'# path\tbytes\tfirst 32 bytes (hex)\n/sound/jp.pck\t916455424\t{b"AKPK".hex()}\tprogram:0\n')
+            rom = pg.facts_of(exefs, manifest)['romfs']
+            self.assertEqual((rom['n'], rom['bytes'], rom['biggest']), (1, 916455424, (0, '')))
+
+
 if __name__ == '__main__':
     unittest.main()

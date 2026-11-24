@@ -440,12 +440,12 @@ static class P {
         public string Path; public byte[] Name; public bool Directory, Damaged; public long Size; public ulong A, B;
         public List<ImageEntry> Children = new List<ImageEntry>();
     }
-    static void OpenImageFile(IFileSystem fs, ref UniqueRef<IFile> file, string path) {
+    static void OpenArchiveFile(IFileSystem fs, ref UniqueRef<IFile> file, string path) {
         var name = path.ToU8Span();
         var result = fs.OpenFile(ref file, name, OpenMode.Read);
         // LibHac's string overload validates guest paths and rejects the colon in names
-        // such as the literal "D:" directory in a DLC RomFS. The image writer already has
-        // an absolute archive path from enumeration. Read it through the typed overload.
+        // such as the literal "D:" directory in a DLC RomFS. Enumeration already yields
+        // an absolute archive path; read it through the typed overload in every mode.
         if (ResultFs.InvalidCharacter.Includes(result) && fs is RomFsFileSystem) {
             using var archived = new LibHac.Fs.Path();
             archived.SetShallowBuffer(name.Value).ThrowIfFailure();
@@ -454,7 +454,7 @@ static class P {
         result.ThrowIfFailure();
     }
     // Stream the merged, integrity-checked filesystem directly into DMROMFS1. No RomFS directories or per-resource host files are created.
-    static void WriteImage(Func<IFileSystem> open, string dst) {
+    internal static void WriteImage(Func<IFileSystem> open, string dst) {
         IFileSystem fs = open?.Invoke();
         var root = new ImageEntry { Path = "/", Name = Array.Empty<byte>(), Directory = true };
         var byPath = new Dictionary<string, ImageEntry>(StringComparer.Ordinal) { ["/"] = root };
@@ -483,7 +483,7 @@ static class P {
                     if (e.Directory) continue;
                     e.A = (ulong)output.Position; e.B = (ulong)e.Size; files++; bytes += e.Size;
                     using var f = new UniqueRef<IFile>();
-                    OpenImageFile(fs, ref f.Ref, e.Path);
+                    OpenArchiveFile(fs, ref f.Ref, e.Path);
                     try { WriteStream(f.Get, output, e.Size, buffer); }
                     catch (HorizonResultException x) when (HashError(x)) {
                         fs = Failed(e.Path, open);
@@ -491,7 +491,7 @@ static class P {
                         e.Damaged = true;
                         g_lenientFs ??= g_lenient();
                         using var lf = new UniqueRef<IFile>();
-                        OpenImageFile(g_lenientFs, ref lf.Ref, e.Path);
+                        OpenArchiveFile(g_lenientFs, ref lf.Ref, e.Path);
                         output.Position = (long)e.A; output.SetLength(output.Position);
                         WriteStream(lf.Get, output, e.Size, buffer);
                     }
@@ -522,7 +522,7 @@ static class P {
     }
 
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
-    static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
+    internal static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
         IFileSystem fs = open();
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -530,7 +530,7 @@ static class P {
             if (e.Type == DirectoryEntryType.Directory) { Directory.CreateDirectory(op); continue; }
             Directory.CreateDirectory(Path.GetDirectoryName(op)); n++; bytes += e.Size;
             using var f = new UniqueRef<IFile>();
-            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            OpenArchiveFile(fs, ref f.Ref, e.FullPath);
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
             try {
                 if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
@@ -545,7 +545,7 @@ static class P {
                 if (!g_allow || g_lenient == null) { File.Delete(op); continue; }
                 g_lenientFs ??= g_lenient();
                 using var lf = new UniqueRef<IFile>();
-                g_lenientFs.OpenFile(ref lf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                OpenArchiveFile(g_lenientFs, ref lf.Ref, e.FullPath);
                 Write(lf.Get, op, e.Size, buf);
             }
             written += e.Size;
@@ -561,7 +561,7 @@ static class P {
         }
     }
     // List the RomFS only (path, size, first 32 bytes) without writing game files, except the NRO modules (code the game loads with nn::ro, read like the ExeFS)
-    static void Manifest(Func<IFileSystem> open, string path) {
+    internal static void Manifest(Func<IFileSystem> open, string path) {
         IFileSystem fs = open();
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -570,7 +570,7 @@ static class P {
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
             if (e.Type == DirectoryEntryType.Directory) continue;
             using var f = new UniqueRef<IFile>();
-            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            OpenArchiveFile(fs, ref f.Ref, e.FullPath);
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
             catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); got = 0; }   // the survey goes on; the file is listed as damaged

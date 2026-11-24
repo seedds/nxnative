@@ -3736,7 +3736,7 @@ static int pkg_inner_written(const NvPkg *pk, const tex_t *t) {   // a page whol
     return ie > ia && nvn_dirty_since_span(pk->span, (const void *)ia, ie - ia, pk->stamp);
 }
 static int pkg_edges_clean(NvPkg *pk, const tex_t *t) {   // the covered pages were written since the upload: 1 = only edge pages, and the texture's bytes there are as uploaded
-    if (!pk->edge_n[0] && !pk->edge_n[1]) return 0;
+    if (!pk->span || (!pk->edge_n[0] && !pk->edge_n[1])) return 0;
     uintptr_t r[2][2], ia, ie; pkg_edge_ranges(t, r, &ia, &ie);
     uint64_t st = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size);   // take the stamp, protect, then read (as pkg_upload): a later write is seen at the next check
     if (ie > ia && nvn_dirty_since_span(pk->span, (const void *)ia, ie - ia, pk->stamp)) return 0;
@@ -5637,7 +5637,7 @@ enum { MOVIE_SLOTS = 6, MOVIE_ALIAS_MAX = 8 };
 @end
 typedef struct {
     uintptr_t mem;
-    uint64_t size, owner_serial, gen, uploaded_gen, last_write_ns;
+    uint64_t size, owner_serial, gen, uploaded_gen, uploaded_serial, last_write_ns;
     uint32_t tw, th, fmt, bpb;
     int retired, many_aliases, nalias;
     uint64_t aliases[MOVIE_ALIAS_MAX];
@@ -5648,6 +5648,7 @@ typedef struct {
 static pthread_mutex_t g_movie_mu = PTHREAD_MUTEX_INITIALIZER;
 static nvn_hmap g_movie_pools = {.klen = 8};   // cpu_pool_key(pool) -> malloc'ed nvn_hmap (uintptr_t mem -> movie_tex_t *)
 static _Atomic unsigned g_movie_live_n;
+static _Atomic uint64_t g_movie_gen;   // monotonic across all movie_tex_t lifetimes so restarted decoders never collide with cached NvPkg->movie_gen
 static uint64_t g_movie_trim_last;
 static uint64_t g_movie_kept[8]; static int g_nmovie_kept;   // submit thread only: movie serials written mid-submission, noted at next mtl_sub_begin
 static void movie_kept_add(uint64_t serial) {
@@ -5730,6 +5731,13 @@ static void movie_tex_retire(const tex_t *t) {
     movie_tex_t *mv = movie_lookup_locked(t);
     if (mv && mv->owner_serial == t->serial) mv->retired = 1;
     pthread_mutex_unlock(&g_movie_mu);
+}
+int mtl_tex_movie_active(const tex_t *t) {
+    if (!atomic_load_explicit(&g_movie_live_n, memory_order_relaxed) || !t || !t->mem) return 0;
+    pthread_mutex_lock(&g_movie_mu);
+    int ok = movie_match_locked(movie_lookup_locked(t), t);
+    pthread_mutex_unlock(&g_movie_mu);
+    return ok;
 }
 void mtl_tex_movie_drop(const tex_t *t) {
     if (!atomic_load_explicit(&g_movie_live_n, memory_order_relaxed) || !t || !t->mem) return;
@@ -5859,7 +5867,7 @@ int mtl_tex_movie_write(const tex_t *t, const void *src, int w, int h, size_t ro
         if (!from_ring && mv->nslots < MOVIE_SLOTS) mv->slots[mv->nslots++] = (void *)CFBridgingRetain(picked);
         old_latest = mv->latest;
         mv->latest = (void *)CFBridgingRetain(picked);
-        mv->gen++; mv->last_write_ns = now;
+        mv->gen = atomic_fetch_add_explicit(&g_movie_gen, 1, memory_order_relaxed) + 1; mv->last_write_ns = now;
         notes = movie_notes_take_locked(mv);
         published = 1;
     }
@@ -5902,14 +5910,33 @@ static id<MTLTexture> movie_upload_slot(const tex_t *t, NvMovieLease *lease, id<
     atomic_fetch_add(&g_upload_ns, d_); g_up_total_ns += d_;
     return mt;
 }
+// Build a pixel-format view on a live movie texture that already holds cur_gen (after staging was trimmed)
+static id<MTLTexture> movie_fresh_view(const tex_t *t, uint64_t cur_gen, uint64_t up_ser, uint64_t owner_ser) {
+    uint64_t srcs[2] = {up_ser, owner_ser};
+    for (int i = 0; i < 2; i++) {
+        uint64_t src_ser = srcs[i];
+        if (!src_ser || src_ser == t->serial || (i == 1 && src_ser == srcs[0])) continue;
+        id oh = tex_get(src_ser);
+        if (![oh isKindOfClass:[NvPkg class]]) continue;
+        NvPkg *opk = oh;
+        if (!opk->tex || opk->movie_gen != cur_gen) continue;
+        MTLTextureDescriptor *d = tex_desc(t, 1);
+        if (!d) continue;
+        id<MTLTexture> base = opk->tex.parentTexture ?: opk->tex;
+        id<MTLTexture> v = [base newTextureViewWithPixelFormat:d.pixelFormat textureType:base.textureType levels:NSMakeRange(0, base.mipmapLevelCount) slices:NSMakeRange(0, base.arrayLength) swizzle:base.swizzle];
+        if (v) return v;
+    }
+    return nil;
+}
 // Returns 1 if t is a direct-uploaded movie texture (writing result to *out), 0 otherwise
 static int movie_tex_resolve(const tex_t *t, int off, id<MTLTexture> __strong *owned, void **out) {
     if (!atomic_load_explicit(&g_movie_live_n, memory_order_relaxed) || !t->mem) return 0;
-    uint64_t cur_gen = 0, owner_ser = 0; int matched = 0;
+    uint64_t cur_gen = 0, owner_ser = 0, up_ser = 0; int matched = 0;
     pthread_mutex_lock(&g_movie_mu);
     movie_tex_t *mv = movie_lookup_locked(t);
     if (movie_match_locked(mv, t)) {
         matched = 1; cur_gen = mv->gen; owner_ser = mv->owner_serial;
+        up_ser = mv->uploaded_gen == mv->gen ? mv->uploaded_serial : 0;
         if (t->serial != mv->owner_serial && !mv->many_aliases) {
             int seen = 0; for (int i = 0; i < mv->nalias; i++) if (mv->aliases[i] == t->serial) { seen = 1; break; }
             if (!seen) { if (mv->nalias < MOVIE_ALIAS_MAX) mv->aliases[mv->nalias++] = t->serial; else mv->many_aliases = 1; }
@@ -5921,6 +5948,9 @@ static int movie_tex_resolve(const tex_t *t, int off, id<MTLTexture> __strong *o
     NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;
     if (!pk && !have && !(t->pool && nvn_sparse_pool(t->pool)) && (pk = pkg_shared(t))) tex_put(t->serial, pk);
     if (off) {
+        if (pk && pk->tex && pk->movie_gen == cur_gen) { *out = tex_mtl_result(pk->tex, owned); return 1; }
+        id<MTLTexture> fresh = movie_fresh_view(t, cur_gen, up_ser, owner_ser);
+        if (fresh && (owned || !fresh.parentTexture)) { *out = tex_mtl_result(fresh, owned); return 1; }
         if (pk && pk->tex) { *out = tex_mtl_result(pk->tex, owned); return 1; }
         RED_ONCE(168, "movie texture ser=%llu resolved first off the submit thread: no host texture until the submit thread uploads it", (unsigned long long)t->serial);
         *out = NULL; return 1;
@@ -5943,26 +5973,36 @@ static int movie_tex_resolve(const tex_t *t, int off, id<MTLTexture> __strong *o
         atomic_fetch_add_explicit(&slot->in_flight, 1, memory_order_acq_rel);
         up_gen = mv->gen;
         notes = movie_notes_take_locked(mv);
+    } else if (movie_match_locked(mv, t)) {
+        cur_gen = mv->gen; owner_ser = mv->owner_serial;
+        up_ser = mv->uploaded_gen == mv->gen ? mv->uploaded_serial : 0;
     }
     pthread_mutex_unlock(&g_movie_mu);
     NvMovieLease *lease = nil;
     if (slot) { lease = [NvMovieLease new]; lease->slot = slot; }
     if (!lease) {
-        if (pk && pk->tex) { *out = tex_mtl_result(pk->tex, owned); return 1; }
-        if (owner_ser && owner_ser != t->serial) {
-            id oh = tex_get(owner_ser);
-            if ([oh isKindOfClass:[NvPkg class]] && ((NvPkg *)oh)->tex) {
-                MTLTextureDescriptor *d = tex_desc(t, 1);
-                id<MTLTexture> base = ((NvPkg *)oh)->tex;
-                id<MTLTexture> v = d ? [base newTextureViewWithPixelFormat:d.pixelFormat textureType:base.textureType levels:NSMakeRange(0, base.mipmapLevelCount) slices:NSMakeRange(0, base.arrayLength) swizzle:base.swizzle] : nil;
-                if (v) {
-                    pk = [NvPkg new]; pk->mem = (uintptr_t)t->mem; pk->size = t->L.size; pk->used_tu = g_tu_now;
-                    pk->lost_gen = atomic_load(&g_up_lost_gen); pk->sub = g_sub_serial; pk->tex = v; pk->movie_gen = cur_gen;
-                    tex_put(t->serial, pk);
-                    *out = tex_mtl_result(v, owned); return 1;
+        id<MTLTexture> v = movie_fresh_view(t, cur_gen, up_ser, owner_ser);
+        if (v) {
+            if (pk) {
+                id<MTLTexture> old = pk->tex;
+                pk->tex = v; pk->stored = 0; pk->part = 0; pk->span = NULL; pkg_edges_drop(pk); pk->movie_gen = cur_gen; pk->sub = g_sub_serial;
+                if (old && old != v) {
+                    if (old.parentTexture) defer_obj_unref(old);
+                    else {
+                        if (pk->spare && pk->spare != v) defer_obj_release(pk->spare);
+                        pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk);
+                    }
                 }
+                own_note(t->serial);
+            } else {
+                pk = [NvPkg new]; pk->mem = (uintptr_t)t->mem; pk->size = t->L.size; pk->used_tu = g_tu_now;
+                pk->lost_gen = atomic_load(&g_up_lost_gen); pk->sub = g_sub_serial; pk->tex = v; pk->movie_gen = cur_gen;
+                tex_put(t->serial, pk);
+                if (!(t->pool && nvn_sparse_pool(t->pool))) pkg_share_put(t, pk);
             }
+            *out = tex_mtl_result(v, owned); return 1;
         }
+        if (pk && pk->tex) { *out = tex_mtl_result(pk->tex, owned); return 1; }
         *out = NULL; return 1;
     }
     id<MTLTexture> reuse = nil; MTLTextureUsage keep = 0;
@@ -5977,9 +6017,13 @@ static int movie_tex_resolve(const tex_t *t, int off, id<MTLTexture> __strong *o
     if (!nt) { *out = pk ? tex_mtl_result(pk->tex, owned) : NULL; return 1; }
     if (pk) {
         id<MTLTexture> old = pk->tex;
-        pk->tex = nt; pk->stored = 0; pk->part = 0; pk->span = NULL; pk->movie_gen = up_gen; pk->sub = g_sub_serial;
-        if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);
-        pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk);
+        pk->tex = nt; pk->stored = 0; pk->part = 0; pk->span = NULL; pkg_edges_drop(pk); pk->movie_gen = up_gen; pk->sub = g_sub_serial;
+        if (old.parentTexture) {
+            defer_obj_unref(old);
+        } else {
+            if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);
+            pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk);
+        }
         g_pkg_reuploads++;
     } else {
         pk = [NvPkg new];
@@ -5992,7 +6036,7 @@ static int movie_tex_resolve(const tex_t *t, int off, id<MTLTexture> __strong *o
     }
     pthread_mutex_lock(&g_movie_mu);
     mv = movie_lookup_locked(t);
-    if (mv && mv->gen >= up_gen && up_gen > mv->uploaded_gen) mv->uploaded_gen = up_gen;
+    if (mv && mv->gen >= up_gen && up_gen >= mv->uploaded_gen) { mv->uploaded_gen = up_gen; mv->uploaded_serial = t->serial; }
     pthread_mutex_unlock(&g_movie_mu);
     movie_notes_emit(&notes);
     *out = tex_mtl_result(pk->tex, owned); return 1;
@@ -6492,11 +6536,15 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
             uint64_t st, vg = nvn_sparse_gen(), b0 = g_bp_up_bytes, lg = atomic_load(&g_up_lost_gen), t0 = bp_now(); unsigned taken = 0;
             id<MTLTexture> nt = pkg_upload(t, &st, reuse, pk->tex.usage, whole ? nil : pk->tex, pk->span, pk->stamp, &taken);
             reup_note(pk, t, taken, g_bp_up_bytes - b0, bp_now() - t0);
-            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; pk->part = taken != 0; if (!taken) pk->lost_gen = lg;
-                if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
+            if (nt) { id<MTLTexture> old = pk->tex; pk->tex = nt; pk->stored = 0; pk->movie_gen = 0; pk->part = taken != 0; if (!taken) pk->lost_gen = lg;
+                if (old.parentTexture) defer_obj_unref(old);
+                else {
+                    if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
+                    pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk);
+                }
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
-                pk->spare = old; pk->spare_fence = g_fence + 1; spare_note(pk); own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
+                own_note(t->serial); pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = st; g_pkg_reuploads++; pkg_hash_take(pk, t); pkg_edges_take(pk, t); }
             if (nt && !pk->sparse) bcp_up_follow(t, nt);   // the CPU's bytes reach the other side of a compressed-alias pair too
             return tex_mtl_result(pk->view ? pk->view : pk->tex, owned);
         }
@@ -6515,6 +6563,7 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         if (!pk->sparse) { pkg_share_put(t, pk); bcp_up_follow(t, pk->tex); }   // the CPU's bytes reach the other side of a compressed-alias pair too
         return tex_mtl_result(pk->view ? pk->view : pk->tex, owned);
     }
+    if ([have isKindOfClass:[NvPkg class]]) have = nil;   // a movie texture dropped back to non-packaged (e.g. buffer-backed linear): rebuild as an MTLTexture below
     // An sRGB / linear view whose parent left the sharing table (upgraded, or evicted with its pool; a takeover leaves a held view's parent) no longer shares the storage's bytes: dropped,
     // live or finalized (its ghost entry), and made again below on what holds them now. serial_del took only a live entry, so a finalized serial kept resolving to the stale view
     // whenever making the new texture failed, and to any thread in between
@@ -22329,19 +22378,55 @@ static void snap_drain(int strict) {
         if (strict) MDIE("present snapshots: GPU did not drain within 10 s");
     }
 }
-uint64_t mtl_snap_acquire_wait(void) {
-    if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
+static int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns);
+int mtl_snap_acquire_wait_timeout(uint64_t timeout_ns, uint64_t *waited_ns) {
+    if (waited_ns) *waited_ns = 0;
+    if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
     int k = (int)(atomic_load(&g_snap_next) % (uint64_t)g_snap_n);
     uint64_t ticket = atomic_load(&g_snap[k].ticket), ev = atomic_load(&g_snap[k].ev), w0 = ws_t0();
+    uint64_t start = now_ns();
+    uint64_t deadline = timeout_ns == UINT64_MAX || timeout_ns > UINT64_MAX - start ? UINT64_MAX : start + timeout_ns;
     pthread_mutex_lock(&g_pq_mu); int blocked = ticket > g_pq_done; pthread_mutex_unlock(&g_pq_mu);
-    if (ticket) mtl_present_wait(ticket);
+    if (ticket) {
+        if (timeout_ns == UINT64_MAX) mtl_present_wait(ticket);
+        else if (!mtl_present_wait_timeout(ticket, timeout_ns)) {
+            if (ws_on()) ws_put(WS_SNAP, w0, blocked);
+            if (waited_ns) *waited_ns = ws_t0() - w0;
+            return 0;
+        }
+    }
     if (ev && !atomic_load(&g_present_discard) && g_snap_ev.signaledValue < ev) {
         blocked = 1;
-        // On timeout present falls back to its original texture; the busy allocator is never reset.
-        if (![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(111, "present snapshots: the previous copy into a ring slot did not finish within 2 s");
+        if (timeout_ns == UINT64_MAX) {
+            // On timeout present falls back to its original texture; the busy allocator is never reset.
+            if (![g_snap_ev waitUntilSignaledValue:ev timeoutMS:2000]) RED_ONCE(111, "present snapshots: the previous copy into a ring slot did not finish within 2 s");
+        } else {
+            uint64_t now = now_ns(), rem = now >= deadline ? 0 : deadline - now;
+            if (!rem) {
+                if (ws_on()) ws_put(WS_SNAP, w0, blocked);
+                if (waited_ns) *waited_ns = ws_t0() - w0;
+                return 0;
+            }
+            uint64_t ms = (rem + 999999ull) / 1000000ull;
+            if (ms > 2000) ms = 2000;
+            if (![g_snap_ev waitUntilSignaledValue:ev timeoutMS:ms]) {
+                if (rem > 2000000000ull) RED_ONCE(111, "present snapshots: the previous copy into a ring slot did not finish within 2 s");
+                if (g_snap_ev.signaledValue < ev && !atomic_load(&g_present_discard)) {
+                    if (ws_on()) ws_put(WS_SNAP, w0, blocked);
+                    if (waited_ns) *waited_ns = ws_t0() - w0;
+                    return 0;
+                }
+            }
+        }
     }
     if (ws_on()) ws_put(WS_SNAP, w0, blocked);
-    return ws_t0() - w0;
+    if (waited_ns) *waited_ns = ws_t0() - w0;
+    return 1;
+}
+uint64_t mtl_snap_acquire_wait(void) {
+    uint64_t w = 0;
+    mtl_snap_acquire_wait_timeout(UINT64_MAX, &w);
+    return w;
 }
 int mtl_snap_acquire_ready(void) {
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
@@ -22502,18 +22587,20 @@ int mtl_present_screen_ready(void) {
     pthread_mutex_unlock(&g_pq_mu);
     return have >= want;
 }
-uint64_t mtl_present_screen_wait(double period) {
+int mtl_present_screen_wait_timeout(double period, uint64_t timeout_ns, uint64_t *waited_ns) {
+    if (waited_ns) *waited_ns = 0;
     present_screen_init();
-    if (!sw_on(g_sdw_mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 0;
+    if (!sw_on(g_sdw_mode) || link_on() || g_classic || mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
     if (!(period > 0)) period = 1.0 / 60;
-    uint64_t t0 = now_ns(); int waited = 0, to = 0;
+    uint64_t t0 = now_ns(); int waited = 0, to = 0, ok = 1;
     pthread_mutex_lock(&g_pq_mu);
     // A flag, not the ticket: a screen that has reported no present at all (newest seen 0: a window covered from its first frame, a headless run) is silent too, and with 0 read
     // as "not silent" every acquire waited the whole two periods, a third of the frame rate for the run
-    if (g_sdw_silent && atomic_load(&g_pres_seen) == g_sdw_silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 0; }
-    g_sdw_silent = 0;
-    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); uint64_t tmo = (uint64_t)(2 * period * 1e9);
-    ts.tv_sec += tmo / 1000000000ull; ts.tv_nsec += tmo % 1000000000ull; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    if (g_sdw_silent && atomic_load(&g_pres_seen) == g_sdw_silent_seen) { pthread_mutex_unlock(&g_pq_mu); return 1; }
+    uint64_t sil_tmo = (uint64_t)(2 * period * 1e9);
+    int caller_capped = timeout_ns < sil_tmo;
+    uint64_t wait_tmo = caller_capped ? timeout_ns : sil_tmo;
+    uint64_t stop = wait_tmo > UINT64_MAX - t0 ? UINT64_MAX : t0 + wait_tmo;
     // Counted in the game's presents, not the replay's: g_pq_in grows only when the queue worker replays a present, a variable time after the game recorded it, and against
     // that stale count the acquire was released early (a short frame) and then held (a long one): the game's present calls ran 25, 25, 48 ms apart at a 30 fps cap while the
     // replay and the screen were even. A present recorded in game frame f waits until the present of frame f - depth is shown. Without recorded presents: the replay's count
@@ -22521,15 +22608,29 @@ uint64_t mtl_present_screen_wait(double period) {
         uint64_t rf = atomic_load(&g_rec_frame), want, have; int byframe = rf > 0;
         if (byframe) { want = rf > (uint64_t)g_sdw_depth ? rf - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_seen_frame); }
         else { want = g_pq_in > (uint64_t)g_sdw_depth ? g_pq_in - (uint64_t)g_sdw_depth : 0; have = atomic_load(&g_pres_seen); }
-        if (have >= want || atomic_load(&g_present_discard)) break;
+        if (have >= want || atomic_load(&g_present_discard)) { g_sdw_silent = 0; break; }
+        uint64_t now = now_ns();
+        if (now >= stop) {
+            if (caller_capped) ok = 0;   // caller's own deadline expired before the 2-period screen-silence threshold: do not latch g_sdw_silent
+            else { to = 1; g_sdw_silent = 1; g_sdw_silent_seen = atomic_load(&g_pres_seen); }
+            break;
+        }
+        g_sdw_silent = 0;
         waited = 1;
-        if (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) == ETIMEDOUT) { if ((byframe ? atomic_load(&g_seen_frame) : atomic_load(&g_pres_seen)) < want) { to = 1; g_sdw_silent = 1; g_sdw_silent_seen = atomic_load(&g_pres_seen); } break; }
+        uint64_t left = stop - now;
+        struct timespec rel = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+        pthread_cond_timedwait_relative_np(&g_pq_cv, &g_pq_mu, &rel);
     }
     pthread_mutex_unlock(&g_pq_mu);
     uint64_t dt = now_ns() - t0;
-    if (waited) { atomic_fetch_add(&g_sdw_n, 1); atomic_fetch_add(&g_sdw_ns, dt); }
+    if (waited) { atomic_fetch_add(&g_sdw_n, 1); atomic_fetch_add(&g_sdw_ns, dt); if (waited_ns) *waited_ns = dt; }
     if (to) { atomic_fetch_add(&g_sdw_to, 1); static int nred; if (nred++ < 3) MLOG("present: the screen reported no frame for %.0f ms while %llu presents wait (newest seen %llu); the acquire stops waiting for the screen until it reports again", 2 * period * 1e3, (unsigned long long)g_pq_in, (unsigned long long)atomic_load(&g_pres_seen)); }
-    return waited ? dt : 0;
+    return ok;
+}
+uint64_t mtl_present_screen_wait(double period) {
+    uint64_t dt = 0;
+    mtl_present_screen_wait_timeout(period, UINT64_MAX, &dt);
+    return dt;
 }
 void mtl_present_wait_texture(uint64_t tk, uint64_t ev) {
     if (!ev) { mtl_present_wait(tk); return; }
@@ -22545,27 +22646,56 @@ int mtl_present_texture_ready(uint64_t tk, uint64_t ev) {
     pthread_mutex_unlock(&g_pq_mu);
     return ok;
 }
-void mtl_present_wait(uint64_t tk) {
+static int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns) {
+    uint64_t start = timeout_ns == UINT64_MAX ? 0 : now_ns();
+    uint64_t dl = timeout_ns == UINT64_MAX || timeout_ns > UINT64_MAX - start ? UINT64_MAX : start + timeout_ns;
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_done < tk && !atomic_load(&g_present_discard)) {
-        if (!g_link_owns_layer) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }
-        if (g_pq_read >= tk) { pthread_cond_wait(&g_pq_cv, &g_pq_mu); continue; }   // This one has already been taken by the display link and is being presented: wait for it to be handed to the GPU (the GPU completion callback will wake us)
+        uint64_t left = UINT64_MAX;
+        if (dl != UINT64_MAX) {
+            uint64_t now0 = now_ns();
+            if (now0 >= dl) { pthread_mutex_unlock(&g_pq_mu); return 0; }
+            left = dl - now0;
+        }
+        if (!g_link_owns_layer || g_pq_read >= tk) {   // without link, or already taken by display link: wait until handed to GPU
+            if (left == UINT64_MAX) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
+            else { struct timespec rel = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)}; pthread_cond_timedwait_relative_np(&g_pq_cv, &g_pq_mu, &rel); }
+            continue;
+        }
         uint64_t pns = link_probe_ns(), wait_ns = STALL_NS;
         if (g_link_probe_at && dm_focus_now() == 1) {
             uint64_t pnow = now_ns(), psince = dm_focus_in_since(), pfrom = g_link_probe_at > psince ? g_link_probe_at : psince;
             uint64_t pel = pnow >= pfrom ? pnow - pfrom : 0, rem = pel >= pns ? 0 : pns - pel;
             if (rem < wait_ns) wait_ns = rem;
         }
+        if (!g_stall_t0 && left < wait_ns) {   // caller's deadline is shorter than the stall threshold: wait without triggering a stall drop
+            struct timespec rel = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+            pthread_cond_timedwait_relative_np(&g_pq_cv, &g_pq_mu, &rel);
+            continue;
+        }
         struct timespec ts = link_deadline(wait_ns);
         // Already determined to be in a stall (when the display link comes back the callback first clears g_stall_t0, then records the display-link tick time): no longer wait 100 ms in vain every frame, drop directly, and the game proceeds by its own display-link wait timeout (about two ticks)
         if (!g_stall_t0 && wait_ns && (pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT || g_pq_done >= tk)) continue;
         uint64_t now = now_ns(), last = __atomic_load_n(&g_link_tick_ns, __ATOMIC_RELAXED);
+        if (dl != UINT64_MAX && now >= dl) { pthread_mutex_unlock(&g_pq_mu); return 0; }
         if (g_pq_read >= tk) continue;
         int active = dm_focus_now() == 1; uint64_t since = dm_focus_in_since();
         uint64_t pfrom = g_link_probe_at > since ? g_link_probe_at : since;
         uint64_t pelapsed = now >= pfrom ? now - pfrom : 0;
         int probe_failed = active && g_link_probe_at && pelapsed >= pns;
-        if (!probe_failed && (now < last || now - last < STALL_NS)) { ts = link_deadline(wait_ns ? wait_ns : STALL_NS); pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts); continue; }   // The display link is still running, it is just not this one's turn yet: keep waiting (bounded, no busy spinning)
+        if (!probe_failed && (now < last || now - last < STALL_NS)) {
+            uint64_t w = wait_ns ? wait_ns : STALL_NS;
+            if (dl != UINT64_MAX && dl - now < w) w = dl - now;
+            struct timespec rel = {(time_t)(w / 1000000000ull), (long)(w % 1000000000ull)};
+            pthread_cond_timedwait_relative_np(&g_pq_cv, &g_pq_mu, &rel);
+            continue;
+        }   // The display link is still running, it is just not this one's turn yet: keep waiting (bounded, no busy spinning)
+        if (dl != UINT64_MAX && g_pq_inflight) {   // wait for an active present to finish before dropping later tickets, honoring caller deadline
+            uint64_t w = dl - now;
+            struct timespec rel = {(time_t)(w / 1000000000ull), (long)(w % 1000000000ull)};
+            pthread_cond_timedwait_relative_np(&g_pq_cv, &g_pq_mu, &rel);
+            continue;
+        }
         uint64_t n = tk - g_pq_read;
         for (uint64_t k = g_pq_read + 1; k <= tk; k++) { nvn_present_history_put(&g_present_history, k, -1); mtl_tex_unpin(g_pq[(k-1)%PQ].t.serial); }
         g_link_dropped += n; g_pq_read = tk;
@@ -22592,7 +22722,9 @@ void mtl_present_wait(uint64_t tk) {
         if (active && !g_stall_red && elapsed >= STALL_RED_NS) { g_stall_red = 1; MLOG("[RED] display link silent for %.1f s while active; presenting relies entirely on fallback frame drops, the picture is frozen", elapsed / 1e9); }
     }
     pthread_mutex_unlock(&g_pq_mu);
+    return 1;
 }
+void mtl_present_wait(uint64_t tk) { mtl_present_wait_timeout(tk, UINT64_MAX); }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
 void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }

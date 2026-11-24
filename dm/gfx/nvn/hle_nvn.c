@@ -2186,6 +2186,7 @@ static _Atomic uint64_t g_screen_at;   // when the screen wait released the acqu
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
+int mtl_present_screen_wait_timeout(double period, uint64_t timeout_ns, uint64_t *waited_ns);   // nvn_mtl.m
 
 // Deferred acquire wait (NVN semantics): nvnWindowAcquireTexture returns the texture index immediately and binds the display-release pacing wait and previous-present ticket wait
 // to the returned NVNsync (fenced == 4). Games that record draw work between AcquireTexture and nvnSyncWait (Super Mario Bros. Wonder – Nintendo Switch 2 Edition measures its CPU
@@ -2253,6 +2254,12 @@ static int acq_pace_ready(const win_t *o, uint64_t at) {
     }
     return mtl_snap_acquire_ready();
 }
+static inline uint64_t acq_rem_ns(uint64_t timeout_ns, uint64_t deadline) {
+    if (timeout_ns == UINT64_MAX) return UINT64_MAX;
+    if (!timeout_ns) return 0;
+    uint64_t now = now_ns();
+    return now >= deadline ? 0 : deadline - now;
+}
 static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t deadline, int *waited) {
     uint64_t now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
     int follow = 1;
@@ -2279,8 +2286,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             follow = 0;
             if (wait) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
         }
-        if (!present_unpaced(o) && timeout_ns > 0) {
-            uint64_t sw = mtl_present_screen_wait(period / 1e9);   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
+        if (!present_unpaced(o)) {
+            uint64_t sw = 0;
+            if (!mtl_present_screen_wait_timeout(period / 1e9, acq_rem_ns(timeout_ns, deadline), &sw)) return 0;   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
             if (sw) { *waited = 1; atomic_store(&g_screen_at, now_ns()); }
         }
         drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
@@ -2299,8 +2307,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             g_det_last = now_ns();
         }
     }
-    if (timeout_ns > 0) {
-        uint64_t sa = mtl_snap_acquire_wait();   // ring capacity is waited for before drawing, where the game does not hold its present lock
+    {
+        uint64_t sa = 0;
+        if (!mtl_snap_acquire_wait_timeout(acq_rem_ns(timeout_ns, deadline), &sa)) return 0;   // ring capacity is waited for before drawing, where the game does not hold its present lock
         if (sa) *waited = 1;
         pace_ns += sa;
     }
@@ -4740,7 +4749,6 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         return;
     }
     if (!r->width || !r->height) return;
-    mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
     // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
     // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
     // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
@@ -4752,11 +4760,30 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
                                               t->d.width, t->d.height, t->d.format, t->d.target, srow, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, nz);
             return;
         }
+        int whole_l0 = !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
         dm_guest_write_prepare(t->mem, t->L.size);
+        if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+            NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+            mtl_read_texels(t, 0, 0, &full, t->mem, srow, srow * (size_t)t->d.height);
+        }
+        mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
         for (size_t y = 0; y < hb; y++) memcpy(t->mem + (y0 + y) * srow + x0, src + y * row0, wb);
         mtl_tex_linear_cpu_written(t);
         return;
     }
+    int whole_l0 = !level && !layer0 && !r->zoffset && !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
+    if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+        size_t l0_row = (size_t)t->d.width * (size_t)bpb;
+        uint8_t *tmp = malloc(l0_row * (size_t)t->d.height);
+        if (!tmp) die("WriteTexels movie readback allocation failed");
+        NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+        mtl_read_texels(t, 0, 0, &full, tmp, l0_row, l0_row * (size_t)t->d.height);
+        dm_guest_write_prepare(t->mem, t->L.size);
+        if (nvn_swizzle(&t->d, 0, 0, tmp, l0_row, t->mem))
+            ONCE_LOG("[RED] WriteTexels movie materialize swizzle failed (format %#x target %d)", t->d.format, t->d.target);
+        free(tmp);
+    }
+    mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);

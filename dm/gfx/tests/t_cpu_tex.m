@@ -525,6 +525,18 @@ static void queued_movie_snapshot(int linear) {
     movie_trim(1);
     memset(got, 0, sizeof got); h_nvnTextureReadTexels(&tex, NULL, &r4, got);
     CHECK(!memcmp(got, first, 64), "ReadTexels still returns last movie frame after staging trim");
+    // Partial 1x1 WriteTexels preserves the other 15 decoded pixels on both block-linear and linear textures
+    {
+        uint8_t exp[64]; memcpy(exp, first, 64);
+        NVNcopyRegion r1 = {2, 1, 0, 1, 1, 1};
+        uint8_t px[4] = {0x11, 0x22, 0x33, 0x44};
+        memcpy(exp + (1 * 4 + 2) * 4, px, 4);
+        h_nvnTextureWriteTexels(&tex, NULL, &r1, px);
+        mtl_sub_begin(); id<MTLTexture> im = tex_by_id(10);
+        CHECK(im != nil && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial WriteTexels after movie trim resolves");
+        readback_tex(im, 4, 4, got);
+        CHECK(!memcmp(got, exp, 64), linear ? "linear partial WriteTexels preserves 15 untouched movie pixels" : "block-linear partial WriteTexels preserves 15 untouched movie pixels");
+    }
     mtl_reg_tex(10, NULL, NULL);
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); mtl_drain(); munmap(mem, len);
 }
@@ -569,6 +581,45 @@ static void movie_alias_and_lifecycle(void) {
     h_nvnTextureWriteTexels(&a, NULL, &r4, wt);
     mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "WriteTexels takeover upload completes");
     readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, wt, 64), "WriteTexels cleanly overrides prior direct movie staging");
+    // Restarting a movie decoder after a full guest WriteTexels must upload frame 1 (no gen==1 collision)
+    uint8_t g115[64], m143[64]; memset(g115, 115, sizeof g115); memset(m143, 143, sizeof m143);
+    h_nvnTextureWriteTexels(&a, NULL, &r4, g115);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "full guest write 115 completes");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, g115, 64), "guest write 115 sampled before decoder restart");
+    nvn_host_write_texture(&a, m143, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "restarted movie frame 1 upload completes");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, m143, 64), "restarted decoder frame 1 displays 143 instead of stale guest 115");
+    // Trimmed staging: owner advances from 77 to 99 while sRGB alias is behind; after movie_trim(1), sRGB alias must sample 99
+    uint8_t m77[64], m99[64], m123[64]; memset(m77, 77, sizeof m77); memset(m99, 99, sizeof m99); memset(m123, 123, sizeof m123);
+    nvn_host_write_texture(&a, m77, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); is = tex_by_id(13);
+    CHECK(ia && is && mtl_wait(mtl_sub_commit(), 5000000000ull), "owner and sRGB alias sync on frame 77");
+    nvn_host_write_texture(&a, m99, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "owner advances to frame 99");
+    movie_trim(1);
+    mtl_sub_begin(); is = tex_by_id(13); CHECK(is && mtl_wait(mtl_sub_commit(), 5000000000ull), "stale sRGB alias resolves after staging trim");
+    readback_tex(is, 4, 4, got); CHECK(!memcmp(got, m99, 64), "sRGB alias samples 99 (not stale 77) after staging trim");
+    // Reverse direction: sRGB alias uploads 123, staging trims, then owner resolves and must sample 123
+    nvn_host_write_texture(&a, m123, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); is = tex_by_id(13); CHECK(is && mtl_wait(mtl_sub_commit(), 5000000000ull), "sRGB alias advances to frame 123");
+    movie_trim(1);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "stale owner resolves after staging trim");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, m123, 64), "owner samples 123 after alias uploaded and staging trimmed");
+    // Partial 1x1 WriteTexels preserves the other 15 decoded movie pixels both before and after staging trim
+    for (int trimmed = 0; trimmed < 2; trimmed++) {
+        uint8_t base[64], exp[64]; for (int i = 0; i < 64; i++) base[i] = (uint8_t)(20 + i * 3);
+        memcpy(exp, base, 64);
+        nvn_host_write_texture(&a, base, 4, 4, 16, NULL, NULL);
+        mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial-edit movie frame uploaded");
+        if (trimmed) movie_trim(1);
+        NVNcopyRegion r1 = {1, 2, 0, 1, 1, 1};
+        uint8_t px[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+        memcpy(exp + (2 * 4 + 1) * 4, px, 4);
+        h_nvnTextureWriteTexels(&a, NULL, &r1, px);
+        mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial WriteTexels over movie completes");
+        readback_tex(ia, 4, 4, got);
+        CHECK(!memcmp(got, exp, 64), trimmed ? "partial WriteTexels after trim keeps all 15 untouched movie pixels" : "partial WriteTexels before trim keeps all 15 untouched movie pixels");
+    }
     // Finalize + re-initialize over same storage does not inherit retired movie frames
     nvn_host_write_texture(&a, f1, 4, 4, 16, NULL, NULL);
     mtl_reg_tex(11, NULL, NULL); mtl_reg_tex(12, NULL, NULL); mtl_reg_tex(13, NULL, NULL);

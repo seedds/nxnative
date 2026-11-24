@@ -2978,30 +2978,95 @@ def mgfx_effect(d, p, label):
     if r.p > len(d) or xnb and d[r.p:].strip(b'\0'): red(f'{label} MGFX @{p:#x}: the effect ends at {r.p:#x}, the file at {len(d):#x}')
     return out
 
+def _xnb_varint(buf, pos):
+    """Read a non-negative .NET 7-bit encoded int at buf[pos:] → (value, next_pos), (None, pos) if short, or (-1, pos) if malformed."""
+    val = sh = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        val |= (b & 0x7f) << sh
+        if b < 0x80: return val, pos
+        sh += 7
+        if sh >= 35: return -1, pos
+    return None, pos
+
+def _xnb_has_effect_reader(d):
+    """Whether an uncompressed XNB buffer (with or without its 10-byte XNB header) lists an .EffectReader in its type reader table."""
+    if d[:3] == b'XNB':
+        if len(d) < 11 or (d[4] == 5 and d[5] & 0xC0): return False
+        pos = 10
+    else:
+        pos = 0
+    n, pos = _xnb_varint(d, pos)
+    if n is None or not 0 <= n <= 0x10000: return False
+    for _ in range(n):
+        ln, pos = _xnb_varint(d, pos)
+        if ln is None or not 0 <= ln <= 0x10000 or pos + ln + 4 > len(d): return False
+        if b'.EffectReader' in d[pos:pos + ln]: return True
+        pos += ln + 4
+    return False
+
 def mgfx_shaders(d, label):
     out = []
     for m in re.finditer(MGFX, d): out += mgfx_effect(d, m.start(), label) or []
-    if label.lower().endswith(('.xnb', '.zxnb')) and b'.EffectReader' in d[:0x200] and not out:
+    if label.lower().endswith(('.xnb', '.zxnb')) and (_xnb_has_effect_reader(d) or b'.EffectReader' in d[:0x200]) and not out:
         red(f'{label}: an XNB effect without an MGFX version 5, 8 or 10 effect of NVN shaders')
     return out
 
 def zxnb_effect(path, label):
     """Peek a raw-DEFLATE .zxnb (Tribute Games' ParisEngine: TMNT: Shredder's Revenge has 1,547, only 13 effects):
-    return the full decompressed XNB only when the stream begins with an XNB EffectReader header, b'' for other raw-DEFLATE
-    .zxnb assets (textures, fonts, SoundEffectReader audio), or None if the file is not raw DEFLATE."""
+    parse the XNB header and type reader table incrementally and return the full decompressed XNB only when a reader entry
+    names .EffectReader (or the XNB itself is LZX/LZ4-compressed), b'' for other raw-DEFLATE .zxnb assets (textures, fonts,
+    SoundEffectReader audio), or None if the file is not raw DEFLATE."""
     limit = max(GZIP_FLOOR, NEST * os.path.getsize(path))
     with open(path, 'rb') as f:
-        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), b''
-        try:
-            while len(head) < 0x200 and not dec.eof:
+        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), bytearray()
+        def pull(need):
+            while len(head) < need and not dec.eof and len(head) <= limit:
+                want = min(need, limit + 1) - len(head)
+                if dec.unconsumed_tail:
+                    head.extend(dec.decompress(dec.unconsumed_tail, want))
+                    continue
                 chunk = f.read(4096)
                 if not chunk: break
-                head += dec.decompress(chunk, 0x200 - len(head))
+                head.extend(dec.decompress(chunk, want))
+        def read_varint(pos):
+            val = sh = 0
+            while True:
+                pull(pos + 1)
+                if pos >= len(head): return None, pos
+                b = head[pos]; pos += 1
+                val |= (b & 0x7f) << sh
+                if b < 0x80: return val, pos
+                sh += 7
+                if sh >= 35: return -1, pos
+        try:
+            pull(10)
         except zlib.error:
             return None
-        if head[:3] != b'XNB' or b'.EffectReader' not in head:
+        if len(head) < 10 or head[:3] != b'XNB':
             return b''
-        out, total = [head], len(head)
+        is_effect = head[4] == 5 and bool(head[5] & 0xC0)
+        if not is_effect:
+            try:
+                n, pos = read_varint(10)
+                if n is not None and 0 <= n <= 0x10000:
+                    for _ in range(n):
+                        ln, pos = read_varint(pos)
+                        if ln is None or not 0 <= ln <= 0x10000: break
+                        pull(pos + ln + 4)
+                        if len(head) > limit: red(f'{label}: raw-DEFLATE stream expands beyond its {limit:#x} byte budget')
+                        if pos + ln > len(head):
+                            if not dec.eof: red(f'{label}: truncated raw-DEFLATE stream')
+                            break
+                        if b'.EffectReader' in head[pos:pos + ln]:
+                            is_effect = True
+                            break
+                        pos += ln + 4
+            except zlib.error as e:
+                red(f'{label}: invalid raw-DEFLATE stream ({e})')
+        if not is_effect:
+            return b''
+        out, total = [bytes(head)], len(head)
         try:
             if dec.unconsumed_tail:
                 part = dec.decompress(dec.unconsumed_tail, limit - total + 1)

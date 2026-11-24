@@ -40,7 +40,7 @@ static id<MTLRenderPipelineState> wl_pso(NvProg *pr) {
     return ps;
 }
 // 1: drawn (or nothing to draw); 0: the caller draws the line 1 pixel wide
-static int wl_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
+static __attribute__((noinline, cold)) int wl_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     NvShader *vs = pr->sh[0];
     static int red;
     #define WL_NO(why) do { if (red++ < 6) MLOG("[RED] wide line (width %.2f, vertex %s) drawn 1 pixel wide: %s", S.line_width, vs->key, why); return 0; } while (0)

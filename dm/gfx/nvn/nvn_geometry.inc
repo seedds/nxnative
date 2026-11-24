@@ -103,11 +103,12 @@ static id<MTLRenderPipelineState> geo_capture_pso(NvShader *vs) {
 // One diagnostic snapshot through the same native vertex fetch as geometry
 // capture. Refuse shaders with writes: observing them must not run their side
 // effects twice. Records retain the documented 144-word geometry capture ABI.
-static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
+static int g_vsdump_on = -1;
+static __attribute__((noinline, cold)) void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
     static const char *key, *path; static int configured, captured, limit; static uint64_t frame;
     if (!configured) { key = getenv("DM_NVN_VSDUMP_KEY"); path = getenv("DM_NVN_VSDUMP");
         const char *f = getenv("DM_NVN_VSDUMP_FROM"), *n = getenv("DM_NVN_VSDUMP_MAX");
-        frame = f ? strtoull(f,NULL,0) : 0; limit = n ? atoi(n) : key && !strcmp(key,"*") ? 256 : 1; configured = 1; }
+        frame = f ? strtoull(f,NULL,0) : 0; limit = n ? atoi(n) : key && !strcmp(key,"*") ? 256 : 1; configured = 1; g_vsdump_on = (key && path) ? 1 : 0; }
     int all = key && !strcmp(key,"*");
     if (captured >= limit || !key || !path || atomic_load(&g_cur_frame) < frame || !vs || (!all && strncmp(vs->key, key, 16)) || !vs->geo_fn ||
         (dw ? dw->ind || dw->mdi_cnt : di->ind || di->mdi_cnt) || S.rast_discard) return;
@@ -150,7 +151,7 @@ static void vertex_dump(NvShader *vs, const p_draw *dw, const p_draw_idx *di) {
     MLOG("vertex dump %s: first %u, count %llu, %s", vs->key, lo, (unsigned long long)span, filename);
     args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
 }
-static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
+static void geo_draw(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
 // A draw whose capture would need more scratch than the bound, drawn as smaller draws in the hardware's order: one instance at a time, then runs of a list topology's primitives
 // (points, lines, triangles, lines and triangles with adjacency), each with its own index range. The capture lays the vertices out by vertex number from the lowest index to the highest for
 // every instance, and the geometry shader's output takes room per primitive: OCTOPATH TRAVELER II draws 129,032 triangles of one mesh through a cube shadow map's geometry shader in its
@@ -226,7 +227,7 @@ static int geo_split(NvProg *pr, const p_draw *dw, const p_draw_idx *di, int cou
     return 1;
 }
 
-static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
+static void geo_draw_(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
 static int g_geo_split_compute = -1, g_geo_full_colors = -1, g_geo_pack_legacy = -1;
 static int geo_pack_legacy(void) { if (g_geo_pack_legacy < 0) { const char *e = getenv("DM_NVN_GEOMETRY_PACK"); g_geo_pack_legacy = e && !strcmp(e, "legacy"); } return g_geo_pack_legacy; }
 static uint64_t g_geo_pack_small, g_geo_pack_large;
@@ -278,6 +279,10 @@ static int geo_color_omit_(void);
 static int geo_color_omit(void) {
     if (g_geo_full_colors < 0) { const char *e = getenv("DM_NVN_GEOMETRY_COLOR"); g_geo_full_colors = e && !strcmp(e, "full"); }
     if (g_geo_full_colors || !R.has_rt || !R.rt.depth || R.clear_d || R.clear_s) return 0;
+    // Fast path when a render pass is already open and neither targets nor chmask nor clears changed since the last check.
+    static uint64_t last_pass, last_setrt, last_sgen; static int last_r = -1;
+    uint64_t clr_c; memcpy(&clr_c, R.clear_c, 8);
+    if (last_r >= 0 && pc_tp() == g_pc_rep_tp && g_enc && g_pass.serial == last_pass && g_setrt_n == last_setrt && g_mpso_sgen == last_sgen && !clr_c) return last_r;
     // The answer of the last call with the same targets (each tex_t with its serial, so another texture at the same address does not match), views, clears and color
     // mask: resolving every attachment's Metal texture a draw was about 15 % of a mesh draw's time in Donkey Kong Bananza
     // A byte key: the target record's bytes as they lie (padding included: unequal padding of an equal record only costs a recompute), then the serials, mask and clears
@@ -286,9 +291,14 @@ static int geo_color_omit(void) {
     for (int i = 0; i < 8; i++) w[i] = R.rt.color[i] ? R.rt.color[i]->serial : 0;
     w[8] = R.rt.depth->serial; w[9] = (uint64_t)S.chmask.mask;
     memcpy(key, &R.rt, KEY_RT); memcpy(key + KEY_RT, w, sizeof w); memcpy(key + KEY_RT + sizeof w, R.clear_c, 8);
-    static uint8_t last[KEY_N]; static int last_r = -1;
-    if (last_r >= 0 && !memcmp(key, last, KEY_N)) return last_r;
-    memcpy(last, key, KEY_N); last_r = geo_color_omit_(); return last_r;
+    static uint8_t last[KEY_N];
+    if (last_r >= 0 && !memcmp(key, last, KEY_N)) {
+        if (g_enc && !clr_c) { last_pass = g_pass.serial; last_setrt = g_setrt_n; last_sgen = g_mpso_sgen; }
+        return last_r;
+    }
+    memcpy(last, key, KEY_N); last_r = geo_color_omit_();
+    if (g_enc && !clr_c) { last_pass = g_pass.serial; last_setrt = g_setrt_n; last_sgen = g_mpso_sgen; } else last_pass = 0;
+    return last_r;
 }
 static int geo_color_omit_(void) {
     // Removing an inactive color must not change raster bounds, sample count or
@@ -350,7 +360,7 @@ static geo_access geo_access_of(NvProg *pr, NvShader *gs) {
 // vertex shader does not): Mario Tennis Fever's atmosphere table (d9c3a99828b4f39f, one 8x8 plane of a 64-plane 3D texture per draw) and its shadow map went to layer 0, and the
 // other planes stayed zero: a blue wash over the whole scene. A VS viewport mask also requires the full path: only the final
 // VTG stage controls the mask, so rerunning the VS raster entry would incorrectly clip a primitive the GS kept. DM_NVN_GEO_LEAN=0 turns it off.
-static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int instances) {
+static void *geo_lean_pick_v(__unsafe_unretained NvProg *pr, __unsafe_unretained NvShader *gs, int topology, int instances) {
     static int lean_on = -1; if (lean_on < 0) { const char *e = getenv("DM_NVN_GEO_LEAN"); lean_on = !(e && !strcmp(e, "0")); }
     __unsafe_unretained NvShader *vs = pr->sh[0], *base = pr->sh[2];   // the program holds them, and a geometry shader its kernels
     if (!lean_on || instances > 1 || (gs && gs->geo_invocations != 1) || base->geo_invocations != 1 || !vs || vs->discard_fn || vs->viewport_mask || S.tf_on || !pr->sh[1] || !(topology == 0 || topology == 1 || topology == 3)) return NULL;
@@ -383,8 +393,9 @@ static NvShader *geo_lean_pick(NvProg *pr, NvShader *gs, int topology, int insta
             MLOG("[RED] lean geometry index kernels: %s", error.localizedDescription.UTF8String); return NULL;
         }
     }
-    return lean;
+    return (__bridge void *)lean;
 }
+#define geo_lean_pick(pr, gs, topology, instances) ((__bridge NvShader *)geo_lean_pick_v((pr), (gs), (topology), (instances)))
 // Passthrough geometry as mesh draws: a lean triangle-list draw whose pair has a mesh library, <vertex key>_<kernel key>_m3 (dm/gfx/tools/dmsh_mesh.py, built for the
 // pairs in the profile's geo_mesh.tsv), is one mesh draw inside the render pass. A threadgroup per 32 triangles runs the pulling vertex shader per index and the kernel body
 // per triangle, and culls what the kernel culls: no capture, no compute, no index compaction, no pass break. Its pipeline is built in the background; until it is ready, and
@@ -427,16 +438,17 @@ static uint64_t g_geo_mesh_runfn_gen;   // changes with every write to g_geo_mes
 // Generated mesh entries inherit the vertex library's constants. Keep their descriptors so fn_dev and fn_dev_b can materialize the defaults or the specialization without the border corrections, as for shader_load.
 static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) { return fn_load(lib, name, NULL); }
 // The mesh entry for this draw's program, or nil (the compute path draws it)
-static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    if (!geo_mesh_on()) { g_geo_why = GCP_OFF; return nil; }
+static void *geo_mesh_fn_v(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (!geo_mesh_on()) { g_geo_why = GCP_OFF; return NULL; }
     int prim = dw ? dw->prim : di->prim, instances = dw ? dw->instances : di->instances, count = dw ? dw->count : di->count;
-    NvShader *vs = pr->sh[0];
+    __unsafe_unretained NvShader *vs = pr->sh[0];
     int why = prim != 4 || count < 3 ? GCP_PRIM : instances > 1 ? GCP_INST : (dw ? dw->ind : di->ind) ? GCP_IND : di && (S.restart.on || di->itype < 0 || di->itype > 2) ? GCP_INDEX :
               S.rast_discard || S.tf_on ? GCP_RAST : !vs || !vs->has_pull || vs->layer_out || vs->discard_fn || !vs->fn ? GCP_VS : pr->sh[3] || pr->sh[4] ? GCP_STAGES : -1;
-    if (why >= 0) { g_geo_why = why; return nil; }
-    NvShader *lean = geo_lean_pick(pr, NULL, 3, instances); if (!lean) { g_geo_why = GCP_LEAN; return nil; }
-    // the last pair's answer, without a key string and a dictionary lookup a draw (strong references: a pair cannot be freed and another take its addresses)
-    if (vs == g_geo_mesh_last.vs && lean == g_geo_mesh_last.lean) { if (!g_geo_mesh_last.f) g_geo_why = GCP_NOLIB; return g_geo_mesh_last.f; }
+    if (why >= 0) { g_geo_why = why; return NULL; }
+    __unsafe_unretained NvShader *lean = geo_lean_pick(pr, NULL, 3, instances); if (!lean) { g_geo_why = GCP_LEAN; return NULL; }
+    // the last pair's answer, without a key string and a dictionary lookup a draw (strong references in g_shcache / vs->geo_mesh keep shaders and functions alive)
+    if (__builtin_expect(vs->geo_mesh_last_set && vs->geo_mesh_last_lean == lean, 1)) { if (!vs->geo_mesh_last_fn) g_geo_why = GCP_NOLIB; return (__bridge void *)vs->geo_mesh_last_fn; }
+    if (vs == g_geo_mesh_last.vs && lean == g_geo_mesh_last.lean) { if (!g_geo_mesh_last.f) g_geo_why = GCP_NOLIB; return (__bridge void *)g_geo_mesh_last.f; }
     if (!vs->geo_mesh) vs->geo_mesh = [NSMutableDictionary dictionary];
     NSString *k = @(lean->key); id f = vs->geo_mesh[k];
     if (!f) {
@@ -453,15 +465,18 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         if (!lib) { pso_record("G\t%.16s\t%.16s\n", vs->key, lean->key); pso_user_record("G\t%.16s\t%.16s\n", vs->key, lean->key); }
         vs->geo_mesh[k] = f = f ?: NSNull.null;
     }
-    g_geo_mesh_last.vs = vs; g_geo_mesh_last.lean = lean; g_geo_mesh_last.f = f == NSNull.null ? nil : f;
-    if (!g_geo_mesh_last.f) g_geo_why = GCP_NOLIB;
-    return g_geo_mesh_last.f;
+    id<MTLFunction> fn_res = f == NSNull.null ? nil : f;
+    vs->geo_mesh_last_lean = lean; vs->geo_mesh_last_fn = fn_res; vs->geo_mesh_last_set = 1;
+    g_geo_mesh_last.vs = vs; g_geo_mesh_last.lean = lean; g_geo_mesh_last.f = fn_res;
+    if (!fn_res) g_geo_why = GCP_NOLIB;
+    return (__bridge void *)fn_res;
 }
+#define geo_mesh_fn(pr, dw, di) ((__bridge id<MTLFunction>)geo_mesh_fn_v((pr), (dw), (di)))
 static nvn_hmap g_pso_mesh = {.klen = sizeof(pso_key)}; static os_unfair_lock g_pso_mesh_lock = OS_UNFAIR_LOCK_INIT;
 static NSObject *g_pso_mesh_building;
 // The draw's mesh pipeline for mesh function fn (the draw's own, or its run twin), or nil while it is built in the background (or when it failed)
 static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> fn, int run) {
-    NvShader *vs = pr->sh[0], *fs = pr->sh[1];
+    __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
     k.fsfn = (__bridge void *)fn;
@@ -490,7 +505,7 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     // A failed pipeline sends the pair back to the compute path for good: with its mesh function still set, every draw of the pair left the geometry runs (geo_run_walk) and drew
     // alone (a mesh output over Metal's limit took Donkey Kong Bananza's translation from about 10 to 22-31 ms a frame)
     if (ps == NSNull.null && run) { g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]] = NSNull.null; g_geo_mesh_runfn_gen++; }   // the draws of the pair stay single
-    else if (ps == NSNull.null && g_geo_mesh.lean) { NvShader *vs = pr->sh[0]; vs->geo_mesh[@(g_geo_mesh.lean->key)] = NSNull.null; g_geo_mesh_last.vs = nil; }
+    else if (ps == NSNull.null && g_geo_mesh.lean) { NvShader *vs = pr->sh[0]; vs->geo_mesh[@(g_geo_mesh.lean->key)] = NSNull.null; vs->geo_mesh_last_set = 0; g_geo_mesh_last.vs = nil; }
     if (ps == NSNull.null || ps == g_pso_mesh_building) return nil;
     last_k = k; last_ps = ps;   // g_pso_mesh retains built pipelines for the life of the process (entries are never removed)
     return ps;
@@ -513,7 +528,8 @@ static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.p
 // DM_NVN_GEO_MESH_RUN=0 turns it off
 typedef struct { uint64_t slot[31]; geo_mesh_args d; uint32_t group_end, n; } geo_mesh_rec;   // = dmsh_mesh.py dm_mesh_rec (RUN_SLOTS)
 enum { GEO_MESH_RUN = 1024 };
-static struct { int n; uint32_t groups, prims; __unsafe_unretained id<MTL4RenderCommandEncoder> en; __unsafe_unretained id<MTLRenderPipelineState> ps, run_ps;
+static struct { int n, fast_ok, omit_colors; uint32_t groups, prims; uint64_t mpso_sgen, fs_gen, fs_ugen, setrt_n, pass, fbc_gen, ubd_ver, psnap_gen;
+                __unsafe_unretained id<MTL4RenderCommandEncoder> en; __unsafe_unretained id<MTLRenderPipelineState> ps, run_ps;
                 __unsafe_unretained NvShader *vs, *fs, *lean; __unsafe_unretained id<MTLFunction> fn; geo_mesh_rec r[GEO_MESH_RUN]; } g_mrun;
 static uint64_t g_mrun_draws, g_mrun_runs, g_mrun_ends[5];   // draws drawn in runs, runs; runs ended by an operation, another draw, the pass end, a full table, a change of the fragment table
 static int geo_mesh_run_on(void) {
@@ -521,20 +537,35 @@ static int geo_mesh_run_on(void) {
     if (on < 0) { const char *e = getenv("DM_NVN_GEO_MESH_RUN"); on = !(e && !strcmp(e, "0")); if (!on) MLOG("DM_NVN_GEO_MESH_RUN=0: every mesh draw is a dispatch of its own"); }
     return on;
 }
+static int geo_shadow_vt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_GEO_SHADOW_VT"); v = !(e && !strcmp(e, "0")); } return v; }
+static int geo_run_fast_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_NVN_GEO_RUN_FAST"); v = !(e && !strcmp(e, "0")) && !getenv("DM_NVN_SKIP_SMALL") && !getenv("DM_NVN_DEPTHOVR"); }
+    return v;
+}
 // Draw the waiting run (why: index into g_mrun_ends)
 static void geo_mesh_flush_(int why) {
     int n = g_mrun.n; if (!n) return;
     g_mrun.n = 0; g_mrun_ends[why]++;
-    id<MTL4RenderCommandEncoder> en = g_mrun.en;
+    __unsafe_unretained id<MTL4RenderCommandEncoder> en = g_mrun.en;
     if (!en || (__bridge void *)en != (__bridge void *)g_enc) { static int once; if (!once++) MLOG("[RED] geometry mesh run: its pass ended before the run was drawn; %d draws lost", n); return; }
     g_mrun.r[0].n = (uint32_t)n;
-    size_t bytes = sizeof(geo_mesh_rec) * (size_t)n; id<MTLBuffer> b; size_t o = arena_alloc(bytes, &b);
-    memcpy((uint8_t *)b.contents + o, g_mrun.r, bytes);
-    [en setRenderPipelineState:g_mrun.run_ps];
+    size_t bytes = sizeof(geo_mesh_rec) * (size_t)n; __unsafe_unretained id<MTLBuffer> b; arena_at at = arena_take_u(bytes, &b); (void)b;
+    memcpy(at.cpu, g_mrun.r, bytes);
+    int was_shadow = g_vt_shadow;
+    __unsafe_unretained id<MTLRenderPipelineState> prev_pso = g_enc_pso;
+    enc_r_pso(en, g_mrun.run_ps);
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
-    enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, b.gpuAddress + o);
+    if (was_shadow) {
+        // Flushed mid-draw (geo_mesh_ft_change): do not disturb g_vt_valid/g_vt_addr of the incoming draw's shadow slots; write GEO_MESH_DRAW_SLOT directly to hardware g_vt.
+        if (rec_on()) rec_table_op(RO_T_ADDR, g_vt, at.gpu, GEO_MESH_DRAW_SLOT); else [g_vt setAddress:at.gpu atIndex:GEO_MESH_DRAW_SLOT];
+        g_vt_shadow_dirty |= 1u << GEO_MESH_DRAW_SLOT;
+    } else {
+        vt_shadow_drop();
+        enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, at.gpu);
+    }
     [en drawMeshThreadgroups:MTLSizeMake(g_mrun.groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * g_mrun.prims, 1, 1)];
-    [en setRenderPipelineState:g_enc_pso ?: g_mrun.ps];   // as the draws left it (or the draw being encoded set it: a fragment table change, geo_mesh_ft_change)
+    enc_r_pso(en, prev_pso ?: g_mrun.ps);   // as the draws left it (or the draw being encoded set it: a fragment table change, geo_mesh_ft_change)
     g_mrun_draws += (uint64_t)n; g_mrun_runs++;
     static int once; if (!once++) MLOG("geometry mesh run: first run, %d draws of vertex %s kernel %s in one dispatch of %u threadgroups", n, g_mrun.vs->key, g_mrun.lean->key, g_mrun.groups);
 }
@@ -555,7 +586,7 @@ static int geo_mesh_run_fits(NvProg *pr) {
     static const char *const why[] = {"its fragment shader writes memory", "it writes colour", "it writes stencil", "its depth test does not keep the nearest or the farthest",
                                       "it writes depth with a depth bounds test, which reads the depth the run's other draws write"};
     static uint8_t logged;
-    NvShader *fs = pr->sh[1]; int r = -1;
+    __unsafe_unretained NvShader *fs = pr->sh[1]; int r = -1;
     uint32_t attached = 0; for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) attached |= 1u << i;
     int fw = 0; if (fs) for (int i = 0; i < fs->rf.nb; i++) fw |= fs->rf.b[i].rw;   // any writable binding (storage, image, image atomics, global stores and their log); its reads are the same for every draw (geo_mesh_ft_change)
     if (fw) r = 0;
@@ -569,7 +600,7 @@ static int geo_mesh_run_fits(NvProg *pr) {
     return 0;
 }
 // The draw about to be dispatched (geo_mesh_encode, with its arguments bound): 1 when it joined the run instead
-static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
+static int geo_mesh_take(__unsafe_unretained id<MTL4RenderCommandEncoder> en) {
     if (!geo_mesh_run_on()) return 0;
     __unsafe_unretained NvProg *pr = g_geo_program;   // geo_mesh_draw's raster program, held by the draw's own
     if (g_mrun.n && ((__bridge void *)en != (__bridge void *)g_mrun.en || g_geo_mesh.ps != g_mrun.ps || g_geo_mesh.fn != g_mrun.fn || pr->sh[0] != g_mrun.vs || pr->sh[1] != g_mrun.fs)) {
@@ -590,6 +621,14 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
         id<MTLRenderPipelineState> rps = geo_mesh_pso_for(pr, f, 1); if (!rps) return 0;   // built in the background: single draws until it is ready
         g_mrun.en = en; g_mrun.ps = g_geo_mesh.ps; g_mrun.run_ps = rps; g_mrun.fn = g_geo_mesh.fn; g_mrun.vs = pr->sh[0]; g_mrun.fs = pr->sh[1]; g_mrun.lean = g_geo_mesh.lean;
         g_mrun.prims = g_geo_mesh.prims; g_mrun.groups = 0;
+        g_mrun.mpso_sgen = g_mpso_sgen; g_mrun.fs_gen = g_args_gen[1]; g_mrun.fs_ugen = g_args_ugen[1];
+        g_mrun.setrt_n = g_setrt_n; g_mrun.pass = g_pass.serial; g_mrun.fbc_gen = g_fbc_gen; g_mrun.ubd_ver = g_ubd_ver; g_mrun.psnap_gen = g_psnap_gen;
+        g_mrun.omit_colors = g_geo_omit_colors;
+        g_mrun.fast_ok = !passdump() && !S.dbnd.on && !g_rt_merged && !g_sm_pass && !g_fsp_pass && !g_rp_aw &&
+            !g_fb_rebind && !g_fb_rmask && !g_fb_dread && !g_fb_n && g_fb_tseq != g_draw_seq && !g_ed_dirty && !g_dss_dirty &&
+            !g_game_barrier && !g_kd_force && !skip_fs_draw(pr) && !ms_on() && pr->c_img == 1 &&
+            (!pr->sh[1] || ((!pr->sh[1]->ae || (pr->sh[1]->ab_buf && pr->sh[1]->ab_pass == g_pass.serial)) && !pr->sh[1]->rf.dyn)) &&
+            pc_tp() == g_pc_rep_tp;
     }
     geo_mesh_rec *r = &g_mrun.r[g_mrun.n++];
     for (int i = 0; i < 31; i++) r->slot[i] = g_vt_valid >> i & 1 ? g_vt_addr[i] : 0;
@@ -599,17 +638,30 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
 }
 // The draw itself (draw() calls it with its pipeline, the vertex and fragment arguments and the pulling layout bound): the kernel's arguments, with vb_info
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
-static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
-    id<MTL4RenderCommandEncoder> en = (id<MTL4RenderCommandEncoder>)en_;
+static int geo_args_keep_on(void) { static int keep = -1; if (keep < 0) { const char *e = getenv("DM_NVN_GEO_ARGS_KEEP"); keep = !(e && !strcmp(e, "0")); } return keep; }
+// The geometry stage's block of the last mesh draw (geo_mesh_encode) and the stage's binding generation when that draw ended (geo_mesh_draw): the next mesh draw of the same lean
+// shader with the generation unchanged patches that block (g_args_geo_only) instead of encoding it in full. DM_NVN_GEO_ARGS_KEEP=0 encodes it in full every time
+static struct { const void *sh, *ab; size_t off; uint64_t gen; } g_gme;
+static void geo_mesh_encode(__unsafe_unretained id<MTL4RenderCommandEncoder> en) { DP_SCOPE(DP_GEO);
     uint32_t tris = g_geo_mesh.a.count / 3;
-    id<MTLBuffer> b; size_t o = arena_alloc(64, &b); uint8_t *p = (uint8_t *)b.contents + o;
-    uint32_t info[8] = {0, 1, 0, 0, tris, 0, 0, 0}; memcpy(p, info, 32); memcpy(p + 32, &g_geo_mesh.a, sizeof g_geo_mesh.a);
-    enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, b.gpuAddress + o + 32);
-    uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = b.gpuAddress + o;
-    args_dirty(2); g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; args_dirty(2);
+    __unsafe_unretained id<MTLBuffer> b; arena_at at = arena_take_u(32, &b); (void)b;
+    uint32_t *ip = (uint32_t *)(void *)at.cpu; ip[0] = 0; ip[1] = 1; ip[2] = 0; ip[3] = 0; ip[4] = tris; ip[5] = 0; ip[6] = 0; ip[7] = 0;
+    uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = at.gpu;
+    __unsafe_unretained NvShader *lean = g_geo_mesh.lean;
+    int geo_patch = geo_args_keep_on() && g_gme.sh == (__bridge const void *)lean && g_gme.gen == g_args_ngen[2] && !lean->rf.sblen && lean->ab_buf && (__bridge const void *)lean->ab_buf == g_gme.ab && lean->ab_off == g_gme.off;
+    if (!geo_patch) args_dirty(2);
+    g_args_mesh = GEO_MESH_GS_SLOT; g_args_geo_only = geo_patch; encode_args(en, lean, 2, 0); g_args_geo_only = 0; g_args_mesh = 0; args_dirty(2);
+    g_gme.sh = (__bridge const void *)lean; g_gme.ab = (__bridge const void *)lean->ab_buf; g_gme.off = lean->ab_off; g_gme.gen = 0;   // the generation once the draw ends (geo_mesh_draw)
     memcpy(g_geo_bind, save, sizeof save);
     if (geo_mesh_take(en)) return;   // drawn with its run, which sets the mesh stage's table itself (geo_mesh_flush_)
-    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];   // only a draw that draws alone needs it here: set at every mesh draw, it was one more recorded call a draw for the encode thread
+    // Single-draw fallback: flush any shadowed vertex table writes to g_vt, bind draw args at GEO_MESH_DRAW_SLOT, and dispatch.
+    if (g_vt_shadow) vt_shadow_flush();
+    arena_at da = arena_take_u(sizeof g_geo_mesh.a, &b); memcpy(da.cpu, &g_geo_mesh.a, sizeof g_geo_mesh.a);
+    [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];
+    if (g_vt_shadow) {
+        if (rec_on()) rec_table_op(RO_T_ADDR, g_vt, da.gpu, GEO_MESH_DRAW_SLOT); else [g_vt setAddress:da.gpu atIndex:GEO_MESH_DRAW_SLOT];
+        g_vt_addr[GEO_MESH_DRAW_SLOT] = da.gpu; g_vt_valid |= 1u << GEO_MESH_DRAW_SLOT;
+    } else enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, da.gpu);
     uint32_t pg = g_geo_mesh.prims;
     [en drawMeshThreadgroups:MTLSizeMake((tris + pg - 1) / pg, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(3 * pg, 1, 1)];
 }
@@ -848,31 +900,94 @@ static void mesh_tasks_draw(const p_draw *dw) {
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
-static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
-    uint64_t ib = 0; void *mb; uint64_t mo;
-    if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) { g_geo_why = GCP_IB; return 0; }
+static int geo_mesh_draw(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    __unsafe_unretained id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
+    uint64_t ib = 0;
+    if (di && !ib_gpu_addr(di->ibuf, 1, &ib, NULL)) { g_geo_why = GCP_IB; return 0; }
     // The synthetic raster program below keeps only VS/FS and drops di, so draw_()'s ubd_conflict cannot see the lean GS's
     // stage-2 bindings or an indexed draw's index buffer. Land conflicting inline updates before encoding, as native task/mesh
     // draws do for their stages; shadowable uniform reads keep their deferral.
-    NvShader *lean = pr->sh[2]->geo_lean_v[3];
+    __unsafe_unretained NvShader *lean = pr->sh[2]->geo_lean_v[3];
     if (g_nubd && (g_enc || ubd_lazy()) && (ubd_conflict_sh(lean, 2) || (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + ((uint64_t)di->count << di->itype))))) { g_ubd_conflicts++; rp_end(); ubd_land(); }
     if (g_enc && g_pass_vbar) rp_end();   // an in-pass vertex barrier does not order mesh stages
     rt_sub_check(pr);   // check the real program including geometry stage before draw() swaps in raster
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
-    NvProg *raster = pr->geo_lean_raster;
-    if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
+    __unsafe_unretained NvProg *raster = pr->geo_lean_raster;
+    if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { NvProg *nr = [NvProg new]; nr->sh[0] = pr->sh[0]; nr->sh[1] = pr->sh[1]; pr->geo_lean_raster = nr; raster = nr; }
+    // A long pass of mesh draws is split for the GPU as draw_ splits others (pass_split_try): its inner draw_ runs with g_geo_program set, where none is made, so a depth prepass of
+    // thousands of geometry-shader draws reached the GPU only once all of it was translated (from PR #1847, long_pass_split_geo)
+    if (g_enc) pass_split_try();
     if (g_mrun.n && (pr->sh[0] != g_mrun.vs || pr->sh[1] != g_mrun.fs || fn != g_mrun.fn || (__bridge void *)g_enc != (__bridge void *)g_mrun.en)) geo_mesh_flush_draw();
+    p_draw synthetic = {.prim = 4, .count = 3, .instances = 1, .base_instance = (int32_t)bi};
+    if (geo_run_fast_on() && g_mrun.n > 0 && g_mrun.n < GEO_MESH_RUN && g_mrun.fast_ok &&
+        g_enc && (__bridge void *)g_enc == (__bridge void *)g_mrun.en &&
+        g_pass.serial == g_mrun.pass && g_setrt_n == g_mrun.setrt_n &&
+        g_mpso_sgen == g_mrun.mpso_sgen && !g_dss_dirty && !g_ed_dirty &&
+        g_args_gen[1] == g_mrun.fs_gen && g_args_ugen[1] == g_mrun.fs_ugen &&
+        g_fbc_gen == g_mrun.fbc_gen && g_psnap_gen == g_mrun.psnap_gen && !passdump() &&
+        !g_rt_merged && !g_sm_pass && !g_fsp_pass && !S.dbnd.on &&
+        !g_fb_rebind && !g_fb_rmask && !g_fb_dread && !g_game_barrier &&
+        !(g_vis_counting && g_vis_need && g_vis_n >= VIS_SLOTS) &&
+        pc_tp() == g_pc_rep_tp) {
+        static uint64_t g_mrun_fast_n; if (++g_mrun_fast_n == 1000) MLOG("geometry mesh run fast path: active (%llu continuation draws so far)", (unsigned long long)g_mrun_fast_n);
+        __unsafe_unretained id<MTL4RenderCommandEncoder> en = g_enc;
+        __unsafe_unretained NvShader *vs = pr->sh[0];
+        if (g_nubd) {
+            if (g_ubd_ver != g_mrun.ubd_ver) goto slow_draw;
+            unsigned vm = vb_used_on() && vs ? vs_streams(&vs->rf) : 0xffffu;
+            for (unsigned m = vm; m; m &= m - 1) { int s_ = __builtin_ctz(m); if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) goto slow_draw; }
+            if (vs && ubd_conflict_sh(vs, 0)) goto slow_draw;
+        }
+        vbuf_prepare(vs ? &vs->rf : NULL, &synthetic, NULL);
+        if ((__bridge void *)g_enc != (__bridge void *)en || !g_mrun.n) goto slow_draw;
+        g_draw_binst = bi;
+        g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.prims = g_mrun.prims; g_geo_mesh.lean = lean; g_geo_mesh.ps = g_mrun.ps;
+        g_geo_mesh.a = (geo_mesh_args){ib, di ? 1u << di->itype : 0, dw ? (uint32_t)dw->first : 0, (uint32_t)(dw ? dw->count : di->count), di ? di->base_vertex : 0, bi, 0};
+        g_geo_program = raster;
+        g_vt_shadow = geo_shadow_vt_on();
+        pull_bind(en, vs ? &vs->rf : NULL, &synthetic, NULL);
+        if (vs) encode_args((id<MTLCommandEncoder>)(id)en, vs, vs->stage == 4 ? 4 : 0, 1);
+        if ((__bridge void *)g_enc != (__bridge void *)en) {
+            g_vt_shadow = 0; vt_shadow_drop(); g_geo_program = nil; g_geo_mesh.on = 0;
+            goto slow_draw;
+        }
+        g_stat_draw++; g_draw_seq++;
+        if (enc_label_on()) g_el_draws++;
+        if (__builtin_expect(!g_pass_late_res, 0)) order_note(raster);
+        geo_mesh_encode(en);
+        g_vt_shadow = 0;
+        if (!g_mrun.n) vt_shadow_drop();
+        goto after_draw;
+    }
+slow_draw:
     g_geo_mesh.on = 1; g_geo_mesh.miss = 0; g_geo_mesh.fn = fn; g_geo_mesh.prims = geo_mesh_prims(fn); g_geo_mesh.lean = lean;
     g_geo_mesh.a = (geo_mesh_args){ib, di ? 1u << di->itype : 0, dw ? (uint32_t)dw->first : 0, (uint32_t)(dw ? dw->count : di->count), di ? di->base_vertex : 0, bi, 0};
     g_geo_program = raster;
-    p_draw synthetic = {.prim = 4, .count = 3, .instances = 1, .base_instance = (int32_t)bi};
     g_geo_omit_colors = geo_color_omit();
+    g_vt_shadow = geo_mesh_run_on() && geo_shadow_vt_on();
     draw(&synthetic, NULL);
+    g_vt_shadow = 0;
+    if (!g_mrun.n) vt_shadow_drop();
     g_geo_omit_colors = 0;
+after_draw:
     // The draw bound the geometry stage's arguments in the vertex table and the vertex stage's for its raster program: those stages encode again. The fragment stage's block is the one
     // the raster program's fragment shader had, from the same bindings, so it stays: re-encoded at every mesh draw, it moved in the frame arena and its address split every run (geo_mesh_ft_change)
-    { uint64_t f = g_args_gen[1]; g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all(); if (!g_geo_mesh.miss) g_args_gen[1] = f; }   // the fragment bindings' generation, as the draw wrote its block
+    // Only the blocks this draw wrote are forgotten (DM_NVN_GEO_ARGS_KEEP, default on): its vertex shader's (written for the raster program) and the geometry stage's. Every other
+    // shader's vertex block still holds what its bindings give and is bound again into the vertex table when its draw reuses it (bind_args); invalidating every stage after each mesh
+    // draw made the next ordinary draw encode its vertex block again: 3,400 full encodes a frame among Donkey Kong Bananza's 26,000 draws, half of all. Off: every stage, as before
+    { uint64_t f = g_args_gen[1]; g_geo_program = nil; g_geo_mesh.on = 0;
+      int keep = geo_args_keep_on();
+      if (keep && !g_geo_mesh.miss) {
+          // The vertex block read the geometry draw's own state only through a geometry binding (g_geo_bind, encode_args_full): one with such a binding is forgotten, any other stays,
+          // so the run's next mesh draw of the same vertex shader reuses it (3,390 encodes a frame otherwise)
+          __unsafe_unretained NvShader *vs = pr->sh[0];
+          if (vs) {
+              uint8_t hb = pc_tp() == g_pc_rep_tp ? vs->has_geo_bind : 0;
+              if (!hb) { int geo = 0; for (int i = 0; i < vs->rf.nb && !geo; i++) geo = vs->rf.b[i].kind == NVN_RB_GEOMETRY; hb = (uint8_t)(geo ? 2 : 1); if (pc_tp() == g_pc_rep_tp) vs->has_geo_bind = hb; }
+              if (hb == 2) { vs->ab_buf = nil; vs->ab_gen = 0; }
+          }
+          if (pr->sh[2]) { pr->sh[2]->ab_buf = nil; pr->sh[2]->ab_gen = 0; } args_dirty(2); g_gme.gen = g_args_ngen[2]; }
+      else { args_dirty_all(); if (!g_geo_mesh.miss) g_args_gen[1] = f; g_gme.sh = NULL; } }   // the fragment bindings' generation, as the draw wrote its block
     if (g_geo_mesh.miss) { g_geo_mesh_wait++; g_geo_why = GCP_PSO; return 0; }
     // the kernel's storage writes, noted as its arguments were encoded (always: geo_mesh_encode), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
     swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;
@@ -1304,7 +1419,7 @@ static int geo_run_passes(uint32_t op, const void *a) {
 static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
     int n = 1;
     if (!geo_hoist_on() || S.tf_on || g_geo_split_depth || !g_exec_next || g_ret_n > 8) return n;
-    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
+    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty; g_pso_sgen++; g_pso_st_sgen++; g_mpso_sgen++;
     op_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n}; memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     const uint8_t *p; op_hdr h; const void *a;
     static geo_run_access run;   // 128 KiB: not on the stack
@@ -1329,16 +1444,20 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
         geo_capture_one(re, &g_geo_run[n]);
         n++;
     }
-    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd;
+    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; g_pso_sgen++; g_pso_st_sgen++; g_mpso_sgen++; g_ed_dirty = ~0u; g_vattr_gen++; g_vstream_gen++; g_vbuf_unaligned_mask = 0x10000u; g_vbuf_dirty = 0xffffu; g_vbuf_ubd_clean = 0; cbsize_dirty_all();
     return n;
 }
-static void geo_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
-static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) {
+static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
+static void geo_draw(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) { DP_SCOPE(DP_GEO); cp_stamp start = cp_begin(); geo_draw_(pr, dw0, di0, primitive_base); cp_end(6, start); }
+static void geo_draw_(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) {
     for (int i = 1; i < g_geo_nrun; i++) if (g_geo_run[i].op && g_geo_run[i].op == g_exec_cur) {
         g_geo_run[i].op = NULL; gcp_count(pr, g_geo_run[i].why); geo_raster(&g_geo_run[i], i == g_geo_nrun - 1); return;
     }
     g_geo_nrun = 0;
     if (!g_geo_split_depth && geo_mesh_draw(pr, dw0, di0)) return;
+    geo_draw_compute(pr, dw0, di0, primitive_base);
+}
+static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base) {
     gcp_count(pr, g_geo_split_depth ? GCP_SPLIT : g_geo_why);
     lc_land(); rp_flush(); rp_end(); ubd_land();
     geo_big_reset();   // enc_r_begin ends transform feedback and opens behind MTLStageAll -> MTLStageAll: earlier geometry draws are done
@@ -1356,7 +1475,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     int n = g_geo_nrun = geo_run_walk(re);
     if (n > 1) { g_geo_hoisted += n - 1; g_geo_hoist_runs++; }
     enc_r_end(re);
-    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty;
+    typeof(S) s0 = S; typeof(R) r0 = R; int pd = g_pso_dirty, dd = g_dss_dirty; g_pso_sgen++; g_pso_st_sgen++; g_mpso_sgen++;
     op_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n};
     if (n > 1) memcpy(cur.ret, g_ret, sizeof(*g_ret) * (size_t)g_ret_n);
     id<MTL4ComputeCommandEncoder> ce = nil;
@@ -1371,7 +1490,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
     }
-    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; }
+    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; g_pso_sgen++; g_pso_st_sgen++; g_mpso_sgen++; g_ed_dirty = ~0u; g_vattr_gen++; g_vstream_gen++; g_vbuf_unaligned_mask = 0x10000u; g_vbuf_dirty = 0xffffu; g_vbuf_ubd_clean = 0; cbsize_dirty_all(); }
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {

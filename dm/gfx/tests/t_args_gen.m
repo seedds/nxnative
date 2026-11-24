@@ -128,6 +128,7 @@ int main(void) { @autoreleasepool {
         size_t expected_off = old_arena->used;
         uint64_t expected_gpu = old_arena->gpu + expected_off;
 
+        g_arena_epoch++;   // the cbsize table kept from the last encode (g_cbsc) would be handed out again: this case wants a new one at the arena's end
         uint64_t p_before = patch_n();
         RUN2(vc, pvc);   // patched encode across arena rollover: x[0] += u2[0] + 1 (= 17 -> total 19)
         CHECK(patch_n() == p_before + 1, "cbsize shader used args_cbuf_only patch path");

@@ -206,7 +206,7 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
 }
 static void *nq_worker(void *unused) {
-    (void)unused; pthread_setname_np("NVN queue replay");
+    (void)unused; pthread_setname_np("NVN queue replay"); { void mtl_pc_claim(void); mtl_pc_claim(); }   // its address-to-pool cache needs no thread-local lookup (nvn_mtl.m pc_tab)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     void *rt=nvn_rt_join("queue replay thread");   // it carries the frame's submissions: it declares the frame's deadline too (hle_nvn.c rt_tick)
     uint64_t frame=UINT64_MAX;

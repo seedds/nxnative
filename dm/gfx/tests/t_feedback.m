@@ -5,6 +5,9 @@
 // 1 / the target's size, set by an inline update (Splatoon Raiders' ink stamps), on an RG8 attachment sampled through (red, green, zero, one): the tile read fills the missing
 // channels as a sample does.
 #include "../nvn/nvn_mtl.m"
+// The cases write bindings (S.tex, S.img, a uniform word) and a shader's reflection (kind, reg, rw, atom, bindless) directly, which the host only changes through binds
+// (g_args_gen) and new shaders: every fb_prepare here scans again, as with DM_NVN_FB_CACHE=0, instead of finding the previous call's kept answer
+#define fb_prepare(pr) (g_fbc_gen++, fb_prepare(pr))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;

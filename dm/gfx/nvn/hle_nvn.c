@@ -2793,6 +2793,24 @@ static void power_line(uint64_t frame) {
         if (dbo != pdbo || dbd != pdbd || dbe != pdbe) LOG("[nvn] depth bounds up to frame %llu, per frame: %.1f ops, %.1f tested draws, %.1f encoder calls, %.1f empty skipped",
             frame, (dbo - pdbo) / nf, (dbd - pdbd) / nf, (dbc - pdbc) / nf, (dbe - pdbe) / nf);
         pdbo = dbo; pdbd = dbd; pdbc = dbc; pdbe = dbe;
+        void mtl_fbc_stats(uint64_t *, uint64_t *); static uint64_t pch, pcm; uint64_t ch, cm; mtl_fbc_stats(&ch, &cm);   // fb_prepare's remembered binding scan (DM_NVN_FB_CACHE)
+        if (ch != pch || cm != pcm) LOG("[nvn] feedback scan up to frame %llu, per frame: %.0f draws skipped the binding scan, %.0f scanned", frame, (ch - pch) / nf, (cm - pcm) / nf);
+        pch = ch; pcm = cm;
+        { int mtl_dp_stats(uint64_t *, uint64_t *, const char *const **); static uint64_t qns[32], qcl[32]; uint64_t ns[32], cl[32]; const char *const *nm2; int nn = mtl_dp_stats(ns, cl, &nm2);
+          if (nn) { char line[1200]; size_t at = 0; double tot = 0; for (int i = 0; i < nn; i++) tot += (ns[i] - qns[i]) / 1e6;
+            for (int i = 0; i < nn && at < sizeof line - 80; i++) if (cl[i] != qcl[i] || ns[i] != qns[i]) at += snprintf(line + at, sizeof line - at, " %s %.2f ms (%.0f)", nm2[i], (ns[i] - qns[i]) / 1e6 / nf, (cl[i] - qcl[i]) / nf);
+            LOG("[nvn] drawprof up to frame %llu, per frame, exclusive (calls): total %.2f ms;%s", frame, tot / nf, line);
+            memcpy(qns, ns, sizeof qns); memcpy(qcl, cl, sizeof qcl); } }
+        void mtl_ubdt_stats(uint64_t *, uint64_t *); static uint64_t puh, pum; uint64_t uh, um; mtl_ubdt_stats(&uh, &um);   // ubd_conflict_textures' remembered scan (DM_NVN_UBDT_CACHE)
+        if (uh != puh || um != pum) LOG("[nvn] buffer-texture scan up to frame %llu, per frame: %.0f stage scans skipped, %.0f made", frame, (uh - puh) / nf, (um - pum) / nf);
+        puh = uh; pum = um;
+        { void mtl_cbslot_stats(uint64_t *, uint64_t *); static uint64_t pk, pt; uint64_t k, t; mtl_cbslot_stats(&k, &t);   // encode_args_full's uniform-only patches (DM_NVN_CB_SLOTGEN)
+          if (k != pk || t != pt) LOG("[nvn] uniform slot patches up to frame %llu, per frame: %.0f slots kept, %.0f taken again", frame, (k - pk) / nf, (t - pt) / nf);
+          pk = k; pt = t; }
+        { void mtl_ubsc_stats(uint64_t *); static uint64_t pq[9]; uint64_t q[9]; mtl_ubsc_stats(q);   // ubd_conflict_sh's remembered scan: why it was not used
+          if (q[0] != pq[0] || q[6] != pq[6]) LOG("[nvn] uniform-update scan up to frame %llu, per frame: kept %.0f; scanned: shader %.0f, bindings %.0f, uniform bindings %.0f, list changed %.0f, other %.0f, not kept %.0f; scans that found an update %.0f; uniform-only rescans %.0f",
+              frame, (q[0]-pq[0]) / nf, (q[1]-pq[1]) / nf, (q[2]-pq[2]) / nf, (q[3]-pq[3]) / nf, (q[4]-pq[4]) / nf, (q[5]-pq[5]) / nf, (q[6]-pq[6]) / nf, (q[7]-pq[7]) / nf, (q[8]-pq[8]) / nf);
+          memcpy(pq, q, sizeof pq); }
         static uint64_t pps[POOL_STATS]; uint64_t ps[POOL_STATS]; mtl_pool_stats(ps);   // the tables of handles traced to no slot (nvn_mtl.m pool_gpu)
         if (ps[0] != pps[0] || ps[2] != pps[2] || ps[3] != pps[3]) {
             uint64_t into = ps[6] - pps[6], whole = ps[8] - pps[8] + ps[9] - pps[9] + ps[10] - pps[10];
@@ -3558,8 +3576,19 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         trow(f, "@rt_load_mb", (l - pl) / 1048576.0); trow(f, "@rt_store_mb", (st - pst) / 1048576.0); trow(f, "@pass_full_rw", (double)(fu - pf));
         uint64_t udc = mtl_udc_saved_bytes(); trow(f, "@unwritten_dc_mb", (udc - pudc) / 1048576.0);
         pl = l; pst = st; pf = fu; pudc = udc;
+        { extern uint64_t g_psw[5]; static uint64_t pp[5]; static const char *nm[5] = {"@psplit_n", "@psplit_busy", "@psplit_nocut", "@psplit_sm", "@psplit_max"}; for (int k = 0; k < 5; k++) { trow(f, nm[k], (double)(g_psw[k] - pp[k])); pp[k] = g_psw[k]; } } { extern uint64_t g_ft_skipn, g_ft_setn; static uint64_t ps, pt; trow(f, "@ft_skip", (double)(g_ft_skipn - ps)); trow(f, "@ft_set", (double)(g_ft_setn - pt)); ps = g_ft_skipn; pt = g_ft_setn; }
         static uint64_t pae, par, pap; uint64_t ae_, ar_, ap_; mtl_args_stats(&ae_, &ar_, &ap_);
         trow(f, "@args_enc", (double)(ae_ - pae)); trow(f, "@args_reuse", (double)(ar_ - par)); trow(f, "@args_patch", (double)(ap_ - pap)); pae = ae_; par = ar_; pap = ap_;
+        { void mtl_args_why(uint64_t *); static uint64_t pw[50]; uint64_t w[50]; mtl_args_why(w);   // full encodes by cause (nvn_mtl.m encode_args_full), and the host's args_dirty_all calls
+          static const char *nm[18] = {"@args_why_none", "@args_why_prog", "@args_why_bind", "@args_why_pass", "@args_why_binst", "@args_why_pool", "@args_why_cs", "@args_why_pd", "@args_why_unpatch", "@args_why_host", "@args_dirty_all", "@ada_drain", "@ada_pass", "@ada_compute", "@ada_reg", "@ada_guest_write", "@ada_ser", "@ada_fb"};
+          for (int i = 0; i < 18; i++) trow(f, nm[i], (double)(w[i] - pw[i]));
+          for (int i = 0; i < 32; i++) if (w[18 + i] != pw[18 + i]) { char k[24]; snprintf(k, sizeof k, "@ada_x%d", i); trow(f, k, (double)(w[18 + i] - pw[18 + i])); }
+          memcpy(pw, w, sizeof pw);
+          void mtl_cbsc_stats(uint64_t *, uint64_t *); static uint64_t pch2, pcm2; uint64_t ch2, cm2; mtl_cbsc_stats(&ch2, &cm2);
+          trow(f, "@cbsize_kept", (double)(ch2 - pch2)); trow(f, "@cbsize_new", (double)(cm2 - pcm2)); pch2 = ch2; pcm2 = cm2; }
+        { int mtl_dp_stats(uint64_t *, uint64_t *, const char *const **); static uint64_t pns[32], pcl[32]; uint64_t ns[32], cl[32]; const char *const *nm2;   // DM_NVN_DRAWPROF
+          int nn = mtl_dp_stats(ns, cl, &nm2);
+          for (int i = 0; i < nn && i < 32; i++) { char k[40]; snprintf(k, sizeof k, "@dp_%s_ms", nm2[i]); trow(f, k, (ns[i] - pns[i]) / 1e6); snprintf(k, sizeof k, "@dp_%s_n", nm2[i]); trow(f, k, (double)(cl[i] - pcl[i])); pns[i] = ns[i]; pcl[i] = cl[i]; } }
         static uint64_t puc, pus; uint64_t uc_, us_; mtl_use_stats(&uc_, &us_);
         trow(f, "@use_call", (double)(uc_ - puc)); trow(f, "@use_skip", (double)(us_ - pus)); puc = uc_; pus = us_;
         static uint64_t pfa, pre_; uint64_t fa_, pr_, up_, re_; nvn_dirty_stats(&fa_, &pr_); mtl_pkg_stats(&up_, &re_);

@@ -60,6 +60,14 @@ class Nvn2Buffers(unittest.TestCase):
         res = self.translate(inst(*ULDC64_C0_10) + inst(*LDG_UR4) + inst(*SUATOM_R5) + inst(*EXIT), [1, 0, 0, 0x40, 0, 0, 0, 0x10])
         self.assertIn((24, 0x100 // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])   # the storage buffer's address: c[24] + 0x100
 
+    def test_a_uniform_entry_follows_push_block_7(self):
+        # Cyberpunk 2077: 2 words in push block 7 (control +0xb0), laid out after block 0 and before the uniform entries. c0: no push words, block 7 at 0x10, one uniform entry at 0x20
+        layout = [1, 0, 0, 0x40, 0, 0, 0, 0] + [0] * 5 + [8]
+        res = self.translate(inst(*ULDC64_C0_10) + inst(*LDG_UR4) + inst(*SUATOM_R5) + inst(*EXIT), layout)
+        self.assertIn((24, 0x700 // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])   # the address in block 7: c[24] + 0x700
+        res = self.translate(inst(*ULDC64_C0_20) + inst(*LDG_UR4) + inst(*SUATOM_R5) + inst(*EXIT), layout)
+        self.assertIn((0, 0x210 // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])   # uniform slot 0's address: c[0] + 0x210
+
     def test_a_uniform_entry_follows_push_block_1(self):
         res = self.translate(inst(*ULDC64_C0_20) + inst(*LDG_UR4) + inst(*SUATOM_R5) + inst(*EXIT), [1, 0, 0, 0x40, 0, 0, 0, 0x10])
         self.assertIn((0, 0x210 // 4), [(s['cb_slot'], s['cb_offset']) for s in res['sbufs']])   # uniform slot 0's address: c[0] + 0x210

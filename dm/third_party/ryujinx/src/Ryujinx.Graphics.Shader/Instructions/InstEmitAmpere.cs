@@ -292,9 +292,23 @@ namespace Ryujinx.Graphics.Shader.Instructions
             // Push block 1 (control +0xaa: the driver's accessor reads +0xa9 + block, the words of each push block; dmsh_abi.h DMSH_PUSH_BLOCKS) follows push block 0,
             // before the uniform entries: PRAGMATA's c8f5a992ec204a44 reads {address, size} pairs at 0x20 / 0x28 and 0x30 / 0x38, right after its one push word, and
             // b12078fe3bce1273, with no push words, the three 8-byte handles it pushes at 0x10, 0x18 and 0x20, then its uniform entries
+            // Every push block of the group follows in order, each rounded to 16 bytes: block b's words at control +0xa9 + b (fields 4 and 7, then 8 to 13 for blocks 2 to 7).
+            // Cyberpunk 2077's 789ad16c60fb647f and 825ff2bfca542ae3 have 2 words in block 7 (the address the game pushes there): without them every entry after push block 0
+            // was taken 16 bytes early, and uniform slot 6's address was read as a separate sampler handle
             int pushed = layout.Length > 7 ? (layout[7] + 0xf) & ~0xf : 0;
             int pb = 0x10 + push;
             int ub = pb + pushed;
+            for (int b = 2; b < 8; b++)
+            {
+                int words = layout.Length > 6 + b ? (layout[6 + b] + 0xf) & ~0xf : 0;
+
+                if (offset >= ub && offset < ub + words)
+                {
+                    return (24, b * 0x100 + (offset - ub));
+                }
+
+                ub += words;
+            }
             int sb = ub + 0x10 * ubos;
             int hb = sb + 0x10 * ssbos;
             int sepTextures = hb + 8 * textures;

@@ -104,6 +104,7 @@ void guest_clock_freeze_for(int reason, int on);
 #endif
 
 static id<MTLDevice> g_dev;
+static void gpu_keep_start(void);   // the GPU clock keeper (near mtl_present_count)
 static void ser_compile_begin(void), ser_compile_end(void), plain_compile_begin(void), plain_compile_end(void);
 static void arch_died(NSError *e);
 // Every compile reports service death before leaving the serialization gate, even when its caller ignores the error. Archive lookups do not compile.
@@ -1276,6 +1277,7 @@ static void mtl_init_once(void) {
     MLOG("Metal device %s", g_dev.name.UTF8String);
     rop_f16_probe();
     udc_selftest();
+    gpu_keep_start();   // after the device (PR #1847)
 }
 
 void mtl_init(void) {
@@ -22056,6 +22058,60 @@ static id<MTLRenderPipelineState> g_blit_pso; static MTLPixelFormat g_blit_fmt;
 static id<MTLSamplerState> g_blit_samp;
 static uint64_t g_present_n;
 uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present count (heat attribution DM_HEAT computes the present frame rate)
+
+// ---------- GPU clock keeper (Mac) ----------
+// macOS sets the GPU's clock from how busy it was: a game that waits for the vsync between frames leaves the GPU idle part of each frame, the clock drops, and the same frame then takes
+// longer on the GPU. Donkey Kong Bananza's later layers on an M4 MacBook Air (10 GPU cores): about 23 ms of GPU a frame at 30 fps, 11.4 ms with the GPU kept busy; a test program measured
+// the same pass 23 ms when paced at 30 frames a second and 12.6 ms back to back. The game's frame-rate controller, which compares its frame with 1.2 vsyncs, therefore stayed at 30 fps for
+// good: at 30 fps the GPU idles, so its frames stay slow. A thread keeps one threadgroup of 32 threads spinning on its own queue for part of the time (its duty), so the GPU looks busier
+// and its clock rises, as far as the frames need: every half second the duty goes up while a frame's GPU time (mtl_gpu_ms, 8 frames back) is above KEEP_HI_MS and down while it is below
+// KEEP_LO_MS. Kept at full duty, the clock stays at its top and the fanless Air heated until its CPU slowed (its power fell from 6 to 3 W after 10 minutes): the duty takes only the clock
+// the frames need, and none while they fit. Each spin is about 2 ms at the top clock (a commit every few ms, not every half millisecond: the submissions alone took a quarter of a core). No present for a quarter
+// second (a pause, a hidden window) stops it. DM_GPU_KEEP=0 turns it off, 1 holds full duty (default auto)
+enum { KEEP_SPIN = 140000 };
+// 14 / 11.5 ms: in handheld mode the game's 13.4 ms of GPU at the clock macOS picks fits its frame, and holding the clock higher only heated the fanless Air into slowing its CPU
+// (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
+static double KEEP_HI_MS = 14.0, KEEP_LO_MS = 11.5;
+static _Atomic int g_keep_active;
+static void *gpu_keep_main(void *arg) {
+    int mode = (int)(intptr_t)arg; pthread_setname_np("dm-gpu-keep");
+    { const char *e = getenv("DM_GPU_KEEP_MS"); double hi, lo; if (e && sscanf(e, "%lf,%lf", &hi, &lo) == 2 && hi > lo && lo >= 0) { KEEP_HI_MS = hi; KEEP_LO_MS = lo; } }
+    NSError *e = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void dm_keep(device float *o [[buffer(0)]], constant uint &n [[buffer(1)]], uint t [[thread_position_in_grid]]) { float x = t; for (uint i = 0; i < n; i++) x = fma(x, 1.0000001f, 0.5f); if (x == 12345.f) o[t] = x; }\n" options:nil error:&e];
+    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"dm_keep"] : nil;
+    id<MTLComputePipelineState> ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+    id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLBuffer> o = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModePrivate];
+    if (!ps || !q || !o) { MLOG("[RED] GPU clock keeper: cannot make its kernel (%s); off", e ? e.localizedDescription.UTF8String : "no error"); return NULL; }
+    uint32_t n = KEEP_SPIN; uint64_t last_present = 0, last_change = 0, last_adj = 0, lines = 0; double duty = mode == 1 ? 1 : 0;
+    for (;;) { @autoreleasepool {
+        uint64_t now = now_ns(), pn = g_present_n;
+        if (pn != last_present) { last_present = pn; last_change = now; }
+        int presenting = now - last_change < 250000000ull;
+        if (mode == 2 && now - last_adj > 500000000ull) {   // the frames' GPU time over the last half second, 8 frames back as the timing line takes it
+            last_adj = now; uint64_t f = atomic_load(&g_cur_frame); double sum = 0; int k = 0;
+            for (uint64_t d = 8; d < 38 && f > d; d++) { double g = mtl_gpu_ms(f - d); if (g >= 0) { sum += g; k++; } }
+            if (k >= 4) { double g = sum / k, was = duty;
+                if (g > KEEP_HI_MS) duty = duty < 0.1 ? 0.25 : MIN(1.0, duty + 0.15); else if (g < KEEP_LO_MS) duty = MAX(0.0, duty - 0.1);
+                if ((duty > 0) != (was > 0) && lines++ < 40) MLOG("GPU clock keeper: %s (a frame's GPU time %.1f ms)", duty > 0 ? "on" : "off", g); } }
+        if (duty <= 0 || !presenting) { atomic_store(&g_keep_active, 0); usleep(20000); continue; }
+        atomic_store(&g_keep_active, 1);
+        id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:ps]; [ce setBuffer:o offset:0 atIndex:0]; [ce setBytes:&n length:4 atIndex:1];
+        [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];
+        uint64_t t0 = now_ns(); [cb commit]; [cb waitUntilCompleted];
+        if (duty < 1) { double spun = (double)(now_ns() - t0) / 1e3; useconds_t rest = (useconds_t)MIN(50000.0, spun * (1 - duty) / duty); if (rest) usleep(rest); }
+    } }
+    return NULL;
+}
+static void gpu_keep_start(void) {
+#if TARGET_OS_OSX
+    const char *e = getenv("DM_GPU_KEEP"); int mode = e ? atoi(e) : 2; if (e && !strcmp(e, "auto")) mode = 2;
+    if (mode <= 0) { MLOG("GPU clock keeper: off (DM_GPU_KEEP=0)"); return; }
+    pthread_t th; if (pthread_create(&th, NULL, gpu_keep_main, (void *)(intptr_t)mode)) { MLOG("[RED] GPU clock keeper: cannot start its thread"); return; }
+    pthread_detach(th);
+    MLOG("GPU clock keeper: %s (DM_GPU_KEEP)", mode == 1 ? "full duty" : "duty set by the frames' GPU time");
+#endif
+}
 void mtl_res_snapshot(mtl_res_count *out) {
     memset(out, 0, sizeof *out);
     out->pso = g_pso.n;

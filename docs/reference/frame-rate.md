@@ -921,6 +921,13 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** each shader keeps, made once, the indices of its texture and image bindings and of the bindings `ubd_conflict_sh` looks at (`sh_lists_make` in `nvn_mtl.m`). The loops walk those lists with the same conditions inside, and a shader with no texture binding skips `ubd_conflict_textures`' lock. The lists are published by a release store of `lists_nb`, read with acquire.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 45 bindings at the 90th percentile, a third of them textures; the walks were about 7 % of the replay thread on Layer 1400 (a Metal System Trace's time profile of the replay thread before these changes).
 
+### The GPU clock fell between frames
+
+- **Symptom:** the same frame took 16.3 ms of GPU where an experiment that kept the GPU busy between frames took 13.6 ms.
+- **Cause:** macOS lowers the GPU's clock while it is idle. A game that waits for an older frame's fence before it records the next leaves the GPU idle while the host translates, so each frame's GPU work started at a lower clock, and that time is in the tail the game waits for.
+- **Fix:** the GPU clock keeper from [PR #1847](https://github.com/seedds/nxnative/pull/1847), on the Mac (`gpu_keep_main` in `nvn_mtl.m`, ported as is): a thread that keeps the GPU busy part of the time, its duty raised while a frame's GPU time is above 14 ms and lowered below 11.5 ms (`DM_GPU_KEEP=auto`, the default; `1` full duty, `0` off; `DM_GPU_KEEP_MS=<hi>,<lo>`).
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game) (`checkpoint`, 2 runs each, M1 Max, 2026-11-22): GPU p50 16.3 → 12.4 ms, frame p50 25.8 → 24.6 ms at the same 26,400 draws (38.0 → 40.7 fps). Full duty had one run of the two at 45 ms frames with 37 ms of GPU, so `auto` is the default. Not measured: other Macs, and the power cost.
+
 ### A streamed submission reached the replay only at its next wait or its end
 
 - **Symptom:** the replay thread idle for the first milliseconds of a busy frame while the game's presentation thread was still copying its one big submission (about 5 MB of records), then translating it all at once; `@qt_rq0_ms` (the replay's first node of the frame) late against `@qt_sub0_ms`.

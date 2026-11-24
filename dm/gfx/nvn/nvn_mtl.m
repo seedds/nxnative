@@ -20359,7 +20359,43 @@ static void present_shape(id<MTLTexture> src, const int crop[4], double *w, doub
     v = atomic_load(&g_layer_shape);
     *w = v ? (double)(uint32_t)v : 1920; *h = v ? (double)(v >> 32) : 1080;
 }
-static MTLViewport present_fit(id<MTLTexture> src, const int crop[4], double dw, double dh) { double w, h; present_shape(src, crop, &w, &h); return present_viewport(w, h, dw, dh); }
+// Picture Fill on the Mac (DM_PICTURE_FIT=fill; on iOS front_ios.m sizes the view larger than the screen instead):
+// the picture covers the whole drawable and its edges are cropped, narrowing the source rectangle r to the drawable's
+// shape about its centre. A 16:9 game on a 16:10 screen loses about 5.5 % at each side and keeps its proportions.
+static int g_present_fill = -1;
+static int present_fill_on(void) {
+#if TARGET_OS_IPHONE
+    return 0;
+#else
+    if (g_present_fill < 0) {
+        const char *e = getenv("DM_PICTURE_FIT");
+        g_present_fill = e && !strcmp(e, "fill");
+        if (g_present_fill) MLOG("present: picture Fill (DM_PICTURE_FIT=fill), edges cropped to the window's shape");
+    }
+    return g_present_fill;
+#endif
+}
+static void present_cover(double w, double h, NSUInteger r[4], double dw, double dh) {
+    if (w <= 0 || h <= 0 || dw <= 0 || dh <= 0 || !r[2] || !r[3]) return;
+    double p = w / h, a = dw / dh;
+    if (p > a * 1.001) {
+        NSUInteger k = (NSUInteger)llround((double)r[2] * a / p);
+        if (k < 1) k = 1;
+        if (k > r[2]) k = r[2];
+        r[0] += (r[2] - k) / 2; r[2] = k;
+    } else if (a > p * 1.001) {
+        NSUInteger k = (NSUInteger)llround((double)r[3] * p / a);
+        if (k < 1) k = 1;
+        if (k > r[3]) k = r[3];
+        r[1] += (r[3] - k) / 2; r[3] = k;
+    }
+}
+static MTLViewport present_fit(id<MTLTexture> src, const int crop[4], NSUInteger r[4], double dw, double dh) {
+    double w, h; present_shape(src, crop, &w, &h);
+    if (!present_fill_on() || dw <= 0 || dh <= 0) return present_viewport(w, h, dw, dh);
+    present_cover(w, h, r, dw, dh);
+    return (MTLViewport){0, 0, dw, dh, 0, 1};
+}
 // The valid source rectangle of a present (x, y, width, height; the crop of nvnWindowSetCrop, zero = the whole texture); 0 when it lies outside the texture
 static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r[4]) {
     r[0] = 0; r[1] = 0; r[2] = src.width; r[3] = src.height;
@@ -20372,6 +20408,8 @@ static int present_crop_rect(id<MTLTexture> src, const int crop[4], NSUInteger r
 }
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
+    double dw = dst.width, dh = dst.height;
+    MTLViewport vp = present_fit(src, crop, r, dw, dh);
     NSUInteger cx = r[0], cy = r[1], cw = r[2], ch = r[3];
     static uint64_t last_crop[8]; uint64_t meta[8] = {src.width, src.height, cx, cy, cw, ch, dst.width, dst.height};
     if (memcmp(meta, last_crop, sizeof meta)) { memcpy(last_crop, meta, sizeof meta);
@@ -20379,8 +20417,6 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
              (unsigned long)cx, (unsigned long)cy, (unsigned long)cw, (unsigned long)ch, (unsigned long)dst.width, (unsigned long)dst.height); }
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, crop, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -20703,7 +20739,7 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     NSUInteger r[4]; if (!present_crop_rect(src, crop, r)) return 0;
     present_pipeline(dst.pixelFormat);
     double dw = dst.width, dh = dst.height;
-    MTLViewport vp = present_fit(src, crop, dw, dh);
+    MTLViewport vp = present_fit(src, crop, r, dw, dh);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     int flipped = atomic_load_explicit(&g_origin_ll, memory_order_relaxed), wrote = 0;
     static int direct_ok = -1; if (direct_ok < 0) { const char *e = getenv("DM_FX_DIRECT"); direct_ok = !(e && !strcmp(e, "0")); }

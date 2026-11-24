@@ -18,7 +18,7 @@ In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the c
 
 ## Rumble
 
-Game vibration uses the iPhone's haptic engine or a compatible connected controller. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.
+Game vibration uses the iPhone's haptic engine or a compatible connected controller. A connected controller without haptics gives no rumble; `DM_PHONE_RUMBLE=1` in `Documents/env.txt` plays player 1's rumble on the iPhone instead, and `DM_PHONE_RUMBLE=0` never uses the iPhone. Controllers with separate left/right haptic outputs keep those effects separate. The settings screen's **Game rumble** and **Rumble strength** control it independently of **Touch feedback**. Phone rumble approximates the Switch's effects; physical feel and controller compatibility still need device testing.
 
 ## Motion (gyro)
 

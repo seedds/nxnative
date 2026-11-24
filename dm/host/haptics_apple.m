@@ -635,6 +635,18 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
 }
+// DM_PHONE_RUMBLE (iOS, GitHub issue #597): 1 plays player 1's rumble on the phone also while player 1's controller offers no haptics (no locality: no channel of its own),
+// 0 never on the phone; unset: the phone only while player 1 has no controller, as before. Never beside a controller's own channels: a channel's failure, backoff or reset
+// clears the whole player (dm_haptics_clear), so a phone engine there would silence the controller and the reverse
+static int phone_rumble(void) { static int v = -2; if (v == -2) { const char *e = getenv("DM_PHONE_RUMBLE"); v = e && (!strcmp(e, "0") || !strcmp(e, "1")) ? atoi(e) : -1; } return v; }
+static void add_phone(int p) {
+#if TARGET_OS_IPHONE
+    // Do not initialize the phone's engine before the game's audio session is active.
+    if (!p && phoneSupported) add_engine(p, -1, @"phone", ^CHHapticEngine *(NSError **e) { return [[CHHapticEngine alloc] initWithAudioSession:AVAudioSession.sharedInstance error:e]; });
+#else
+    (void)p;
+#endif
+}
 static GCHapticsLocality const kJoyConLeftLocality = (GCHapticsLocality)@"JoyCon (L)";
 static GCHapticsLocality const kJoyConRightLocality = (GCHapticsLocality)@"JoyCon (R)";
 
@@ -684,15 +696,12 @@ static void configure(int p, GCController *controller) {
             };
         }
         else if (localities.count) default_controller(p, h, 0);
-        fprintf(stderr, "haptics: player %d controller %s, localities %s, %lu channels\n", p + 1,
-                controller.vendorName.UTF8String ?: "unknown", [[localities.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "].UTF8String ?: "none", (unsigned long)channels[p].count);
+        NSUInteger own = channels[p].count; if (!own && phone_rumble() == 1) add_phone(p);
+        fprintf(stderr, "haptics: player %d controller %s, localities %s, %lu channels%s\n", p + 1,
+                controller.vendorName.UTF8String ?: "unknown", [[localities.allObjects sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "].UTF8String ?: "none", (unsigned long)channels[p].count,
+                channels[p].count > own ? " (the phone's, as the controller offers no haptics: DM_PHONE_RUMBLE=1)" : "");
     }
-#if TARGET_OS_IPHONE
-    else if (!p && phoneSupported) {
-        // Do not initialize the phone's engine before the game's audio session is active.
-        add_engine(p, -1, @"phone", ^CHHapticEngine *(NSError **e) { return [[CHHapticEngine alloc] initWithAudioSession:AVAudioSession.sharedInstance error:e]; });
-    }
-#endif
+    else if (phone_rumble() != 0) add_phone(p);
     dm_haptics_route(p, channels[p].count != 0);
 }
 void dm_haptics_apple_set_sink(int p, void (*sink)(const dm_haptic_state *)) {

@@ -160,6 +160,14 @@ HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolution
     static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k_buf_max_res[r][0], k_buf_max_res[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
 }
+// The display's current refresh rate, in Hz (the SDK's own client answers only for its internal default display, sdk+0x55dbd0: for the host's display it returns 0x272 and leaves
+// the output as the game set it). Cyberpunk 2077 reads 120 and 60 as such and 0 as its variable-rate mode (main+0x81e88c), in which its swap chain wants 4 active textures
+// (main+0x854fe8); it builds the chain with 2 from another flag, so with the output left at 0 it finalized and initialized its window every frame and stayed on the boot screen.
+// The host presents at a fixed 60 Hz
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPKNS0_7DisplayE", "display refresh rate: 60 Hz (fixed, no VRR)", Result, h_vi_RefreshRate,
+          uint32_t *out, const void *disp) {
+    (void)disp; if (out) *out = 60; return RES_OK;
+}
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
 HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,
           void *layer, int a, int b) {

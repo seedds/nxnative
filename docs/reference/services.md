@@ -1913,6 +1913,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
 
+### The display's refresh rate
+
+- **Symptom:** a Switch 2 game stays on its boot screen with its sound playing, and the log shows `[nvn] WindowInitialize` several times a second.
+- **Cause:** the SDK's `nn::vi::QueryDisplayCurrentRefreshRate` answers only for its internal default display (`sdk+0x55dbd0`). For the display the host opens it returns 0x272 and leaves the output as the game set it. Cyberpunk 2077 reads the rate in Hz, and 0 as its variable-rate mode (`main+0x81e88c`). In that mode its swap chain wants 4 active textures (`main+0x854fe8`, `nvnWindowGetNumActiveTextures`), but it builds the chain with 2 from another flag (`main+0x8155d0`). So every frame it finalized and initialized its window again.
+- **Fix:** `hle_vi.c` answers 60, the fixed rate the host presents at.
+- **Found on:** Cyberpunk 2077 (`0400DDB020648000`, no profile yet): `WindowInitialize` went from about 5,600 calls in 180 s to 3, and the game left its boot screen for its loading screen.
+
 ### A game that decodes its code at run time
 
 - **Symptom:** `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes.

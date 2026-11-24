@@ -255,12 +255,16 @@ $(B)/t_uecvar: t_uecvar.c ../hle_uecvar.c ../hle.h ../dm.h $(GAME_H) | $(B)
 $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_swkbd.c ../hle_swkbd.c
 run: $(B)/t_bigstack
-run: web-stack
-.PHONY: web-stack
+run: web-stack web-apple
+.PHONY: web-stack web-apple
 web-stack: $(B)/t_web_stack
 	$(B)/t_web_stack
 $(B)/t_web_stack: t_web_stack.c ../hle_web.c ../hle_bigstack.c ../hle.h ../dm.h ../front.h ../dm_input.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_web_stack.c ../hle_bigstack.c
+web-apple: $(B)/t_web_apple
+	$(B)/t_web_apple
+$(B)/t_web_apple: t_web_apple.m ../web_apple.m ../dm.h ../dm_input.h ../front.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_web_apple.m -framework Cocoa -framework WebKit -framework JavaScriptCore
 $(B)/t_bigstack: t_bigstack.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_bigstack.c ../hle_bigstack.c
 run: watch-sample

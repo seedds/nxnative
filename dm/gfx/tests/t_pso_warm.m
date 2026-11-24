@@ -119,7 +119,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     EXPECT("live key finds warmed pipeline", 1, hm_get_id(&g_pso, &live) != nil);
     uint64_t before = g_pb_spec + g_pb_legacy;
     NvProg *program = [NvProg new]; program->sh[0] = vs; program->sh[1] = fs;
-    id<MTLRenderPipelineState> warmed = pso_get_(program, nil);
+    id<MTLRenderPipelineState> warmed = pso_get(program, nil);
     EXPECT("draw lookup adds no pipeline build", before, g_pb_spec + g_pb_legacy);
     EXPECT("draw lookup returns a pipeline", 1, warmed != nil);
     if (!warmed) { g_pso_lmap = NULL; return; }
@@ -314,6 +314,17 @@ static void native_mesh(NSString *dir) {
     pso_key depth = {.dfmt = MTLPixelFormatDepth32Float, .samples = 1};
     NSError *error = nil;
     EXPECT("depth-only native mesh pipeline uses the empty fragment", 1, mtk_build(&depth, nil, live, nil, &error, NULL) != nil);
+    MTLRenderPipelineDescriptor *no_vertex = [MTLRenderPipelineDescriptor new];
+    error = nil;
+    EXPECT("missing vertex function returns an error", 1, dev_rps(no_vertex, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_fragment = [MTLMeshRenderPipelineDescriptor new];
+    no_fragment.meshFunction = live->fn;
+    error = nil;
+    EXPECT("missing mesh fragment function returns an error", 1, dev_mps(no_fragment, &error) == nil && error.code == 3);
+    MTLMeshRenderPipelineDescriptor *no_mesh = [MTLMeshRenderPipelineDescriptor new];
+    no_mesh.fragmentFunction = fragment->fn;
+    error = nil;
+    EXPECT("missing mesh function returns an error", 1, dev_mps(no_mesh, &error) == nil && error.code == 3);
     g_mtk.ms = nil;
     g_warm_t0 = bp_now(); warm_finish();
 }

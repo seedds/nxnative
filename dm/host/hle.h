@@ -4,7 +4,28 @@
 #pragma once
 #include "dm.h"
 #include "registration.h"
+#include <fcntl.h>
 #include <stddef.h>
+#include <unistd.h>
+
+// Read len bytes at off from the application's control.nacp (nn::ns::ApplicationControlProperty, 0x4000 bytes): DM_CONTROL_NACP, else control.nacp beside DM_ROMFS
+// (the NSP script's extraction folder <version>/{RomFS,control.nacp}, the Mac app's Resources). Returns 0 on success, -1 if missing, -2 if too short.
+static inline int dm_control_read(off_t off, void *out, size_t len, char *path_out, size_t path_cap) {
+    char p[1100]; const char *e = getenv("DM_CONTROL_NACP");
+    if (e && *e) snprintf(p, sizeof p, "%s", e);
+    else {
+        const char *rom = getenv("DM_ROMFS");
+        if (rom) snprintf(p, sizeof p, "%s", rom);
+        else snprintf(p, sizeof p, "%s%s/romfs", getenv("DM_ROOT") ?: (getenv("HOME") ?: ""), getenv("DM_ROOT") ? "" : "/dm-work");
+        size_t k = strlen(p); while (k > 1 && p[k - 1] == '/') p[--k] = 0;
+        char *sl = strrchr(p, '/'); if (sl) sl[1] = 0; else p[0] = 0;
+        strlcat(p, "control.nacp", sizeof p);
+    }
+    if (path_out && path_cap) strlcpy(path_out, p, path_cap);
+    int fd = open(p, O_RDONLY); ssize_t r = fd < 0 ? -1 : pread(fd, out, len, off);
+    if (fd >= 0) close(fd);
+    return r == (ssize_t)len ? 0 : (fd < 0 ? -1 : -2);
+}
 typedef struct { const char *name; void *fn; } hle_ent;
 #define HLE(mangled, ret, cname, ...)                                                             \
     static ret cname(__VA_ARGS__);                                                                \
@@ -32,8 +53,8 @@ int dm_detclock_enabled(void);
 uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
 void guest_clock_freeze(int on);
 void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation
-void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
-void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while the app is in the background (hle_os.c)
+void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
+void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 
 // Forced takeover: even if the SDK module has a definition, all references to that symbol at load time (JUMP_SLOT/GLOB_DAT/ABS64) are resolved to the host implementation.
@@ -131,8 +152,8 @@ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnit
 typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf;   // next, data, buffer_size, data_size, data_offset
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
-void dm_audio_route_changed(void);   // the output route changed: recreate units whose route-dependent channel count changed (hle_audio.c)
-int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device on a host stack
+void dm_audio_route_changed(void);   // the output route changed: update channel layout and watch for stalled callbacks (hle_audio.c)
+int dm_audio_output_channels(void);   // the output route: 6 on a Mac device whose preferred speaker layout maps surround (5.0 / 5.1+) onto its outputs (iOS: six session channels), else 2 (hle_audio.c); reads the device on a host stack
 int dm_audio_route(void);             // cached route, initialized on the calling host stack (hle_audio.c)
 // In-process DeviceSink PCM: L R C LFE Ls Rs, followed by the stereo fold made before clamping/resampling.
 // Both representations stay queued together; a device route change selects one without losing the original mix.

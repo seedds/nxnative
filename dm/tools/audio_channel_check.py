@@ -5,7 +5,7 @@ The probe (dm/host/tests/t_audio_live.c, built by `make -C dm/host/tests GAME=<i
 AudioOut on the named device and captures that device's input in the same process (DM_AUDIO_CAPTURE), so what it measures is what the
 device received from the host.
 
-Six channels (a six-channel device such as BlackHole 16ch): channels 1..6 must carry the tones 440, 660, 880, 60, 1320, 1760 Hz
+Six channels (a device with a 5.1 speaker layout, such as BlackHole 16ch set to 5.1 under Configure Speakers in Audio MIDI Setup): channels 1..6 must carry the tones 440, 660, 880, 60, 1320, 1760 Hz
 (front-left, front-right, center, LFE, back-left, back-right), each at least 12 dB above the others.
 Stereo (a two-channel device such as BlackHole 2ch, the six-channel guest downmixed by the host): left carries 440 Hz at 1.0, 880 Hz and 1320 Hz
 at 0.707 (center and back-left), 60 Hz at 0.251 (LFE); right the same with 660 and 1760 Hz. Each within 1.5 dB.

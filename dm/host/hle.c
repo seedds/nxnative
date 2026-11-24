@@ -92,25 +92,41 @@ static void (*g_obs_fn[OBS_MAX])(uint64_t *regs, int param); static int g_obs_ha
 void gate_obs_set(int id, void (*fn)(uint64_t *regs, int param)) { if (id <= 0 || id >= OBS_MAX) die("observation gate number out of range %d", id); g_obs_fn[id] = fn; }
 int gate_obs_present(int id) { return id > 0 && id < OBS_MAX && g_obs_have[id]; }
 typedef struct { uint64_t ret; int kind, arg; uint64_t orig; } gate_t;
-#define GATE_BITS 15                     // 32768 slots, gate count ≤ 8192, load factor ≤ 1/4 (spin wait gates: Tears of the Kingdom's main has 843)
-static gate_t g_gate[1u << GATE_BITS];
-static int g_ngate;
-static inline unsigned gate_h(uint64_t a) { return (unsigned)(((a >> 2) * 0x9E3779B97F4A7C15ull) >> (64 - GATE_BITS)); }
+// All gates, including NROs, are registered by load_modules before guest execution. Grow and rehash there;
+// dispatch only reads the finished table, so no allocation, lock or relocation is needed on the hot path.
+static gate_t *g_gate;
+static size_t g_ngate, g_gate_cap;
+static unsigned g_gate_bits = 15;   // initially 32768 slots; keep the load factor at most 1/4
+static inline size_t gate_h(uint64_t a, unsigned bits) { return (size_t)(((a >> 2) * 0x9E3779B97F4A7C15ull) >> (64 - bits)); }
+static void gate_grow(void) {
+    if (g_gate_cap > SIZE_MAX / 2 / sizeof *g_gate) die("gate table too large");
+    size_t cap = g_gate_cap ? g_gate_cap * 2 : (size_t)1 << g_gate_bits;
+    unsigned bits = g_gate_bits + (g_gate != NULL);
+    gate_t *tab = calloc(cap, sizeof *tab);
+    if (!tab) die("gate table allocation for %zu entries", cap);
+    for (size_t j = 0; g_gate && j < g_gate_cap; j++) if (g_gate[j].ret) {
+        size_t i = gate_h(g_gate[j].ret, bits) & (cap - 1);
+        while (tab[i].ret) i = (i + 1) & (cap - 1);
+        tab[i] = g_gate[j];
+    }
+    free(g_gate); g_gate = tab; g_gate_cap = cap; g_gate_bits = bits;
+}
 
 void gate_register(uint64_t ret_abs, const char *kind, int arg, uint64_t orig) {
     int k = !strcmp(kind, "svc") ? G_SVC : !strcmp(kind, "cntpct") ? G_CNTPCT : !strcmp(kind, "cntvct") ? G_CNTVCT : !strcmp(kind, "obs") ? G_OBS : !strcmp(kind, "spin") ? G_SPIN : -1;
     if (k < 0) die("unknown gate kind %s", kind);
     if (k == G_OBS) { if ((arg & 0xff) <= 0 || (arg & 0xff) >= OBS_MAX) die("observation gate number out of range %d", arg & 0xff); g_obs_have[arg & 0xff] = 1; }
-    if (++g_ngate > (1 << GATE_BITS) / 4) die("gate overflow");
-    unsigned i = gate_h(ret_abs);
-    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("gate registered twice %#llx", ret_abs); i = (i + 1) & ((1u << GATE_BITS) - 1); }
-    g_gate[i] = (gate_t){ret_abs, k, arg, orig};
+    if (g_ngate == g_gate_cap / 4) gate_grow();
+    size_t i = gate_h(ret_abs, g_gate_bits) & (g_gate_cap - 1);
+    while (g_gate[i].ret) { if (g_gate[i].ret == ret_abs) die("gate registered twice %#llx", ret_abs); i = (i + 1) & (g_gate_cap - 1); }
+    g_gate[i] = (gate_t){ret_abs, k, arg, orig}; g_ngate++;
 }
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr);   // hle_svc.c
 
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
-    for (unsigned i = gate_h(ret_addr);; i = (i + 1) & ((1u << GATE_BITS) - 1)) {
+    if (!g_gate) die("unknown gate at %#llx", ret_addr);
+    for (size_t i = gate_h(ret_addr, g_gate_bits) & (g_gate_cap - 1);; i = (i + 1) & (g_gate_cap - 1)) {
         const gate_t *g = &g_gate[i];
         if (g->ret == ret_addr) switch (g->kind) {
             case G_CNTPCT: case G_CNTVCT: {

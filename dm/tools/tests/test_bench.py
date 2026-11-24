@@ -25,6 +25,25 @@ class Bench(unittest.TestCase):
             self.assertEqual(s['fps'], 100.0); self.assertEqual(s['frame_p50'], 10.0); self.assertEqual(s['frame_p99'], 10.0); self.assertEqual(s['frame_max'], 50.0)
             self.assertEqual(s['over_budget'], 1)   # only the 50 ms frame is longer than 1.5 × 8.33 ms
 
+    def test_submit_metrics(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / 'frames.tsv'
+            rows = ['# kind: nvn-per-frame', 'frame\tname\tvalue']
+            for i in range(10):
+                t = 10.0 + i * 0.1
+                draws = 1000 if i < 5 else 2000
+                cpu = 2.0 if i < 5 else 6.0   # 2.0 us/draw then 3.0 us/draw
+                instr = 20_000_000 if i < 5 else 60_000_000   # 20k then 30k instr/draw
+                rows += [f'{i}\t@t_s\t{t:.3f}', f'{i}\t@draws\t{draws}', f'{i}\t@sub_cpu_ms\t{cpu}', f'{i}\t@sub_instr\t{instr}']
+            f.write_text('\n'.join(rows) + '\n')
+            m = bench.submit_metrics(f, 10.5, 11.0)   # frames 5..9
+            self.assertEqual(m['draws_p50'], 2000)
+            self.assertEqual(m['sub_cpu_p50'], 6.0)
+            self.assertEqual(m['sub_us_draw'], 3.0)
+            self.assertEqual(m['sub_minstr_p50'], 60.0)
+            self.assertEqual(m['sub_kinstr_draw'], 30.0)
+            self.assertEqual(bench.submit_metrics(f, 20.0, 21.0), {})
+
     def test_percentile(self):
         xs = list(range(1, 101))
         self.assertEqual(bench.pct(xs, 50), 50); self.assertEqual(bench.pct(xs, 99), 99); self.assertEqual(bench.pct(xs, 100), 100); self.assertIsNone(bench.pct([], 50))

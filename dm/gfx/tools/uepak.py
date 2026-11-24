@@ -43,7 +43,7 @@
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
 #        uepak.py finish <work dir> <out dir>                           after the host has run the job: the archives with every shader decoded
-import ctypes, json, os, re, struct, sys
+import json, os, re, struct, sys
 from typing import cast
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../tools'))
 from romfs import os, open
@@ -52,17 +52,7 @@ PAK_MAGIC, ARCHIVE_VERSION = 0x5A6F12E1, 2
 JOB_MAGIC, OUT_MAGIC = 0x4a4f4d44, 0x524f4d44   # "DMOJ", "DMOR" (hle_oodle.c)
 FREQ = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs'}   # EShaderFrequency (the archive's frequency census: 0 vertex, 3 pixel, 5 compute)
 
-_cc = None
-def aes_decrypt(key, data):
-    """AES-256 ECB decryption through CommonCrypto (every Mac has it; no Python package needed)"""
-    global _cc
-    if _cc is None:
-        _cc = ctypes.CDLL('/usr/lib/libSystem.B.dylib').CCCrypt
-        _cc.restype = ctypes.c_int32
-        _cc.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
-    out = ctypes.create_string_buffer(len(data)); moved = ctypes.c_size_t()
-    if _cc(1, 0, 2, key, len(key), None, data, len(data), out, len(data), ctypes.byref(moved)): raise ValueError('CCCrypt failed')   # decrypt, AES, ECB
-    return out.raw[:moved.value]
+from aes import decrypt as aes_decrypt
 
 _M, _K0, _K1, _K2 = (1 << 64) - 1, 0xc3a5c85c97cb3127, 0xb492b66fbe98f273, 0x9ae16a3b2f90404f
 def _rot(v, s): return ((v >> s) | (v << (64 - s))) & _M if s else v
@@ -188,11 +178,11 @@ def frozen_index(f, ver):
 def footer(f):
     """(encrypted index, index offset, index size, compression method names by number from 1, version); ValueError when the index does not lie inside the file"""
     back, ver = magic_back(f)
-    if ver in (4, 11) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
+    if ver in (4, 11, 12) and (ver == 4) != (back == 0x2c) or ver == 8 and back == 0x2c or (ver == 9) != (back == 0xcd): raise ValueError(f'a version {ver} pak footer with its magic {back:#x} bytes from the end, where that version has none')
     if ver == 4:
         f.seek(-0x2d, 2); ft = f.read(0x2d); ioff, isz = struct.unpack_from('<QQ', ft, 9)
         enc, methods = ft[0], [LEGACY_METHODS.get(i, f'flags {i}') for i in range(1, 8)]
-    elif ver not in (8, 9, 11): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))} and 11 are read')
+    elif ver not in (8, 9, 11, 12): raise ValueError(f'pak version {ver}, only {", ".join(map(str, LEGACY))}, 11 and 12 are read')
     else:
         f.seek(-(back + 21), 2); ft = f.read(back + 21); k = 21
         ioff, isz = struct.unpack_from('<QQ', ft, k + 8)
@@ -385,30 +375,57 @@ class Pak:
         off = r.take('<I' if v >> 31 & 1 else '<Q'); raw = r.take('<I' if v >> 30 & 1 else '<Q')
         size = r.take('<I' if v >> 29 & 1 else '<Q') if meth else raw
         cur, blocks = 53 + (4 + 16 * nblk if meth else 0), []
-        if nblk == 1 and not bsz: bsz = raw   # FINAL FANTASY RESONANCE's pak (UE 5.6) stores block size 0 for a file of one block
+        if nblk == 1: bsz = raw   # a single-block entry always holds raw bytes: UE 4.26 stores (raw >> 11) & 0x3f (truncated to 2 KB, e.g. 0x3800 for a ~15 KB file), UE 5.6 stores 0
         if nblk == 1 and not enc: blocks = [(cur, size)]
         else:
             for _ in range(nblk): s = r.take('<I'); blocks.append((cur, s)); cur += (s + 15) & ~15 if enc else s
         if meth > len(self.methods) or meth and not self.methods[meth - 1]: raise ValueError(f'{self.path}: {path} names compression method {meth}, which the footer does not')
         return dict(off=off, raw=raw, size=size, method=self.methods[meth - 1] if meth else '', encrypted=enc, block_size=bsz, blocks=blocks)
     def read(self, path, decode=None):
-        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib and LZ4 blocks are decoded here (OCTOPATH TRAVELER II: Zlib); any other
+        """A file's bytes, block by block (each block holds block_size raw bytes, the last one the rest). Zlib, LZ4 and Zstd blocks are decoded here (OCTOPATH TRAVELER II: Zlib, BRAVELY DEFAULT II: Zstd); any other
         method needs decode(block bytes, raw length) → bytes: the game's own decoder in the Mac host (shader_split.py oodle); Octopath Traveler 0's archives go through the Oodle job instead"""
         e = self.entry(path)
         if not e['method']: return self.read_at(cast(int, e['off']) + self.stored_header, e['size'], e['encrypted'])
         import zlib
         bad = (zlib.error,)   # a block its decoder refuses
         if e['method'] == 'Zlib': decode = zlib_block
+        elif e['method'] == 'Zstd':
+            zstd = zstd_mod()
+            decode = zstd_block; bad = (zstd.ZstdError,)
         elif e['method'] == 'LZ4': import lz4.block; decode = lambda b, k: lz4.block.decompress(b, uncompressed_size=lz4_raw(b, k, path)); bad = (lz4.block.LZ4BlockError,)
         elif not decode: raise ValueError(f'{path} is {e["method"]}-compressed in the pak')
-        out, left = [], e['raw']
+        raw = cast(int, e['raw']); out, left = [], raw
+        if left < 0: raise ValueError(f'{self.path}: {path} has negative raw size {left:#x}')
+        bsz = left if len(e['blocks']) == 1 else cast(int, e['block_size'])
+        if len(e['blocks']) > 1 and bsz <= 0: raise ValueError(f'{self.path}: {path} has non-positive block size {bsz:#x}')
         for i, (s, n) in enumerate(e['blocks']):
-            k = min(left, e['block_size'])
+            k = min(left, bsz)
             try: b = decode(self.read_at(e['off'] + s, n, e['encrypted']), k)
             except bad as x: raise ValueError(f'{self.path}: {path} block {i} does not decode ({x})') from None
             if len(b) != k: raise ValueError(f'{self.path}: {path} block {i} decodes to {len(b):#x} bytes, not {k:#x}')
             out.append(b); left -= k
+        if left: raise ValueError(f'{self.path}: {path} decoded {raw - left:#x} bytes, not {raw:#x}')
         return b''.join(out)
+
+_ZSTD = None
+def zstd_mod():
+    global _ZSTD
+    if _ZSTD is None:
+        try: from compression import zstd
+        except ImportError:
+            import importlib
+            zstd = importlib.import_module('backports.zstd')
+        _ZSTD = zstd
+    return _ZSTD
+
+def zstd_block(b, k):
+    """One Zstandard frame bounded by the pak block's raw size, including frames without a content size."""
+    zstd = zstd_mod()
+    if k < 0: raise zstd.ZstdError(f'negative raw size {k:#x}')
+    z = zstd.ZstdDecompressor(); out = z.decompress(b, max_length=k + 1)
+    if not z.eof or z.unused_data or len(out) != k:
+        raise zstd.ZstdError(f'the frame does not end at its {k:#x} raw bytes')
+    return out
 
 def zlib_block(b, k):
     """A Zlib block of k raw bytes: inflated no further than k (a damaged stream could inflate about 1,000 times its size), short when the stream ends early"""
@@ -579,23 +596,39 @@ def io_library_name(toc, i, names):
         if city64(n[len('ShaderArchive-'):].lower().encode('utf-16-le')).to_bytes(8, 'little') == h: return n
     return f'ShaderArchive-IoStore-{h.hex()}'
 
+def _io_library_tables(r: R, hash_size: int):
+    maph = r.raw(hash_size * r.take('<I'))
+    nsh = r.take('<I'); shh = r.raw(hash_size * nsh)
+    gids = [r.raw(12) for _ in range(cast(int, r.take('<I')))]
+    maps = [r.take('<II') for _ in range(cast(int, r.take('<I')))]
+    n = r.take('<I'); ents = r.array('Q', n)
+    groups = [r.take('<IIII') for _ in range(cast(int, r.take('<I')))]
+    idx = r.array('I', r.take('<I'))
+    if r.o != len(r.b) or n != nsh or len(gids) != len(groups): raise ValueError(f'{r.what} does not parse with {hash_size}-byte hashes')
+    return maph, shh, gids, maps, ents, groups, idx
+
+def _widen_io_hashes(hashes):
+    """Append 12 zero bytes to each xxHash64 for the version 2 archive."""
+    return b''.join(hashes[k:k + 8] + bytes(12) for k in range(0, len(hashes), 8))
+
 def io_archive(toc, i, decode, chunk=None):
-    """An IoStore shader library (Unreal Engine 5: FIoStoreShaderCodeArchive) as a version 2 shader code archive with every shader decoded, the form the shader tools read.
-    The library chunk: u32 version (1), shader map hashes (20 bytes each), shader hashes (20 each), the shader groups' chunk IDs (12 each), shader map entries {u32 first index, u32 shader count},
+    """An IoStore shader library (FIoStoreShaderCodeArchive) as a version 2 shader code archive with every shader decoded, the form the shader tools read.
+    The library chunk: u32 version (1), shader map hashes, shader hashes (20-byte SHA-1 in FINAL FANTASY RESONANCE, 8-byte xxHash64 in Godzilla), the shader groups' chunk IDs (12 each),
+    shader map entries {u32 first index, u32 shader count},
     shader entries (u64: frequency in bits 0-3, group in 4-33, offset in the group's decoded bytes from bit 34), group entries {u32 first index, u32 shader count, u32 raw size, u32 stored size},
     shader indices (u32): each a u32 count and its elements. Each group is one ShaderCode chunk holding its shaders end to end, Oodle-compressed as a whole when its stored size is below its raw
     size (FINAL FANTASY RESONANCE: 5,919 groups of 74,244 shaders); a shader runs to the next shader's offset in its group, or to the group's end. chunk(chunk ID) → (container, index) looks a
     group up in every container under the RomFS: a patch container's library lists the groups it did not change from the base container's"""
     r = R(toc.read(i, decode), what=f'{toc.path}: shader library chunk {i}')
     if r.take('<I') != 1: raise ValueError(f'{toc.path}: shader library chunk {i} is not version 1')
-    maph = r.raw(20 * r.take('<I')); nsh = r.take('<I'); shh = r.raw(20 * nsh)
-    gids = [r.raw(12) for _ in range(r.take('<I'))]
-    maps = [r.take('<II') for _ in range(r.take('<I'))]
-    n = r.take('<I'); ents = r.array('Q', n)
-    groups = [r.take('<IIII') for _ in range(r.take('<I'))]
-    idx = r.array('I', r.take('<I'))
-    if r.o != len(r.b) or n != nsh or len(gids) != len(groups): raise ValueError(f'{toc.path}: shader library chunk {i} does not parse')
-    code = [None] * n
+    try:
+        maph, shh, gids, maps, ents, groups, idx = _io_library_tables(r, 20)
+    except ValueError:
+        r.o = 4   # The version is shared by both layouts.
+        maph, shh, gids, maps, ents, groups, idx = _io_library_tables(r, 8)
+        maph, shh = _widen_io_hashes(maph), _widen_io_hashes(shh)
+    n = len(ents)
+    code: list[bytes | None] = [None] * n
     for g, (gid, (first, cnt, raw, stored)) in enumerate(zip(gids, groups)):
         owner = chunk(gid) if chunk else (toc, toc.index.get(gid))
         if not owner or owner[1] is None: raise ValueError(f'{toc.path}: shader group {g} ({gid.hex()}) is in no container under the RomFS')
@@ -607,12 +640,13 @@ def io_archive(toc, i, decode, chunk=None):
             if (ents[s] >> 4) & 0x3FFFFFFF != g: raise ValueError(f'{toc.path}: shader {s} is listed in group {g} but names another')
             code[s] = d[at:nxt]
     if any(c is None for c in code): raise ValueError(f'{toc.path}: {sum(c is None for c in code)} shaders in no group')
+    shaders = cast(list[bytes], code)
     out, off = bytearray(struct.pack('<II', ARCHIVE_VERSION, len(maph) // 20) + maph + struct.pack('<I', n) + shh + struct.pack('<I', len(maps))), 0
     for a, c in maps: out += struct.pack('<IIII', a, c, 0, 0)
     out += struct.pack('<I', n)
-    for e, c in zip(ents, code): out += struct.pack('<QIIB', off, len(c), len(c), e & 0xF); off += len(c)
+    for e, c in zip(ents, shaders): out += struct.pack('<QIIB', off, len(c), len(c), e & 0xF); off += len(c)
     out += struct.pack('<I', 0) + struct.pack(f'<I{len(idx)}I', len(idx), *idx)
-    return bytes(out) + b''.join(code)
+    return bytes(out) + b''.join(shaders)
 
 def mount_order(path):
     """A container's place in the mount stack: the game's container first, then the numbered patch chunks in order. A chunk ID that two containers both have resolves to the later container, as in
@@ -658,12 +692,12 @@ def inline_in_containers(path):
 
 def pak_shader_sources(path, key=None):
     """(scan inline packages or adjacent IoStore bundles, try extracting shader archives).
-    Versions 4 and ordinary v8 use the inline scan. Short v8 and v9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
+    Version 4 uses the inline scan. Versions 8 and 9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
     Version 11 uses the inline scan when its directory names no .ushaderbytecode and names either .uexp or a global shader cache beside inline export bundles. An empty v11 index supplies neither.
     Encrypted paks with no key that can hold shared archives are sent for extraction so it can report the missing key."""
     with open(path, 'rb') as f:
-        enc, ioff, isz, methods, ver = footer(f)
-        if ver == 9 or ver == 8 and len(methods) == 4:
+        enc, ioff, isz, _, ver = footer(f)
+        if ver in (8, 9):
             if enc and not key: return False, True
             pak = Pak(path, key)
             with pak.f:
@@ -691,7 +725,7 @@ def inline_shaders(path, key=None):
 
 def unreal_paks(romfs, inline=None, mains=()):
     """Unreal paks under the RomFS. inline=None lists all parsed paks, True selects the inline scan, False selects archive extraction (pak_shader_sources).
-    A mixed short v8 or v9 pak appears in both selections. mains: the ExeFS mains whose key opens an encrypted index (Keys)."""
+    A mixed v8 or v9 pak appears in both selections. mains: the ExeFS mains whose key opens an encrypted index (Keys)."""
     out, keys = [], Keys(mains)
     for p in paks(romfs):
         try: k = keys(p) if mains else None
@@ -764,18 +798,39 @@ def finish(work, out):
         tmp = os.path.join(out, x['name'] + '.partial'); open(tmp, 'wb').write(decoded_archive(src, raws)); os.replace(tmp, os.path.join(out, x['name']))
     return [x['name'] for x in meta['archives']]
 
+CTL_MAGIC = b'\x34\x12\x76\x98'
+CTL_NVN2 = CTL_MAGIC + b'\xc9\0\0\0'
+
+def _maxwell_sections(s, k, control_size=None):
+    if k < 8 or k + 0x708 > len(s): return None
+    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
+    if control_size is not None and nctl != control_size: return None
+    c = k - 4 - ncode
+    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
+    return s[k:k + nctl], s[c:c + ncode]
+
 def lslg(s):
     """A decoded Switch shader (LSLG): 'LSLG', a stage tag (SV vertex, SP pixel, SC compute, ...), a header with the shader's source name, then u32 code length, the code area,
     u32 control length and the control section (0x880 bytes), and a short tail (24 or 29 bytes). → (tag, control section, code area), or None if the layout differs"""
     if s[:4] != b'LSLG': return None
-    k = s.find(b'\x34\x12\x76\x98')
-    if k < 8 or k + 0x708 > len(s): return None
-    nctl, ncode = struct.unpack_from('<I', s, k - 4)[0], struct.unpack_from('<I', s, k + 0x704)[0]
-    c = k - 4 - ncode
-    if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
-    return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+    sections = _maxwell_sections(s, s.find(CTL_MAGIC))
+    if sections is None: return None
+    return s[4:6].decode('latin1'), *sections
 
-CTL_NVN2 = b'\x34\x12\x76\x98\xc9\0\0\0'
+def raw_record(s):
+    """A decoded Switch shader in the untagged layout (Godzilla's Unreal 4.27 IoStore libraries). Code and control use the same length fields as LSLG, with 0x880 control bytes before the tail.
+    The stage comes from the archive's frequency. → (control section, code area), or None without a unique valid layout."""
+    if s[:4] == b'LSLG': return None
+    found = None
+    for marker in re.finditer(CTL_MAGIC, s):
+        k = marker.start()
+        if s[k:k + 8] == CTL_NVN2: continue
+        sections = _maxwell_sections(s, k, control_size=0x880)
+        if sections is None: continue
+        if found is not None: return None
+        found = sections
+    return found
+
 def sage_record(s):
     """A decoded Switch 2 shader (Unreal Engine 5.4's SP_GLSL_SAGE, Yoshi and the Mysterious Book): a 0x3e-byte header with no magic, u32 name length, the name ("Global/<type>/0:/Engine/Private/<file>.usf|<entry>"),
     u32 code length, the code area (Ampere), u32 control length, the control section (an NVN2 one, version 0xc9) and a tail of 12 bytes. → (name, control section, code area), or None if the layout differs"""

@@ -132,6 +132,27 @@ class GuardedWrites(Translated):
         self.assertIn('cp_t_cb262147_10068006', msl)
 
 
+class GatherOffsets(Translated):
+    def test_runtime_per_texel_offsets_move_the_coordinates(self):
+        # MOV R16, c4[0]; MOV R17, c4[4]; TLD4.PTP R24, R6, R16. The atomic keeps a gather result live.
+        load0 = (0x000fe20000000f00, 0x0100000000107a02)
+        load1 = (0x000fe20000000f00, 0x0100010000117a02)
+        gather = (0x000f4600001e2f0e, 0x3000041006189b63)
+        # The depth-compare form has a third source in its second block, R18.
+        reference = (0x000fe20000000f00, 0x3f00000000127802)
+        gather_compare = (0x000f4600001e6f0e, 0x2000041006189b63)
+        use = (0x020ea200001ee000, 0x00000c18030c7593)
+        for call, body in (('.gather(', (gather,)), ('.gather_compare(', (reference, gather_compare))):
+            with self.subTest(call=call):
+                msl = self.translate(b''.join(inst(*op) for op in (load0, load1, *body, use, EXIT)))
+                self.assertIn('.get_width()', msl)
+                self.assertIn('.get_height()', msl)
+                self.assertEqual(msl.count(call), 4)
+                for line in msl.splitlines():
+                    if call in line:
+                        self.assertNotRegex(line, r', int2\((?!0\))')
+
+
 class Suatom(Translated):
     def test_handle_in_the_games_uniform_buffer(self):   # Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]: the same word 12, in bank 3
         msl = self.translate(inst(SUATOM[0], SUATOM[1] | 3 << 54) + inst(*EXIT))
@@ -158,6 +179,52 @@ class Suatom(Translated):
     def test_add_u32_on_a_1d_image(self):
         msl = self.translate(inst(*SUATOM) + inst(*EXIT))
         self.assertIn('atomic_fetch_add', msl)   # native (the build's options) or through spirv-cross's buffer alias (these defaults)
+
+
+class DynamicImages(Translated):
+    """Non-atomic storage images whose handle cannot be traced to one constant-buffer word (from c2, a game UBO, or computed/memory values) index the image pool (1048576 entries)."""
+    SUST_3D_R12 = (0x000fe20000000f0c, (5 << 61) | (4 << 32) | 0x799c)     # SUST.P.3D [R0], R4, R12 (formatted, RGBA mask 0xf, handle in Rc=R12)
+    SUST_BUF_R12 = (0x000fe20000000f0c, (1 << 61) | (4 << 32) | 0x799c)    # SUST.P.1D_BUFFER [R0], R4, R12
+    SULD_3D_R12 = (0x000fe20000000f0c, (5 << 61) | (4 << 16) | 0x7998)     # SULD.P.3D R4, [R0], R12
+    P0 = (0x000fda0003f06070, 0x00c0060005007a0c)                          # P0 = R5 >= c3[0x18]
+    MOV_R12_C4 = (0x000fe20000000f00, 0x01000000000c7a02)                  # R12 = c4[0]
+    AND_R12 = (0x000fe400078ec0ff, 0x00007fff0c0c7812)                     # R12 = R12 & 0x7fff (computed handle, not a CB word)
+    MOV_R12_IMG0_P0 = (0x000fe20000000f00, 0x00000a00000c0a02)             # @P0  MOV R12, c0[0x28] (image slot 0 via AMapC0 -> c2)
+    MOV_R12_IMG1_NP0 = (0x000fe20000000f00, 0x00000c00000c8a02)            # @!P0 MOV R12, c0[0x30] (image slot 1 via AMapC0 -> c2)
+
+    def test_computed_3d_image_store_indexes_image_pool(self):
+        msl = self.translate(inst(*self.MOV_R12_C4) + inst(*self.AND_R12) + inst(*self.SUST_3D_R12) + inst(*EXIT))
+        self.assertIn('array<texture3d<float, access::write>, 1048576> cp_i3d_cb0_40000000_', msl)
+        sys.path.insert(0, str(TOOLS)); import dmsh_reflect, dmsh_abi as abi
+        rewritten = dmsh_reflect.pool_arrays(msl)
+        b = {e['msl_name']: e for e in dmsh_reflect.reflect('k', 'cs', rewritten, self.res)}
+        self.assertEqual(b['cp_i3d_cb0_40000000_']['kind'], abi.KIND_IMG_POOL)
+
+    def test_c2_picked_3d_image_store_indexes_image_pool(self):
+        # Picking between two c2 image slots at run time also uses the image pool (no tex_dyn_slots key needed)
+        msl = self.translate(inst(*self.P0) + inst(*self.MOV_R12_IMG0_P0) + inst(*self.MOV_R12_IMG1_NP0) + inst(*self.SUST_3D_R12) + inst(*EXIT))
+        self.assertIn('array<texture3d<float, access::write>, 1048576> cp_i3d_cb0_40000000_', msl)
+        self.assertNotIn(', 32> cp_i3d_cb0_40000000_', msl)
+
+    def test_buffer_image_store_indexes_image_pool_with_bias(self):
+        # Dynamic 1D buffer image (Persona 3 Reload's cp_ib_cb0_40000000_): pooled and rewritten to dm_buffer_write
+        msl = self.translate(inst(*self.MOV_R12_C4) + inst(*self.AND_R12) + inst(*self.SUST_BUF_R12) + inst(*EXIT))
+        self.assertIn('array<texture_buffer<float, access::write>, 1048576> cp_ib_cb0_40000000_', msl)
+        sys.path.insert(0, str(TOOLS)); import dmsh_reflect, dmsh_abi as abi
+        rewritten = dmsh_reflect.pool_arrays(msl)
+        self.assertIn('dm_buffer_write(', rewritten)
+        b = {e['msl_name']: e for e in dmsh_reflect.reflect('k', 'cs', rewritten, self.res)}
+        self.assertEqual(b['cp_ib_cb0_40000000_']['kind'], abi.KIND_IMG_POOL)
+
+    def test_readonly_image_load_indexes_image_pool(self):
+        # Read-only SULD through a computed handle: reflects as img_pool (not tex_pool)
+        msl = self.translate(inst(*self.MOV_R12_C4) + inst(*self.AND_R12) + inst(*self.SULD_3D_R12) + inst(SUATOM[0], 0x00000c04030c7593) + inst(*EXIT))
+        self.assertIn('array<texture3d<float>, 1048576> cp_i3d_cb0_40000000_', msl)
+        sys.path.insert(0, str(TOOLS)); import dmsh_reflect, dmsh_abi as abi
+        rewritten = dmsh_reflect.pool_arrays(msl)
+        self.assertNotIn('dm_pool_mark', rewritten)
+        b = {e['msl_name']: e for e in dmsh_reflect.reflect('k', 'cs', rewritten, self.res)}
+        self.assertEqual(b['cp_i3d_cb0_40000000_']['kind'], abi.KIND_IMG_POOL)
         self.assertIn('cp_i_tcb_4A_r32ui', msl)   # image slot 1 (c2 0x128), a 32-bit unsigned image
 
     def test_images_come_after_the_separate_handles(self):   # 1 texture, 1 separate texture, 1 separate sampler from 0x10: word 12 (0x30) is image slot 1 still, past both tables (Star Fox's 1002069a331ceded)
@@ -355,6 +422,19 @@ class StageMemory(Translated):
 
     def test_input_is_at_its_offset(self):   # 0x10 + 0x20
         self.assertRegex(self.msl(self.INPUT, self.KEEP_R19), r'as_type<float>\(_\d+\[12\]\)')
+
+    def test_spilled_stage_input_uses_its_own_shared_memory_for_all_widths(self):
+        # With stage_input_words > 0, ISBERD modes 0x38 (B32), 0x34 (U16) and 0x30 (U8) read from dm_stage_in at byte offset [Ra + imm], separate from stage_memory (even alongside stage[4..6] vertex records).
+        for mode, offset, bits in ((0x38, 0x20, 32), (0x34, 0x22, 16), (0x30, 0x23, 8)):
+            read = (self.INPUT[0] & ~0xff00 | mode << 8, self.INPUT[1] & ~(0xffffff << 40) | offset << 40)
+            src = self.translate(inst(*read) + inst(*self.KEEP_R19) + inst(*EXIT),
+                                 stage_memory=[0, 0x10, 0x10, 0x400, 0x3f0, 6, 128 * 24], stage_input_words=6976, shared=0x800)
+            self.assertIn('threadgroup spvUnsafeArray<uint, 512>', src)
+            self.assertIn('threadgroup spvUnsafeArray<uint, 6976>', src)
+            self.assertIn('[8]', src)   # 0x20 >> 2 = 8 (no stage[1] offset added)
+            if bits < 32:
+                self.assertRegex(src, rf'uint\(as_type<int>\(\w+\)\) >> uint\({(offset & 3) * 8}\)')
+                self.assertIn(f'& {(1 << bits) - 1};', src)
 
     def test_subword_inputs_are_unsigned_and_keep_the_byte_offset(self):
         # Fast Fusion reads packed U16 entries with mode 0x34. The high half of word 12 must stay unsigned, as must an U8 input at its own byte within the word.

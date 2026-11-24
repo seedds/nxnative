@@ -5,8 +5,12 @@ file without the magic is byte-identical for other games, and that only the Text
 import os
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from dm.tools.tests.test_cpk_offsets import cpk, cpk_file
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
@@ -105,6 +109,22 @@ class UnityTextGlslc(unittest.TestCase):
         # the magic gate: a serialized file whose TextAssets hold no GLSLC magic yields nothing, as it did before the change
         d = serialized_file([('notes', b'hello world')])
         self.assertEqual(ss.unity_text_glslc(d, 'resources.assets'), [])
+
+    def test_reads_unity_bundle_inside_cpk(self):
+        asset = serialized_file([('vfxsb', glslc_output())])
+        info = bytes(16) + struct.pack('>iIIHiqqI', 1, len(asset), len(asset), 0, 1, 0, len(asset), 0) + b'resources.assets\0'
+        head = b'UnityFS\0' + struct.pack('>I', 6) + b'5.x.x\0' + b'2021.2.17f1\0'
+        bundle = head + struct.pack('>qIII', len(head) + 20 + len(info) + len(asset), len(info), len(info), 0) + info + asset
+        with tempfile.TemporaryDirectory() as temp, patch.object(ss, 'COMMON', {}), patch.object(ss, 'TREES', {}):
+            path = str(Path(temp) / 'data.cpk')
+            Path(path).write_bytes(cpk_file({'shaders.bundle': bundle}, toc_at_end=False))
+            rel, shaders, pairs, trees = ss.scan_file((path, 'data.cpk', tuple(cpk.files(path))))
+        self.assertEqual(rel, 'data.cpk')
+        self.assertEqual([row[:2] for row in shaders.values()], [
+            ('/data.cpk/d/shaders.bundle:resources.assets#vfxsb#GLSLC@0x0', 'vs'),
+        ])
+        self.assertEqual(pairs, set())
+        self.assertEqual(trees, {})
 
 
 if __name__ == '__main__':

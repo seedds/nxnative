@@ -12,8 +12,14 @@
 
 // ---------- oe ----------
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU boost mode; the host does not scale clocks", void, h_oe_CpuBoost, int m) { (void)m; }
-// DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
-HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (by the main build ID)", void, h_oe_DispVer, char *v) {
+// DisplayVersion = char[16] (the application's display version): the 16-byte string from control.nacp (+0x3060), as Horizon serves it (Fate/hollow ataraxia REMASTERED 1.0.2 ships
+// "1.0.2 b723" and parses the trailing build number 723 for its savedata version check); without control data (dumps / NUPs), falls back to the profile's build rows by main's build ID, else 1.0.0
+HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "display version (from control.nacp, else the main build ID)", void, h_oe_DispVer, char *v) {
+    char nacp[16];
+    if (!dm_control_read(0x3060, nacp, sizeof nacp, NULL, 0) && nacp[0]) {
+        size_t n = strnlen(nacp, 15);
+        memset(v, 0, 16); memcpy(v, nacp, n); return;
+    }
     const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
     const char *ver = "1.0.0";
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
@@ -395,16 +401,22 @@ HLE_FORCE("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", "language enum �
     if ((unsigned)lang < sizeof k_lang_code / sizeof *k_lang_code) strncpy(code, k_lang_code[lang], sizeof code);
     uint64_t v; memcpy(&v, code, 8); return v;
 }
+// Before SDK 4 the wrappers use set commands 1/3, whose list is fixed at
+// 15 entries. SDK 4+ uses the extensible commands 5/6 instead.
+static int settings_language_count(void) {
+    int major = dm_sdk_major();
+    return major > 0 && major < 4 ? 15 : LANG_FALLBACK_COUNT;
+}
 // The legacy settings-service list in nn::settings::Language order. The loader leaves verified self-contained SDK implementations bound to their guest exports.
 // Returns how many were written (Paper Mario: The Thousand-Year Door, SDK 15:
 // nnMain asks for 32 and takes the index of GetDesiredLanguage's code in the list as its language, main+0x327888; the SDK's own version aborted in sm::Initialize)
 HLE_FORCE("_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi", "available language codes (settings-service fallback)", int, h_set_AvailLang, char *out, int count) {
-    int n = 0;
-    for (; n < count && n < LANG_FALLBACK_COUNT; n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, k_lang_code[n], 8); }
+    int n = 0, limit = settings_language_count();
+    for (; n < count && n < limit; n++) { memset(out + 8 * n, 0, 8); strncpy(out + 8 * n, k_lang_code[n], 8); }
     return n;
 }
 // How many codes that list holds (Catherine: Full Body, SDK 8.2.1: nnMain compares LanguageCode::Make(0 … count − 1) with GetDesiredLanguage's code and keeps the matching index,
 // main+0x117590; the SDK's own version aborted in sm::Initialize)
 HLE_FORCE("_ZN2nn8settings29GetAvailableLanguageCodeCountEv", "number of available language codes (settings-service fallback)", int, h_set_AvailLangN, void) {
-    return LANG_FALLBACK_COUNT;
+    return settings_language_count();
 }

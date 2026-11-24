@@ -1,0 +1,26 @@
+# South Park: The Stick of Truth 1.01 (v65536), Obsidian's Onyx engine, SDK 4.5.0, NVN.
+
+title_id	010095300B6A4000
+program_id	010095300B6A4000
+name	South Park: The Stick of Truth
+ipa	SouthParkTheStickOfTruth.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+build	v65536	1.01	main=bb789d7392b165f5650c9d8a7e77aa31	sdk=d95547528dcd684e2813ec83d338a472
+package	v65536
+shader_versions	v65536
+
+modules	main sdk
+romfs_marker	data_archive.oaf
+zip_store	.bk2:.oaf:.metallib
+
+# A 3.25 GiB heap region fits the game's 3.14 GiB heap request. The NPDM declares 16 MiB of system resource.
+mem_reserve	0x140000000
+mem_alias	0x50000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+shader_groups	/engine/=engine
+shader_note	South Park™: The Stick Of Truth™ shaders

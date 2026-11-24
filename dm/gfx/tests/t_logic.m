@@ -96,9 +96,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     ps->rf.fcols_known = 1; ps->rf.fcols = 1; ps->rf.ucols = 2; k.cfmt[1] = MTLPixelFormatRGBA8Unorm; CHECK(pso_cls(&k, ps, &cls) && cls == 0u);   // main0 declares output 1 unsigned (a fout fact): a float target takes the typed one too
     k.cfmt[1] = MTLPixelFormatR32Uint; CHECK(!pso_cls(&k, ps, &cls) && cls == 2u);   // and an unsigned target main0 itself
     ps->rf.fcols_known = 0; ps->rf.color_mask = 3;
-    id<MTLFunction> u2 = typed_fn(ps, 2, 0, 0, 0), u3 = typed_fn(ps, 3, 0, 0, 0), s2 = typed_fn(ps, 0x200, 0, 0, 0), f0 = typed_fn(ps, 0, 1, 0, 0);
-    CHECK(u2 && u3 && s2 && f0 && u2 != u3 && u2 != s2 && typed_fn(ps, 2, 0, 0, 0) == u2 && typed_fn(ps, 0x200, 0, 0, 0) == s2 && typed_fn(ps, 2, 1, 0, 0) != u2);   // one specialization per set, kept
-    ps->u_alpha = 0; CHECK(!typed_fn(ps, 2, 1, 0, 0)); ps->u_alpha = 1;   // no test it does not hold
+    id<MTLFunction> u2 = typed_fn(ps, 2, 0, 0, 0, 0), u3 = typed_fn(ps, 3, 0, 0, 0, 0), s2 = typed_fn(ps, 0x200, 0, 0, 0, 0), f0 = typed_fn(ps, 0, 1, 0, 0, 0), d0 = typed_fn(ps, 0, 0, 0, 1, 0);
+    CHECK(u2 && u3 && s2 && f0 && d0 && u2 != u3 && u2 != s2 && d0 != u2 && typed_fn(ps, 2, 0, 0, 0, 0) == u2 && typed_fn(ps, 0x200, 0, 0, 0, 0) == s2 && typed_fn(ps, 2, 1, 0, 0, 0) != u2 && typed_fn(ps, 0, 0, 0, 1, 0) == d0);   // one specialization per set, kept
+    ps->u_alpha = 0; CHECK(!typed_fn(ps, 2, 1, 0, 0, 0)); ps->u_alpha = 1;   // no test it does not hold
+    ps->u_dual = 0; CHECK(!typed_fn(ps, 0, 0, 0, 1, 0)); ps->u_dual = 1;   // no dual-source it does not hold
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = pr->sh[0]->fn; pd.fragmentFunction = fn_dev(u2);
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm; pd.colorAttachments[1].pixelFormat = MTLPixelFormatRG32Uint;
     NSError *perr = nil; CHECK([g_dev newRenderPipelineStateWithDescriptor:pd error:&perr] != nil);   // output 0 a float, output 1 the integer vector of its bits: Metal takes the pair

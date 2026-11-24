@@ -8,7 +8,7 @@
 # rounded to them as the target would store it, combined, and normalized again; a mask of zero (a floating-point or sRGB target, which the operation does not apply to) passes it through.
 # An output whose target the pass lacks has no attachment to read, and Metal refuses a pipeline that reads one: each read depends on the function constant DMSH_LOGIC_FC + n. The operation
 # is data, not part of the code: one pipeline serves every operation. The host takes these entry points only for pipelines drawn with an operation other than COPY (nvn_mtl.m lo_fn), so other
-# draws keep the base library and read no attachment. The dual-source entry point main0_d gets none: a logic operation takes the place of blending, so the host never takes it from here.
+# draws keep the base library and read no attachment. Dual-source blending (main0_u's DMSH_TYPED_DUAL_FC) takes none: a logic operation takes the place of blending.
 # Usage: refused(msl) → why the shader gets none, or None; entry(msl, e) → (the entry point's text, the colour outputs it reads), or None, e from dmsh_side.entries; constants(targets) → the function constants' declarations
 import re
 import dmsh_abi

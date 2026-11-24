@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 import urllib.request
 
+import nso
+
 ENDPOINT = 'https://nextendo.network/service-catalog/v1/npln-patches'
 MAX_DOCUMENT = 2 * 2**20
 MAX_IMAGE = 512 * 2**20
@@ -179,30 +181,20 @@ def prepare_nso(source, destination, title_id, document):
     if len(data) < 0x100 or len(data) > MAX_IMAGE or data[:4] != b'NSO0': raise ValueError('Expected a bounded NSO module')
     flags = struct.unpack_from('<I', data, 0xc)[0]
     segments = [struct.unpack_from('<III', data, 0x10 + i * 0x10) for i in range(3)]
-    sizes = struct.unpack_from('<III', data, 0x60)
-    length = max(mo + size for _, mo, size in segments)
-    if length > MAX_IMAGE: raise ValueError('NSO virtual layout exceeds patch bounds')
-    image = bytearray(length)
-    for i, (fo, mo, size) in enumerate(segments):
-        stored = sizes[i] if flags & (1 << i) else size
-        if fo < 0x100 or fo + stored > len(data): raise ValueError('NSO segment exceeds the file')
-        raw = data[fo:fo + stored]
-        if flags & (1 << i):
-            import lz4.block
-            raw = lz4.block.decompress(raw, uncompressed_size=size)
-        if len(raw) != size: raise ValueError('Invalid decompressed NSO segment')
-        image[mo:mo + size] = raw
-    changed, applied = apply_image(image, title_id, data[0x40:0x60].hex(), document)
+    if any(fo < 0x100 for fo, _, _ in segments): raise ValueError('NSO segment overlaps the header')
+    if max(mo + size for _, mo, size in segments) > MAX_IMAGE: raise ValueError('NSO virtual layout exceeds patch bounds')
+    module = nso.load(data, str(source))
+    changed, applied = apply_image(module.image, title_id, module.build_id.hex(), document)
     if changed is None: return []
     for patch in document['patches']:
         if patch.get('id') in applied:
             for offset in records(patch)[1]:
                 position = offset - 0x100
-                if not any(mo <= position < mo + size for _, mo, size in segments):
+                if not any(mo <= position < mo + size for mo, size in module.segments):
                     raise ValueError('A signed patch targets an unmapped NSO gap')
-    header = bytearray(data[:0x100]); struct.pack_into('<I', header, 0xc, flags & ~7)
+    header = bytearray(data[:0x100]); struct.pack_into('<I', header, 0xc, flags & ~(7 | nso.NSO_ZSTD))
     body = bytearray()
-    for i, (_, mo, size) in enumerate(segments):
+    for i, (mo, size) in enumerate(module.segments):
         raw = changed[mo:mo + size]
         struct.pack_into('<I', header, 0x10 + i * 0x10, len(body) + 0x100)
         struct.pack_into('<I', header, 0x60 + i * 4, size)

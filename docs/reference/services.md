@@ -1333,6 +1333,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `PYTHONUTF8=1 python -m unittest dm.tools.tests.test_nextendo_patches` (an unknown format is left alone for another game and refused for its own).
 - **Found on:** the controls-12 builds of Mario Kart 8 Deluxe and Super Mario Bros. Wonder, 2026-11-15; catalog revision 10 had 22 patches, one of them `patch_version` 2.
 
+### A signed Nextendo patch check stops on a ZBIC module
+
+- **Symptom:** a Nextendo build stops while decoding compressed `main`, even when the exact build has no catalog patch.
+- **Cause:** the patch adapter always used LZ4 on compressed segments, including ZBIC.
+- **Fix:** use `nso.load`. No matching patch means no copy. A matching patch writes an uncompressed copy with fresh hashes and no ZBIC or segment compression flags.
+- **Found on:** a synthetic ZBIC NSO with a mocked decoder, with and without a matching catalog entry.
+
 ### Nextendo's account routes take different tokens
 
 - **Symptom:** in Nextendo mode the log has `[RED] nextendo: /api/me answered HTTP 401` (and `/api/friends answered HTTP 401`) while the game's own online login works. Or, after the first fix below, `[RED] nextendo: /api/profile answered HTTP 401`, `/api/history answered HTTP 401` and `online status could not be asked: Session invalide ou expirée.`, and Nextendo's site keeps showing no play time.

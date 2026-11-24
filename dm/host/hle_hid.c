@@ -1686,6 +1686,17 @@ HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 ent
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
+// The handle forms of the mouse (Cyberpunk 2077 on the Switch 2 imports GetMouseHandle, InitializeMouse(handle) and GetMouseStates(states, count, handle)). Without them the sdk's
+// InitializeMouse connects to the hid service itself (sdk+0x64c230), which the host does not serve, and the game aborts at boot with 0xe15 (main+0x968060). One handle, 0, for the
+// mouse the host does not provide; the history as the keyboard's: every requested entry zeroed (attributes 0, not connected), newest first, with consecutive sampling numbers
+HLE_FORCE("_ZN2nn3hid14GetMouseHandleEv", "mouse handle: 0 (the host provides no mouse)", uint64_t, h_hid_MouseHandle, void) { return 0; }
+HLE_FORCE("_ZN2nn3hid15InitializeMouseERKNS0_11MouseHandleE", "mouse (by handle); not provided by the host", void, h_hid_InitMouseH, const void *h) { (void)h; }
+HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEiRKNS0_11MouseHandleE", "mouse state history (by handle): not connected (each 0x28-byte entry zeroed)", int, h_hid_MouseStatesH,
+          uint8_t *s, int n, const void *h) {
+    (void)h; int64_t top = atomic_fetch_add(&g_sampling, 1) + 1;
+    for (int i = 0; i < n; i++) { memset(s + 0x28 * i, 0, 0x28); *(int64_t *)(s + 0x28 * i) = top - i; }
+    return n > 0 ? n : 0;
+}
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "keyboard; not provided by the host", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "keyboard state: not connected (KeyboardState 0x30 bytes zeroed)", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

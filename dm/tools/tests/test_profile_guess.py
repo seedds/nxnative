@@ -344,6 +344,30 @@ class AddressRegions(unittest.TestCase):
     def test_no_table(self):
         self.assertEqual(pg.region_findings('', 0x118000000), [])
 
+    def test_a_mac_only_build_of_regions_that_fit_the_mac(self):   # issue #2860: Minecraft Dungeons' row, past the 0.50 GB iPhone layout and inside the Mac's 64 GB
+        row = f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x185a8e0\t{0x14800000:#x}\t0\t{0x920000000:#x}\t0x2010\n'
+        t = self.HEAD + row; found = pg.region_findings(t, 0x20000000, self.SYMS)
+        self.assertTrue(found[-1][0])   # for an iPhone it stays red
+        mac, moved = pg.mac_only_findings(found, t)
+        self.assertTrue(moved); self.assertFalse(any(red for red, _ in mac), mac)
+        self.assertTrue(mac[-1][1].startswith(found[-1][1]))   # the same finding, for whoever builds for an iPhone next
+        self.assertIn("this Mac-only build's alias region is 64.00 GB", mac[-1][1]); self.assertIn('a build for an iPhone checks again', mac[-1][1])
+        self.assertEqual(mac[:-1], found[:-1])
+        self.assertEqual(pg.mac_only_findings(found, t.replace('0x1000000000', '0x2000000000'))[0][-1][1].count('128.00 GB'), 1)   # the size the run had: a Switch 2 game's
+
+    def test_a_mac_only_build_keeps_what_does_not_fit_the_mac(self):
+        over = f'{0x7000000:#x}\t{64 << 30:#x}\tmain+0x10\t0\t-\t-\t0x2010\n'   # reaches past the 64 GB the run had
+        t = self.HEAD + over; found = pg.region_findings(t, 0x20000000, self.SYMS)
+        self.assertEqual(pg.mac_only_findings(found, t), (found, False))
+        fits = self.HEAD + '0x4000000\t0x100000000\tmain+0x10\t0x60000000\t0\t0x100000000\t0x1010\n'
+        found = pg.region_findings(fits, 0x118000000, self.SYMS)
+        self.assertFalse(any(red for red, _ in found))
+        self.assertEqual(pg.mac_only_findings(found, fits), (found, False))   # nothing to take back: this verdict holds for an iPhone too
+        unnamed = '# offset\tsize\twho\tmapped\tfirst opened\tend\tvia\n' + f'{0x7000000:#x}\t{37 << 30:#x}\tmain+0x10\t0\t-\t-\t0x2010\n'
+        found = pg.region_findings(unnamed, 0x20000000, self.SYMS)
+        self.assertEqual(pg.mac_only_findings(found, unnamed), (found, False))   # the run's alias region is unknown: as before
+        self.assertEqual(pg.mac_only_findings([], ''), ([], False))
+
 
 class Ue3OodlePackages(unittest.TestCase):
     @staticmethod

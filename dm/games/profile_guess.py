@@ -532,6 +532,22 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
     return out
 
 
+def table_alias(table):   # the alias region the run had, from the first line of its table (hle_svc.c "# alias region <size>; ..."); 0 when it does not say
+    m = re.match(r'# alias region (0x[0-9a-fA-F]+);', table)
+    return int(m.group(1), 16) if m else 0
+
+
+def mac_only_findings(found, table):
+    """region_findings for a build that makes no iPhone app: (findings, moved). A red finding is about the profile's alias region, the layout an iPhone runs; the Mac host reserves at least the
+    console's (hle_svc.c, dm.h dm_alias_size_for: 64 GB for Switch 1, 128 GB for Switch 2), and the check boots with that one. So when every region in the table fits the alias region this run had,
+    the line stays and says so, without the red (Minecraft Dungeons: 37 GB through nn::os::AllocateAddressRegion, GitHub issue #2860). moved: a red line was taken back, so the verdict holds for a
+    Mac-only build only and an iPhone build must check again. A table that does not name its alias region, or a reach past it, stays red"""
+    alias = table_alias(table)
+    if not alias or not any(red for red, _ in found) or max(r['off'] + r['size'] for r in region_rows(table)) > alias: return found, False
+    note = f'; this Mac-only build\'s alias region is {alias / 2**30:.2f} GB, which holds them (what the game takes later in play is not measured here), and a build for an iPhone checks again'
+    return [(False, text + note if red else text) for red, text in found], True
+
+
 STDALLOC_LATER = 0x10000000   # the room the host leaves after a StandardAllocator region (hle_svc.c STDALLOC_LATER)
 NODE_AREA = 0x3e00000         # the SDK's node area at the start of the alias region, with the SDK-wide cut (sdk_patches.py)
 

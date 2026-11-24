@@ -6,8 +6,9 @@ Scaleform menus, Bink movies, its maps as `.bsm` packages, two `bulkcontent` arc
 in two caches of its own.
 
 **Plays on the Mac** (M1 Pro, 16 GB, macOS 26.6.2): the two legal pages of a fresh save, then the game past them at its
-own 30 fps with no `[RED]` line and no shader-map miss in the runs below. The memory split is the survey's, not measured
-against hardware ([What is open](#what-is-open)). Nothing here was run on an iPhone.
+own 30 fps with no `[RED]` line and no shader-map miss in the runs below. It was also played in a Mac window: the game
+loads, plays, and the first level is walked through. The memory split is the survey's, not measured against hardware
+([What is open](#what-is-open)). Nothing here was run on an iPhone.
 
 ## What it needs
 
@@ -54,9 +55,9 @@ copied in.
 - **The memory split is the survey's.** The game boots, plays and saves with `mem_reserve 0x100000000` /
   `mem_alias 0x10000000`; those numbers were never compared with hardware, and a long session in a streamed area may want
   more alias room.
-- **Depth of play is unmeasured.** The runs above reach frames after both legal pages, at 30 fps; no save later in the game,
-  no in-game menus, and no `smoke.tsv`/`bench.tsv` route exist yet. The title screen itself was inferred from 90 s of steady
-  frames rather than photographed.
+- **Depth of play stops at the first level.** The game loads and plays in a Mac window, and the first level is walked
+  through; nothing past it was played. No save later in the game and no `smoke.tsv`/`bench.tsv` route exist yet. The
+  headless runs above reach frames after both legal pages, at 30 fps.
 - **The iPhone was not built.** The Mac app is the only artifact so far.
 - **`depth_mode` is unrecorded**, so an offline pipeline archive has no observed mode; the prewarm list is short.
 - The app is ad-hoc signed: it runs here, but `spctl` rejects it and it is not notarized.

@@ -24,6 +24,28 @@ int main(void) {
     CHECK(nvn_link_latch_wait(cb, cb + 0.020, T60, LINK_LATCH_GIVE_UP, 1, 1) > 0, "the end of a drain into the latch waits through a give-up");
     CHECK(NEAR(nvn_link_latch_reach(0.033, T60), T60 - T60 / 8) && NEAR(nvn_link_latch_wait(cb, cb + 0.033, T60, 0, 1, 0), nvn_link_latch_reach(0.033, T60)),
           "the wait is its reach: 14.6 ms of 33 ms room (a window on a built-in ProMotion screen)");
+
+    // Runtime health: exit on late GPU or skipped ticks after a latched present
+    nvn_link_latch_health h = {0};
+    CHECK(!nvn_link_latch_check(&h, 2 * T60, T60, 0, 1), "a large gap when the previous tick did not latch does not exit");
+    CHECK(nvn_link_latch_check(&h, T60, T60, 1, 0), "a late-GPU feedback exits immediately even on a normal tick gap");
+    h = (nvn_link_latch_health){.prev = 1};
+    CHECK(nvn_link_latch_check(&h, 2 * T60, T60, 0, 1) && h.skips == 0, "a single 33.3 ms skipped tick right after a drain into the latch exits at once");
+    h = (nvn_link_latch_health){.prev = 1};
+    CHECK(nvn_link_latch_check(&h, 1.5 * T60, T60, 0, 1), "a 25 ms slip (one 120 Hz refresh late) right after a drain exits too");
+    h = (nvn_link_latch_health){.prev = 1};
+    CHECK(!nvn_link_latch_check(&h, 1.25 * T60, T60, 0, 1), "a 144 Hz virtual-tick gap (20.83 ms = 1.25 ticks) is not a skipped tick");
+    CHECK(!nvn_link_latch_check(&h, 0.30, T60, 0, 1), "a long pause (300 ms) is not counted as a skipped tick");
+    h = (nvn_link_latch_health){.prev = 1};
+    CHECK(!nvn_link_latch_check(&h, 2 * T60, T60, 0, 0) && h.skips == 1, "one stray skipped tick during steady latched play does not exit");
+    CHECK(nvn_link_latch_check(&h, 2 * T60, T60, 0, 0) && h.skips == 0, "a second skipped tick exits immediately");
+    h = (nvn_link_latch_health){.prev = 1};
+    CHECK(!nvn_link_latch_check(&h, 2 * T60, T60, 0, 0) && h.skips == 1, "one stray skip remembered");
+    for (int i = 0; i < LINK_LATCH_GIVE_UP; i++) CHECK(!nvn_link_latch_check(&h, T60, T60, 0, 0), "clean latched tick");
+    CHECK(h.skips == 0 && !nvn_link_latch_check(&h, 2 * T60, T60, 0, 0), "LINK_LATCH_GIVE_UP clean latched ticks clear a prior stray skip");
+    h.prev = 0;
+    CHECK(!nvn_link_latch_check(&h, T60, T60, 0, 0) && h.skips == 0 && h.clean == 0, "leaving the latch clears prior skip state");
+
     printf("t_link_latch: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 }

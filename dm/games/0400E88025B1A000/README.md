@@ -14,7 +14,7 @@ A Switch 2 game: update v131072, SDK 21.4.4 built for the Switch 2 (`Ounce`), NV
 | `shader_groups /data.zip=shader` | `game.tsv` | every shader is a member of the archive |
 | `depth_mode zero` | `game.tsv` | the game sets near = 0 before its first frame, so the offline archive and Mac prebuild use the near-zero vertex entries ([measurement](#found-on-this-game)) |
 
-There is no game-specific patch, and only v131072's build row: the base game, v0, has not been run.
+There is no game-specific patch, and only v131072's build row. Base v0 (main build ID `898024ffa42c059518eb38196f1ee0f635ecdf89`) has a startup report from an M4 Max (macOS 27.2.1, 2026-11-21): its guest input loop exposed a missing streamplay HID feature getter, and with the general host fix the PR #3162 author verified startup and played from an existing save through to Andross once. A fresh-save route, later gameplay and other titles remain unchecked.
 
 ## Files
 
@@ -65,6 +65,7 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 ## Found on this game
 
 - **Resolved.** On NX18, the v131072 Mac app on an M4 Max (`applegpu_g16s`) refused its 66.5 MB archive stamped near = −w. The first launch built 1,483 pipeline bases in 6.3 s and reached its first frame in 6.6 s. With `depth_mode zero` the archive rebuilt in 12 s from the same build folder, the host found 16 of 16 probed bases, and the first frame came at 1.4 s. [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree) · [NX18 measurement](https://github.com/kencalx/NX18/commit/72c84bd43102129eefcd83ad8729495d832f75df)
+- [GameShare HID feature query opens the service](../../../docs/reference/services.md#gameshare-hid-feature-query-opens-the-service): base v0 startup abort.
 - [SDK 21 socket initialization and overloads](../../../docs/reference/services.md#sdk-21-socket-initialization-and-overloads) and [Socket `Poll` and `Select` with nothing to wait on](../../../docs/reference/services.md#socket-poll-and-select-with-nothing-to-wait-on): the game's HTTP thread aborted on a failed `poll`.
 - [SDK 21's OutputStream on a virtual output device](../../../docs/reference/audio.md#sdk-21s-outputstream-on-a-virtual-output-device) and [SDK 21's hardware Opus decoder manager](../../../docs/reference/audio.md#sdk-21s-hardware-opus-decoder-manager): its voice and music.
 - [GameChat queries from the title screen (SDK 21)](../../../docs/reference/services.md#gamechat-queries-from-the-title-screen-sdk-21): a null read in `nn::chat::GetChattingUid`.

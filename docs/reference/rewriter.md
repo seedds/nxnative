@@ -58,8 +58,8 @@ To enroll a cut for any game's own module:
 ### Function-matched ordinary stubs
 
 - **Symptom:** a local timing correction needs extra instructions, but declaring a frame-step state page would also change the host's pacing for a game with a native engine frame-rate setting.
-- **Fix:** `MATCH_STUBS = {module: [rule, ...]}` in a profile's `patches.py` uses the same complete-function or import-anchored matching as `MATCH_FRAME_STEP`, with `ctx.base`, `others` and `found`, and the ordinary `STUBS` emit/site/put/address operations. It allocates no frame-step state page. `ctx.address(adrp, low=None)` derives a data address from the original instructions, accepting an explicit low-instruction offset for interleaved ADRP/load pairs and checking their register relationship. Missing or ambiguous matches install no stub. A rule's optional `fps_required=True` keeps native engine frame targets disabled unless the stub sets `ctx.fps_ready=True` after installing its complete correction: fixups record `NATIVE_FPS_BLOCKED`, and `hle_fpslock.c` leaves the game's own limits. This also applies when a required companion function cannot be found.
-- **Found on:** [Xenoblade Chronicles X: Definitive Edition](../../dm/games/0100453019AA8000/README.md#frame-rate): its camera's per-update angular gain must use elapsed time before its native interval can safely select 60 fps.
+- **Fix:** `MATCH_STUBS = {module: [rule, ...]}` in a profile's `patches.py` uses the same complete-function (with optional `called_by` for a short ambiguous callee) or import-anchored matching as `MATCH_FRAME_STEP`, with `ctx.base`, `others` and `found`, and the ordinary `STUBS` emit/site/put/address operations. It allocates no frame-step state page. `ctx.address(adrp, low=None)` derives a data address from the original instructions, accepting an explicit low-instruction offset for interleaved ADRP/load pairs and checking their register relationship. Missing or ambiguous matches install no stub. A rule's optional `fps_required=True` keeps native engine frame targets disabled unless the stub sets `ctx.fps_ready=True` after installing its complete correction: fixups record `NATIVE_FPS_BLOCKED`, and `hle_fpslock.c` leaves the game's own limits. This also applies when a required companion function cannot be found.
+- **Found on:** [Xenoblade Chronicles X: Definitive Edition](../../dm/games/0100453019AA8000/README.md#frame-rate): its camera's per-update angular gain must use elapsed time before its native interval can safely select 60 fps; `called_by` on [FINAL FANTASY TACTICS - The Ivalice Chronicles](../../dm/games/010038B015560000/README.md#threads) ([#3046](https://github.com/seedds/nxnative/issues/3046)): its 8-byte job-pool signal wrapper is byte-identical to an adjacent wrapper and its `b SignalEvent` encoding shifts across updates.
 - **Check:** patch registry/site checks, interleaved address decoding, the native frame-limit block test, and the game's matched base/update rewrites.
 
 ### A frame step state page where the patch area starts
@@ -163,7 +163,7 @@ To enroll a cut for any game's own module:
 - **Symptom:** `jump table 590ee8` assertion in `patch_nso.py` on ULTRA STREET FIGHTER II: The Final Challengers 1.1.1 (SDK 1.3.1).
 - **Cause:** `tbnz w17, #3, next; and x18, x17, #0xf; ldrsw x18, [x13, x18, lsl #2]; add x18, x18, x13; br x18` bounds the index without a compare: on the fall-through bit 3 is clear and the mask removes every higher bit, so 8 entries, not the 16 the mask allows. The base `x13` is built by `adrp` + `add` before two loops around the dispatch, whose back edges land before the guard.
 - **Fix:** the [jump solver](#jump-tables-proved-over-control-flow): the `tbnz` narrows the low bits of `w17`, and the mask is of the same root: 8 entries.
-- **Found on:** ULTRA STREET FIGHTER II: The Final Challengers (`01007330027EE000`) 1.1.1, `main` build `8726f5e816b001b2af588df35996c4c0`, `main+0x590ee8` (reported with a first matcher by PikaMan80 in [#960](https://github.com/seedds/nxnative/issues/960); [PR #2108](https://github.com/seedds/nxnative/pull/2108)). There is no profile for this title yet; its `main` and five other modules now rewrite.
+- **Found on:** [ULTRA STREET FIGHTER II: The Final Challengers](../../dm/games/01007330027EE000/README.md) 1.1.1, `main` build `8726f5e816b001b2af588df35996c4c0`, `main+0x590ee8` (reported with a first matcher by PikaMan80 in [#960](https://github.com/seedds/nxnative/issues/960), then landed in `7b5d631` after [PR #2108](https://github.com/seedds/nxnative/pull/2108)).
 
 ### Bit test after the mask
 
@@ -532,6 +532,13 @@ To enroll a cut for any game's own module:
 
 ## Relocations and module layout
 
+### Gate tables grow with the loaded modules
+
+- **Symptom:** `FATAL gate overflow` while loading rewritten modules, before the game starts.
+- **Cause:** the host used one fixed 32,768-slot hash table for every NSO and preloaded NRO, and stopped once their combined gate count exceeded 8,192. A module can fit by itself while the collection does not. The limit is in the host's dispatch index, not the rewriter's patch area.
+- **Fix:** `hle.c` grows and rehashes the index during `load_modules`, keeping its load factor at most one quarter. All NRO gates are registered during preload too; runtime NRO load/unload only relocates the already mapped modules. Guest dispatch reads the completed table without locks or allocations. Duplicate-address and unknown-gate checks remain in place.
+- **Found on:** [Assassin's Creed III Remastered startup report, issue #3118](https://github.com/seedds/nxnative/issues/3118). The capacity failure is reproduced with synthetic gates. [The 1.0.0 build](../../dm/games/01007F600B134000/README.md) registers 12,565 gates across its NSOs and NROs and reaches the launcher on Mac.
+
 ### Packed relative relocations (DT_RELR)
 
 - **Symptom:** every pointer in `.data` / the GOT is a module offset, crashes everywhere.
@@ -556,6 +563,14 @@ To enroll a cut for any game's own module:
 - **Found on:** [Breath of the Wild](../../dm/games/01007EF00011E000/README.md#found-on-this-game).
 - **Check:** synthetic tests cover SIGTERM during active pool jobs, invalid counts and explicit worker limits through the packing script. The original speed measurements and module comparisons are in [PR #761](https://github.com/seedds/nxnative/pull/761); their timings are contributor measurements, not local regression results. Local game validation is recorded in Breath of the Wild's note; other games and NROs have no new local runtime validation here.
 
+### Spin-wait search memory bounded
+
+- **Symptom:** the rewrite step's memory keeps growing in `find_spin_regions` and the rewrite does not finish. EA SPORTS FC 27 1.8e's `main` (185 MB of text) passed 24 GB with `DM_REWRITE_J=1` (reported in [PR #3234](https://github.com/seedds/nxnative/pull/3234)).
+- **Cause:** `spin_ins` kept every decoded instruction (0.5–2.6 KB each with capstone details) in `spin_dec` for the whole search, per forked worker, even though `find_spin_regions` strides heads by `8 * WORKERS` so cross-head reuse is effectively zero. In addition, `spin_region` called `spin_lock(T)` (decoding 6 instructions) before `DATA_BLOCKS` and `spin_quick(T, hi)` filtered out non-candidates (44% of 931,397 heads on FC 27 1.8d `main`), and `spin_lock(a)` decoded 6 instructions before checking `a`'s mnemonic.
+- **Fix:** `spin_region` now checks `DATA_BLOCKS` and `spin_quick(T, hi)` before decoding anything, `spin_lock(a)` decodes lookahead instructions only when `a`'s mnemonic can start a lock or test sequence, and `spin_region` clears `spin_dec` in a `finally` block after every head. The cache therefore holds at most the ~135 instructions in `[T - 4, hi + 20]` for the head being analysed; returned regions keep the instruction objects they need and `spin_emit` decodes nothing. This holds for every NSO and NRO.
+- **Found on:** [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md#found-on-this-game) 1.8e.50bc.
+- **Check:** `test_spin_waits.py` (cache cleared on found and rejected heads, zero decodes on `spin_quick`-rejected heads, no extra lookahead on non-lock instructions) and `test_rewrite_parallel.py`. On a 1/64 worker slice of FC 27 1.8d `main` (14,554 heads), total decodes dropped 39% (146,104 → 88,639) and time dropped 30% (2.59 → 1.80 s) with identical spin regions. A full parallel rewrite of FC 27 1.8d `main` (185.6 MB text, 318 spin waits) finished at 2.20 GiB max RSS (down from >24 GB), and all 7 rewritten `sdk` outputs were byte-identical against `origin/main`.
+
 ### A pool's shutdown hangs on a worker that has just started
 
 - **Symptom:** a rewrite never ends, using no CPU: `patch_nso.py` waits in `wait4` and one forked worker of the same command in `sem_wait`, in `multiprocessing/queues.py` `get`, having run no job. It is rare and needs small jobs (about 1 in 6,000 pools of tiny jobs under load). Separately, a SIGTERM could be ignored until the rewrite ended, or leave workers behind.
@@ -564,6 +579,15 @@ To enroll a cut for any game's own module:
 - **Open:** cancelling a rewrite still ends in `Pool.terminate`, and a worker it kills while sending a result never releases the result queue's lock, so the parent can hang (Python's own limit; 2 in about 25,000 cancellations of a process doing nothing but pools, far rarer in a real rewrite, which spends its time in analysis). A rewrite that finishes never reaches it.
 - **Found on:** the Python tool tests (`discover -s dm/tools/tests`), which hung for 2 hours in a test's small NRO; no game was seen to hang.
 - **Check:** `test_rewrite_parallel.py` checks that SIGTERM is blocked from the fork on and that a worker has the default action unblocked before any job, and sends SIGTERM during pool start and during teardown. The race itself is too rare and too slow to repeat in a test.
+
+## Mod code plugins
+
+### A mod's exefs plugin is left out, and its game files wait for it
+
+- **Symptom:** a mod with an Atmosphère `exefs/` (a `subsdk<N>` code plugin, usually built on [exlaunch](https://github.com/shadowninja108/exlaunch)) beside its `romfs/` boots to a black screen with `DM_ROMFS_OVERLAY` on its RomFS: the last file read (`DM_FSLOG`) is the mod's script (Pokémon Compass: `script/lua/bin/release/main_dynamic.blua`), then the main thread waits on a condition variable for good. The plugin registers the functions those scripts call.
+- **Cause:** the overlay only takes RomFS files; nothing loaded the plugin. Rewritten as it was, its start-up then stops on what exlaunch asks of Horizon: `patch_nso.py` found no `.eh_frame_hdr` (devkitA64 links none); its module walk (`FindModules`) asserts the first module is `rtld`, which the host does not load; it takes its process handle from `GetInfo` 65001 (Mesosphere) and writes hooks through `MapProcessMemory` views of module code; and it seeds `std::mt19937_64` from `svcGetSystemTick`, which answered 0 in `x0`, so `virtmemFindAslr` drew the same address forever.
+- **Fix:** `scripts/prepare_mod.py <mod>` rewrites a mod's `subsdk<N>` NSOs once into `<mod>/exefs/nxnative/`; on the Mac, with the mod's RomFS in `DM_ROMFS_OVERLAY`, the host loads them in numeric order before `sdk` (`hle_exl.c`), and `loader.c` reserves one contiguous virtual span for non-JIT startup modules so they sit in strict ascending load order with a 3-page slot below `main` for the stand-in `rtld`. `patch_nso.py` and `mod_layout.py` walk `.eh_frame` directly when `MOD0`'s `.eh_frame_hdr` range is empty. When a mod plugin is loaded (or a manually loaded `subsdk` carries exlaunch's signature in `.rodata`), the stand-in `rtld` is populated below `main`; `GetInfo` 65001 answers the current-process handle; `MapProcessMemory` maps a writable copy in the free ASLR region and `UnmapProcessMemory` / per-module `DT_INIT` sync write only changed words back into the module's guest image through a shared `mach_vm_remap` writable alias (`code_write.h`), refusing any word in `<module>.changed.tsv` (verified against `build_id`) or past `key_page_off`. `svcGetSystemTick` returns the tick in `x0` as Horizon does. A mod's `exefs/main` is refused, and iOS skips mod code plugins cleanly (signed code pages cannot be written).
+- **Found on:** [Pokémon Violet](../../dm/games/01008F6008C5E000/README.md) 3.0.1 (`v720896`, a derived profile) with Pokémon Compass 2.1.1.1 (PR #3178, M3, macOS 27.2: 12 hooks in `main`, none refused, reaches the new-game character screen). Not checked: playing past the character screen with Compass, other exlaunch plugins, plugins that replace `main`.
 
 ## Checking a rewriter change
 

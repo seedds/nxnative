@@ -33,8 +33,8 @@ class RawPointers(unittest.TestCase):
                         *(sts(8 + k, k * 4) for k in range(words)), EXIT)
                 res, msl = storage_offset.StorageOffset.translate(self, dict(stage='cs', shared=0x1000), code(*body))
                 bindings = reflect('k', 'cs', msl, res)
-                self.assertEqual([b['kind'] for b in bindings], ['sbuf', 'gmem_map'])
-                self.assertEqual(bindings[1]['pointers'], [[0, 8]])
+                self.assertEqual([b['kind'] for b in bindings], ['sblen', 'sbuf', 'gmem_map'])
+                self.assertEqual(bindings[2]['pointers'], [[0, 8]])
                 self.assertEqual(len([n for n in res['notes'] if 'gptr site ' in n]), 1)
                 if words > 1:
                     self.assertIn(f'reinterpret_cast<const device uint{words}*>', msl)

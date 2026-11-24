@@ -44,7 +44,7 @@ shader_note	EA SPORTS FC 27 shaders: Frostbite CompiledBytecode resources (frost
 shader_key_skip	0x7d0+0x18
 
 # ---- Frame rate ----
-# 60 fps as on the game's other platforms: the host sets Frostbite's simulation rate (SimulationTimeSettings, found by name) and, on 1.8d.310c, the game's frame regulator to the
-# target (hle_fpslock.c); the game asks for present interval 2, which display pacing ignores (README.md, Frame rate). 30 runs the game's own 30
+# 60 fps as on the game's other platforms: the host sets Frostbite's simulation rate (SimulationTimeSettings) and frame regulator (under GameRenderSettings.Enable), both found
+# dynamically on any build (hle_fpslock.c); the game asks for present interval 2, which display pacing ignores (README.md, Frame rate). 30 runs the game's own 30
 fps_target	60
 present_interval	display

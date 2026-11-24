@@ -270,6 +270,7 @@ supplies, nightly and by hand (never on pull requests): the RomFS image reader
 (`romfs.py`), the control data (`nacp.py`), the NSO loader, the shader
 containers of `shader_split.py` (BNSH, BAHS, MSHD, SARC / Yaz0, GLSLC, SDF,
 [NXSD](reference/shaders.md#nxsd-single-stage-shader-containers),
+[NXVS / NXFS](reference/shaders.md#mediavision-wide-mvgl-archives-and-nxvs--nxfs--nxcs-shader-containers),
 ARH1 and the others `scan_blob` recognizes) and the Unreal paks and shader
 archives of `uepak.py`. Each harness, `dm/tools/fuzz/fuzz_<parser>.py`, builds
 its seeds in code and mutates them for 60 s; nothing comes from a game. A
@@ -679,7 +680,7 @@ The iPhone settings list can require a verified rewrite capability (`fixups:<NAM
 
 Each game has a profile in `dm/games/<id>/`:
 - `game.tsv` holds the title ID, known builds, code modules, RomFS marker, memory split, app name and bundle ID;
-- the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv` (pairs used by vertex output padding and the pipeline prebuild), `pso_manifest.tsv`, and `c1_full.tsv` / `cb_extent.tsv`, which each checkout's full shader build makes (not committed);
+- the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv` (pairs used by vertex output padding and the pipeline prebuild), `geo_pairs.tsv` (vertex / geometry pairs that get mesh libraries), `pso_manifest.tsv`, and `c1_full.tsv` / `cb_extent.tsv`, which each checkout's full shader build makes (not committed);
 - `patches.py` (when there are any): the rewriter's patches of the game's own builds.
 
 The shader translation chain has one version for every game, in `dm/gfx/nvn/dmsh_chain.h`. What the shader libraries and the host must agree on, the NVN driver segment layout and the binding kinds of the reflection, is written once in `dm/gfx/nvn/dmsh_abi.h`: the host includes it, the build reads it through `dm/gfx/tools/dmsh_abi.py`, and `dm/tools/tests/test_dmsh_abi.py` guards it ([Shaders, Bindings and handles](reference/shaders.md#bindings-and-handles)).
@@ -740,7 +741,7 @@ Notes on these steps:
 
 ### Building selected Mac shaders
 
-A full shader build of a large map takes hours (Pokopia: 131,426 shaders, an estimated 2.5 hours on an M4 Pro), while play reaches far fewer. `--seen-shaders` (`SEEN_SHADERS = True`) with `--platform mac` or `mac-app` builds only the shaders a game's playtests used, for an NVN game whose profile lists them in `shader_seen.tsv` (Pokopia: 8,157 of them; Hyrule Warriors: Age of Imprisonment: 15,449). Anything else stops with a message, and without the option the build stays the whole map, which then mentions the option for a game with a list.
+A full shader build of a large map takes hours (Pokopia: 131,426 shaders, an estimated 2.5 hours on an M4 Pro), while play reaches far fewer. `--seen-shaders` (`SEEN_SHADERS = True`) with `--platform mac` or `mac-app` builds only the shaders a game's playtests used, for an NVN game whose profile lists them in `shader_seen.tsv` (Pokopia: 8,176 of them; Hyrule Warriors: Age of Imprisonment: 15,449). Anything else stops with a message, and without the option the build stays the whole map, which then mentions the option for a game with a list.
 
 ```sh
 python3 scripts/build_ipa_from_nsp.py "<NSP or dump folder>" --platform mac-app --seen-shaders
@@ -748,7 +749,7 @@ python3 scripts/build_ipa_from_nsp.py "<NSP or dump folder>" --platform mac-app 
 
 **The limit:** the rest of the map does not draw. The build says how many shaders it covers. An area the list does not cover logs `[RED] shader <key> (<stage>) failed to load` (or `failed to load shader <key>_b: cannot open`) and draws without that shader. Run the same command again to add those keys, or without `--seen-shaders` for the whole map.
 
-- **The keys** are the profile's list, the keys of the last partial build (`shader/partial-keys.txt`) and the keys the logs report missing: `~/Library/Logs/nxnative/<title ID>.log` and `.prev.log` for the app, `run/host.log` for `--platform mac`, whose printed run command keeps it. The file keeps what earlier runs added, since a shader that now loads no longer shows in a log, and a key outside the packed version's shader map is dropped. A key that still fails did not translate, and the build's summary (`logs/dmsh_build.log`) names it. Pokopia logs one at every start, vertex shader `cc679c7b4d3e703c` (never drawn: [Pokopia's note](../dm/games/0400A3A01EE4C000/README.md#shaders)).
+- **The keys** are the profile's list, the keys of the last partial build (`shader/partial-keys.txt`) and the keys the logs report missing: `~/Library/Logs/nxnative/<title ID>.log` and `.prev.log` for the app, `run/host.log` for `--platform mac`, whose printed run command keeps it. The file keeps what earlier runs added, since a shader that now loads no longer shows in a log, and a key outside the packed version's shader map is dropped. A key that still fails did not translate, and the build's summary (`logs/dmsh_build.log`) names it.
 - **The library** is `shader/partial/b-<chain>`, emptied first, with its own reuse key that includes the list. It shares the full build's cache (`DMSH_CAS`), so a stopped full build's work is reused here and this work by a later full build, which removes `shader/partial` when it finishes. A partial build leaves the full library, its key and the cache as they are: no pruning, no regression check against the last build.
 - **No stamp:** a partial library has no `inputs.tsv`, and none of the build's own `c1_full.tsv` or `cb_extent.tsv`. `c1_full.tsv` lists the shaders not proven safe, so beside a stamp a shader the partial build never saw would pass as proven. The host logs a red line for the missing stamp at each start and the game runs without the tables: every c1 gets its own 64 KiB ([as slices of a bank](reference/frame-rate.md#dedicated-c1-constants-as-slices-of-a-bank)).
 - **Pipelines:** `pso_offline.py` leaves out the pairs with no library (Pokopia: 1,091 bases of 17,952 pairs). The host's probe of 16 pairs spread over the whole list skips those without a library, so it accepts this archive on what remains (Pokopia: `holds the bases of every shader pair (3 of 3 probed bases found …)`, though the archive holds only those of the listed shaders). A first start with no prewarm list runs no prebuild, so no probe. If none of the 16 had its libraries, the probe would prove nothing and log that this system does not take the bases: from the code, the host then walks the pairs once, finds what the archive holds and leaves the rest to the draws. `--platform mac` keeps these bases in `run/pso_archive_partial`, as the prebuild's stamp does not name the library.

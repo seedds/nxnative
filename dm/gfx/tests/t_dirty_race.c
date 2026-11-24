@@ -210,6 +210,21 @@ static void gpu_written(size_t pg) {
     nvn_dirty_remove_range(m); munmap(m, 2 * pg);
 }
 
+// A page the tracker previously unprotected (state NONE, non-zero generation) that another subsystem later made read-only:
+// on_fault must check kernel writability instead of claiming it blindly (which would re-execute the faulting store forever).
+static void foreign_ro_on_none_page(size_t pg) {
+    uint8_t *m = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    nvn_dirty_add_range(m, pg);
+    nvn_dirty_protect(m, pg);
+    m[0] = 1;   // faults and leaves the page NONE with a non-zero generation
+    mprotect(m, pg, PROT_READ);
+    EXPECT("write fault on a NONE page the kernel has read-only is declined", 0, on_fault(m, 1, NULL));
+    mprotect(m, pg, PROT_READ | PROT_WRITE);
+    EXPECT("write fault on a NONE page the kernel has writable is claimed", 1, on_fault(m, 1, NULL));
+    nvn_dirty_remove_range(m); munmap(m, pg);
+}
+
 int main(void) {
     crash_install();
     size_t pg = (size_t)getpagesize();
@@ -239,5 +254,6 @@ int main(void) {
     open_waits_busy(pg);
     open_shared_page(pg);
     gpu_written(pg);
+    foreign_ro_on_none_page(pg);
     printf("t_dirty_race: %s\n", g_fail ? "FAILED" : "all passed"); return g_fail != 0;
 }

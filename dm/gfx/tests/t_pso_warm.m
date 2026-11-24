@@ -119,7 +119,7 @@ static void check_draw(const pso_key *raw, int merged, const uint8_t expected[4]
     EXPECT("live key finds warmed pipeline", 1, hm_get_id(&g_pso, &live) != nil);
     uint64_t before = g_pb_spec + g_pb_legacy;
     NvProg *program = [NvProg new]; program->sh[0] = vs; program->sh[1] = fs;
-    id<MTLRenderPipelineState> warmed = pso_get_(program, nil);
+    id<MTLRenderPipelineState> warmed = pso_get(program, nil);
     EXPECT("draw lookup adds no pipeline build", before, g_pb_spec + g_pb_legacy);
     EXPECT("draw lookup returns a pipeline", 1, warmed != nil);
     if (!warmed) { g_pso_lmap = NULL; return; }

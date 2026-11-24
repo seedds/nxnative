@@ -1,0 +1,41 @@
+# BRAVELY DEFAULT Ⅱ 1.0.0 (v0), Unreal Engine 4.23, Nintendo SDK 10.4.0, NVN and CRIWARE.
+# See dm/games/README.md for the format.
+
+# ---- Identity ----
+title_id	01006DC010326000
+program_id	01006DC010326000
+
+# ---- App ----
+name	BRAVELY DEFAULT Ⅱ
+ipa	BravelyDefaultII.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=05de5a7f20bd1532d139c16c0b3e8920	subsdk0=2c35246689bc9c3d21b19cebedd74646	sdk=204eaef83fe5e5617d0787c8ef01a080
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Sunrise-E/Content/Paks/Sunrise-E-Switch.pak
+zip_store	.awb:.pak:.ttf:.usm:.metallib
+
+# ---- Memory ----
+# The NPDM's 80 MiB of system resource enables virtual address memory. In the 5 GiB guest block, the shared Unreal region gate grants 4,160 MiB.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x5000000
+
+# ---- Graphics ----
+# The game sets nvnDeviceSetDepthMode to near = 0.
+depth_mode	zero
+
+# ---- Frame rate ----
+# The shared Unreal limiter finds t.MaxFPS by its registered name.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	BRAVELY DEFAULT Ⅱ shaders

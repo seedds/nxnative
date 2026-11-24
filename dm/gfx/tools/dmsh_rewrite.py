@@ -107,11 +107,30 @@ FLOAT_ADD = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=
                        r'(?P=ind)    \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<addr2>[^\n]*?), &(?P=seen), as_type<uint>\((?P=sum)\), '
                        r'memory_order_relaxed, memory_order_relaxed\) && (?P=seen) == (?P=want)\);\n'
                        r'(?P=ind)    uint (?P<found>_\d+) = (?P=seen);\n(?P=ind)    (?P=again) = int\((?P=found)\) != as_type<int>\((?P=old)\);\n(?P=ind)\} while \((?P=again)\);\n')
+# Same loop on a storage buffer guarded by TranslationFlags.MetalStorageBounds: out of bounds, the load yields 0.0f and the swap returns 0u, so the loop exits without writing
+FLOAT_ADD_BOUND = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=ind)\{\n'
+                             r'(?P=ind)    bool (?P<c1>_\d+) = (?P<cond1>[^;\n]+);\n'
+                             r'(?P=ind)    float (?P<old>_\d+) = as_type<float>\((?P=c1) \? (?P<buf1>\(\*\w+\.\w+\)\._m0)\[(?P=c1) \? (?P<idx1>[^:\n]+) : 0\] : 0u\);\n'
+                             r'(?P=ind)    float (?P<sum>_\d+) = (?:(?P=old) \+ (?P<val>[^;\n]+)|spvFAdd\((?P=old), (?P<valp>[^;\n]+)\));\n'
+                             r'(?P=ind)    bool (?P<c2>_\d+) = (?P<cond2>[^;\n]+);\n'
+                             r'(?P=ind)    uint (?P<want>_\d+) = as_type<uint>\((?P=old)\);\n'
+                             r'(?P=ind)    uint (?P<res>_\d+);\n'
+                             r'(?P=ind)    if \((?P=c2)\)\n(?P=ind)    \{\n'
+                             r'(?P=ind)        uint (?P<seen>_\d+);\n(?P=ind)        do\n(?P=ind)        \{\n(?P=ind)            (?P=seen) = (?P=want);\n'
+                             r'(?P=ind)        \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<buf2>\(\*\w+\.\w+\)\._m0)\[(?P=c2) \? (?P<idx2>[^:\n]+) : 0\], &(?P=seen), as_type<uint>\((?P=sum)\), '
+                             r'memory_order_relaxed, memory_order_relaxed\) && (?P=seen) == (?P=want)\);\n'
+                             r'(?P=ind)        (?P=res) = (?P=seen);\n'
+                             r'(?P=ind)    \}\n(?P=ind)    else\n(?P=ind)    \{\n(?P=ind)        (?P=res) = 0u;\n(?P=ind)    \}\n'
+                             r'(?P=ind)    uint (?P<found>_\d+) = (?P=res);\n(?P=ind)    (?P=again) = int\((?P=found)\) != as_type<int>\((?P=old)\);\n(?P=ind)\} while \((?P=again)\);\n')
 def float_add_msl(msl):
     if 'atomic_compare_exchange_weak_explicit' not in msl: return msl
-    return FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
-                         f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
-                         f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
+    msl = FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
+                        f"{m.group('ind')}atomic_fetch_add_explicit((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
+                        f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
+    return FLOAT_ADD_BOUND.sub(lambda m: m.group(0) if (m.group('cond1') != m.group('cond2') or m.group('buf1') != m.group('buf2') or m.group('idx1') != m.group('idx2')) else
+                               f"{m.group('ind')}if ({m.group('cond1')})\n{m.group('ind')}{{\n"
+                               f"{m.group('ind')}    atomic_fetch_add_explicit((device atomic_float*)&{m.group('buf1')}[{m.group('idx1')}], {m.group('val') or m.group('valp')}, memory_order_relaxed);\n"
+                               f"{m.group('ind')}}}\n{m.group('ind')}bool {m.group('again')} = false;\n", msl)
 
 # spirv-cross writes OpUMulExtended / OpSMulExtended as calls of an optnone template, spvMulExtended, as Metal's compiler may fail on an inlined mulhi (spirv_msl.cpp,
 # SPVFuncImplMulExtended). The barrier keeps every product a call that is never folded: Switch 2 shaders divide by constants through the high word of a product (Ocarina of Time
@@ -584,7 +603,10 @@ def first_store(msl, local):
         if not m or 1 << int(m.group(7)) != local[1] or 1 << int(m.group(12)) != local[0]: return msl, []
         guard = r'!' + re.escape(m.group(20)) if m.group(20) else re.escape(m.group(19))
     held = re.compile(r'int (\w+) = \w+;\s*if \(%s\)\s*\{\s*\1 = (\d+);\s*\}\s*int (\w+) = \1;\s*' % guard)   # a local that holds a constant in the first invocation
-    block = re.compile(r'if \(%s\)\s*\{\s*((?:\(\*\w+\.\w+\)\._m0\[\d+\] = (?:\d+u|uint\(\w+\));\s*)+)\}\s*' % guard)
+    # A plain store, or one guarded by TranslationFlags.MetalStorageBounds (c[27] length table): both hoist to the host's pre-dispatch write
+    s_plain = r'\(\*\w+\.\w+\)\._m0\[\d+\] = (?:\d+u|uint\(\w+\));\s*'
+    s_bound = r'bool \w+ = [^;{}]+ < \(\*\w+\.\w+\)\._m0\[\d+\]\.[xyzw];\s*if \(\w+\)\s*\{\s*\(\*\w+\.\w+\)\._m0\[(?:\w+ \? \d+ : 0|\d+)\] = (?:\d+u|uint\(\w+\));\s*\}\s*'
+    block = re.compile(r'if \(%s\)\s*\{\s*((?:(?:%s|%s))+)\}\s*' % (guard, s_plain, s_bound))
     plain = re.compile(r'int \w+ = [^;{}]*;\s*')   # arithmetic the compiler left between them
     at, out, stores, values = m.end(), msl[:m.end()], [], {}
     while True:
@@ -592,9 +614,10 @@ def first_store(msl, local):
         if h: values[h.group(3)] = int(h.group(2)); out += msl[at:h.end()]; at = h.end(); continue
         b = block.match(msl, at)
         if b:
-            for n, w, v in re.findall(r'\(\*\w+\.(\w+)\)\._m0\[(\d+)\] = (\d+u|uint\(\w+\));', b.group(1)):
-                if v.endswith('u'): stores.append((n, int(w), int(v[:-1])))
-                elif v[5:-1] in values: stores.append((n, int(w), values[v[5:-1]]))
+            for m2 in re.finditer(r'\(\*\w+\.(\w+)\)\._m0\[(?:\w+ \? (\d+) : 0|(\d+))\] = (\d+u|uint\(\w+\));', b.group(1)):
+                n, w, v = m2.group(1), int(m2.group(2) or m2.group(3)), m2.group(4)
+                if v.endswith('u'): stores.append((n, w, int(v[:-1])))
+                elif v[5:-1] in values: stores.append((n, w, values[v[5:-1]]))
                 else: return msl, []
             at = b.end(); continue
         p = plain.match(msl, at)
@@ -908,7 +931,7 @@ def frag_z_snap(msl):
 # what the zero weight makes of it. With blending off, on a target that is not floating point, or with a weight the alpha does not make zero, the output's bits are 0 and it is returned as
 # it is: NVIDIA stores that NaN or Inf too. This part never changes a finite colour, nor the alpha.
 # Not covered, as a shader cannot see it: a NaN or Inf already in the target under a zero destination weight, and a non-finite weight on a colour of 0.
-# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_d, main0_f and
+# The guard goes into main0 before the build makes its other entry points, so each of them has it: they call main0's body (dmsh_side.shared_body: main0_u, main0_f and
 # the side library's) and take main0's parameters, the word's among them. It is written as a call, not as stores to out, which dmsh_entry.fs_uint reads to tell what a shader writes
 # The same call rounds what goes into a normalized target as NVIDIA's colour unit does (the struct's second word, round, DMSH_BLEND_ROUND_BITS a colour output, from nvn_mtl.m rop_word).
 # The two convert a float colour differently where it lies within rounding of a half step: Apple stores the nearest integer to the exact x * (2^n - 1) (dm/gfx/tests/t_rop_round.m
@@ -930,8 +953,10 @@ static inline __attribute__((always_inline)) float4 dm_rop(float4 c, uint m)
     float4 s = m == %du ? float4(255.0f) : (m == %du ? float4(65535.0f) : float4(1023.0f, 1023.0f, 1023.0f, 3.0f));
     return rint(precise::clamp(c, 0.0f, 1.0f) * s) / s;   // precise: NaN goes to 0, as both store it; the product is float32's, rint rounds it to nearest even
 }
+constant bool dm_blend_off [[function_constant(%d)]];   // abi.BLEND_OFF_FC: the pipeline's blend words are both 0 (nvn_mtl.m fn_off), so nothing to fix up
 static inline __attribute__((always_inline)) void dm_blend0(thread main0_out& dm_o, constant dm_blend_state& dm_s)
 {
+    if (is_function_constant_defined(dm_blend_off) && dm_blend_off) return;
     uint m = dm_s.zero, r = dm_s.round;
     if ((m | r) == 0u) return;
 %s}
@@ -953,6 +978,6 @@ def blend_zero(msl):
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
     bits, rb = abi.BLEND_ZERO_BITS, abi.BLEND_ROUND_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16,
+    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16, abi.BLEND_OFF_FC,
                            ''.join(f'    dm_o.{nm} = dm_rop(dm_bz(dm_o.{nm}, m >> {bits * c}u), r >> {rb * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

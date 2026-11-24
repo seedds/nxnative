@@ -62,6 +62,22 @@ int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) {
     return 1;
 }
 void dm_backtrace(uint64_t fp) { (void)fp; }
+// No exlaunch plugin in this fixture (hle_exl.c): no stand-in rtld, and no module code a MapProcessMemory view could be made of
+const uint32_t dm_exl_process_handle = 0xFFFF8001u;
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm) { (void)addr; (void)base; (void)size; (void)state; (void)perm; return 0; }
+uint64_t dm_exl_rtld_base(void) { return 0; }
+uint64_t dm_exl_rtld_size(void) { return 0; }
+int dm_exl_view_source_ok(uint64_t src, uint64_t size) { (void)src; (void)size; return 0; }
+void dm_exl_code_prepare(uint64_t src) { (void)src; }
+int dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
+int dm_sdk_ounce(void) {
+#ifdef TEST_SDK_OUNCE
+    return TEST_SDK_OUNCE;
+#else
+    return 0;
+#endif
+}
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t guest_ticks(void) { return 0; }
@@ -481,9 +497,9 @@ static void concurrency(void) {
     for (unsigned i = 0; i < 40; ++i) {
         task h = {.svc=1, .b=8 * 1024 * 1024}, p = {.svc=0x2c, .a=alias, .b=8 * 1024 * 1024};
         race(&h, &p);
-        if (DM_GAME_MEM_MAP_LIMIT) assert((!h.result && p.result == LIMIT) || (h.result == LIMIT && !p.result));
+        if (mem_map_limit_on()) assert((!h.result && p.result == LIMIT) || (h.result == LIMIT && !p.result));
         else assert(!h.result && !p.result);
-        assert(info(I_UsedMem) == DM_GAME_MEM_USED + g_heap_cur + (DM_GAME_MEM_MAP_LIMIT ? g_alias_mapped : 0));
+        assert(info(I_UsedMem) == DM_GAME_MEM_USED + g_heap_cur + (mem_map_limit_on() ? g_alias_mapped : 0));
         assert(!pages(0, alias, p.b) && !resize(0));
         assert(!pages(1, alias, P));
         task m = {.svc=4, .a=stack, .b=alias, .c=P}, d = {.svc=0x2d, .a=alias, .b=P};
@@ -759,12 +775,18 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 8; ++i) { assert(!pthread_join(threads[i], NULL)); assert(addresses[i] == addresses[0]); }
     alias = addresses[0]; stack = info(I_StackAddr); heap = info(I_HeapAddr);
 #if !TARGET_OS_IPHONE
-    if (!getenv("DM_ALIAS_SIZE")) assert(info(I_AliasSize) == SWITCH_ALIAS);   // the Mac's alias region is a Switch's, whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+    if (!getenv("DM_ALIAS_SIZE")) {
+        size_t want_alias = dm_sdk_ounce() ? SWITCH2_ALIAS : SWITCH_ALIAS;
+        assert(info(I_AliasSize) == want_alias);   // the Mac's alias region is the console's (64 GB Switch 1, 128 GB Switch 2), whatever the profile can give an iPhone; DM_ALIAS_SIZE=<mem_alias> runs these tests on an iPhone's
+#if !__has_feature(address_sanitizer)
+        assert((uint64_t)(uintptr_t)g_as + g_reserve < UINT64_C(1) << 40);
+#endif
+    }
 #endif
     layout_order(); readonly_shared_memory(); transfer_memory_setup();
     lazy_commit(); alias_lifecycle(); device_shared_refused(); ownership(); stack_pages_released(); module_sources(); module_back_patch(); process_memory_walk(); failures(); release_fallback(); file_rule(); file_sweep(); heap_regrow(); concurrency(); fragmented_queries();
     guest_helper();
-    if (!DM_GAME_MEM_MAP_LIMIT) metadata_limit();
+    if (!mem_map_limit_on()) metadata_limit();
 #ifdef TEST_REAL_DIRTY
     dirty_integration();
 #endif
@@ -787,6 +809,6 @@ int main(int argc, char **argv) {
     assert(resize(DM_GAME_APP_POOL - DM_GAME_MEM_USED + P) == 0x10801 && !g_heap_cur);
     g_nmod = 0;
     free(g_alias_bits); free(g_alias_exposed); assert(!munmap(g_as, g_reserve));
-    printf("memory SVCs passed (map limit=%d, host page=%d, guest files %d)\n", DM_GAME_MEM_MAP_LIMIT, memory_getpagesize(), g_gf_n);
+    printf("memory SVCs passed (ounce=%d, map limit=%d, host page=%d, guest files %d)\n", dm_sdk_ounce(), mem_map_limit_on(), memory_getpagesize(), g_gf_n);
     return 0;
 }

@@ -90,6 +90,13 @@
 "setting.DM_UPSCALER.label" = "Game's upscaler";
 "setting.DM_UPSCALER.option.game" = "Game's own";
 "setting.DM_UPSCALER.option.metalfx" = "MetalFX";
+"setting.DM_NVN_ANISO.label" = "Texture filtering";
+"setting.DM_NVN_ANISO.note" = "Sharper ground and walls seen at an angle. 16x costs little on a Mac.";
+"setting.DM_NVN_ANISO.option.0" = "Game default";
+"setting.DM_NVN_ANISO.option.2" = "2x";
+"setting.DM_NVN_ANISO.option.4" = "4x";
+"setting.DM_NVN_ANISO.option.8" = "8x";
+"setting.DM_NVN_ANISO.option.16" = "16x";
 "setting.DM_PICTURE_FIT.label" = "Picture";
 "setting.DM_PICTURE_FIT.note" = "Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.";
 "setting.DM_PICTURE_FIT.option.fit" = "Fit";

@@ -45,6 +45,7 @@ uint64_t now_ns(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
+int dm_native_window_offscreen(const void *native);   // hle_misc.c: a native window no display shows (GameChat's virtual camera); hle_nvn.c drops the frames of its NVN windows
 void dm_host_lock(pthread_mutex_t *m);  // contention on a host mutex releases the guest core
 void dm_thread_service_connect(void);   // an HLE call that stands for connecting to a service on Horizon: threads started so far get to run (hle_thread.c)
 void dm_thread_service_request(void);   // an HLE call that is a blocking service request on Horizon: the caller gives up its core (hle_thread.c)
@@ -134,6 +135,7 @@ void dm_focus_set(int st);
 // report the applet could not start (RES_FAIL cuts): those never had an applet open
 void dm_applet_enter(const char *name);
 void dm_applet_leave(void);
+unsigned dm_account_pushed_users(void);   // hle_account.c: bitmask snapshotted by account::PushOpenUsers for oe::ExecuteProgram
 static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
 #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)

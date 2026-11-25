@@ -204,6 +204,92 @@ int main(void) {
         }
         unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
     }
+    {   // fs::GetSaveDataSize, GetDeviceSaveDataSize, GetSaveDataSizeMax, ExtendSaveData, ExtendDeviceSaveData
+        char sroot[1100], sdir[1200], nacp_path[1200], rec[1300], tmp[1300];
+        snprintf(sroot, sizeof sroot, "%s/savesize", root); mkdir(sroot, 0755);
+        snprintf(sdir, sizeof sdir, "%s/save", sroot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", sroot);
+        const uint64_t uid1[2] = {DM_UID0, DM_UID1}, uid2[2] = {DM_UID0 + 1, DM_UID1}, bad_uid[2] = {0x1234, 0x5678};
+        int64_t size = -1, journal = -1;
+        setenv("DM_SAVE", sdir, 1); setenv("DM_CONTROL_NACP", nacp_path, 1);
+        // No control.nacp and no record: fallback is 256 MB data + 16 MB journal (size > journal)
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size max: fallback without control.nacp is 256 MB / 16 MB");
+        // Unknown or NULL UID is rejected as TargetNotFound without touching outputs
+        size = journal = -1;
+        CHECK(h_fs_SaveSize(&size, &journal, bad_uid) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: unknown UID returns TargetNotFound");
+        CHECK(h_fs_SaveSize(&size, &journal, NULL) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: NULL UID returns TargetNotFound");
+        CHECK(h_fs_ExtendSave(bad_uid, 64 << 20, 4 << 20) == RES_TARGET_NOT_FOUND && h_fs_ExtendSave(NULL, 64 << 20, 4 << 20) == RES_TARGET_NOT_FOUND, "extend save: unknown or NULL UID returns TargetNotFound");
+        // Short/corrupt control.nacp falls back cleanly
+        put(nacp_path, "short");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size: short control.nacp falls back to 256 MB / 16 MB");
+        // control.nacp with account (62 MB / 1 MB) and device (32 MB / 2 MB), no separate max
+        static uint8_t snacp[0x4000]; memset(snacp, 0, sizeof snacp);
+        const int64_t acc[2] = {62 << 20, 1 << 20}, dev[2] = {32 << 20, 2 << 20};
+        memcpy(snacp + 0x3080, acc, sizeof acc); memcpy(snacp + 0x3090, dev, sizeof dev);
+        FILE *f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: reads UserAccountSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: reads DeviceSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size max: falls back to base NACP account size when max is 0");
+        // Without a separate NACP max, extending above base returns ResultExtensionSizeTooLarge; a no-op within base succeeds without writing a record
+        snprintf(rec, sizeof rec, "%s.size", sdir);
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0, "extend save: rejects growth past base when NACP max is 0");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 2 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend device save: rejects growth past base when NACP device max is 0");
+        CHECK(h_fs_ExtendSave(uid1, 62 << 20, 1 << 20) == RES_OK && access(rec, F_OK) != 0, "extend save: no-op within base succeeds without writing a record");
+        // Partial NACP max (journal max 0 < base journal 1 MB) never reports max below base
+        const int64_t partial_mx[2] = {128 << 20, 0}; memcpy(snacp + 0x3148, partial_mx, sizeof partial_mx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (1 << 20), "save size max: clamps partial NACP max journal >= base journal");
+        // control.nacp with explicit account max (128 MB / 8 MB) and device max (64 MB / 4 MB)
+        const int64_t mx[2] = {128 << 20, 8 << 20}, dmx[2] = {64 << 20, 4 << 20};
+        memcpy(snacp + 0x3148, mx, sizeof mx); memcpy(snacp + 0x3158, dmx, sizeof dmx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (8 << 20), "save size max: reads UserAccountSaveDataSizeMax/JournalSizeMax from control.nacp");
+        // Negative arguments, over-max requests, and unaligned growing sizes are rejected without writing a record
+        CHECK(h_fs_ExtendSave(uid1, -1, 0) == RES_INVALID_SIZE && h_fs_ExtendSave(uid1, 64 << 20, -1) == RES_INVALID_SIZE, "extend save: rejects negative size or journal with ResultInvalidSize");
+        CHECK(h_fs_ExtendDeviceSave(-1, 0) == RES_INVALID_SIZE && h_fs_ExtendDeviceSave(48 << 20, -1) == RES_INVALID_SIZE, "extend device save: rejects negative size or journal with ResultInvalidSize");
+        CHECK(h_fs_ExtendSave(uid1, 129 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, 96 << 20, 9 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend save: rejects requests above NACP max");
+        CHECK(h_fs_ExtendDeviceSave(65 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(48 << 20, 5 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend device save: rejects requests above NACP device max");
+        CHECK(h_fs_ExtendSave(uid1, (96 << 20) + 1, 4 << 20) == RES_EXT_SIZE_INVALID && h_fs_ExtendSave(uid1, 96 << 20, (4 << 20) + 1) == RES_EXT_SIZE_INVALID, "extend save: rejects unaligned growth with ResultExtensionSizeInvalid");
+        CHECK(access(rec, F_OK) != 0, "extend save: rejected requests write no record");
+        // ExtendSaveData persists beside DM_SAVE and grows monotonically per dimension (never shrinks)
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (96 << 20) && journal == (4 << 20), "extend save: subsequent GetSaveDataSize returns extended size");
+        CHECK(!access(rec, F_OK), "extend save: record sits beside DM_SAVE");
+        CHECK(h_fs_ExtendSave(uid1, 112 << 20, 0) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (4 << 20), "extend save: journal 0 grows data while preserving current journal");
+        CHECK(h_fs_ExtendSave(uid1, 0, 8 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: size 0 grows journal while preserving current data size");
+        CHECK(h_fs_ExtendSave(uid1, 80 << 20, 2 << 20) == RES_OK && h_fs_ExtendSave(uid1, (80 << 20) + 1, (2 << 20) + 1) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: smaller sizes are monotonic no-ops and never shrink");
+        // Device save has its own record, isolated from account save
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: unaffected by account ExtendSaveData");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20), "extend device save: recorded independently");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "account save size: unaffected by ExtendDeviceSaveData");
+        // Additional account user keeps its own record
+        CHECK(dm_account_create_user(1) == 0, "save size: register user 2");
+        CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: user 2 reads control.nacp before its own extend");
+        CHECK(h_fs_ExtendSave(uid2, 80 << 20, 2 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (80 << 20) && journal == (2 << 20), "extend save: user 2 gets its own record");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: user 1 record is untouched by user 2");
+        // Persistence failures return failure instead of RES_OK and leave no .tmp behind
+        char bad_save[1200];
+        snprintf(bad_save, sizeof bad_save, "%s/missing_dir/save", sroot);
+        setenv("DM_SAVE", bad_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL, "extend save: returns failure when parent directory does not exist");
+        char blk_save[1200];
+        snprintf(blk_save, sizeof blk_save, "%s/blocked", sroot);
+        snprintf(rec, sizeof rec, "%s.size", blk_save); mkdir(rec, 0755);   // directory at destination makes rename fail
+        snprintf(tmp, sizeof tmp, "%s.tmp", rec);
+        setenv("DM_SAVE", blk_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL && access(tmp, F_OK) != 0, "extend save: returns failure when rename fails and cleans up .tmp");
+        rmdir(rec);
+        setenv("DM_SAVE", sdir, 1);
+        // NULL output pointers and unset DM_SAVE
+        CHECK(h_fs_SaveSize(&size, NULL, uid1) == RES_OK && h_fs_SaveSize(NULL, &journal, uid1) == RES_OK && h_fs_DeviceSaveSize(NULL, NULL) == RES_OK && h_fs_SaveSizeMax(NULL, NULL) == RES_OK, "save size: NULL output pointers are accepted");
+        unsetenv("DM_SAVE");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: reads control.nacp cleanly when DM_SAVE is unset");
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_FAIL && h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_FAIL, "extend save: fails when DM_SAVE is unset instead of returning RES_OK");
+        unsetenv("DM_CONTROL_NACP");
+    }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);
@@ -259,6 +345,26 @@ int main(void) {
         CHECK(h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 3 && !strcmp(de[0].name, "a") && de[0].size == 5 && de[1].type == ENT_DIR && !strcmp(de[2].name, "c"), "lists a, b, c"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "the file filter hides directories"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/data/b", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0, "an empty directory"); h_fs_CloseDirectory(h);
+        {   // image directory handle streams via cursor without a snapshot: batched filtered reads, zeroed padding, and DirCount leaves cursor untouched
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && !((dirh_t *)h)->snap && ((dirh_t *)h)->img, "image directory opens with a cursor and no snapshot");
+            memset(de, 0xaa, sizeof de);
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 0) == RES_OK && cnt == 0, "a 0-entry read returns 0 and leaves the cursor at the start");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "a") && de[0].type == ENT_FILE && de[0].size == 5, "first filtered 1-entry batch returns a");
+            int zero = 1; for (size_t i = 2; i < sizeof de[0].name; i++) zero &= !de[0].name[i];
+            for (size_t i = 0; i < sizeof de[0].pad0; i++) zero &= !de[0].pad0[i];
+            for (size_t i = 0; i < sizeof de[0].pad1; i++) zero &= !de[0].pad1[i];
+            CHECK(zero, "DirectoryEntry padding and name tail are zeroed");
+            CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 2, "DirCount counts filtered files (2) mid-read");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "c") && de[0].type == ENT_FILE && de[0].size == 2, "second batch skips directory b and returns c (cursor untouched by DirCount)");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "third batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1, "dir-only filter counts 1");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "b") && de[0].type == ENT_DIR && de[0].size == 0, "dir-only batch returns b with size 0");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "dir-only second batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", 0) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "mode 0 counts and lists nothing");
+            h_fs_CloseDirectory(h);
+        }
         g_nmnt = 0;
         char ov[1100], ovd[1200]; snprintf(ov, sizeof ov, "%s/imgov", root); snprintf(ovd, sizeof ovd, "%s/data", ov); mkdir(ov, 0755); mkdir(ovd, 0755);
         snprintf(fn, sizeof fn, "%s/a", ovd); put(fn, "mod"); snprintf(fn, sizeof fn, "%s/new", ovd); put(fn, "added");

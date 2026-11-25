@@ -474,6 +474,17 @@ class Pack(Base):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
         with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())
 
+    def test_npdm_bounds_and_header_aci0_text(self):
+        d = bytearray(npdm(TID)); d[0x20:0x24] = b'ACI0'; d[0x30:0x38] = b'1.0.0\0\0\0'
+        self.assertEqual(pack_nup.program_id(bytes(d), 'test'), TID)
+        for raw, msg in ((b'META', 'not an NPDM'),
+                         (b'META' + bytes(0x70), 'not an NPDM'),
+                         (d[:0x90], 'no ACI0 section')):
+            with self.assertRaisesRegex(pack_nup.Error, msg): pack_nup.program_id(bytes(raw), 'test')
+        for off, size in ((0x20, 0x20), (0x80, 0x17), (0x80, 0x200)):
+            bad = bytearray(d); struct.pack_into('<II', bad, 0x70, off, size)
+            with self.assertRaisesRegex(pack_nup.Error, 'no ACI0 section'): pack_nup.program_id(bytes(bad), 'test')
+
     def test_update_packed_on_its_own_with_control_data(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         pack_nup.pack_version(n, vers[VER], base, app, self.out() / 'u', say=lambda s: None)
@@ -859,6 +870,44 @@ class Programs(Base):
                 ex_dir = self.dir / f'ex_{case.split()[0]}'
                 pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
                 self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / marker).exists())
+
+    def test_reused_provisional_profile_reconciles_stale_sibling_marker(self):
+        # Retrying a multi-program NUP with a provisional profile created before 2cc4cda2 must replace
+        # the stale sibling romfs_marker while preserving hand-edited settings and comments.
+        import game as gamemod
+        for case, own_romfs, want_marker in (
+            ('small own file replaces stale sibling marker', {'dummy.bin': b'12345'}, 'dummy.bin'),
+            ('empty own RomFS clears stale sibling marker', {}, ''),
+            ('valid hand-edited marker stays untouched', {'dummy.bin': b'12345', 'keep.dat': b'1'}, 'keep.dat'),
+        ):
+            with self.subTest(case=case):
+                s1 = {'exefs': {'main': b'switch 1 code', 'main.npdm': npdm(S1)}, 'romfs': {'sound/jp.pck': b'AKPK' + b'x' * 796}}
+                s2 = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': own_romfs}
+                write_nup(self.path, [(0, S1, 0, s1, META), (0, S2, 0, s2, program_nacp())])
+                got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
+                ex_dir = self.dir / f'ex_retry_{case.split()[0]}'
+                pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
+                pdir = self.dir / f'prof_retry_{case.split()[0]}' / f'{got:016X}'
+                pdir.mkdir(parents=True)
+                initial_marker = 'keep.dat' if want_marker == 'keep.dat' else 'sound/jp.pck'
+                (pdir / 'game.tsv').write_text(
+                    f'# hand-edited provisional profile\n'
+                    f'title_id\t{got:016X}\n'
+                    f'modules\tmain\n'
+                    f'romfs_marker\t{initial_marker}\n'
+                    f'# user custom tuning\n'
+                    f'mem_reserve\t0x12340000\n',
+                    encoding='utf-8',
+                )
+                g = gamemod.Game(pdir)
+                with mock.patch.object(nsp, 'say'):
+                    g2 = nsp.reconcile_provisional_marker(g, nsp.rfs.source(ex_dir))
+                self.assertEqual(g2.get('romfs_marker'), want_marker)
+                self.assertEqual(g2.get('mem_reserve'), '0x12340000')
+                text = (pdir / 'game.tsv').read_text(encoding='utf-8')
+                self.assertIn('# hand-edited provisional profile', text)
+                self.assertIn('# user custom tuning', text)
+                self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / want_marker).exists())
 
 
 class StandaloneCLI(Base):

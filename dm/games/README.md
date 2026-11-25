@@ -57,6 +57,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN | — |
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN | — |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN | — |
+| [Apollo Justice: Ace Attorney Trilogy](010020D01B890000/README.md) | `010020D01B890000` | 1.0.1 | 15.3.2 | Capcom's RE Engine, Havok, Wwise | NVN | [60 fps target](010020D01B890000/README.md#frame-rate) |
 | [Assassin's Creed III Remastered](01007F600B134000/README.md) | `01007F600B134000` | 1.0.0 (provisional Mac profile) | 5.4.0 | Ubisoft Scimitar / Anvil | NVN | — |
 | [Atelier Ryza: Ever Darkness & the Secret Hideout DX](0100199023B2E000/README.md) | `0100199023B2E000` | 1.2.0 | 18.3.2 | Gust's engine on Koei Tecmo's KTGL | NVN | — |
 | [Baba Is You](01002CD00A51C000/README.md) | `01002CD00A51C000` | 1.0.12 | 19.3.3 | Multimedia Fusion 2 game on MP2 Games' runtime (Lua) | NVN | — |
@@ -69,6 +70,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Bayonetta 3](01004A4010FEA000/README.md) | `01004A4010FEA000` | 1.2.0 | 13.3.2 | PlatinumGames' engine | NVN | — |
 | [The Binding of Isaac: Rebirth](01009BC00C38A000/README.md) | `01009BC00C38A000` | 1.0 (base) | 5.5.0 | its own engine | NVN | — |
 | [Big Brain Academy: Brain vs. Brain](0100620012D6E000/README.md) | `0100620012D6E000` | 1.2.0 | 11.4.3 | NintendoWare Bezel Engine 1.56 | NVN | — |
+| [BioShock Remastered](0100AD10102B2000/README.md) | `0100AD10102B2000` | 1.0.2 (provisional Mac profile) | 9.3.1 | Unreal Engine 3 (Blind Squirrel), Scaleform, Bink | NVN | — |
 | [Blasphemous](0100698009C6E000/README.md) | `0100698009C6E000` | 1.0.8 | 8.3.1 | Unity 2017.4.28f1 IL2CPP, FMOD | NVN | — |
 | [Blasphemous 2](010040801A4C8000/README.md) | `010040801A4C8000` | 1.0.8 | 15.3.2 | Unity 2021.3.20f1 IL2CPP, FMOD | NVN | — |
 | [Bloodstained: Curse of the Moon](01004B800AF5A000/README.md) | `01004B800AF5A000` | 1.1.1 | 4.5.0 | Inti Creates' engine | NVN | — |
@@ -136,6 +138,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Hyrule Warriors: Age of Calamity](01002B00111A2000/README.md) | `01002B00111A2000` | 1.3.0 | 9.6.0 | Koei Tecmo's KTGL | NVN | 60 fps target |
 | [Hyrule Warriors: Age of Imprisonment](04003F40232DE000/README.md) | `04003F40232DE000` | v196608 (Switch 2) | 20.5.15 (Ounce) | Koei Tecmo's KTGL | NVN2 | — |
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN | — |
+| [Iconoclasts](0100BC60099FE000/README.md) | `0100BC60099FE000` | 1.15p | 5.3.0 | its own engine | NVN | — |
 | [It Takes Two](010092A0172E4000/README.md) | `010092A0172E4000` | 1.0.3 | 13.3.5 | Unreal Engine 4 (Hazelight, AngelScript), Wwise | NVN | 60 fps target |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 | — |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN | — |
@@ -178,6 +181,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 | — |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN | — |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN | — |
+| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | [60 fps target](01003DC0144B6000/README.md#frame-rate) |
 | [Overcooked! All You Can Eat](0100F28011892000/README.md) | `0100F28011892000` | 1.0.12 | 10.4.1 | Unity 2019.4.11f1 IL2CPP, FMOD | NVN | 60 fps target |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN | — |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN | 60 fps target |
@@ -265,8 +269,10 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Unicorn Overlord](010069401ADB8000/README.md) | `010069401ADB8000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN | — |
 | [Unicorn Overlord, Asian release](010054B01AD92000/README.md) | `010054B01AD92000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN | — |
 | [UnMetal](01008F4014A74000/README.md) | `01008F4014A74000` | 1.2.0 | 14.3.0 | Unepic Fran's own engine (`arcadix`) | OpenGL | — |
+| [Volcano Princess](01007CB025C58000/README.md) | `01007CB025C58000` | 1.0.2 | 21.4.7 | Unity 6000.4.7f1 IL2CPP, FMOD | NVN | — |
 | [Warhammer Survivors](0100CAA026246000/README.md) | `0100CAA026246000` | 1.0.0 (base) | 21.4.7 | Unity 6000.0.74f1 IL2CPP, FMOD | NVN | — |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL | — |
+| [XCOM 2 Collection](0100D0B00FB74000/README.md) | `0100D0B00FB74000` | 1.0.3 (`v131072`) | 9.3.1 | Unreal Engine 3, Wwise | NVN | Mac |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 3](010074F013262000/README.md) | `010074F013262000` | 2.2.1 | 12.3.9 | Monolith's engine | NVN | — |

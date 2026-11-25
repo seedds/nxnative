@@ -1,0 +1,43 @@
+# Outer Wilds, Switch update v327680 (1.1.15.1027), Unity 2019.4.40f1 on SDK 14.3.0.
+# Format is documented in dm/games/README.md.
+
+# ---- Identity ----
+title_id	01003DC0144B6000
+program_id	01003DC0144B6000
+
+# ---- App ----
+name	Outer Wilds
+ipa	OuterWilds.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.1.15.1027	main=cd9af768102ed946bf265100f3ccdeed	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# subsdk0 exports NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets1.resource
+zip_store	.assets:.bundle:.dat:.json:.mp4:.png:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MiB of system resource. Startup uses address regions.
+# The first expedition reaches +4.53 GiB. Keep the original allocator request
+# and give it and Unity's regions a 4.875 GiB alias region.
+mem_reserve	0x160000000
+mem_alias	0x138000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Frame rate ----
+# Unity's internal calls identify the limiter, and the host paces presents at the target.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Outer Wilds shaders
+
+# The game calls nvnDeviceSetDepthMode with near = 0.
+depth_mode	zero

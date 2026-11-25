@@ -13,7 +13,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, errno, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_metalwa, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -510,6 +510,30 @@ def ps_omap(code):
 
 NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NVN2 graphics stage indices (PRAGMATA's banks: vertex c[25], hull and mesh c[26], domain c[27], geometry c[28], pixel c[29])
 
+def unity_acescc_lut(code):
+    # The Unity Post Processing v1 LUT generator in Outer Wilds lost the two
+    # half-subnormal constants in ACES_to_ACEScc when compiled for Maxwell.
+    # Match the shader's bytes so other LUT variants keep their own math. The
+    # offsets are from the SPH, and only the offline translator sees this copy.
+    if len(code) != 4304 or hashlib.sha256(code).hexdigest() != '4beffc02e07565c3d9ee6e3b33d6f456f4eae4d16fbe2986417b5d9986a00b00':
+        return code
+    patched = bytearray(code)
+    # RRO.EX2 R5, R5 is already a no-op in the translator. Use its slot to
+    # load 2^-16 into the unused R254. Each low branch then computes
+    # x * 0.5 + 2^-16 and tests x < 2^-15 before selecting its logarithm.
+    for offset, word in (
+        (0x148, 0x010378000007F0FE),  # MOV32I R254, 2^-16
+        (0x248, 0x32807F3F00070402),  # FFMA R2, R4, 0.5, R254
+        (0x260, 0x36B103B800070407),  # FSETP.LT.AND P0, PT, R4, 2^-15, PT
+        (0x278, 0x32807F3F00070503),  # FFMA R3, R5, 0.5, R254
+        (0x280, 0x36B103B80007050F),  # FSETP.LT.AND P1, PT, R5, 2^-15, PT
+        (0x2F8, 0x32807F3F00070503),  # FFMA R3, R5, 0.5, R254
+        (0x348, 0x36B103B800070507),  # FSETP.LT.AND P0, PT, R5, 2^-15, PT
+    ):
+        struct.pack_into('<Q', patched, offset, word)
+    return bytes(patched)
+
+
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
     # Short NVN2 graphics control sections have no optional stage byte.
@@ -552,6 +576,7 @@ def job_for(key, name, rec, w):
             # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
             if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
             code = code[0x100:]
+        if stage == 'ps': code = unity_acescc_lut(code)
         tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
         if tf: extra['tf'] = tf
     if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True
@@ -622,7 +647,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # dmsh_side.py is in it: dmsh_entry's fs_uint writes main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_metalwa, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -793,7 +818,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *XC, spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        try: selected = dmsh_rewrite.uniform_tests(dmsh_rewrite.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_rewrite.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
+        try: selected = dmsh_metalwa.apply(dmsh_rewrite.uniform_tests(dmsh_rewrite.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))))))[0]   # precise, bit0_mask, select_guards, uniform_tests, and Metal compiler workarounds (dmsh_metalwa), as finish makes them
         except ValueError as e: return 'geometry MSL failed', str(e)[:160], None
         plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(selected))
         src = dmsh_geometry.capture_input(plain)
@@ -916,6 +941,11 @@ def finish(key, w, j, c1):
             src, tess = dmsh_tess.hull(src, os.path.join(w, key + '.spv')) if j['stage'] == 'hs' else dmsh_tess.domain(src, os.path.join(w, key + '.spv'), j.get('tess_mode'))
             open(msl, 'w').write(src)
         except ValueError as e: tess = {'unsupported': str(e)[:160]}
+    if j['stage'] not in ('vs', 'ds'):   # Metal GPU compiler workarounds (KK3 ballots behind DMSH_MWA_FC, KK9 loop breaks), before mesh wrapping, compute_loops and shared_body
+        try:
+            t = dmsh_metalwa.apply(src)[0]
+            if t != src: src = t; open(msl, 'w').write(src)
+        except ValueError as e: return 'metal workaround rewrite failed', str(e)[:160], None
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
         # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes); each output as wide as they read

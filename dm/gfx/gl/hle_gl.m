@@ -2080,19 +2080,30 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 // ---------- Sync objects ----------
 // A fence is the serial of the command buffer being recorded when it was made, signalled when that command buffer completes (g_ev). LÖVE fences each third of its stream
 // buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
-// magic: a sync this layer made and has not deleted (glIsSync; DOOM 3 asks before it waits on or deletes one)
-#define SYNC_MAGIC 0x676c7379u
-typedef struct { uint32_t magic; uint64_t serial; } sync_t;
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->magic = SYNC_MAGIC; s->serial = g_serial; return s; }
-GL(glDeleteSync, void, void *s) { if (s) ((sync_t *)s)->magic = 0; free(s); }
-GL(glIsSync, uint32_t, void *s) { return s && ((sync_t *)s)->magic == SYNC_MAGIC; }
+// A sync is a name, as in GL: a value this layer handed out and has not deleted, which the set of live syncs answers without reading through the value (glIsSync; DOOM 3 asks before it
+// waits on or deletes one). A value that never was a sync, or one deleted already, is GL_INVALID_VALUE and is neither written nor freed (OpenGL 4.6, section 4.1). Read through, a
+// GLsync that NVN's nvnSyncCreateGLSync (not implemented) left unwritten was freed as if it were a block of ours: libmalloc's abort at boot (GitHub issue #2835)
+typedef struct { uint64_t serial; } sync_t;
+static CFMutableSetRef g_syncs;   // the live syncs, by address (no retain callbacks)
+static int sync_live(const void *s) { return s && g_syncs && CFSetContainsValue(g_syncs, s); }
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
+    (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial;
+    if (!g_syncs) g_syncs = CFSetCreateMutable(NULL, 0, NULL);
+    CFSetAddValue(g_syncs, s); return s;
+}
+GL(glDeleteSync, void, void *s) {   // frees the set's own entry, a block glFenceSync made, never what the caller passed
+    const void *own = NULL; if (!s) return;
+    if (!g_syncs || !CFSetGetValueIfPresent(g_syncs, s, &own)) { gl_error(GL_INVALID_VALUE); return; }
+    CFSetRemoveValue(g_syncs, own); free((void *)own);
+}
+GL(glIsSync, uint32_t, void *s) { return sync_live(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
 // glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads
 // them next. Nothing here writes from a shader, the buffers are shared memory, and the command buffers run in order: there is nothing to wait for
 GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
-    if (!s) return 0x911d;   // WAIT_FAILED
+    if (!sync_live(s)) { gl_error(GL_INVALID_VALUE); return 0x911d; }   // WAIT_FAILED: no sync object
     if (g_ev.signaledValue >= s->serial) return GL_ALREADY_SIGNALED;
     if (s->serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;

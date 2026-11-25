@@ -463,7 +463,8 @@ class Anchors(unittest.TestCase):
     def test_a_file_named_after_the_title_id_names_no_build(self):
         """A file named after the title ID is taken as written for the NSO's build, not refused as another build's."""
         (self.dir / 't').mkdir()
-        npdm = bytearray(0xa0); struct.pack_into('<I', npdm, 0x70, 0x80); npdm[0x80:0x84] = b'ACI0'
+        npdm = bytearray(0xa0); npdm[:4] = b'META'; npdm[0x20:0x24] = b'ACI0'; npdm[0x30:0x38] = b'1.0.0\0\0\0'
+        struct.pack_into('<II', npdm, 0x70, 0x80, 0x20); npdm[0x80:0x84] = b'ACI0'
         struct.pack_into('<Q', npdm, 0x90, 0x0100abcd00000000); (self.dir / 't/main.npdm').write_bytes(npdm)
         old = self.build('t/main', {0x100: reader(0x100, 0x4100), 0x200: reader(0x200, 0x4100, 0x20)})
         self.assertEqual(old.title, '0100ABCD00000000')

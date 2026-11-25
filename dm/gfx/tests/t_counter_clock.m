@@ -148,8 +148,17 @@ int main(void) {
         CHECK("projection subtracts the time spent frozen", guest < host && guest >= frozen);
         CHECK("a host sample older than the pause offset cannot underflow", guest_ns_at_host_time(1) == 0);
         CHECK("feedback conversion uses the resumed guest epoch", llabs((int64_t)gpu_s_guest_ns(host / 1e9) - (int64_t)guest) <= 2);
+        { int bad = 0; for (int i = 0; i < 20000; i++) { uint64_t h = now_ns(); if (!gpu_s_guest_ns(h / 1e9)) bad++; } CHECK("a feedback time in the clock tick of the read is not in the future", bad == 0); }
+        CHECK("a feedback time one double step ahead of the read is the read's time", gpu_s_guest_ns_at(nextafter(host / 1e9, INFINITY), host) == guest);
+        {
+            uint64_t ticks = 24000000ull * 86400 * 100 + 1;   // 100 days uptime, ticks % 3 == 1 (now_ns truncates 2/3 ns)
+            uint64_t long_now = ticks * 125 / 3, long_g = guest_ns_at_host_time(long_now);
+            CHECK("same-tick Metal 24 MHz float time at 100 days uptime is accepted", llabs((int64_t)gpu_s_guest_ns_at((double)ticks * (125.0 / 3e9), long_now) - (int64_t)long_g) <= 2);
+            CHECK("one double step ahead at 100 days uptime is the read's time", gpu_s_guest_ns_at(nextafter(long_now / 1e9, INFINITY), long_now) == long_g);
+            CHECK("a feedback time just past slack is rejected as future", gpu_s_guest_ns_at((long_now + 100) / 1e9, long_now) == 0);
+        }
         CHECK("future feedback is rejected", gpu_s_guest_ns(host / 1e9 + 1) == 0);
-        CHECK("invalid feedback is rejected", gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
+        CHECK("invalid feedback is rejected", gpu_s_guest_ns(0) == 0 && gpu_s_guest_ns(-1) == 0 && gpu_s_guest_ns(9.5e9) == 0 && gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
 
         setenv("DM_DETCLOCK", "1000000", 1);
         // A synthetic window with no textures exercises the present's clock accounting without submitting a GPU job.

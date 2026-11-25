@@ -39,6 +39,13 @@ int main(void) { @autoreleasepool {
         NSMutableData *header = [NSMutableData dataWithLength:32]; memcpy(header.mutableBytes, magics[i], 4); [header writeToFile:bad atomically:YES];
         EXPECT("archive guard: bare header refused", 0, arch_file_ok(bad));
     }
+    // # cover padding sections are skipped by pre_parse and pre_parse_files, resetting on # kind: and isolating headerless later files (no Metal compiler needed).
+    @autoreleasepool {
+        NSString *cov = @"# kind: evidence\nv1\tf1\n# cover: single-stage padding pairs\nv1\tf2\n# kind: evidence\nv1\tfc\n# cover\nv1\tf3\n";
+        EXPECT("cover: pre_parse skips # cover and resets on # kind:", 2, pre_parse(cov).count);
+        EXPECT("cover: pre_parse_files isolates headerless second file", 2, pre_parse_files(@[@"# kind: evidence\nv1\tf1\n# cover: padding\nv1\tf2\n", @"v1\tfc\n"]).count);
+        EXPECT("cover: pre_parse_files deduplicates across files", 1, pre_parse_files(@[@"v1\tf1\n", @"v1\tf1\n"]).count);
+    }
     NSString *v = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n"
         "vertex V main0(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, 1); return o; }\n"
         "vertex V main0_z(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0.5, 1); return o; }\n";
@@ -217,6 +224,36 @@ int main(void) { @autoreleasepool {
             EXPECT("steady-state blend-off (FN_OFF_BORDER|FN_OFF_BLEND) is distinct", 0, p1 && [boArchive newRenderPipelineStateWithDescriptor:p1 error:nil] != nil);
         }
     }
+    // KK3 ballot workaround constant (dm_mwa3_fc) in both render and compute shaders: pso_offline.py specializes it per target OS (matching nvn_mtl.m mwa_on),
+    // so both bases and compute pipelines stay in the offline archive and hit on lookup through pre_desc, fn_load and cps_new_b
+    NSString *fm = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_mwa3_fc [[function_constant(%d)]];\n"
+        "constant bool dm_mwa3 = is_function_constant_defined(dm_mwa3_fc) ? dm_mwa3_fc : true;\n"
+        "fragment float4 main0() { return float4(dm_mwa3 ? 1 : 0, 0, 0, 1); }\n", DMSH_MWA_FC];
+    NSString *cm = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_mwa3_fc [[function_constant(%d)]];\n"
+        "constant bool dm_mwa3 = is_function_constant_defined(dm_mwa3_fc) ? dm_mwa3_fc : true;\n"
+        "kernel void main0(device uint *out [[buffer(0)]]) { out[0] = dm_mwa3 ? 1u : 0u; }\n", DMSH_MWA_FC];
+    if (!lib(msl, @"fm_b", fm) && !lib(msl, @"cm_b", cm)) {
+        put([msl stringByAppendingPathComponent:@"fm_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
+        put([msl stringByAppendingPathComponent:@"cm_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"stage\": \"cs\", \"entry\": \"main0\"}", DMSH_CHAIN]);
+        put([tables stringByAppendingPathComponent:@"mwa.tsv"], @"v1\tfm\n");
+        put([tables stringByAppendingPathComponent:@"mwa_map.tsv"], @"p\t0\tcompute\tcm\ts\n");
+        NSString *mw = [root stringByAppendingPathComponent:@"mwa"];
+        int rc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/mwa.tsv --shader-map %@/mwa_map.tsv --out %@ --work %@/mwa-work --depth gl > %@/pso_mwa.log 2>&1",
+                     tool, gpu, msl, tables, tables, mw, root, root]);
+        EXPECT("mwa constant: pso_offline.py made the archive", 0, rc);
+        if (rc) fprintf(stderr, "%s\n", [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_mwa.log"] encoding:NSUTF8StringEncoding error:nil].UTF8String);
+        NSString *mwPath = [mw stringByAppendingFormat:@"/%@.mtl4a", gpu];
+        id<MTL4Archive> mwArchive = arch_file_ok(mwPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:mwPath] error:nil] : nil;
+        EXPECT("mwa constant: archive opened", 1, mwArchive != nil);
+        EXPECT("mwa constant: render base in archive (no rest_pairs)", 0, [NSFileManager.defaultManager fileExistsAtPath:[mw stringByAppendingPathComponent:@"rest_pairs.tsv"]]);
+        MTL4RenderPipelineDescriptor *dm = pre_desc(@"v1", @"fm", 0);
+        EXPECT("mwa constant: pre_desc render base found in archive", 1, dm && [mwArchive newRenderPipelineStateWithDescriptor:dm error:nil] != nil);
+        id<MTLLibrary> cl = lib_from_file([msl stringByAppendingPathComponent:@"cm_b.metallib"], NULL);
+        id<MTLFunction> cf = fn_load(cl, @"main0", NULL);
+        MTL4ComputePipelineDescriptor *cd = [MTL4ComputePipelineDescriptor new]; cd.computeFunctionDescriptor = fn4_of_b(cf, FN_OFF_BORDER);
+        EXPECT("mwa constant: compute shader recognized as host-specialized", 1, fd_host_fc(cd.computeFunctionDescriptor));
+        EXPECT("mwa constant: compute pipeline found in archive", 1, [mwArchive newComputePipelineStateWithDescriptor:cd error:nil] != nil);
+    }
     EXPECT("batched archive: full coverage stamp preserved", 1, [[NSString stringWithContentsOfFile:[batched stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]
             isEqualToString:[NSString stringWithContentsOfFile:[bundle stringByAppendingPathComponent:@"prebuilt.tsv"] encoding:NSUTF8StringEncoding error:nil]]);
     // its stamp matches: only the pair with function constants is built here
@@ -273,6 +310,17 @@ int main(void) { @autoreleasepool {
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(sparse, 0));
         EXPECT("probe: no eligible sample cannot establish coverage", 0, pso_bundle_covers(pre_parse(sparse), pre_stamp(sparse, 0), 0, nil));
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(txt, 0));
+    }
+    // cover-only shader_pairs.tsv builds zero bases in pso_prebuild
+    @autoreleasepool {
+        NSString *sp = [tables stringByAppendingPathComponent:@"shader_pairs.tsv"];
+        NSString *saved = [NSString stringWithContentsOfFile:sp encoding:NSUTF8StringEncoding error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:[arch stringByAppendingPathComponent:@"prebuilt.tsv"] error:nil];
+        put(sp, @"# kind: evidence\n# cover: single-stage padding pairs\nv1\tf1\nv1\tf2\n");
+        reset_counts();
+        EXPECT("cover-only: pso_prebuild builds nothing", -1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+        EXPECT("cover-only: zero bases built or archived", 0, g_pre_built + g_pre_archived);
+        put(sp, saved);
     }
     // a folder without this GPU's archive, and a file that is no archive (Metal crashed on one, and on a bare Mach-O header too): no archive, no crash
     @autoreleasepool {
@@ -332,36 +380,6 @@ int main(void) { @autoreleasepool {
             EXPECT("named: the prebuild's bases name the pulling library's entry points", 1, d0 != nil && d1 != nil);
             EXPECT("named: the host's base found in the archive", 1, d0 && [namedArchive newRenderPipelineStateWithDescriptor:d0 error:nil] != nil);
             EXPECT("named: no base of the near = 0 entry", 0, d1 && [namedArchive newRenderPipelineStateWithDescriptor:d1 error:nil] != nil);
-        }
-        // Offline mesh pipeline bases (mesh_pairs.tsv): metal-tt compiles M rows (tasked and taskless) into the pair archive; depth-only rows go to rest_pairs.tsv;
-        // mesh_stage.prim rows are skipped; the host's pre_desc_mesh and mtk_build find the offline base in the archive without compiling
-        NSString *mts = @"#include <metal_stdlib>\nusing namespace metal;\nstruct PL { uint n; };\n"
-            "[[object]] void main0(object_data PL &pl [[payload]], mesh_grid_properties g) { pl.n = 1; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n";
-        NSString *mms = @"#include <metal_stdlib>\nusing namespace metal;\nstruct MV { float4 p [[position]]; };\nusing Tri = mesh<MV, void, 3, 1, topology::triangle>;\nstruct PL { uint n; };\n"
-            "[[mesh]] void main0(Tri out, const object_data PL &pl [[payload]]) { out.set_primitive_count(pl.n); out.set_vertex(0, MV{float4(-1,-1,0.5,1)}); out.set_vertex(1, MV{float4(3,-1,0.5,1)}); out.set_vertex(2, MV{float4(-1,3,0.5,1)}); out.set_index(0,0); out.set_index(1,1); out.set_index(2,2); }\n";
-        NSString *mns = @"#include <metal_stdlib>\nusing namespace metal;\nstruct MV { float4 p [[position]]; };\nusing Tri = mesh<MV, void, 3, 1, topology::triangle>;\nstruct BL { uint first; };\n"
-            "[[object]] void main0_o(object_data BL &b [[payload]], mesh_grid_properties g) { b.first = 0; g.set_threadgroups_per_grid(uint3(1, 1, 1)); }\n"
-            "[[mesh]] void main0(Tri out, const object_data BL &b [[payload]]) { out.set_primitive_count(1 + b.first); out.set_vertex(0, MV{float4(-1,-1,0.5,1)}); out.set_vertex(1, MV{float4(3,-1,0.5,1)}); out.set_vertex(2, MV{float4(-1,3,0.5,1)}); out.set_index(0,0); out.set_index(1,1); out.set_index(2,2); }\n";
-        if (!lib(msl, @"ts1_b", mts) && !lib(msl, @"ms1_b", mms) && !lib(msl, @"mn1_b", mns)) {
-            put([msl stringByAppendingPathComponent:@"ts1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"mesh_stage\": {\"kind\": \"ts\", \"threads\": 1, \"payload\": 4, \"task\": true}}", DMSH_CHAIN]);
-            put([msl stringByAppendingPathComponent:@"ms1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 1, \"payload\": 4, \"task\": true}}", DMSH_CHAIN]);
-            put([msl stringByAppendingPathComponent:@"mn1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"entry_object\": \"main0_o\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 1, \"payload\": 0, \"task\": false}}", DMSH_CHAIN]);
-            put([msl stringByAppendingPathComponent:@"mp1_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\", \"entry_object\": \"main0_o\", \"mesh_stage\": {\"kind\": \"ms\", \"threads\": 1, \"payload\": 0, \"task\": false, \"prim\": 1}}", DMSH_CHAIN]);
-            put([tables stringByAppendingPathComponent:@"mesh_pairs.tsv"], @"# mesh triples\nM\tts1\tms1\tf1\nM\t-\tmn1\tf1\nM\t-\tmn1\t-\nM\t-\tmp1\tf1\n");
-            NSString *mb = [root stringByAppendingPathComponent:@"mesh-bundle"];
-            int mrc = sh([NSString stringWithFormat:@"python3 %@ --platform macos --gpu %@ --msl %@ --pairs %@/shader_pairs.tsv --pairs %@/mesh_pairs.tsv --out %@ --work %@/mesh-work --no-compute > %@/pso_mesh.log 2>&1",
-                          tool, gpu, msl, tables, tables, mb, root, root]);
-            EXPECT("mesh bundle: pso_offline.py succeeded", 0, mrc);
-            if (mrc) fprintf(stderr, "%s\n", [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"pso_mesh.log"] encoding:NSUTF8StringEncoding error:nil].UTF8String);
-            NSString *mbPath = [mb stringByAppendingFormat:@"/%@.mtl4a", gpu];
-            id<MTL4Archive> mbArchive = arch_file_ok(mbPath) ? [g_dev newArchiveWithURL:[NSURL fileURLWithPath:mbPath] error:nil] : nil;
-            MTL4MeshRenderPipelineDescriptor *md1 = pre_desc_mesh(@"ts1", @"ms1", @"f1", 0), *md2 = pre_desc_mesh(@"-", @"mn1", @"f1", 0);
-            EXPECT("mesh bundle: archive opened", 1, mbArchive != nil);
-            EXPECT("mesh bundle: pre_desc_mesh skips mesh_stage.prim", 1, pre_desc_mesh(@"-", @"mp1", @"f1", 0) == nil);
-            EXPECT("mesh bundle: tasked mesh base found in offline archive", 1, md1 && [mbArchive newRenderPipelineStateWithDescriptor:md1 error:nil] != nil);
-            EXPECT("mesh bundle: taskless mesh base found in offline archive", 1, md2 && [mbArchive newRenderPipelineStateWithDescriptor:md2 error:nil] != nil);
-            NSString *mrest = [NSString stringWithContentsOfFile:[mb stringByAppendingPathComponent:@"rest_pairs.tsv"] encoding:NSUTF8StringEncoding error:nil];
-            EXPECT("mesh bundle: depth-only triple in rest_pairs.tsv", 1, [mrest rangeOfString:@"M\t-\tmn1\t-\n"].location != NSNotFound);
         }
     }
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];

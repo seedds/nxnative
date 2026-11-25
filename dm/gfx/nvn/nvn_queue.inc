@@ -86,6 +86,7 @@ static void nq_release_sync_locked(sync_t *s) {
 static void nq_set_sync(sync_t *s,nq_receipt *r) { nq_release_sync_locked(s); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
 void nvn_sync_release(sync_t *s) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); pthread_mutex_unlock(&nq_mu); }
 void nvn_sync_set_acq(sync_t *s, uint64_t handle) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); s->fence = handle; s->fenced = 4; pthread_mutex_unlock(&nq_mu); }
+void nvn_sync_set_acq_fence(sync_t *s, uint64_t fence) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); s->fence = fence; s->fenced = 2; pthread_mutex_unlock(&nq_mu); }
 uint64_t nvn_sync_ref_acq(const sync_t *s) {
     pthread_mutex_lock(&nq_mu);
     uint64_t h = s->fenced == 4 ? s->fence : 0;
@@ -223,6 +224,7 @@ static void *nq_worker(void *unused) {
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                { void dm_vi_frame_ticket(uint64_t,uint64_t); dm_vi_frame_ticket(j->frame+1,present); }
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }

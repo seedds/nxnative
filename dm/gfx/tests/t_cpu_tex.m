@@ -1,6 +1,7 @@
 // The set of CPU-written textures (mtl_tex_cpu_written, tex_cpu_written, mtl_tex_release): membership, no duplicates, a released texture leaving it, and lookups of textures
 // not in it staying cheap with thousands of consecutive serials in it (a CFSet that hashed serials as numbers probed a whole bucket run per miss: half of Batman: Arkham Knight's
 // rendering thread with 6,442 CPU-written textures)
+#include <err.h>
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
@@ -178,6 +179,84 @@ static void poll_asks_again(void) {
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
+// A copy's Finalize ends only the copy (own_tex_end_locked): the texture the object it was initialized in still holds stays registered for the CPU's writes, and the CPU's next
+// rewrite is still uploaded. A copy initialized again as another texture leaves it registered too. The texture's own Finalize, or its own object initialized again, ends the
+// registration (GitHub issue #2975)
+static void copy_finalize_keeps_registration(void) {
+    const size_t len = 1 << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "CPU-cached pool initialized");
+    NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "texture initialized");
+    tex_t *t = (tex_t *)&tex; uint64_t serial = t->serial;
+    NVNtexture copy = tex; h_nvnTextureFinalize(&copy);
+    CHECK(nvn_ft_tracked(serial), "a copy's Finalize leaves the texture registered");
+    NVNtexture again = tex; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 4 * 65536);
+    CHECK(h_nvnTextureInitialize(&again, &tb), "a copy initialized again as another texture");
+    uint64_t other = ((tex_t *)&again)->serial;
+    CHECK(nvn_ft_tracked(serial) && nvn_ft_tracked(other), "the texture stays registered, beside the new one");
+    h_nvnTextureFinalize(&again);
+    CHECK(!nvn_ft_tracked(other), "the new one's own Finalize ends its registration");
+    dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x66, t->L.size);
+    nvn_ft_poll();
+    CHECK(tex_cpu_written(t), "the CPU's rewrite after the copies' Finalize is uploaded");
+    NVNtexture own = {0}; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 8 * 65536);
+    CHECK(h_nvnTextureInitialize(&own, &tb), "a third texture initialized");
+    uint64_t third = ((tex_t *)&own)->serial;
+    CHECK(h_nvnTextureInitialize(&own, &tb) && nvn_ft_tracked(((tex_t *)&own)->serial) && !nvn_ft_tracked(third), "its own object initialized again ends its old registration");
+    uint64_t fourth = ((tex_t *)&own)->serial;
+    h_nvnTextureFinalize(&own);
+    CHECK(!nvn_ft_tracked(fourth), "its own Finalize ends the registration");
+    h_nvnTextureFinalize(&tex);
+    CHECK(!nvn_ft_tracked(serial), "the uploaded texture stays unregistered after Finalize");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    defer_drain(); munmap(mem, len);
+}
+// Finalizing a memory pool before its texture objects drops those textures from g_ft (ft_drop_pool), so a later nvn_ft_poll neither hashes unmapped edge pages (small texture,
+// ie <= ia) nor dereferences a freed NVNmemoryPool / resurrects g_cpu_pools (large texture, ie > ia), while another pool's tracked textures keep working.
+static void pool_finalize_drops_registration(void) {
+    const size_t len = 1 << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    uint8_t *other_mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED || other_mem == MAP_FAILED) abort();
+    pool_t *pool = calloc(1, sizeof *pool), other = {0};
+    pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    pool_builder_t ob = {.mem=other_mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)pool, (const NVNmemoryPoolBuilder *)&pb), "pool to finalize initialized");
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&other, (const NVNmemoryPoolBuilder *)&ob), "surviving pool initialized");
+    NVNtextureBuilder tb; NVNtexture small = {0}, large = {0}, keep = {0};
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetWidth(&tb, 16); h_nvnTextureBuilderSetHeight(&tb, 16);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)pool, 0x200);
+    CHECK(h_nvnTextureInitialize(&small, &tb), "small texture on finalized pool initialized");
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)pool, 65536);
+    CHECK(h_nvnTextureInitialize(&large, &tb), "large texture on finalized pool initialized");
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&other, 65536);
+    CHECK(h_nvnTextureInitialize(&keep, &tb), "texture on surviving pool initialized");
+    uint64_t s_small = ((tex_t *)&small)->serial, s_large = ((tex_t *)&large)->serial, s_keep = ((tex_t *)&keep)->serial;
+    CHECK(nvn_ft_tracked(s_small) && nvn_ft_tracked(s_large) && nvn_ft_tracked(s_keep), "all three textures registered before pool Finalize");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)pool);
+    CHECK(!nvn_ft_tracked(s_small) && !nvn_ft_tracked(s_large) && nvn_ft_tracked(s_keep), "pool Finalize drops its textures from g_ft and keeps the other pool's");
+    // Unmap the backing memory and poison + free the pool object before polling, as a game may do before finalizing its texture objects.
+    munmap(mem, len);
+    void *dead_pool = pool;
+    memset(pool, 0xa5, sizeof *pool);
+    free(pool);
+    tex_t *tk = (tex_t *)&keep;
+    dm_guest_write_prepare(tk->mem, tk->L.size); memset(tk->mem, 0x77, tk->L.size);
+    nvn_ft_poll();
+    CHECK(tex_cpu_written(tk) && !nvn_ft_tracked(s_keep), "surviving pool's texture is still uploaded by nvn_ft_poll");
+    CHECK(!cpu_pool_present(dead_pool), "poll does not resurrect cpu_pool for the finalized pool");
+    h_nvnTextureFinalize(&small); h_nvnTextureFinalize(&large); h_nvnTextureFinalize(&keep);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&other);
+    defer_drain(); munmap(other_mem, len);
+}
 // Writes beside a registered texture (ft_written): storage 0x200 past a host page shares its first and last pages with other data. A write there leaves the texture registered and
 // not CPU-written, at the poll and at first use (nvn_ft_written); a write of the texture's own bytes in those pages, or of a page wholly inside it, is still taken as written.
 // The Great Ace Attorney Chronicles' window textures and render targets lie so beside textures it fills from the CPU, and were all made CPU-written
@@ -234,6 +313,8 @@ static void poll_beside(void) {
 #else
 static void poll_asks_again(void) { printf("poll_asks_again: skipped, the profile has no tex_dirty_upload\n"); }
 static void poll_beside(void) { printf("poll_beside: skipped, the profile has no tex_dirty_upload\n"); }
+static void copy_finalize_keeps_registration(void) { printf("copy_finalize_keeps_registration: skipped, the profile has no tex_dirty_upload\n"); }
+static void pool_finalize_drops_registration(void) { printf("pool_finalize_drops_registration: skipped, the profile has no tex_dirty_upload\n"); }
 #endif
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
@@ -459,9 +540,14 @@ static void write_texels_bounds(void) {
 }
 // Direct linear movie upload (issue #497): queued GPU upload keeps its complete frame after the next write,
 // works for both block-linear and LINEAR | VIDEO_DECODE textures, updates registered descriptors, and serves ReadTexels
+static id<MTLBuffer> new_readback_buffer(size_t bytes) {
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!rb) errx(EXIT_FAILURE, "could not allocate a %zu-byte movie readback buffer", bytes);
+    return rb;
+}
 static void readback_tex(id<MTLTexture> tex, int w, int h, void *dst) {
     size_t row = (size_t)w * 4, bytes = row * (size_t)h;
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> rb = new_readback_buffer(bytes);
     id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
     [e copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake((NSUInteger)w, (NSUInteger)h, 1)
               toBuffer:rb destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:bytes];
@@ -519,6 +605,18 @@ static void queued_movie_snapshot(int linear) {
     movie_trim(1);
     memset(got, 0, sizeof got); h_nvnTextureReadTexels(&tex, NULL, &r4, got);
     CHECK(!memcmp(got, first, 64), "ReadTexels still returns last movie frame after staging trim");
+    // Partial 1x1 WriteTexels preserves the other 15 decoded pixels on both block-linear and linear textures
+    {
+        uint8_t exp[64]; memcpy(exp, first, 64);
+        NVNcopyRegion r1 = {2, 1, 0, 1, 1, 1};
+        uint8_t px[4] = {0x11, 0x22, 0x33, 0x44};
+        memcpy(exp + (1 * 4 + 2) * 4, px, 4);
+        h_nvnTextureWriteTexels(&tex, NULL, &r1, px);
+        mtl_sub_begin(); id<MTLTexture> im = tex_by_id(10);
+        CHECK(im != nil && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial WriteTexels after movie trim resolves");
+        readback_tex(im, 4, 4, got);
+        CHECK(!memcmp(got, exp, 64), linear ? "linear partial WriteTexels preserves 15 untouched movie pixels" : "block-linear partial WriteTexels preserves 15 untouched movie pixels");
+    }
     mtl_reg_tex(10, NULL, NULL);
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool); mtl_drain(); munmap(mem, len);
 }
@@ -563,6 +661,45 @@ static void movie_alias_and_lifecycle(void) {
     h_nvnTextureWriteTexels(&a, NULL, &r4, wt);
     mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "WriteTexels takeover upload completes");
     readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, wt, 64), "WriteTexels cleanly overrides prior direct movie staging");
+    // Restarting a movie decoder after a full guest WriteTexels must upload frame 1 (no gen==1 collision)
+    uint8_t g115[64], m143[64]; memset(g115, 115, sizeof g115); memset(m143, 143, sizeof m143);
+    h_nvnTextureWriteTexels(&a, NULL, &r4, g115);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "full guest write 115 completes");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, g115, 64), "guest write 115 sampled before decoder restart");
+    nvn_host_write_texture(&a, m143, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "restarted movie frame 1 upload completes");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, m143, 64), "restarted decoder frame 1 displays 143 instead of stale guest 115");
+    // Trimmed staging: owner advances from 77 to 99 while sRGB alias is behind; after movie_trim(1), sRGB alias must sample 99
+    uint8_t m77[64], m99[64], m123[64]; memset(m77, 77, sizeof m77); memset(m99, 99, sizeof m99); memset(m123, 123, sizeof m123);
+    nvn_host_write_texture(&a, m77, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); is = tex_by_id(13);
+    CHECK(ia && is && mtl_wait(mtl_sub_commit(), 5000000000ull), "owner and sRGB alias sync on frame 77");
+    nvn_host_write_texture(&a, m99, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "owner advances to frame 99");
+    movie_trim(1);
+    mtl_sub_begin(); is = tex_by_id(13); CHECK(is && mtl_wait(mtl_sub_commit(), 5000000000ull), "stale sRGB alias resolves after staging trim");
+    readback_tex(is, 4, 4, got); CHECK(!memcmp(got, m99, 64), "sRGB alias samples 99 (not stale 77) after staging trim");
+    // Reverse direction: sRGB alias uploads 123, staging trims, then owner resolves and must sample 123
+    nvn_host_write_texture(&a, m123, 4, 4, 16, NULL, NULL);
+    mtl_sub_begin(); is = tex_by_id(13); CHECK(is && mtl_wait(mtl_sub_commit(), 5000000000ull), "sRGB alias advances to frame 123");
+    movie_trim(1);
+    mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "stale owner resolves after staging trim");
+    readback_tex(ia, 4, 4, got); CHECK(!memcmp(got, m123, 64), "owner samples 123 after alias uploaded and staging trimmed");
+    // Partial 1x1 WriteTexels preserves the other 15 decoded movie pixels both before and after staging trim
+    for (int trimmed = 0; trimmed < 2; trimmed++) {
+        uint8_t base[64], exp[64]; for (int i = 0; i < 64; i++) base[i] = (uint8_t)(20 + i * 3);
+        memcpy(exp, base, 64);
+        nvn_host_write_texture(&a, base, 4, 4, 16, NULL, NULL);
+        mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial-edit movie frame uploaded");
+        if (trimmed) movie_trim(1);
+        NVNcopyRegion r1 = {1, 2, 0, 1, 1, 1};
+        uint8_t px[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+        memcpy(exp + (2 * 4 + 1) * 4, px, 4);
+        h_nvnTextureWriteTexels(&a, NULL, &r1, px);
+        mtl_sub_begin(); ia = tex_by_id(11); CHECK(ia && mtl_wait(mtl_sub_commit(), 5000000000ull), "partial WriteTexels over movie completes");
+        readback_tex(ia, 4, 4, got);
+        CHECK(!memcmp(got, exp, 64), trimmed ? "partial WriteTexels after trim keeps all 15 untouched movie pixels" : "partial WriteTexels before trim keeps all 15 untouched movie pixels");
+    }
     // Finalize + re-initialize over same storage does not inherit retired movie frames
     nvn_host_write_texture(&a, f1, 4, 4, 16, NULL, NULL);
     mtl_reg_tex(11, NULL, NULL); mtl_reg_tex(12, NULL, NULL); mtl_reg_tex(13, NULL, NULL);
@@ -604,9 +741,9 @@ static void upload_tear_stress(int rounds, int linear) {
     CHECK(h_nvnTextureInitialize(&tex, &tb), "stress texture");
     uint32_t *first = malloc((size_t)W * H * 4); for (size_t i = 0; i < (size_t)W * H; i++) first[i] = 0xff000000u;
     nvn_host_write_texture(&tex, first, W, H, W * 4, NULL, NULL); free(first);
+    id<MTLBuffer> rb = new_readback_buffer((size_t)W * H * 4);
     atomic_store(&g_st_stop, 0); atomic_store(&g_st_writes, 0); atomic_store(&g_st_write_ns, 0);
     g_st_tex = &tex; pthread_t th; pthread_create(&th, NULL, st_writer, NULL);
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:(NSUInteger)W * H * 4 options:MTLResourceStorageModeShared];
     int torn = 0, done = 0, firstrow = -1, changed = 0; uint32_t last = 0; uint64_t bytes0 = mtl_upload_bytes(), rs0 = 0;
     mtl_upload_ns_take();
     for (int r = 0; r < rounds; r++) { @autoreleasepool {
@@ -673,7 +810,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         mtl_init(); write_texels_bounds(); finalized_upload(0); finalized_upload(1);
         queued_movie_snapshot(0); queued_movie_snapshot(1); movie_alias_and_lifecycle();
         upload_tear_stress(stress_n, 0); upload_tear_stress(stress_n, 1);
-        for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads();
+        for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); copy_finalize_keeps_registration(); pool_finalize_drops_registration(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads();
     }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

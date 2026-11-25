@@ -331,9 +331,11 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
+static void ft_drop_pool(const void *pool);
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     // Dead to the replay first (its IDs marked gone under g_rmu, the magic cleared), then torn down: a texture resolving on the submit thread must not find the page table or the storage already gone
     pool_t *o = (pool_t *)p;
+    ft_drop_pool(p);
     mtl_alias_drop_pool(p); o->magic = 0;
     if (o->flags & 0x200 && o->vp) vpool_release(o);
     if (o->mem && !(o->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
@@ -474,6 +476,8 @@ NVN(nvnTextureBuilderGetSparseTileLayout, void, const NVNtextureBuilder *b, NVNt
 // stamp: dirty-page generation at registration (tex_dirty_upload); span: its tracked range (nvn_dirty_span), so a check needs no search over every pool; edge_h: hashes of its bytes in its edge pages at the stamp (ft_edges_take), edged = they hold
 typedef struct { const uint8_t *mem; uint64_t size; tex_t t; uint64_t stamp; const void *span; uint64_t edge_h[2]; int edged; } flush_tex;
 static flush_tex *g_ft; static size_t g_nft, g_cft; static pthread_mutex_t g_ft_mu = PTHREAD_MUTEX_INITIALIZER;
+// Serializes nvn_ft_poll's out-of-lock rewrite pass with nvnMemoryPoolFinalize (ft_drop_pool), so a poll never reads freed pool memory or resurrects g_cpu_pools after finalize. Lock order: g_ft_poll_mu → g_ft_mu / g_smu
+static pthread_mutex_t g_ft_poll_mu = PTHREAD_MUTEX_INITIALIZER;
 // Writes beside a registered texture (tex_dirty_upload). The tracker marks whole host pages (16 KB) dirty, and a texture's storage need not start or end on one: its first and last pages
 // are shared with whatever lies beside it, as for the packaged textures' re-uploads (pkg_edges_clean in nvn_mtl.m). The Great Ace Attorney Chronicles keeps its window textures and render
 // targets in its 1000 MB CPU_CACHED pool at 0x200 past a page, beside textures it fills from the CPU (ser=262, 256x256, shares the first window texture's last page): every 1920x1080 one,
@@ -534,6 +538,17 @@ static void ft_del(uint64_t serial) {
     for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { g_ft[i] = g_ft[--g_nft]; break; }
     pthread_mutex_unlock(&g_ft_mu);
 }
+// A memory pool's Finalize ends every texture made on its storage, whether or not its texture objects have been finalized yet: drop them from g_ft before the pool's dirty range and
+// backing memory go, so nvn_ft_poll never hashes unmapped edge pages (ft_hash) or hands a dangling t->pool to mtl_tex_cpu_rewritten, and ft_flush never matches reused addresses
+static void ft_drop_pool(const void *pool) {
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !pool) return;
+    pthread_mutex_lock(&g_ft_poll_mu);
+    pthread_mutex_lock(&g_ft_mu);
+    for (size_t i = 0; i < g_nft;)
+        if (g_ft[i].t.pool == pool) g_ft[i] = g_ft[--g_nft]; else i++;
+    pthread_mutex_unlock(&g_ft_mu);
+    pthread_mutex_unlock(&g_ft_poll_mu);
+}
 // Profile tex_dirty_upload: Tears of the Kingdom fills some textures from the CPU after creating them and publishes them with no NVN flush at all (os::FlushDataCache runs
 // natively; its 121-layer ASTC terrain material arrays, 42 MB each). They stayed GPU-only textures with content 0, which ASTC decodes as the error colour, and the cave came out magenta.
 // ft_add write-protects a registered texture's pages, and on its first resolution (tex_mtl, submit thread) a write since then makes it CPU-written like a flushed one
@@ -566,11 +581,13 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
 enum { FT_POLL_BYTES = 128 << 20 };
 void nvn_ft_poll(void) {
     if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
+    pthread_mutex_lock(&g_ft_poll_mu);
     static uint64_t gen; static size_t cur, left;
     static struct { tex_t t; size_t at; int how; } *hit; static size_t chit; size_t nhit = 0;
     uint64_t now = nvn_dirty_now(), scanned = 0;
     pthread_mutex_lock(&g_ft_mu);
     if (now != gen) { gen = now; left = g_nft; }   // guest memory changed: every entry gets one more look
+    if (left > g_nft) left = g_nft;
     while (left && g_nft && scanned < FT_POLL_BYTES) {
         if (cur >= g_nft) cur = 0;
         scanned += g_ft[cur].size; left--;
@@ -581,7 +598,7 @@ void nvn_ft_poll(void) {
         cur++;
     }
     pthread_mutex_unlock(&g_ft_mu);
-    if (!nhit) return;
+    if (!nhit) { pthread_mutex_unlock(&g_ft_poll_mu); return; }
     uint64_t st = nvn_dirty_now();
     for (size_t i = 0; i < nhit; i++) nvn_dirty_protect(hit[i].t.mem, hit[i].t.L.size);
     static uint64_t up, kept;
@@ -605,6 +622,7 @@ void nvn_ft_poll(void) {
         else g_ft[j] = g_ft[--g_nft];
     }
     pthread_mutex_unlock(&g_ft_mu);
+    pthread_mutex_unlock(&g_ft_poll_mu);
 }
 static void ft_flush(const uint8_t *a, uint64_t n) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;
@@ -666,7 +684,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
-    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
+    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); uint64_t old = o->serial; if (mtl_tex_release(o)) ft_del(old); }   // and its registration, when that ends the texture (nvnTextureFinalize)
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     // NVN2 device flag bit 16 selects X1 order in CPU copies and descriptor word 2 bit 24. Keep the owning device's order in the texture snapshot.
@@ -696,7 +714,10 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     ft_add(o);
     return 1;
 }
-NVN(nvnTextureFinalize, void, NVNtexture *t) { ft_del(TX(t)->serial); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
+// The texture's registration for the CPU's writes (ft_add) goes only when this Finalize ends the texture. NVNtexture is plain data and engines finalize copies of it while the
+// object it was initialized in lives on (own_tex_end_locked: Breath of the Wild about 100 a frame, Ocarina of Time every few frames): taken out first, at any copy's Finalize,
+// the texture left the poll and its first-use check, so the CPU's later writes to it were never uploaded (GitHub issue #2975)
+NVN(nvnTextureFinalize, void, NVNtexture *t) { uint64_t serial = TX(t)->serial; if (mtl_tex_release(TX(t))) ft_del(serial); TX(t)->magic = 0; }
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
 NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }
@@ -2122,8 +2143,9 @@ static int window_active(const win_t *o) { return o->nactive > 0 && o->nactive <
 NVN(nvnWindowInitialize, NVNboolean, NVNwindow *w, const NVNwindowBuilder *b) {
     const win_builder_t *s = (const win_builder_t *)b; win_t *o = (win_t *)w;
     memset(o, 0, sizeof *o); o->magic = MAGIC('W', 'I', 'N', 'D'); o->native = s->native; o->ntex = s->ntex; o->interval = s->interval; o->nactive = s->nactive;
+    o->offscreen = dm_native_window_offscreen(s->native);
     memcpy(o->tex, s->tex, sizeof o->tex);
-    LOG("[nvn] WindowInitialize swap chain %d textures (%d active), interval %d, first %dx%d format %#x", o->ntex, window_active(o), o->interval,
+    LOG("[nvn] WindowInitialize %sswap chain %d textures (%d active), interval %d, first %dx%d format %#x", o->offscreen ? "off-screen " : "", o->ntex, window_active(o), o->interval,
         o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.width : 0, o->ntex && o->tex[0] ? (int)CTX(o->tex[0])->d.height : 0, o->ntex && o->tex[0] ? CTX(o->tex[0])->d.format : 0);
     return 1;
 }
@@ -2186,6 +2208,7 @@ static _Atomic uint64_t g_screen_at;   // when the screen wait released the acqu
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
+int mtl_present_screen_wait_timeout(double period, uint64_t timeout_ns, uint64_t *waited_ns);   // nvn_mtl.m
 
 // Deferred acquire wait (NVN semantics): nvnWindowAcquireTexture returns the texture index immediately and binds the display-release pacing wait and previous-present ticket wait
 // to the returned NVNsync (fenced == 4). Games that record draw work between AcquireTexture and nvnSyncWait (Super Mario Bros. Wonder – Nintendo Switch 2 Edition measures its CPU
@@ -2253,6 +2276,12 @@ static int acq_pace_ready(const win_t *o, uint64_t at) {
     }
     return mtl_snap_acquire_ready();
 }
+static inline uint64_t acq_rem_ns(uint64_t timeout_ns, uint64_t deadline) {
+    if (timeout_ns == UINT64_MAX) return UINT64_MAX;
+    if (!timeout_ns) return 0;
+    uint64_t now = now_ns();
+    return now >= deadline ? 0 : deadline - now;
+}
 static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t deadline, int *waited) {
     uint64_t now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
     int follow = 1;
@@ -2279,8 +2308,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             follow = 0;
             if (wait) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
         }
-        if (!present_unpaced(o) && timeout_ns > 0) {
-            uint64_t sw = mtl_present_screen_wait(period / 1e9);   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
+        if (!present_unpaced(o)) {
+            uint64_t sw = 0;
+            if (!mtl_present_screen_wait_timeout(period / 1e9, acq_rem_ns(timeout_ns, deadline), &sw)) return 0;   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
             if (sw) { *waited = 1; atomic_store(&g_screen_at, now_ns()); }
         }
         drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
@@ -2299,8 +2329,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             g_det_last = now_ns();
         }
     }
-    if (timeout_ns > 0) {
-        uint64_t sa = mtl_snap_acquire_wait();   // ring capacity is waited for before drawing, where the game does not hold its present lock
+    {
+        uint64_t sa = 0;
+        if (!mtl_snap_acquire_wait_timeout(acq_rem_ns(timeout_ns, deadline), &sa)) return 0;   // ring capacity is waited for before drawing, where the game does not hold its present lock
         if (sa) *waited = 1;
         pace_ns += sa;
     }
@@ -2388,6 +2419,12 @@ static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64
 }
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
     win_t *o = (win_t *)w;
+    if (o->offscreen) {   // nothing shows its frames, so nothing holds a texture: free once the commands before this point are done
+        int n = window_active(o);
+        *idx = n ? o->next++ % n : 0;
+        if (s) nvn_sync_set_acq_fence((sync_t *)s, mtl_last_fence());
+        return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
+    }
     // If a prior deferred acquire on this window was never waited on via CPU nvnSyncWait (e.g. only nvnQueueWaitSync), drain its pacing & ticket wait now so pacing stays one wait per frame
     pthread_mutex_lock(&acq_mu);
     acq_wait_t *prev = (acq_wait_t *)o->pending_acq;
@@ -3249,6 +3286,7 @@ static const int *present_crop(const int win[4], int tw, int th, int lc[4]) {
 }
 NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     (void)q; win_t *o = (win_t *)w; o->presents++;
+    if (o->offscreen) return;   // dropped (nvnWindowInitialize)
     dm_ue_cvar_tick();
     if (fps_high()) high_cap_tick();
     int movie = dm_movie_hz();
@@ -3281,7 +3319,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
+    int presented = 0;
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
+        presented = 1;
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         uint64_t new_tk = nvn_queue_present((queue_t *)q, t, present_period(o) / 1e9, crop);
         pthread_mutex_lock(&acq_mu);
@@ -3370,7 +3410,6 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
-    { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
     if (g_frame % TWIN == 0) tsummary(g_frame);
     // GPU replay carries the submitted frame, even when a later CPU frame is already queued.
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
@@ -3387,6 +3426,13 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t slot = now;   // a frame the display link paced (or nothing did) is shown from its present on, and the beat follows it (nvn_pace_follow)
     if (follow) nvn_pace_follow(&pc, now); else slot += nvn_pace(&pc, now, period);
     o->pace = pc.target;
+    // The layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber: when the host pacer drives a vsync grid (!DM_DETCLOCK, !follow, period > 0, g_hz > 0), pass the
+    // present time, the pacer's vsync target and one vsync tick so frames with no Metal presentedTime (headless) flip on that grid instead of at first read. Under DM_DETCLOCK,
+    // display-link pacing (nvn_pace_follow: pc.target is just `now`), or unpaced presents (period 0), there is no pacer grid (pass 0) and the first-seen fallback stays.
+    { void dm_vi_frame_queued(uint64_t, uint64_t, uint64_t, uint64_t); void dm_vi_frame_ticket(uint64_t, uint64_t);
+      int paced = !dm_detclock_enabled() && !follow && period > 0 && g_hz > 0;
+      dm_vi_frame_queued(g_frame, paced ? now : 0, paced ? pc.target : 0, paced ? 1000000000ull / (uint64_t)g_hz : 0);
+      if (!presented) dm_vi_frame_ticket(g_frame, 0); }
     if (idx >= 0 && idx < 4) { pthread_mutex_lock(&acq_mu); o->avail[idx] = period ? slot + period : 0; pthread_mutex_unlock(&acq_mu); }
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
@@ -4740,7 +4786,6 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         return;
     }
     if (!r->width || !r->height) return;
-    mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
     // A linear texture (LINEAR or LINEAR_RENDER_TARGET) is one 2D level of rows of its stride, written by rows as ReadTexels reads it (mtl_read_texels) and the upload reads it (gsb_geom).
     // The block-linear writes below refuse its layout (nvn_deswizzle_geom), and the whole-level path dropped the write: a movie decoded into a LINEAR | VIDEO_DECODE texture (the host's
     // native-texture output, nvn_host_write_texture) drew black (Tsukihime's title backdrop, 1920x1080 RGBA8, nxnative PR #1983)
@@ -4752,11 +4797,30 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
                                               t->d.width, t->d.height, t->d.format, t->d.target, srow, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, nz);
             return;
         }
+        int whole_l0 = !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
         dm_guest_write_prepare(t->mem, t->L.size);
+        if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+            NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+            mtl_read_texels(t, 0, 0, &full, t->mem, srow, srow * (size_t)t->d.height);
+        }
+        mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
         for (size_t y = 0; y < hb; y++) memcpy(t->mem + (y0 + y) * srow + x0, src + y * row0, wb);
         mtl_tex_linear_cpu_written(t);
         return;
     }
+    int whole_l0 = !level && !layer0 && !r->zoffset && !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
+    if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+        size_t l0_row = (size_t)t->d.width * (size_t)bpb;
+        uint8_t *tmp = malloc(l0_row * (size_t)t->d.height);
+        if (!tmp) die("WriteTexels movie readback allocation failed");
+        NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+        mtl_read_texels(t, 0, 0, &full, tmp, l0_row, l0_row * (size_t)t->d.height);
+        dm_guest_write_prepare(t->mem, t->L.size);
+        if (nvn_swizzle(&t->d, 0, 0, tmp, l0_row, t->mem))
+            ONCE_LOG("[RED] WriteTexels movie materialize swizzle failed (format %#x target %d)", t->d.format, t->d.target);
+        free(tmp);
+    }
+    mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);

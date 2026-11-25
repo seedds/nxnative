@@ -212,11 +212,13 @@ private struct LauncherView: View {
     /// Play, once the cloud's save is compared with this iPhone's (save_sync_report, SaveSyncReport): a save that changed on both sides is the player's pick, not the
     /// newer file's, and a cloud save that did not come is said so before the game starts without it.
     private func start() {
+        dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
+        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) }
+        guard let folder, SaveSyncReport.syncEnabled(folder) else { go(nil); return }
         check += 1; checking = true; asking = nil
         let mine = check
-        dm_cloud_saves_env()   // DM_SAVE_SYNC from the picked folder, as the game's mount will read it (front_ios.m calls it again at the start)
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = Self.compare()
+            let r = Self.compare(folder: folder)
             DispatchQueue.main.async {
                 guard checking, check == mine else { return }   // the player played without it
                 checking = false
@@ -229,11 +231,12 @@ private struct LauncherView: View {
     }
 
     /// Blocks while the cloud's file downloads (SaveSyncReport.waitMs at most). nil: no report (the host then decides as it always did)
-    private static func compare() -> SaveSyncReport? {
+    private static func compare(folder: String) -> SaveSyncReport? {
         // getenv, not ProcessInfo.environment: main.m sets DM_SAVE and applies env.txt after that snapshot
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         var buf = [CChar](repeating: 0, count: 1024)
-        guard save_sync_report(save, dm_save_title(), nil, SaveSyncReport.waitMs, &buf, buf.count) == 0 else {
+        let r = folder.withCString { save_sync_report(save, dm_save_title(), $0, SaveSyncReport.waitMs, &buf, buf.count) }
+        guard r == 0 else {
             fputs("launcher: save sync: no report on \(String(cString: save))\n", stderr)
             return nil
         }

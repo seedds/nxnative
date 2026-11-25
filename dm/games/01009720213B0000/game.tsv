@@ -31,6 +31,7 @@ sys_resource	0x1400000
 # Match the depth mode selected at startup when building pipeline bases offline.
 depth_mode	zero
 tex_dyn_slots	on
+fps_target	60
 
 # ---- Shader split ----
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game

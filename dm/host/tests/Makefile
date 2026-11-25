@@ -77,6 +77,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_account
 	TMPDIR="$(abspath $(B))" $(B)/t_album $(QUIET)
 	$(B)/t_home_quit
+	$(B)/t_pad_focus
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
@@ -340,7 +341,9 @@ account-saves: $(B)/t_account_save
 	$(B)/t_account_save
 $(B)/t_account_save: t_account_save.c t_fs_stub.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
-run: $(B)/t_home_quit $(B)/t_home_quit_mac
+run: $(B)/t_home_quit $(B)/t_home_quit_mac $(B)/t_pad_focus
+$(B)/t_pad_focus: t_pad_focus.c ../pad_focus.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_pad_focus.c
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
 $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)

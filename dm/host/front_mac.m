@@ -33,6 +33,7 @@ static void s2pad_read(s2_pad *d);
 static void (*g_merge_sink)(const dm_haptic_state *);   // DM_PAD_MERGE: where player 1's rumble goes, the pads last used (merge_rumble_to): NULL for GameController's
 static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "home_quit.h"
+#include "pad_focus.h"
 #include "home_quit_mac.h"
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
@@ -45,6 +46,8 @@ static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
+static int g_pads_on = 1;    // main thread: the controllers reach the game; as g_input_on, except that DM_PAD_BACKGROUND keeps it while the window is up but not key (pad_focus.h)
+static int g_pad_background; // DM_PAD_BACKGROUND=1, read once in front_run
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
@@ -334,7 +337,7 @@ static int pro_gc_stick_nonzero(GCController *c, int right) {
     return u && (u.xAxis.value != 0.f || u.yAxis.value != 0.f);
 }
 static void pad_read(GCExtendedGamepad *g) {
-    if (!g_input_on) return;
+    if (!g_pads_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller);
     if (p < 0 && (!g_press_to_join || pad_gc_unread(g.controller))) return;   // a controller read from its HID reports: GameController's controller of it stays unread
@@ -365,7 +368,7 @@ static void pad_read(GCExtendedGamepad *g) {
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
     for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
-    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_pads_on) hq_poll(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
@@ -496,20 +499,24 @@ static void pads_reread(void) {
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) jc1pad_read(d);
 }
 static void hq_close(void);
-static void input_release(void) {
+// pads=0 (DM_PAD_BACKGROUND, pad_focus.h): only the keyboard and mouse are released, the controllers and the awake display stay
+static void input_release_pads(int pads) {
     hq_close();   // the prompt or the hold indicator, if one is up: the Games app the system opens for Home takes the focus too
     [NSCursor setHiddenUntilMouseMoves:NO];
-    display_awake(0);
     g_input_on = 0;
-    dm_motion_pro_active(0); hidpad_motion_clear();
-    dm_switch2_active(0); dm_jc1_active(0);
     g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
+    if (!pads) return;
+    display_awake(0);
+    g_pads_on = 0;
+    dm_motion_pro_active(0); hidpad_motion_clear();
+    dm_switch2_active(0); dm_jc1_active(0);
     pads_release();
 }
+static void input_release(void) { input_release_pads(1); }
 static void input_resume(void) {
     display_awake(1);
-    g_input_on = 1;
+    g_input_on = 1; g_pads_on = 1;
     dm_motion_pro_active(1);
     dm_switch2_active(1); dm_jc1_active(1);
     pads_reread();
@@ -530,7 +537,7 @@ static void hidpad_show_player(hid_pad *d, int p, uint64_t m) {
     if (d->sink != p + 1) { d->sink = p + 1; dm_haptics_apple_set_sink(p, dm_hidpad_rumble); }   // its rumble goes over HID, not to a Core Haptics engine
 }
 static void hidpad_read(hid_pad *d) {
-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    if (!g_pads_on || hq_blocks_input(g_hq.phase)) return;
     int p = hidpad_player(d), full = hidpad_full(d);
     uint64_t m = full ? d->pro_m : pad_hid_buttons(&d->st);
     if (p < 0 && (!hidpad_first_press(d) || !m || (p = pad_join(d, d->name)) < 0)) return;   // joins at its first button
@@ -549,7 +556,7 @@ static void hidpad_attach(hid_pad *d) {
     hidpad_read(d);
 }
 static void hidpad_motion(hid_pad *d, const float acc[3], const float rot[3], uint64_t ns) {
-    int p = g_input_on && !g_merge ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
+    int p = g_pads_on && !g_merge ? pad_slot_of(&g_slots, d) : -1; if (p < 0) return;
     dm_motion_set_hid(p, acc, rot, ns);
 }
 static void hidpad_models_changed(void) { pads_changed(nil); }
@@ -572,7 +579,7 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
 // Wired Xbox One (GIP) and Xbox 360 (XUSB) pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP/XUSB
 // pad is a gamepad, unlike a raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. A GIP pad's Xbox button is Home (hq_buttons)
 static void gippad_read(gip_pad *d) {
-    if (!g_input_on) return;
+    if (!g_pads_on) return;
     hq_poll();   // Home and the prompt's A and B come from these pads too
     if (hq_blocks_input(g_hq.phase)) return;
     int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
@@ -607,10 +614,10 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *)) {
     if (!g_merge || g_merge_sink == sink) return;
     g_merge_sink = sink; dm_haptics_apple_set_sink(0, sink);
 }
-static int s2pad_blocked(void) { return !g_input_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
+static int s2pad_blocked(void) { return !g_pads_on || hq_blocks_input(g_hq.phase) || cp_blocks_input(g_cp.phase); }   // no input to the game (focus lost, the Home or controller prompt up): its Joy-Con states are not sent (pad_switch2_apple.m)
 static void s2pad_read(s2_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    if (!g_pads_on || hq_blocks_input(g_hq.phase)) return;
     int p = s2pad_player(d);
     uint64_t m; int32_t s[4]; if (!s2_pad_input(&d->st, &m, s)) return;
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
@@ -650,7 +657,7 @@ static int jc1pad_player(jc1_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots
 static int jc1pad_blocked(void) { return s2pad_blocked(); }
 static void jc1pad_read(jc1_pad *d) {
     hq_poll();   // Home and the prompt's A and B come from these pads too
-    if (!g_input_on || hq_blocks_input(g_hq.phase)) return;
+    if (!g_pads_on || hq_blocks_input(g_hq.phase)) return;
     int p = jc1pad_player(d);
     uint64_t m; int32_t s[4]; if (!jc1_pad_state(d, &m, s)) return;
     if (p < 0) {   // joins at its first button
@@ -1895,7 +1902,11 @@ void front_run(void (*guest)(void)) {
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
+        // DM_PAD_BACKGROUND=1 (pad_focus.h): the controllers keep playing while another app is in front, so the game keeps the focus too (a game out of focus may pause).
+        // GameController stops sending a background app the controllers' input unless asked to; HID pads are read either way
+        g_pad_background = getenv("DM_PAD_BACKGROUND") && atoi(getenv("DM_PAD_BACKGROUND"));
+        if (g_pad_background) { keep = 1; GCController.shouldMonitorBackgroundEvents = YES; LOG("front end: controllers reach the game while another app is in front (DM_PAD_BACKGROUND)"); }
+        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release_pads(!pad_focus_keep(g_pad_background, win.miniaturized, g_text_box)); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
         [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];

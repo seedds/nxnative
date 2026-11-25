@@ -27,9 +27,7 @@ A subsequent replay was recorded at **2026-11-25 20:25:07**. The NX2Apple perfor
 - Recorded hitches: 5
 - Dropped frames: 13
 
-At the reported 60 FPS, 16,844 frames represent approximately 4 minutes 41 seconds of captured frames. Compared with the earlier capture, the dropped-frame count is substantially lower (13 versus 3,697), while the median and 99th-percentile frame times remain consistent.
-
-The NX2Apple panel states that frame-time recording writes a row per frame while the game is on and that nothing is recorded while it is off. Therefore, switching away from the game should not be assumed to explain the earlier dropped-frame count. The recorder's exact definition of "dropped" is not established by this screenshot; the value is reported as displayed.
+At the reported 60 FPS, 16,844 frames represent approximately 4 minutes 41 seconds of captured frames. This replay reports substantially fewer dropped frames than the earlier capture (13 versus 3,697), while the median and 99th-percentile frame times remain consistent.
 
 ## Earlier first-mission capture
 
@@ -43,7 +41,9 @@ The first mission was previously played through to completion with frame-time re
 - Recorded hitches: 10
 - Dropped frames: 3,697
 
-This earlier capture is retained for transparency, but the subsequent replay provides a cleaner measurement with only 13 reported dropped frames. The dropped-frame count is not conflated with the separate hitch count.
+During this recording, the user switched tabs away from the game several times while the frame-time recorder remained enabled. This is relevant context when interpreting the dropped-frame count, but the available screenshot does not establish how tab switching affects the recorder's accounting. The 3,697 value is retained as reported and should not be treated as a count of visibly missed gameplay frames.
+
+The NX2Apple panel states that frame-time recording writes a row per frame while the game is on and that nothing is recorded while it is off. In this case, the recorder was enabled; the user switched tabs away from the game. The precise behavior of the recorder during that situation is not established by the panel description alone.
 
 ## Earlier gameplay frame-time capture
 

@@ -6,7 +6,7 @@ typedef struct { float amplitude_low, frequency_low, amplitude_high, frequency_h
 typedef struct { int player, motor; dm_vibration value; } dm_vibration_update;
 typedef struct { int player; uint64_t epoch; dm_vibration motor[2]; } dm_haptic_state;
 typedef struct { float intensity, sharpness; } dm_haptic_level;
-enum { DM_HAPTICS_INACTIVE = 1, DM_HAPTICS_INTERRUPTED = 2 };
+enum { DM_HAPTICS_INACTIVE = 1, DM_HAPTICS_INTERRUPTED = 2, DM_HAPTICS_UNFOCUSED = 4 };
 
 // The sink copies/enqueues each snapshot in order; called under the state lock, it must not reenter.
 // No hardware calls on the sending thread. A changed epoch invalidates all older queued snapshots.

@@ -478,6 +478,14 @@
 - **Fix:** use `shader_lib.name_of` for the output stem in the signed `ShaderLibraries` bundle and in its reuse key, for both the primary program and `--program` entries. The primary stem still takes the explicit `--msl-name` override and supplies `DMChain`. `test_nsp_mac_app.py` checks the signed layout and reuse across both input spellings.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), a Mac app packed by hand from the build's `shader/cache/b-<chain>.img` ([PR #1790](https://github.com/seedds/nxnative/pull/1790)).
 
+### Identical shader files repeated inside library images
+
+- **Symptom:** a built shader library image `b-<chain>.img` stores a separate full copy for every shader filename even when `cas-<chain>.db` already holds identical compiled payloads once.
+- **Cause:** `dmsh_build.py` queried `STORE.names(prefix)` without each entry's `blob` ID, and `shader_lib.write` assigned a fresh data range to every filename; `shader_lib.subset` and `shader_lib.pack` also copied each entry individually from existing images. Both `romfs.py` and the native reader (`dm/host/romfs_image.h`, `dm/gfx/nvn/msl_image.h`) already allow several filenames to point at one range.
+- **Fix:** `shader_cache.Store.blob_ids` exposes local staged `blob` IDs, `shader_lib.write` takes an optional `share` map so aliased entries reuse the first entry's `(offset, size)` range without invoking loaders or writing duplicate bytes, and `dmsh_build.publish_library`, `shader_lib.subset`, and `shader_lib.pack` pass those `blob` IDs and existing image ranges. The image format, readers, and shader contents are unchanged, with zero extra hashing and fewer SQLite reads and disk writes; legacy loose-folder packs without a prior image stay unshared.
+- **Measured** on [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game)'s real library image `b-13b3bdb97e7e.img` (`9.250 GiB`, `173,316` files): `3.86%` duplicate bytes overall (`0.357 GiB`, `5,825` duplicate entries) and `4.20%` in the app subset (`0.199 GiB` of `4.732 GiB`), matching the `cas.db` vs library size gap; investigated following Pokémon Pokopia `#1174` / [PR #2140](https://github.com/seedds/nxnative/pull/2140).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+
 ### A shader build leaves a file per shader output while it runs or after a stop
 
 - **Symptom:** a game's build folder holds tens of thousands of small files while its shaders build, and keeps them when the build stops: Octopath Traveler 0's `_build`, stopped in its compile, held 68,230 files (38,376 in `tmp/dmsh_*`, 29,757 in `shader/cache/b-<chain>/`), against 105 once a build finished. Every later build made another `tmp/dmsh_*` beside the old one.

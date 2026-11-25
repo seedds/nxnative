@@ -40,6 +40,11 @@ def dies_in_batch(i):
     with s.batch(): s.put('dead', b'd'); os._exit(9)
 
 
+def remote_blob_ids(prefix):
+    assert STORE is not None
+    return STORE.blob_ids(prefix)
+
+
 def forked_stores(path, work):
     """Four forked workers of a process that has opened the store, as dmsh_build.py makes them → their results, and what the store holds then"""
     import multiprocessing
@@ -128,6 +133,16 @@ class Entries(Base):
         self.store.put('metallib/mac/d.metallib', b'L' * 100000); self.store.put('shader/d/mac/k_b.metallib', b'L' * 100000)
         self.assertEqual(self.blobs(), 1)
         self.assertEqual(self.store.get('shader/d/mac/k_b.metallib'), b'L' * 100000)
+
+    def test_blob_ids_match_shared_local_entries_only(self):
+        ro_path = self.root / 'ro.db'
+        ro = shader_cache.Store(ro_path); ro.put('stage/a/ro', b'same'); ro.close()
+        s = shader_cache.Store(self.root / 'local.db', readonly=ro_path); self.addCleanup(s.close)
+        s.put('stage/a/1', b'same'); s.put('stage/a/2', b'same'); s.put('stage/a/3', b'other'); s.put('stage/ab/1', b'same')
+        ids = s.blob_ids('stage/a/')
+        self.assertEqual(set(ids), {'stage/a/1', 'stage/a/2', 'stage/a/3'})
+        self.assertEqual(ids['stage/a/1'], ids['stage/a/2'])
+        self.assertNotEqual(ids['stage/a/1'], ids['stage/a/3'])
 
     def test_to_file_and_from_file(self):
         src, dst = self.root / 'src', self.root / 'dst'; src.write_bytes(b'data')
@@ -468,6 +483,17 @@ class Writers(Base):
                 "s.db.execute('BEGIN IMMEDIATE'); s.put('half', b'2'); os.kill(os.getpid(), 9)\n")
         subprocess.run([sys.executable, '-c', code, str(REPO / 'dm/tools'), str(self.path)])
         self.assertEqual(self.store.names(''), {'done'})
+
+    def test_remote_blob_ids(self):
+        import concurrent.futures as cf, multiprocessing
+        global SERVED; SERVED = shader_cache.Served(self.store, 1)
+        self.store.put('stage/a/1', b'same'); self.store.put('stage/a/2', b'same'); self.store.put('stage/a/3', b'other')
+        with cf.ProcessPoolExecutor(1, mp_context=multiprocessing.get_context('fork'), initializer=worker_start) as ex:
+            ex.submit(int).result(); SERVED.start()
+            ids = ex.submit(remote_blob_ids, 'stage/a/').result()
+        self.assertEqual(set(ids), {'stage/a/1', 'stage/a/2', 'stage/a/3'})
+        self.assertEqual(ids['stage/a/1'], ids['stage/a/2'])
+        self.assertNotEqual(ids['stage/a/1'], ids['stage/a/3'])
 
 
 class Damage(unittest.TestCase):

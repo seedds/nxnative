@@ -66,6 +66,82 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     EXPECT(name,0,bad);free(out);
 }
 
+#ifndef CROP_LEGACY_HEADER
+// Minification (present.metal): each minified axis is filtered by an exact radius-1 tent kernel stretched by min(step, 3),
+// while a non-minified axis takes one bilinear sample. The CPU model evaluates each texel directly (no pairing shortcut) so
+// the test checks that the GPU's bilinear-paired implementation matches the exact mathematical tent filter.
+static double tent_ref(double x) { x = fabs(x); return x < 1.0 ? 1.0 - x : 0.0; }
+static double bil_axis(const uint8_t *v, int w, int y, double cx) {
+    double u = fmin(fmax(cx, 0.5), w - 0.5) - 0.5;
+    int x0 = (int)u, x1 = x0 + 1 < w ? x0 + 1 : x0; double fx = u - x0;
+    return v[4 * (y * w + x0)] * (1.0 - fx) + v[4 * (y * w + x1)] * fx;
+}
+static double tent_x(const uint8_t *v, int w, int y, double cx, double stepx) {
+    if (stepx < 1.001) return bil_axis(v, w, y, cx);
+    double sx = fmin(stepx, 3.0), sum = 0.0, ws = 0.0;
+    int i0 = (int)floor(cx - 0.5 - sx) + 1, last = (int)ceil(cx - 0.5 + sx) - 1;
+    for (int i = i0; i <= last; i++) {
+        double wt = tent_ref((i + 0.5 - cx) / sx);
+        int ci = i < 0 ? 0 : i >= w ? w - 1 : i;
+        sum += wt * v[4 * (y * w + ci)]; ws += wt;
+    }
+    return ws > 0.0 ? sum / ws : bil_axis(v, w, y, cx);
+}
+static double minify_ref(const uint8_t *v, int w, int h, int ow, int oh, int x, int y) {
+    double stepx = (double)w / ow, stepy = (double)h / oh, cx = (x + 0.5) * stepx, cy = (y + 0.5) * stepy;
+    if (stepy < 1.001) {
+        double t = fmin(fmax(cy, 0.5), h - 0.5) - 0.5;
+        int y0 = (int)t, y1 = y0 + 1 < h ? y0 + 1 : y0; double fy = t - y0;
+        return tent_x(v, w, y0, cx, stepx) * (1.0 - fy) + tent_x(v, w, y1, cx, stepx) * fy;
+    }
+    double sy = fmin(stepy, 3.0), sum = 0.0, ws = 0.0;
+    int j0 = (int)floor(cy - 0.5 - sy) + 1, last = (int)ceil(cy - 0.5 + sy) - 1;
+    for (int j = j0; j <= last; j++) {
+        double wt = tent_ref((j + 0.5 - cy) / sy);
+        int cj = j < 0 ? 0 : j >= h ? h - 1 : j;
+        sum += wt * tent_x(v, w, cj, cx, stepx); ws += wt;
+    }
+    return ws > 0.0 ? sum / ws : tent_x(v, w, 0, cx, stepx);
+}
+// Presents a w x h image (or its crop sub-rectangle, surrounded by 255 outside the crop) whose red channel is pattern(x, y)
+// into an ow x oh square canvas (1:1 layer); returns the red channel's largest difference from the exact tent model and the
+// interior column spread (max - min). m4 = 0 uses present_encode, m4 = 1 uses present_offscreen_wait (Metal 4).
+static void check_minify_ex(const char *name, int w, int h, const int crop[4], int ow, int oh, uint8_t (*pattern)(int, int), int m4, int *maxdiff, int *spread) {
+    int flip = atomic_load(&g_origin_ll);   // lower-left origin: stored bottom-up, so output row y is model row oh - 1 - y
+    int cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop ? crop[2] : w, ch = crop ? crop[3] : h;
+    MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> s=[g_dev newTextureWithDescriptor:sd];uint8_t *px=calloc((size_t)w*h,4), *sub=calloc((size_t)cw*ch,4);
+    assert(px && sub);
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+        int in = x>=cx && x<cx+cw && y>=cy && y<cy+ch;
+        uint8_t v = in ? pattern(x-cx, y-cy) : 255;
+        px[4*(y*w+x)]=v; px[4*(y*w+x)+3]=255;
+        if (in) { sub[4*((y-cy)*cw+(x-cx))]=v; sub[4*((y-cy)*cw+(x-cx))+3]=255; }
+    }
+    [s replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:px bytesPerRow:w*4];
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:ow height:oh mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> dst=[g_dev newTextureWithDescriptor:od];
+    if (m4) {
+        res_add(s); res_add(dst); res_commit();
+        EXPECT(name,PRESENT_STANDARD,present_offscreen_wait(s,crop,dst));
+        res_remove(s); res_remove(dst);
+    } else {
+        id<MTLCommandBuffer> cb=[g_q commandBuffer];
+        EXPECT(name,1,ENCODE(cb,s,dst,crop));[cb commit];[cb waitUntilCompleted];
+    }
+    uint8_t *o=malloc((size_t)ow*oh*4); assert(o);
+    [dst getBytes:o bytesPerRow:ow*4 fromRegion:MTLRegionMake2D(0,0,ow,oh) mipmapLevel:0];
+    int md=0,lo=255,hi=0;
+    for(int y=0;y<oh;y++)for(int x=0;x<ow;x++){int r=o[4*(y*ow+x)],d=abs(r-(int)lround(minify_ref(sub,cw,ch,ow,oh,x,flip?oh-1-y:y)));md=d>md?d:md;if(x>0&&x<ow-1){lo=r<lo?r:lo;hi=r>hi?r:hi;}}
+    *maxdiff=md;*spread=hi-lo;free(px);free(sub);free(o);
+}
+static void check_minify(const char *name, int w, int h, int ow, int oh, uint8_t (*pattern)(int, int), int *maxdiff, int *spread) {
+    check_minify_ex(name, w, h, NULL, ow, oh, pattern, 0, maxdiff, spread);
+}
+static uint8_t stripes(int x, int y) { (void)y; return x & 1 ? 255 : 0; }   // the finest detail a picture holds: one texel on, one off
+static uint8_t ramp(int x, int y) { return (uint8_t)((x * 37 + y * 91) & 255); }
+#endif
+
 // This fixture is the only present producer. A window now holds a logical queue receipt;
 // wait for replay, then for the display ticket (snapshots do not return that ticket).
 static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
@@ -171,6 +247,33 @@ int main(int argc, char **argv) { @autoreleasepool {
     check(src,"non-zero x and y offset, 16 pixels byte-identical to a hand-written sub-rectangle",inset,4,4,-2);
     check(src,"aspect of the valid area kept, 128 pixels red in the middle / black on both sides",tl,16,8,4);
 #ifndef CROP_LEGACY_HEADER
+    {   // Minification: 3:2, 4:3 (2560x1440 -> 1920x1080), 2:1 (1280x720 window), 5:1 (width capped at 3:1), 1:1, lower-left origin,
+        // anisotropic (X upscaled, Y minified), cropped minification (no bleed from outside the crop) and Metal 4 present
+        int md,sp;
+        check_minify("3:2 stripes present",12,12,8,8,stripes,&md,&sp);
+        EXPECT("3:2 stripes match the exact tent filter within 1",1,md<=1);
+        // one bilinear tap gave columns of 64 and 191 here (spread 127): the stripes aliased into a coarser pattern of their own
+        EXPECT("3:2 stripes: spread at most 30 (one tap: 127)",1,sp<=30);
+        check_minify("4:3 ramp present",16,16,12,12,ramp,&md,&sp);
+        EXPECT("4:3 ramp matches the exact tent filter within 1",1,md<=1);
+        check_minify("2:1 ramp present",16,16,8,8,ramp,&md,&sp);
+        EXPECT("2:1 ramp matches the exact tent filter within 1",1,md<=1);
+        check_minify("5:1 ramp present",40,40,8,8,ramp,&md,&sp);
+        EXPECT("5:1 ramp matches the tent filter at 3:1 width within 1",1,md<=1);
+        check_minify("1:1 ramp present",8,8,8,8,ramp,&md,&sp);
+        EXPECT("1:1 ramp: the texels as they are",0,md);
+        check_minify("anisotropic ramp present (X upscaled 0.75x, Y minified 1.5x)",12,24,16,16,ramp,&md,&sp);
+        EXPECT("anisotropic ramp: bilinear on X and exact tent on Y within 1",1,md<=1);
+        const int midcrop[4]={6,6,12,12};
+        check_minify_ex("cropped 3:2 ramp present",24,24,midcrop,8,8,ramp,0,&md,&sp);
+        EXPECT("cropped 3:2 ramp: matches exact tent with no bleed outside the crop, within 1",1,md<=1);
+        check_minify_ex("Metal 4 4:3 ramp present",16,16,NULL,12,12,ramp,1,&md,&sp);
+        EXPECT("Metal 4 4:3 ramp matches the exact tent filter within 1",1,md<=1);
+        atomic_store(&g_origin_ll,1);
+        check_minify("3:2 ramp present, lower-left origin",24,24,16,16,ramp,&md,&sp);
+        EXPECT("3:2 ramp with the lower-left origin is the exact tent picture upside down, within 1",1,md<=1);
+        atomic_store(&g_origin_ll,0);
+    }
     {
         // sRGB swapchain: present sends the raw bytes (as the Switch's scan-out does) without decoding first; unfixed, 128/64/200 decode to about 55/13/148
         MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:8 height:8 mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;

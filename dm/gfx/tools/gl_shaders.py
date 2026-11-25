@@ -333,11 +333,14 @@ def argument_names(spv):
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1'); renamed = {}
-    v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
+    v = re.search(r'^[ \t]*#[ \t]*version[ \t]+(\d+)([^\r\n]*)\r?\n?', t, re.M)
     desktop_legacy = bool(v and v.group(1) in ('110', '120', '130'))
     legacy = not v or v.group(1) == '100' or desktop_legacy
     if legacy:
         src = promote_legacy(t.replace(v.group(0), '', 1) if v else t, stage, renamed, desktop=desktop_legacy).encode('latin1')
+    elif v and v.group(1) in ('310', '320') and re.match(r'^[ \t]*(?:$|//|/\*)', v.group(2)):
+        # GLSL 310/320 exist only in OpenGL ES; NVIDIA accepts them without `es`, while glslang -E requires it.
+        src = (t[:v.end(1)] + ' es' + t[v.end(1):]).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)

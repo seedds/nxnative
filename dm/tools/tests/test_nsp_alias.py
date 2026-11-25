@@ -61,7 +61,7 @@ class Alias(unittest.TestCase):
         fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
         with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
             self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
-        self.assertEqual([c for c, _ in seen], [fam['updates'][0][1], '-'])
+        self.assertEqual(seen, [(fam['updates'][0][1], ()), ('-', (4,))])
 
     def test_same_build_goes_on_past_an_unreadable_base_when_an_update_supplies_the_code(self):
         seen = []

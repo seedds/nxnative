@@ -43,6 +43,9 @@
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
 #   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches, see rdhs_shaders and fzlc_shaders
+#   · shadercache.nx (Blind Squirrel's Unreal Engine 3 ports: BioShock Remastered v13, BioShock 2 Remastered v28): header {u32 version, u32 block count}, then per block
+#       {u32 stored length, [u32 raw length in v28,] one zlib stream}; the blocks are joined before scanning because records straddle block boundaries. A record = 16-byte header
+#       {u32 control length, u32 code length, ?, ?}, code area, control section; see shadercache_nx
 #   · bnd2 (Criterion's Bundle 2: Need for Speed: Hot Pursuit Remastered's SHADERS.BNDL, Burnout Paradise Remastered's bundles): whole GLSLC outputs in its zlib resources, see bnd2_resources and bnd2_shaders
 #   · Heaps (Dead Cells): whole GLSLC outputs in base64 after the GLSL of the engine's shader cache (shaders.cache.nx), inside its PAK archive, see heaps_pak_files and heaps_shaders
 #   · Frostbite (EA SPORTS FC 27): the CompiledBytecode resources of the bundles its superbundle tables (.toc) list, in its cas files (Oodle Leviathan, decoded by the game's own decoder in the
@@ -877,7 +880,10 @@ def pacx4_unchunk(d, at, chunks, n, where):
     out = bytearray()
     for c, u in chunks:
         raw = span(d, at, c, where)
-        out += raw if c == u else lz4.block.decompress(raw, uncompressed_size=u)
+        if c != u:
+            try: raw = lz4.block.decompress(raw, uncompressed_size=u)
+            except lz4.block.LZ4BlockError as e: red(f'{where}: invalid LZ4 chunk at {at:#x}: {e}')
+        out += raw
         at += c
     if len(out) != n: red(f'{where}: its chunks give {len(out):#x} bytes, its length is {n:#x}')
     return bytes(out)
@@ -1897,8 +1903,11 @@ def pg_sized_shader(d, label):
     return [(f'{label}#PGSO', st, ctl, code)]
 
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
-def _zlib_header(d):
-    return len(d) >= 2 and (d[0] & 0xf) == 8 and (d[0] >> 4) <= 7 and (d[0] * 256 + d[1]) % 31 == 0
+def _zlib_header(d, at=0):
+    """Check the RFC 1950 zlib header at `at` for deflate, a window up to 32 KiB and valid FCHECK."""
+    if at + 2 > len(d): return False
+    b0, b1 = d[at], d[at + 1]
+    return (b0 & 0x0f) == 8 and (b0 >> 4) <= 7 and ((b0 << 8) | b1) % 31 == 0
 
 def mtarc_members(d, label):
     """Capcom's MT Framework archive: 'ARC\\0', u16 version, u16 entry count, then one entry per file. → (path, data) of each entry.
@@ -2969,30 +2978,95 @@ def mgfx_effect(d, p, label):
     if r.p > len(d) or xnb and d[r.p:].strip(b'\0'): red(f'{label} MGFX @{p:#x}: the effect ends at {r.p:#x}, the file at {len(d):#x}')
     return out
 
+def _xnb_varint(buf, pos):
+    """Read a non-negative .NET 7-bit encoded int at buf[pos:] → (value, next_pos), (None, pos) if short, or (-1, pos) if malformed."""
+    val = sh = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        val |= (b & 0x7f) << sh
+        if b < 0x80: return val, pos
+        sh += 7
+        if sh >= 35: return -1, pos
+    return None, pos
+
+def _xnb_has_effect_reader(d):
+    """Whether an uncompressed XNB buffer (with or without its 10-byte XNB header) lists an .EffectReader in its type reader table."""
+    if d[:3] == b'XNB':
+        if len(d) < 11 or (d[4] == 5 and d[5] & 0xC0): return False
+        pos = 10
+    else:
+        pos = 0
+    n, pos = _xnb_varint(d, pos)
+    if n is None or not 0 <= n <= 0x10000: return False
+    for _ in range(n):
+        ln, pos = _xnb_varint(d, pos)
+        if ln is None or not 0 <= ln <= 0x10000 or pos + ln + 4 > len(d): return False
+        if b'.EffectReader' in d[pos:pos + ln]: return True
+        pos += ln + 4
+    return False
+
 def mgfx_shaders(d, label):
     out = []
     for m in re.finditer(MGFX, d): out += mgfx_effect(d, m.start(), label) or []
-    if label.lower().endswith(('.xnb', '.zxnb')) and b'.EffectReader' in d[:0x200] and not out:
+    if label.lower().endswith(('.xnb', '.zxnb')) and (_xnb_has_effect_reader(d) or b'.EffectReader' in d[:0x200]) and not out:
         red(f'{label}: an XNB effect without an MGFX version 5, 8 or 10 effect of NVN shaders')
     return out
 
 def zxnb_effect(path, label):
     """Peek a raw-DEFLATE .zxnb (Tribute Games' ParisEngine: TMNT: Shredder's Revenge has 1,547, only 13 effects):
-    return the full decompressed XNB only when the stream begins with an XNB EffectReader header, b'' for other raw-DEFLATE
-    .zxnb assets (textures, fonts, SoundEffectReader audio), or None if the file is not raw DEFLATE."""
+    parse the XNB header and type reader table incrementally and return the full decompressed XNB only when a reader entry
+    names .EffectReader (or the XNB itself is LZX/LZ4-compressed), b'' for other raw-DEFLATE .zxnb assets (textures, fonts,
+    SoundEffectReader audio), or None if the file is not raw DEFLATE."""
     limit = max(GZIP_FLOOR, NEST * os.path.getsize(path))
     with open(path, 'rb') as f:
-        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), b''
-        try:
-            while len(head) < 0x200 and not dec.eof:
+        dec, head = zlib.decompressobj(-zlib.MAX_WBITS), bytearray()
+        def pull(need):
+            while len(head) < need and not dec.eof and len(head) <= limit:
+                want = min(need, limit + 1) - len(head)
+                if dec.unconsumed_tail:
+                    head.extend(dec.decompress(dec.unconsumed_tail, want))
+                    continue
                 chunk = f.read(4096)
                 if not chunk: break
-                head += dec.decompress(chunk, 0x200 - len(head))
+                head.extend(dec.decompress(chunk, want))
+        def read_varint(pos):
+            val = sh = 0
+            while True:
+                pull(pos + 1)
+                if pos >= len(head): return None, pos
+                b = head[pos]; pos += 1
+                val |= (b & 0x7f) << sh
+                if b < 0x80: return val, pos
+                sh += 7
+                if sh >= 35: return -1, pos
+        try:
+            pull(10)
         except zlib.error:
             return None
-        if head[:3] != b'XNB' or b'.EffectReader' not in head:
+        if len(head) < 10 or head[:3] != b'XNB':
             return b''
-        out, total = [head], len(head)
+        is_effect = head[4] == 5 and bool(head[5] & 0xC0)
+        if not is_effect:
+            try:
+                n, pos = read_varint(10)
+                if n is not None and 0 <= n <= 0x10000:
+                    for _ in range(n):
+                        ln, pos = read_varint(pos)
+                        if ln is None or not 0 <= ln <= 0x10000: break
+                        pull(pos + ln + 4)
+                        if len(head) > limit: red(f'{label}: raw-DEFLATE stream expands beyond its {limit:#x} byte budget')
+                        if pos + ln > len(head):
+                            if not dec.eof: red(f'{label}: truncated raw-DEFLATE stream')
+                            break
+                        if b'.EffectReader' in head[pos:pos + ln]:
+                            is_effect = True
+                            break
+                        pos += ln + 4
+            except zlib.error as e:
+                red(f'{label}: invalid raw-DEFLATE stream ({e})')
+        if not is_effect:
+            return b''
+        out, total = [bytes(head)], len(head)
         try:
             if dec.unconsumed_tail:
                 part = dec.decompress(dec.unconsumed_tail, limit - total + 1)
@@ -3682,6 +3756,57 @@ def ue3_shaders(d, label):
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
     return out
+
+
+def ue3_shared_buffers(d, label):
+    """UE3's UniShaderBuffer export (XCOM 2, main+0xcdf770): after the UObject fields and one word come three byte arrays, each length-prefixed, holding control, code and reflection."""
+    export, = field(d, '<I', 8, label)
+    if export < 12 or b'\x10\0\0\0UniShaderBuffer\0' not in d[:export]: red(f'{label}: no UniShaderBuffer export')
+    at, arrays = export + 0x30, []
+    data = memoryview(d)
+    for name in ('control', 'code', 'reflection'):
+        size, = field(data, '<I', at, f'{label}: {name} array size')
+        at += 4
+        arrays.append(span(data, at, size, f'{label}: {name} array'))
+        at += size
+    if at != len(d): red(f'{label}: UniShaderBuffer arrays do not fill the export')
+    return arrays[0], arrays[1]
+
+
+def ue3_shared_shaders(d, label, controls, codes):
+    """UNIS v1 cache records refer to the shared NVN buffers by offset (main+0xcca610). The reflection bytes and their offset are local to the record."""
+    out, seen = [], set()
+    for m in re.finditer(b'UNIS\x01\0\0\0', d):
+        off = m.start()
+        if off < 4 or off + 0x20 > len(d): continue
+        size, _, _, nk, k, nc, c, nr, r = struct.unpack_from('<9I', d, off - 4)
+        if size != 0x20 + r + nr or off + size > len(d) or k & 0xff or c & 7 or nk < 0x34 or nc < 0x760: continue
+        ref = (k, nk, c, nc)
+        if ref in seen: continue
+        seen.add(ref)
+        where = f'{label}#UE3@{off:x}'
+        ctl, code = bytes(span(controls, c, nc, where)), bytes(span(codes, k, nk, where))
+        st = glslc_stage(ctl, code)
+        why = check(where, st, ctl, code) if st else 'no shader stage in the referenced sections'
+        if why: red(f'{where}: {why}')
+        out.append((where, st, ctl, code))
+    return out
+
+
+def ue3_shared_cache(d, path, rel):
+    controls, codes = ue3_shared_buffers(d, '/' + rel)
+    platform = os.path.basename(path).removeprefix('UniShaderBuffer-').removesuffix('.upk')
+    out = []
+    for name in (f'GlobalShaderCache-{platform}.bin', f'RefShaderCache-{platform}.upk'):
+        cache = os.path.join(os.path.dirname(path), name)
+        if not os.path.isfile(cache): continue
+        label = '/' + os.path.join(os.path.dirname(rel), name)
+        with open(cache, 'rb') as f: data = f.read()
+        body = ue3_body(data, label) if ue3_package(data) else data
+        out.extend(ue3_shared_shaders(body, label, controls, codes))
+    if not out: red(f'/{rel}: no UNIS references in the sibling shader caches')
+    return out
+
 
 UE_LEGACY, UE_IO = 'UE legacy pak', 'UE IoStore'
 def ue_legacy_jobs(files, parts=64, mains=()):
@@ -4773,6 +4898,73 @@ def fzlc_shaders(path, label):
         parts.append(p); at = end
     return glslc_shaders(b''.join(parts), label, need=False)
 
+def shadercache_nx_framing(d):
+    """The block framing of a RomFS shadercache.nx / startupshadercache.nx, or None when the file is not one. Two exist: version 13's blocks are
+    {u32 stored length, one zlib stream} (BioShock Remastered), version 28's are {u32 stored length, u32 raw length, one zlib stream} (BioShock 2 Remastered;
+    its raw length varies: 32 KiB in shadercache.nx, 30,178 B in startupshadercache.nx). The table is walked without inflating it: every stored length in range
+    (and raw length in range for v28), every block starting with a valid RFC 1950 zlib header, and the last block ending exactly at the file's end. Returns the
+    bytes before each block's stream (4 or 8)"""
+    if len(d) < 16: return None
+    ver, count = struct.unpack_from('<II', d, 0)
+    if not 1 <= ver <= 0x100 or not 1 <= count <= 1 << 20: return None
+    for word in (4, 8):
+        at, ok = 8, True
+        for _ in range(count):
+            if at + word > len(d): ok = False; break
+            stored, = struct.unpack_from('<I', d, at)
+            if word == 8:
+                raw, = struct.unpack_from('<I', d, at + 4)
+                if not 1 <= raw <= 1 << 24: ok = False; break
+            body = at + word
+            if stored < 8 or body + stored > len(d) or not _zlib_header(d, body): ok = False; break
+            at = body + stored
+        if ok and at == len(d): return word
+    return None
+
+def is_shadercache_nx(d): return shadercache_nx_framing(d) is not None
+
+def shadercache_nx(d, label, need=True):
+    """The NVN graphics programs of shadercache.nx / startupshadercache.nx (Blind Squirrel's Unreal Engine 3 Switch ports: BioShock Remastered v13, 5,557 zlib blocks
+    joining to 182,079,141 bytes / 20,419 distinct keys; BioShock 2 Remastered v28, 20,376 keys across shadercache.nx and startupshadercache.nx). Records are
+    {16-byte header: u32 control length, u32 code length, u32, u32}, code area, control section, and cross block boundaries (2,622 in BioShock Remastered), so blocks
+    are joined before scanning. The header's control length is the record's own (0x880..0x970, including per-record descriptors past 0x880), while NVN's control section
+    declares 0x880 at +0x20 and that is what the host hashes. A candidate control magic is accepted only when the header's code length matches, the code area starts with
+    GFX_MAGIC, and check() passes. When need=False (generic dispatch in scan_file_in), a valid chunked-zlib file with no NVN records returns [] instead of failing red"""
+    ver, count = field(d, '<II', 0, label)
+    word = shadercache_nx_framing(d)
+    if word is None: red(f'{label}: {ver} version, {count} blocks that do not fill the file')
+    parts, at = [], 8
+    for i in range(count):
+        where = f'{label}: block {i} at {at:#x}'
+        stored, = field(d, '<I', at, where)
+        raw = field(d, '<I', at + 4, where)[0] if word == 8 else None
+        body = span(d, at + word, stored, where)
+        if not _zlib_header(body, 0): red(f'{where}: {stored} stored bytes that are not a zlib stream')
+        try: part = zlib.decompress(body)
+        except zlib.error as e: red(f'{where}: invalid zlib stream ({e})')
+        if raw is not None and len(part) != raw: red(f'{where}: decompresses to {len(part)} bytes, its header says {raw}')
+        parts.append(part); at += word + stored
+    if at != len(d): red(f'{label}: {count} blocks end at {at:#x}, the file is {len(d):#x} bytes')
+    s = b''.join(parts)
+    out, off = [], 0
+    while (c := s.find(CTL_MAGIC, off)) >= 0:
+        off = c + 4
+        if c + 0x708 > len(s): break
+        n, = struct.unpack_from('<I', s, c + 0x704)
+        start = c - n
+        if n < 0x40 or start < 16: continue
+        nctl, ncode = struct.unpack_from('<II', s, start - 16)
+        if ncode != n or not 0x880 <= nctl <= 0x1000 or c + 0x880 > len(s): continue   # a control magic in code or descriptor bytes, not a record
+        code, ctl = s[start:c], s[c:c + 0x880]
+        if code[:4] != GFX_MAGIC: continue
+        st = sph_stage(code)
+        if st is None or st == 'cs': red(f'{label}#NXBLK@0x{c:x}: stage {st} with a graphics code area')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}#NXBLK@0x{c:x}: {why}')
+        out.append((f'{label}#NXBLK@0x{c:x}', st, ctl, code))
+    if not out and need: red(f'{label}: {ver} version, {count} blocks, no NVN record')
+    return out
+
 def scan_file_in(args):
     path, rel = args[:2]
     stem, ext = os.path.splitext(path)
@@ -4872,7 +5064,7 @@ def scan_file_in(args):
     if len(args) > 2 and head[:4] == CPK:   # entries of a CRI CPK (cpk_jobs)
         pairs, deferred = cpk_shaders(path, rel, args[2], found, trees if not TREES else dict(TREES))
         extra = DeferredUnity((path, rel, tuple(deferred)), trees) if deferred else trees
-        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, extra
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, extra
     if len(args) > 2 and args[2][0] == MDB1:   # .shad entries of a Media.Vision MVGL archive (mvgl_jobs)
         if args[2][1] is None: red(args[2][2])
         mvgl_shaders(path, rel, args[2][1], args[2][2], found)
@@ -4913,7 +5105,12 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'BMSG' or ue3_package(head):   # an Unreal Engine 3 global shader cache or package (ue3_body, ue3_shaders)
         with open(path, 'rb') as f: d = f.read()
-        found += ue3_shaders(ue3_body(d, '/' + rel) if d[:4] == UE3_TAG else d, '/' + rel)
+        if d[:4] == UE3_TAG:
+            d = ue3_body(d, '/' + rel)
+            if os.path.basename(path).startswith('UniShaderBuffer-') and ext == '.upk':
+                found += ue3_shared_cache(d, path, rel)
+                return rel, uniq_keys(found), var_pairs(found), trees
+        found += ue3_shaders(d, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == RFRM:   # a Retro Studios form or pack (rfrm_shaders)
         from romfs import mmap   # mapped, not read: Metroid Prime 4's packs reach 3.9 GB and only their MTRL resources are looked at
@@ -4986,6 +5183,9 @@ def scan_file_in(args):
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
     if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
+    if is_shadercache_nx(d):   # BioShock Remastered / BioShock 2 Remastered RomFS shader cache: zlib blocks joined, then NVN records (shadercache_nx)
+        found = shadercache_nx(d, '/' + rel, need=False)
+        if found: return rel, uniq_keys(found), var_pairs(found), trees
     # Containers the generic prefilter below would drop, read whole by scan_blob: Monolith's, which it also ships loose, without an ARH/ARD archive (Xenoblade DE;
     # DRSM model streams contain several embedded XBC1 resources; DMPA model packages (.wimdo) keep plain HCPS programs beside the model: 18 of Xenoblade DE's, the only copy
     # of 14 shaders its Switch 2 Edition's prologue draws with), and Phyre's effects and FFX/X-2's loose programs, their two lengths before the code (phyre_shaders)
@@ -5005,7 +5205,7 @@ def scan_file_in(args):
         import unityfs
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
-        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
+        return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, trees
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
@@ -5229,8 +5429,13 @@ def main():
     pairs.update(pair for pair in play_pairs if any(k in keys and keys[k][0].startswith('/glslc_play/') for k in pair[:3]))
     mesh = {(a, b, c) for a, b, *t in pairs if len(t) == 2 and t[1] == 'mesh' for c in (t[0],)}; pairs -= {(a, b, c, 'mesh') for a, b, c in mesh}
     geo = {(a, b) for a, b, *t in pairs if t == ['geo']}; pairs -= {(a, b, 'geo') for a, b in geo}
-    prog = {(a, b) for a, b, *t in pairs if t} - pairs; pairs = {x for x in pairs if len(x) == 2}
-    sp, cover = separable_pairs(keys); pairs |= sp
+    prog = {(a, b) for a, b, *t in pairs if t == ['prog']}
+    pso_cover = {(a, b) for a, b, *t in pairs if t == ['cover']}
+    pairs = {x for x in pairs if len(x) == 2}
+    prog -= pairs
+    pso_cover -= pairs | prog
+    sp, cover = separable_pairs(keys)
+    sp_cover = sp - pairs   # synthetic single-stage covers stay separate from real variation pairs so pso_offline.py and pso_prebuild skip them while dmsh_build.py still pads outputs
     if cover: print(f'single-stage programs: {len({v for v, _ in sp}):,} vertex shaders are paired with a cover of {len(cover)} pixel shader(s) ({" ".join(cover)})')
     os.makedirs(pkg, exist_ok=True)
     for f in os.listdir(pkg):
@@ -5278,10 +5483,16 @@ def main():
         with open(pairsout, 'w') as f:
             f.write('# kind: evidence  vertex / pixel shader pairs within BNSH variations (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
             for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
+            if sp_cover:
+                f.write('# cover: single-stage padding pairs (for vertex output padding only; skipped by pso_offline.py and pso_prebuild)\n')
+                for a, b in sorted(sp_cover): f.write(f'{a}\t{b}\n')
     if psopairsout:
         with open(psopairsout, 'w') as f:
             f.write('# kind: evidence  supplemental vertex / pixel shader pairs (BAHS program variations and legacy Unity pass-input covers) for vertex output padding and the pipeline prebuild (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> pixel key\n')
-            for a, b in sorted(prog - pairs): f.write(f'{a}\t{b}\n')
+            for a, b in sorted(prog): f.write(f'{a}\t{b}\n')
+            if pso_cover:
+                f.write('# cover: legacy Unity pass-input padding pairs (for vertex output padding only; skipped by pso_offline.py and pso_prebuild)\n')
+                for a, b in sorted(pso_cover): f.write(f'{a}\t{b}\n')
     if pairsout:   # beside the pair table: geo_pairs.tsv and mesh_pairs.tsv (var_pairs); the NSP script checks or keeps them as it does pso_pairs.tsv
         with open(os.path.join(os.path.dirname(os.path.abspath(pairsout)), 'geo_pairs.tsv'), 'w') as f:
             f.write('# kind: evidence  vertex / geometry shader pairs within shader variations, for mesh libraries (generated by dm/gfx/tools/shader_split.py, do not edit): vertex key <TAB> geometry key\n')
@@ -5289,7 +5500,7 @@ def main():
         with open(os.path.join(os.path.dirname(os.path.abspath(pairsout)), 'mesh_pairs.tsv'), 'w') as f:
             f.write('# kind: evidence  task / mesh / pixel shader triples within shader variations, for mesh pipeline bases (generated by dm/gfx/tools/shader_split.py, do not edit): M <TAB> task key (or -) <TAB> mesh key <TAB> pixel key (or -)\n')
             for a, b, c in sorted(mesh): f.write(f'M\t{a}\t{b}\t{c}\n')
-    print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' if pairsout else ''))
+    print(f'shaders: {len(rows)} (' + ', '.join(f'{STAGE_NAME[s]} {n}' for s, n in sorted(stat.items())) + '); sources ' + ', '.join(f'{g} {n}' for g, n in per_src.most_common()) + f'; compute shader answers {len(facts)} rows' + (f'; variation pairs {len(pairs)}' + (f' (+ {len(sp_cover)} cover)' if sp_cover else '') if pairsout else ''))
 
 if __name__ == '__main__':
     import nso

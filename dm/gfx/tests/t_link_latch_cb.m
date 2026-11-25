@@ -232,5 +232,14 @@ int main(void) { @autoreleasepool {
     hold_case(2, 120, 75, 1, "75 fps on a 120 Hz link can take a frame on the next tick");
     hold_case(1, 60, 30, 2, "30 fps on a 60 Hz link takes the queued frame on the second tick");
     hold_case(3, 30, 30, 1, "30 fps on a 30 Hz link can take a frame on the next tick");
+    // 9. mtl_gpu_done: frame 0 is distinct from an untouched zero-initialized slot, stays 0 while any CB is pending, and reports the latest GPUEndTime once all finish
+    { uint64_t end = 123;
+      CHECK("untouched frame 0 has no GPU record", mtl_gpu_done(0, &end) == -1 && mtl_gpu_ms(0) < 0);
+      gpu_tag_begin(0); gpu_tag_begin(0);
+      CHECK("frame 0 with pending CBs reports running", mtl_gpu_done(0, &end) == 0);
+      gpu_tag_done(0, 10.0, 10.004);
+      CHECK("frame 0 with one CB left still reports running", mtl_gpu_done(0, &end) == 0);
+      gpu_tag_done(0, 10.002, 10.009);
+      CHECK("frame 0 reports done with the latest GPUEndTime", mtl_gpu_done(0, &end) == 1 && end == (uint64_t)(10.009 * 1e9)); }
     printf("t_link_latch_cb: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

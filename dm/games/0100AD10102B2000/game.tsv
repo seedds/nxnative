@@ -1,0 +1,40 @@
+# Game profile of BioShock Remastered (Switch, update 1.0.2 = v65536). Plays on the Mac
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Blind Squirrel's Unreal Engine 3 port of Irrational's BioShock, SDK 9, NVN. Modules main (16 MB) and sdk (5.3 MB); rtld is replaced by the host.
+# The shaders are the RomFS's own cache, shadercache.nx (shader_split.py shadercache_nx): 5,557 zlib blocks joined, 20,419 keys; 8 more come from main (Phyre).
+# The legal-terms pages end with the browser's close(), which dm/host/web_apple.m now answers as exit reason 4; the game then writes its own first-run save
+# (FirstRun.nx) and skips those pages on later boots, so no save file is needed before the first one.
+
+# ---- Identity ----
+title_id	0100AD10102B2000
+program_id	0100AD10102B2000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP
+name	BioShock Remastered
+ipa	BioShockRemastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.2	main=d89ffaa2062e373d914d04bb73ca6c6f	sdk=ad3fdfbd62a5f4b082d385ffe420d440
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	bulkcontent/bulkpatch1.blk
+zip_store	.bik:.blk:.bsm:.deu_fsb:.deu_pkg:.esp_fsb:.esp_pkg:.fra_fsb:.fra_pkg:.fsb:.gsc:.ibf:.ita_fsb:.ita_pkg:.jpn_fsb:.jpn_pkg:.lbf:.nx:.pkg:.swf:.u:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (IsVirtualAddressMemoryEnabled is false), so main sets its own heap: at most the pool less 64 MB.
+# The split below is the survey's; the game boots, plays and saves with it, but it was not measured against hardware (README.md, What is open)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/sounds_nx/=soundsnx /maps/=maps /binkmovies/=binkmovies /flashmovies/=flashmovies /bulkcontent/=bulkcontent
+shader_note	BioShock Remastered shaders (the RomFS shader cache, shadercache.nx, and main's own Phyre shaders)

@@ -140,7 +140,7 @@ int main(void) { @autoreleasepool {
     same_as_whole(b11, "the patched table holds what a table built whole does (takeover)");
 
     // Past the budget: a texture registered since the walk that no shader has read is not made, as in a walk (its entry is its stand-in, or the dummy with DM_NVN_POOL_STANDIN=0), and the table is patched rather than built whole. ID 6 names a
-    // texture the game finalized before anything made it. Once a shader reads ID 6, the scan of the read bitmap makes it whatever the budget and writes it into the table in place:
+    // texture the game finalized before anything made it. Once a shader reads ID 6, the scan of the read bitmap makes it whatever the budget and forks the table via copy-on-write:
     // a view of a retired registration, which the table lists, so the next submission takes it again
     mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL); table(); table();   // no retired IDs left: the table lists none
     CHECK(snap()->sub == 0 && snap()->trans.n == 0, "a table without views of retired registrations");
@@ -156,10 +156,11 @@ int main(void) { @autoreleasepool {
     CHECK(LEFT_OUT(b12, 6) && snap()->left > 0 && !snap()->left_req, "the unread texture is left out");
     h_nvnTextureFinalize(&t6); table();
     CHECK(g_treg[6].retired && !tex_get(((const tex_t *)&t6)->serial) && LEFT_OUT(snap()->buf, 6), "finalized, it is still left out: nothing made it");
+    id<MTLBuffer> b12b = snap()->buf; uint64_t b12b_e6 = entry(b12b, 6);
     ((uint32_t *)g_seen_buf.contents)[6 / 32] |= 1u << (6 % 32);
     mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan();
     pool_snap *s = snap(); id<MTLBuffer> b13 = s->buf;
-    CHECK(entry(b13, 6) != dummy_of(b13), "a read goes into the table in place, past the budget");
+    CHECK(b13 != b12b && entry(b12b, 6) == b12b_e6 && entry(b13, 6) != dummy_of(b13), "a read updates the table via copy-on-write past the budget without mutating the prior buffer");
     CHECK(s->sub == g_sub_serial && lists(&s->trans, 6), "as a view of a retired registration of this submission");
     os_unfair_lock_unlock(&g_rmu); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
     CHECK(!g_treg[6].view, "the view went at the submission's end");

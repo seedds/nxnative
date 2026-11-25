@@ -679,7 +679,8 @@ def interface_check(tree, g, out):
     # Run pso_offline in the tree's own Python process so baseline and candidate never share sys.modules (dmsh_abi, dmsh_side, romfs, ...)
     todo = [tuple(pr) for pr in json.loads(tree.py(
         "import json, sys; sys.path.insert(0, 'dm/gfx/tools'); import pso_offline as po; "
-        "print(json.dumps(po.read_pairs(po.pair_text(json.load(sys.stdin)))))",
+        "paths = json.load(sys.stdin); "
+        "print(json.dumps(po.read_pairs_files(paths) if hasattr(po, 'read_pairs_files') else po.read_pairs(po.pair_text(paths))))",
         env, stdin=json.dumps([str(p) for p in pairs if p.is_file()])))]
     zero = depth_zero(g, tree)
     keys = {k for pr in todo for k in pr}
@@ -1078,7 +1079,6 @@ def run_env(g, art, route, outdir, a):
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
-        if not (prof / 'mesh_pairs.tsv').is_file() and (g.build / 'shader/mesh_pairs.tsv').is_file(): env['DM_MESH_PAIRS'] = str(g.build / 'shader/mesh_pairs.tsv')
     if (g.build / 'aoc').is_dir(): env['DM_AOC_DIR'] = str(g.build / 'aoc')
     for kv in a.env: k, _, v = kv.partition('='); env[k] = v
     try: run_saves.cloud_off(env, run_saves.asked(a.env))   # last, after every override: cloud saves off (dm/tools/run_saves.py)

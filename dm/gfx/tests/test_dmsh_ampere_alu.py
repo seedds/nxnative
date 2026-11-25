@@ -41,14 +41,19 @@ class FloatRed(Translated):
 
     def test_storage_add_is_one_native_add(self):
         import dmsh_rewrite
-        code = b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5)) + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), self.RED_E)) + inst(*EXIT)
+        def red_e(off): return (self.RED_E[0], (self.RED_E[1] & ~(0xffffff << 40)) | ((off & 0xffffff) << 40))
+        code = (b''.join(inst(*i) for i in (ULDC_SB0, MOV_R8_UR4, MOV_R9_UR5))
+                + b''.join(inst(*waiting(i)) for i in (s2r_tid(6), red_e(0), red_e(4), red_e(8)))
+                + inst(*EXIT))
         for reduced in (True, False):   # dmsh_build's default (an add) and XLATE_REDUCED=0 (spvFAdd)
             with self.subTest(reduced=reduced):
                 msl = self.translate(code, nvn2_cs=[0, 1, 0, 0x20, 0], reduced=reduced)
                 self.assertIn('cp_s0', msl)   # traced to the storage buffer, not the memory pool table
-                out = dmsh_rewrite.float_add_msl(msl)
+                self.assertRegex(msl, r'\(\*spvDescriptorSet0\.cp_s0\)\._m0\[int\(_\d+\)\]')
+                out = dmsh_rewrite.float_add_msl(dmsh_rewrite.select_guards(msl))
                 self.assertIn('static __attribute__((noinline)) void dm_atomic_add_f32', out)
-                self.assertRegex(out, r'dm_atomic_add_f32\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[0\], _\d+\);')
+                for w in (0, 1, 2):
+                    self.assertRegex(out, rf'dm_atomic_add_f32\(\(device atomic_float\*\)&\(\*spvDescriptorSet0\.cp_s0\)\._m0\[{w}\], _\d+\);')
                 self.assertNotIn('atomic_compare_exchange_weak_explicit', out)
 
 

@@ -148,6 +148,47 @@ class FloatAdd(unittest.TestCase):
         mismatch = src.replace('_87 ? 0 : 0', '_87 ? 1 : 0')
         self.assertEqual(float_add_msl(mismatch), mismatch)
 
+    def test_bounded_word1_bool_index(self):   # SPIRV-Cross simplifies OpSelect(c, 1, 0) for word 1 to int(c)
+        src = (
+            HEAD
+            + '    bool _46;\n'
+            + '    do\n'
+            + '    {\n'
+            + '        bool _71 = (uint(1) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            + '        float _48 = as_type<float>(_71 ? (*spvDescriptorSet0.cp_s0)._m0[int(_71)] : 0u);\n'
+            + '        float _50 = spvFAdd(_48, _42);\n'
+            + '        bool _87 = (uint(1) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            + '        uint _91 = as_type<uint>(_48);\n'
+            + '        uint _100;\n'
+            + '        if (_87)\n'
+            + '        {\n'
+            + '            uint _97;\n'
+            + '            do\n'
+            + '            {\n'
+            + '                _97 = _91;\n'
+            + '            } while (!atomic_compare_exchange_weak_explicit((device atomic_uint*)&(*spvDescriptorSet0.cp_s0)._m0[int(_87)], &_97, as_type<uint>(_50), memory_order_relaxed, memory_order_relaxed) && _97 == _91);\n'
+            + '            _100 = _97;\n'
+            + '        }\n'
+            + '        else\n'
+            + '        {\n'
+            + '            _100 = 0u;\n'
+            + '        }\n'
+            + '        uint _53 = _100;\n'
+            + '        _46 = int(_53) != as_type<int>(_48);\n'
+            + '    } while (_46);\n'
+        )
+        out = float_add_msl(src)
+        self.assertEqual(out, HEAD + HELPER
+                              + '    if ((uint(1) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y)\n'
+                              + '    {\n'
+                              + '        dm_atomic_add_f32((device atomic_float*)&(*spvDescriptorSet0.cp_s0)._m0[1], _42);\n'
+                              + '    }\n'
+                              + '    bool _46 = false;\n')
+        mismatch = src.replace('int(_87)', '_87 ? 0 : 0')
+        self.assertEqual(float_add_msl(mismatch), mismatch)
+        unrelated = src.replace('int(_87)', 'int(_999)')
+        self.assertEqual(float_add_msl(unrelated), unrelated)
+
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_sums_on_gpu(self):
         body = loop('b', 0, 'v', 10) + loop('b', 1, 'w', 20) + loop('b', 2, 'v', 30) + loop('b', 3, 'w', 40)

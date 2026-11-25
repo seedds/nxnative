@@ -55,6 +55,34 @@ class FirstStore(unittest.TestCase):
         self.assertNotIn('if (!_71)', out)
         self.assertIn('int _73 = as_type<int>(_61) + _63;', out)
 
+    def test_bounded_bool_index(self):   # SPIRV-Cross simplifies OpSelect(c, 1, 0) for word 1 to int(c)
+        bounded = (
+            'bool _80 = (uint(0) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        if (_80)\n'
+            '        {\n'
+            '            (*spvDescriptorSet0.cp_s0)._m0[_80 ? 0 : 0] = 0u;\n'
+            '        }\n'
+            '        bool _81 = (uint(1) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        if (_81)\n'
+            '        {\n'
+            '            (*spvDescriptorSet0.cp_s0)._m0[int(_81)] = 0u;\n'
+            '        }\n'
+            '        bool _82 = (uint(2) + (*spvDescriptorSet0.cp_c27)._m0[0].x) < (*spvDescriptorSet0.cp_c27)._m0[0].y;\n'
+            '        if (_82)\n'
+            '        {\n'
+            '            (*spvDescriptorSet0.cp_s0)._m0[_82 ? 2 : 0] = 0u;\n'
+            '        }'
+        )
+        src = (BODY % (5, '!=')).replace('(*spvDescriptorSet0.cp_s0)._m0[1] = 0u;', bounded)
+        out, stores = first_store(src, [32, 1, 1])
+        self.assertEqual(stores, [('cp_s0', 0, 0), ('cp_s0', 1, 0), ('cp_s0', 2, 0)])
+        self.assertNotIn('if (!_71)', out)
+        self.assertIn('int _73 = as_type<int>(_61) + _63;', out)
+        bad_var = src.replace('_m0[int(_81)]', '_m0[int(_73)]')
+        self.assertEqual(first_store(bad_var, [32, 1, 1]), (bad_var, []))
+        bad_cond = src.replace('if (_81)', 'if (_80)')
+        self.assertEqual(first_store(bad_cond, [32, 1, 1]), (bad_cond, []))
+
     def test_other_shapes_stay(self):
         for src, local in ((BODY % (4, '!='), [32, 1, 1]),   # the shift is not the local size: not one invocation
                            (BODY % (5, '=='), [32, 1, 1]),   # the opposite condition: all but the first

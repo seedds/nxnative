@@ -666,7 +666,7 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     const tex_builder_t *s = (const tex_builder_t *)b; tex_t *o = TX(t);
     // Re-initializing a texture object that is still live (without a Finalize first): release the host texture of the old serial first. SMBW re-initializes its transient render targets on the same object every frame and never Finalizes them;
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
-    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); mtl_tex_release(o); }
+    if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); uint64_t old = o->serial; if (mtl_tex_release(o)) ft_del(old); }   // and its registration, when that ends the texture (nvnTextureFinalize)
     memset(o, 0, sizeof *o);
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     // NVN2 device flag bit 16 selects X1 order in CPU copies and descriptor word 2 bit 24. Keep the owning device's order in the texture snapshot.
@@ -696,7 +696,10 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     ft_add(o);
     return 1;
 }
-NVN(nvnTextureFinalize, void, NVNtexture *t) { ft_del(TX(t)->serial); mtl_tex_release(TX(t)); TX(t)->magic = 0; }
+// The texture's registration for the CPU's writes (ft_add) goes only when this Finalize ends the texture. NVNtexture is plain data and engines finalize copies of it while the
+// object it was initialized in lives on (own_tex_end_locked: Breath of the Wild about 100 a frame, Ocarina of Time every few frames): taken out first, at any copy's Finalize,
+// the texture left the poll and its first-use check, so the CPU's later writes to it were never uploaded (GitHub issue #2975)
+NVN(nvnTextureFinalize, void, NVNtexture *t) { uint64_t serial = TX(t)->serial; if (mtl_tex_release(TX(t))) ft_del(serial); TX(t)->magic = 0; }
 NVN(nvnTextureGetFlags, NVNtextureFlags, const NVNtexture *t) { return (NVNtextureFlags)CTX(t)->d.flags; }
 NVN(nvnTextureGetWidth, int, const NVNtexture *t) { return (int)CTX(t)->d.width; }
 NVN(nvnTextureGetHeight, int, const NVNtexture *t) { return (int)CTX(t)->d.height; }

@@ -78,6 +78,28 @@ static void poll_run(int64_t wait_ns, int sleep_too, uint32_t event) {
     poll_step(wait_ns, sleep_too, event);   // exactly 2 ms: the wait (and any yield) backs off
     assert(backoffs() == b0 + 1 + sleep_too);
 }
+// WaitForAddress(wait if equal, timeout 0) on a word that holds the value: a poll, TimedOut at once as on Horizon (issue #1768)
+static _Atomic uint32_t addr_word = 1;
+static int64_t addr_poll(uint32_t value) {
+    uint64_t r[32] = {(uint64_t)&addr_word, 2, value, 0}; svc_thread(0x34, r); return (int64_t)r[0];
+}
+static void addr_run(void) {
+    atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
+    uint64_t b0 = backoffs();
+    for (int i = 0; i < 200; i++) {   // 0 through 1.99 ms: no backoff yet
+        unsigned s0 = sleep_requests;
+        assert(addr_poll(1) == R_TIMEOUT);
+        assert(backoffs() == b0 && sleep_requests == s0);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    unsigned s0 = sleep_requests;
+    assert(addr_poll(1) == R_TIMEOUT);   // exactly 2 ms: the poll sleeps the back-off, and still times out
+    assert(backoffs() == b0 + 1 && sleep_requests == s0 + 1);
+    atomic_fetch_add(&poll_clock, 10000);
+    assert(addr_poll(2) == R_BAD_STATE);   // the word moved on: the loop ends, and so does the run
+    atomic_fetch_add(&poll_clock, 10000);
+    assert(addr_poll(1) == R_TIMEOUT && backoffs() == b0 + 1);   // the next poll starts a new run
+}
 // A run of SleepThread(ns) with 10 us of guest work between the sleeps, as Unity 6's idle job workers poll their queue: the guest's own sleeps for steps * 10 us, then one more
 static void sleep_run(int64_t ns, int steps, int expect_backoff) {
     atomic_fetch_add(&poll_clock, 30000);   // guest work ends the previous run
@@ -152,6 +174,27 @@ int main(void) {
     assert(backoffs() == b0 + 1);
     poll_step(500, 0, 0); assert(backoffs() == b0 + 1);
     puts("PASS: a lengthened wait returns at the signal and the next poll starts a new run");
+    poll_run(0, 0, 0);
+    puts("PASS: zero-timeout condition variable waits time out at once and back off at 2 ms, not before");
+    poll_run(0, 0, ev_r);
+    puts("PASS: the same with WaitSynchronization");
+    addr_run();
+    puts("PASS: the same with WaitForAddress, whose run ends when the word moves on");
+    uint64_t z0 = backoffs();
+    for (int i = 0; i < 300; i++) { atomic_fetch_add(&poll_clock, 30000); assert(addr_poll(1) == R_TIMEOUT); }
+    assert(backoffs() == z0);
+    puts("PASS: zero-timeout polls with 30 us of work between them never back off");
+    z0 = backoffs(); atomic_fetch_add(&poll_clock, 30000);
+    for (int i = 0; i < 300; i++) {   // a loop that works between its tries: its counter moves in x19
+        uint64_t q[32] = {(uint64_t)&addr_word, 2, 1, 0}; q[19] = (uint64_t)i;
+        svc_thread(0x34, q); assert(q[0] == R_TIMEOUT);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    assert(backoffs() == z0);
+    puts("PASS: zero-timeout tries whose caller's registers move never back off");
+    atomic_fetch_add(&poll_clock, 30000);
+    assert(cv_wait(0) == R_TIMEOUT && atomic_load(&mutex_word) == 0);
+    puts("PASS: a zero-timeout condition variable wait still releases the lock");
     r[0] = ev_w; svc_thread(0x16, r); r[0] = ev_r; svc_thread(0x16, r);
     return 0;
 }

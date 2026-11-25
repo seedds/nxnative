@@ -1021,11 +1021,29 @@ static int64_t poll_wait_begin(int64_t ns) {
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
     return (int64_t)bo;
 }
-// After the wait (ns: the guest's timeout): a signalled wait ends the run, the loop moves on
-static void poll_wait_end(int64_t ns, int64_t r) {
-    if (ns <= 0 || ns >= 20000) return;
+// After the wait (ns: the guest's timeout; regs: the guest registers at the SVC): a signalled wait ends the run, the loop moves on.
+// Zero-timeout waits as polls too. Horizon answers a wait with a timeout of 0 at once, TimedOut while the condition holds (mesosphere's WaitIfEqual / WaitIfLessThan,
+// WaitSynchronization and the condition variable's wait, which still releases the lock), and so does the host. A loop of them that makes no progress waits for another thread:
+// an audio thread of 01007ED02424E000 made 4.7 million WaitForAddress(wait if equal, timeout 0) calls a second, a whole host core at 4 W of CPU (issue #1768; why its caller
+// at sdk+0xc808e0 passes 0 is not known). A zero-timeout poll that times out is a step of the run of yields, by the yields' rules (thr_yield): it continues the run when the SVC
+// before it was one of the run's steps, under SPIN_GAP_NS of guest work came after it, and the caller's x19–x28 match one of the last two steps'. The register test matters
+// here, unlike for short timed waits: a timeout of 0 is also the SDK's try form (TryWaitSystemEvent, TryWaitAny), which a loop that works between its tries calls with its
+// counters moving. Once the run has lasted the back-off's start (2 ms), the thread sleeps the back-off after the poll (backoff_sleep), then answers TimedOut. A sleep, not a
+// longer wait as poll_wait_begin makes: the thread is never a waiter, so it takes no wake that a signal with a count means for a real waiter, and the answer stays Horizon's.
+// A poll that does not time out ends the run
+static void poll_wait_end(int64_t ns, int64_t r, const uint64_t *regs) {
+    if (ns < 0 || ns >= 20000) return;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return;
-    if (r == R_TIMEOUT) me->poll_ret = now_ns(); else me->yrun_svc = 0;
+    if (r != R_TIMEOUT) { me->yrun_svc = 0; return; }
+    if (ns) { me->poll_ret = now_ns(); return; }
+    uint64_t now = now_ns(), sig = 0xcbf29ce484222325ull;
+    for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
+    int same = me->yrun_svc + 1 == me->nsvc && now - me->poll_ret <= SPIN_GAP_NS;
+    if (!same || (me->yrun_sig != sig && me->yrun_sig2 != sig)) me->yrun_t0 = now;   // a new run: another SVC or guest work came between, or the loop moved on
+    me->yrun_svc = me->nsvc; me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
+    uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
+    if (bo) { me->nyield++; backoff_sleep(me, bo); }   // counted as a yield that backed off (the power line)
+    me->poll_ret = now_ns();
 }
 // Short sleeps as polls. A loop that sleeps a few tens of microseconds between checks of a flag polls: on the Switch such a sleep costs little, here each one wakes a host
 // core. Unity 6's job workers do it while idle (Hollow Knight: Silksong, main+0xbd99e0: SleepThread of a global 25 µs between looks at the job queue, or a yield, by another global),
@@ -1295,7 +1313,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
 #endif
         int64_t r = block(t, 2, poll_wait_begin((int64_t)regs[3]));   // Timeout: the lock is not re-acquired (user mode takes it itself)
         g_unlock();
-        poll_wait_end((int64_t)regs[3], r);
+        poll_wait_end((int64_t)regs[3], r, regs);
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x1D: {  // SignalProcessWideKey(x0 condition key, w1 count, <=0 all)
@@ -1318,7 +1336,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         if (!ok) r = R_BAD_STATE;
         else { t->waddr = addr; r = block(t, 3, poll_wait_begin((int64_t)regs[3])); }
         g_unlock();
-        if (ok) poll_wait_end((int64_t)regs[3], r);
+        if (ok) poll_wait_end((int64_t)regs[3], r, regs);
         regs[0] = (uint64_t)r; return 1;
     }
     case 0x35: {  // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake, 1 increment if equal and wake, 2 if equal modify the value by waiter count and wake
@@ -1385,7 +1403,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         }
         for (int i = 0; i < held; i++) sync_close(objects[i]);
         g_unlock();
-        poll_wait_end(ns, r);
+        poll_wait_end(ns, r, regs);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 thread)

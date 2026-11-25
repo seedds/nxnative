@@ -3290,7 +3290,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
+    int presented = 0;
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
+        presented = 1;
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         uint64_t new_tk = nvn_queue_present((queue_t *)q, t, present_period(o) / 1e9, crop);
         pthread_mutex_lock(&acq_mu);
@@ -3398,9 +3400,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     // The layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber: when the host pacer drives a vsync grid (!DM_DETCLOCK, !follow, period > 0, g_hz > 0), pass the
     // present time, the pacer's vsync target and one vsync tick so frames with no Metal presentedTime (headless) flip on that grid instead of at first read. Under DM_DETCLOCK,
     // display-link pacing (nvn_pace_follow: pc.target is just `now`), or unpaced presents (period 0), there is no pacer grid (pass 0) and the first-seen fallback stays.
-    { void dm_vi_frame_queued(uint64_t, uint64_t, uint64_t, uint64_t);
+    { void dm_vi_frame_queued(uint64_t, uint64_t, uint64_t, uint64_t); void dm_vi_frame_ticket(uint64_t, uint64_t);
       int paced = !dm_detclock_enabled() && !follow && period > 0 && g_hz > 0;
-      dm_vi_frame_queued(g_frame, paced ? now : 0, paced ? pc.target : 0, paced ? 1000000000ull / (uint64_t)g_hz : 0); }
+      dm_vi_frame_queued(g_frame, paced ? now : 0, paced ? pc.target : 0, paced ? 1000000000ull / (uint64_t)g_hz : 0);
+      if (!presented) dm_vi_frame_ticket(g_frame, 0); }
     if (idx >= 0 && idx < 4) { pthread_mutex_lock(&acq_mu); o->avail[idx] = period ? slot + period : 0; pthread_mutex_unlock(&acq_mu); }
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded

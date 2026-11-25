@@ -18,9 +18,9 @@ uint64_t now_ns(void) { return g_hns; }
 int dm_sdk_ounce(void) { return 0; }
 int dm_opmode(void) { return 0; }
 
-static void present(void) { g_in++; g_count++; dm_vi_frame_queued(g_count, 0, 0, 0); }   // no pacer grid (DM_DETCLOCK, display-link follow, unpaced): first-seen stays
+static void present(void) { g_in++; g_count++; dm_vi_frame_queued(g_count, 0, 0, 0); dm_vi_frame_ticket(g_count, g_in); }   // no pacer grid (DM_DETCLOCK, display-link follow, unpaced): first-seen stays
 static uint64_t g_at, g_grid;   // the present time and the pacer grid a paced present is queued with
-static void ppresent(void) { g_in++; g_count++; g_done = g_in; g_pt[g_count] = 0; dm_vi_frame_queued(g_count, g_at, g_grid, 16666667ull); }   // handed on, no presented time
+static void ppresent(void) { g_in++; g_count++; g_done = g_in; g_pt[g_count] = 0; dm_vi_frame_queued(g_count, g_at, g_grid, 16666667ull); dm_vi_frame_ticket(g_count, g_in); }   // handed on, no presented time
 static uint64_t ticks(uint64_t ns) { return ns * 12 / 625; }
 
 int main(void) {
@@ -86,6 +86,38 @@ int main(void) {
     ppresent(); g_pt[19] = -1; g_hns = G0 + 5000000ull;
     h_vi_FrameHist(fi, 10, NULL);
     assert(fi[0][0] == 2 && fi[0][3] == ticks(g_gns - (g_hns - G0)));
-    puts("vi frame history: count query 8, newest first, shown once handed on, presented, first-seen or latched virtual-vsync tick, dropped frames shown, queued ones not");
+
+    // --- async ticket binding (dm_vi_frame_ticket from nq_worker) ---
+    // frame 20: queued on game thread before nq_worker assigns its ticket; must stay status 1 even though g_done already passed frame 19 and hnow is past grid
+    g_count++; g_hns = G0 + 5000000ull;
+    dm_vi_frame_queued(20, G0 - 2000000ull, G0, T);
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 20 && fi[0][0] == 1 && fi[0][3] == 0 && fi[0][4] == 0);
+    // once nq_worker assigns ticket 20 (still not handed on, g_done == 19), it stays queued; once g_done reaches 20, its own presentedTime wins
+    g_in++; dm_vi_frame_ticket(20, g_in); g_pt[20] = (g_hns - 12000000ull) / 1e9;
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 20 && fi[0][0] == 1 && fi[0][3] == 0);
+    g_done = g_in;
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 20 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns - 12000000ull));
+    // frame 21: reverse order (nq_worker finishes before dm_vi_frame_queued); ticket is preserved when dm_vi_frame_queued runs
+    g_in++; g_done = g_in; g_pt[21] = (g_hns - 8000000ull) / 1e9;
+    dm_vi_frame_ticket(21, g_in);
+    g_count++;
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 20);   // frame 21 not yet recorded by dm_vi_frame_queued, skipped cleanly
+    dm_vi_frame_queued(21, 0, 0, 0);
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 21 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns - 8000000ull));
+    // stale ticket for frame 13 (same slot 21 % 8) must not clobber frame 21
+    dm_vi_frame_ticket(13, 13);
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 21 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns - 8000000ull));
+    // frame 22: discarded / unsubmitted present (ticket 0) still resolves as shown
+    g_count++; dm_vi_frame_queued(22, 0, 0, 0); dm_vi_frame_ticket(22, 0);
+    h_vi_FrameHist(fi, 10, NULL);
+    assert(fi[0][1] == 22 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns));
+
+    puts("vi frame history: count query 8, newest first, shown once handed on with its own physical ticket, presented, first-seen or latched virtual-vsync tick, dropped frames shown, queued ones not");
     return 0;
 }

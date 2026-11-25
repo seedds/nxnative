@@ -615,7 +615,7 @@ def first_store(msl, local):
     held = re.compile(r'int (\w+) = \w+;\s*if \(%s\)\s*\{\s*\1 = (\d+);\s*\}\s*int (\w+) = \1;\s*' % guard)   # a local that holds a constant in the first invocation
     # A plain store, or one guarded by TranslationFlags.MetalStorageBounds (c[27] length table): both hoist to the host's pre-dispatch write
     s_plain = r'\(\*\w+\.\w+\)\._m0\[\d+\] = (?:\d+u|uint\(\w+\));\s*'
-    s_bound = r'bool \w+ = [^;{}]+ < \(\*\w+\.\w+\)\._m0\[\d+\]\.[xyzw];\s*if \(\w+\)\s*\{\s*\(\*\w+\.\w+\)\._m0\[(?:\w+ \? \d+ : 0|\d+)\] = (?:\d+u|uint\(\w+\));\s*\}\s*'
+    s_bound = r'bool \w+ = [^;{}]+ < \(\*\w+\.\w+\)\._m0\[\d+\]\.[xyzw];\s*if \(\w+\)\s*\{\s*\(\*\w+\.\w+\)\._m0\[(?:\w+ \? \d+ : 0|int\(\w+\)|\d+)\] = (?:\d+u|uint\(\w+\));\s*\}\s*'
     block = re.compile(r'if \(%s\)\s*\{\s*((?:(?:%s|%s))+)\}\s*' % (guard, s_plain, s_bound))
     plain = re.compile(r'int \w+ = [^;{}]*;\s*')   # arithmetic the compiler left between them
     at, out, stores, values = m.end(), msl[:m.end()], [], {}
@@ -624,8 +624,8 @@ def first_store(msl, local):
         if h: values[h.group(3)] = int(h.group(2)); out += msl[at:h.end()]; at = h.end(); continue
         b = block.match(msl, at)
         if b:
-            for m2 in re.finditer(r'\(\*\w+\.(\w+)\)\._m0\[(?:\w+ \? (\d+) : 0|(\d+))\] = (\d+u|uint\(\w+\));', b.group(1)):
-                n, w, v = m2.group(1), int(m2.group(2) or m2.group(3)), m2.group(4)
+            for m2 in re.finditer(r'\(\*\w+\.(\w+)\)\._m0\[(?:\w+ \? (\d+) : 0|(int)\(\w+\)|(\d+))\] = (\d+u|uint\(\w+\));', b.group(1)):   # int(c): the bound's bool as the index, word 1 (the c[27] test passed)
+                n, w, v = m2.group(1), 1 if m2.group(3) else int(m2.group(2) or m2.group(4)), m2.group(5)
                 if v.endswith('u'): stores.append((n, w, int(v[:-1])))
                 elif v[5:-1] in values: stores.append((n, w, values[v[5:-1]]))
                 else: return msl, []

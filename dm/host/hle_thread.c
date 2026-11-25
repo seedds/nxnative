@@ -920,11 +920,15 @@ static void yield_for(thr_t *me, uint64_t run_ns, int clock) {
 // A loop that waits at two yields comes back to the registers of the yield before last: Hades' NetworkPollThread (main+0x27aaa0) yields between its passes (w23 = 0) and once
 // in each pass's wait for the nifm request (w23 = 2,000, its retry count), and spun a host core as one that moved on at every yield.
 // A wait whose pass reads the system clock (dm_clock_reads moved since the last yield of the run) waits for a time, not for another thread's handoff: a clock wait (clock_wait).
+static uint64_t yield_sig(const uint64_t *regs) {
+    uint64_t sig = 0xcbf29ce484222325ull;
+    for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
+    return sig;
+}
 static void clock_wait(thr_t *me, uint64_t sig, uint64_t now, int predict);
 static void thr_yield(thr_t *me, const uint64_t *regs) {
     if (!me) { sched_yield(); return; }
-    uint64_t y0 = now_ns(), sig = 0xcbf29ce484222325ull;
-    for (int i = 19; i <= 28; i++) sig = (sig ^ regs[i]) * 0x100000001b3ull;
+    uint64_t y0 = now_ns(), sig = yield_sig(regs);
     int same = me->yrun_svc + 1 == me->nsvc;   // no other SVC since the thread's last yield
     int moved = same && me->yrun_sig != sig && me->yrun_sig2 != sig;   // the loop moved on since its last two yields
     int clock = g_yield_clock && same && !moved && dm_clock_reads != me->yrun_clk;   // a wait whose pass read the clock
@@ -1003,19 +1007,29 @@ void dm_spin_wait(uint64_t gate, uint64_t site) {
     if (g_spin_on && now - me->srun_t0 >= g_spin_poll_ns) { me->nyield++; yield_for(me, now - me->srun_t0, 0); }
     me->spin_ret = now_ns();
 }
-// Short timed waits as polls. A wait with a timeout under 20 µs (a condition variable, WaitSynchronization or WaitForAddress) that times out is a poll, as a SleepThread that short is
+// Short timed waits as polls. A wait with a timeout under 20 µs (0 included: a condition variable, WaitSynchronization or WaitForAddress) that times out is a poll, as a SleepThread that short is
 // (case 0x0B): Hyrule Warriors: Definitive Edition (KTGL, SDK 3.5.1) waits out its frames in two such loops, its main thread with TimedWaitEvent(30 ns) and SleepThread(1 µs) in turn
-// (main+0x2acdc0; 3,400 passes a frame at 60 fps), its update thread with TimedWaitEvent(500 ns) alone (main+0x2ad224). The waits were SVCs between the yields, so every yield began a new run
-// and the back-off never started: 4.6 W of CPU on the Mac in its first battle. Such a wait is now a step of the run of yields: it continues the run when the SVC before it was one of the
+// (main+0x2acdc0; 3,400 passes a frame at 60 fps), its update thread with TimedWaitEvent(500 ns) alone (main+0x2ad224). LucaSystem's PreLoad thread (Summer Pockets REFLECTION BLUE main+0x1d4d0,
+// Little Busters! Converted Edition main+0x29e10) passes 0 ns to TimedWaitLightEvent → svcWaitForAddress(timeout=0) in a tight loop (~6.5M SVCs/s, 995 ms/s CPU, ~6.5 W). The waits were SVCs between the yields,
+// or ran alone with ns=0, so every yield began a new run and the back-off never started. Such a wait is now a step of the run of yields: it continues the run when the SVC before it was one of the
 // run's steps and under SPIN_GAP_NS of guest work came after it (as for spin waits; a loop that works between its waits starts a new run each time), and once the run has lasted the
-// back-off's start its timeout becomes the back-off's sleep (yield_backoff_ns), which, unlike the sleep, ends at once when the wait is signalled. The yields' register test does not
-// apply: at the SVC the SDK's own frames hold the time left (SDK 3.5.1 InternalConditionVariableImplByHorizon::TimedWait, x21). → the timeout to wait with
-static int64_t poll_wait_begin(int64_t ns) {
-    if (ns <= 0 || ns >= 20000) return ns;
+// back-off's start its timeout becomes the back-off's sleep (yield_backoff_ns), which, unlike the sleep, ends at once when the wait is signalled. For nonzero timeouts the yields' register test does not
+// apply: at the SVC the SDK's own frames hold the time left (SDK 3.5.1 InternalConditionVariableImplByHorizon::TimedWait, x21). For ns == 0 there is no ticking deadline in x19–x28, so the two-slot
+// callee-saved register check (as in thr_yield) applies, preventing a working loop that polls TryWaitSystemEvent per item from backing off while still catching pure zero-timeout poll loops. → the timeout to wait with
+static int64_t poll_wait_begin(int64_t ns, const uint64_t *regs) {
+    if (ns < 0 || ns >= 20000) return ns;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return ns;
     uint64_t now = now_ns();
-    if (me->yrun_svc + 1 != me->nsvc || now - me->poll_ret > SPIN_GAP_NS) me->yrun_t0 = now;   // a new run
+    int same = me->yrun_svc + 1 == me->nsvc && now >= me->poll_ret && now - me->poll_ret <= SPIN_GAP_NS;
+    int moved = 0;
+    if (ns == 0) {
+        uint64_t sig = yield_sig(regs);
+        moved = same && me->yrun_sig != sig && me->yrun_sig2 != sig;
+        me->yrun_sig2 = me->yrun_sig; me->yrun_sig = sig;
+    }
+    if (!same || moved) me->yrun_t0 = now;   // a new run
     me->yrun_svc = me->nsvc;
+    if (moved) return ns;
     uint64_t bo = yield_backoff_ns(now - me->yrun_t0, 0);
     if (bo <= (uint64_t)ns) return ns;
     me->nyield++; me->nbackoff++;   // counted as a yield that backed off (the power line)
@@ -1023,7 +1037,7 @@ static int64_t poll_wait_begin(int64_t ns) {
 }
 // After the wait (ns: the guest's timeout): a signalled wait ends the run, the loop moves on
 static void poll_wait_end(int64_t ns, int64_t r) {
-    if (ns <= 0 || ns >= 20000) return;
+    if (ns < 0 || ns >= 20000) return;
     thr_t *me = pthread_getspecific(g_keythr); if (!me) return;
     if (r == R_TIMEOUT) me->poll_ret = now_ns(); else me->yrun_svc = 0;
 }
@@ -1293,7 +1307,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         st32(key, 1);
         t->wkey = key; t->waddr = addr; t->wtag = (uint32_t)regs[2];
 #endif
-        int64_t r = block(t, 2, poll_wait_begin((int64_t)regs[3]));   // Timeout: the lock is not re-acquired (user mode takes it itself)
+        int64_t r = block(t, 2, poll_wait_begin((int64_t)regs[3], regs));   // Timeout: the lock is not re-acquired (user mode takes it itself)
         g_unlock();
         poll_wait_end((int64_t)regs[3], r);
         regs[0] = (uint64_t)r; return 1;
@@ -1316,7 +1330,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         int ok = type == 3 ? ld64(addr) == regs[2] : type == 2 ? (int32_t)v == val : (int32_t)v < val;
         if (ok && type == 1) { while (!cas32(addr, &v, v - 1)) if (!((int32_t)v < val)) { ok = 0; break; } }
         if (!ok) r = R_BAD_STATE;
-        else { t->waddr = addr; r = block(t, 3, poll_wait_begin((int64_t)regs[3])); }
+        else { t->waddr = addr; r = block(t, 3, poll_wait_begin((int64_t)regs[3], regs)); }
         g_unlock();
         if (ok) poll_wait_end((int64_t)regs[3], r);
         regs[0] = (uint64_t)r; return 1;
@@ -1365,7 +1379,6 @@ static int svc_thread_impl(int num, uint64_t *regs) {
     case 0x18: {  // WaitSynchronization(→w1 index; x1 handle array, w2 count, x3 timeout)
         thr_t *t = cur(); int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
         if (n < 0 || n > MAX_SYNC_OBJECTS) { regs[0] = R_OUT_OF_RANGE; regs[1] = 0; return 1; }
-        int64_t wait_ns = poll_wait_begin(ns);
         uint32_t hs[MAX_SYNC_OBJECTS]; sync_ref_t *objects = t->wobjs;
         if (n) memcpy(hs, (const void *)regs[1], n * sizeof *hs);
         g_lock();
@@ -1375,17 +1388,23 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             for (int i = 0; i < n; i++) if (sync_signaled(objects[i])) { idx = i; break; }
             // Ready objects, then a zero-time poll, precede pending cancellation.
             if (idx >= 0) r = 0;
-            else if (!ns) r = R_TIMEOUT;
-            else if (t->cancel) { t->cancel = 0; r = R_CANCELLED; }
+            else if (!ns && t->cancel) r = R_TIMEOUT;
+            else if (ns && t->cancel) { t->cancel = 0; r = R_CANCELLED; }
             else {
-                t->wn = n; t->widx = -1;
-                r = block(t, 4, wait_ns); idx = t->widx;
-                t->wn = 0;
+                int64_t wait_ns = poll_wait_begin(ns, regs);
+                if (!wait_ns) r = R_TIMEOUT;
+                else {
+                    t->wn = n; t->widx = -1;
+                    r = block(t, 4, wait_ns); idx = t->widx;
+                    t->wn = 0;
+                    // A zero-timeout poll cannot consume a concurrent CancelSynchronization.
+                    if (!ns && r == R_CANCELLED) { t->cancel = 1; r = R_TIMEOUT; }
+                }
             }
         }
         for (int i = 0; i < held; i++) sync_close(objects[i]);
         g_unlock();
-        poll_wait_end(ns, r);
+        if (held == n) poll_wait_end(ns, r);
         regs[0] = (uint64_t)r; regs[1] = idx >= 0 ? (uint64_t)idx : 0; return 1;
     }
     case 0x19: {  // CancelSynchronization(w0 thread)

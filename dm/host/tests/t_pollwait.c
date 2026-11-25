@@ -48,7 +48,7 @@ static int test_timedwait(pthread_cond_t *cv, pthread_mutex_t *mutex, const stru
 #undef pthread_cond_timedwait
 #undef nanosleep
 
-static _Atomic uint32_t mutex_word, condition_key;
+static _Atomic uint32_t mutex_word, condition_key, addr_word;
 static uint32_t me_handle;
 static uint64_t backoffs(void) { thr_t *me = pthread_getspecific(g_keythr); assert(me); return me->nbackoff; }
 // One condition variable wait as the SDK's TimedWait makes it: take the lock in user mode, wait (the timeout releases it without taking it back)
@@ -61,6 +61,12 @@ static int64_t cv_wait(int64_t ns) {
         assert(atomic_load(&mutex_word) == me_handle);   // a signalled waiter owns the lock again
     }
     return result;
+}
+static int64_t addr_wait(int64_t ns, uint64_t tag) {
+    uint64_t r[32] = {(uint64_t)&addr_word, 2, 1, (uint64_t)ns};
+    r[19] = tag;
+    svc_thread(0x34, r);
+    return (int64_t)r[0];
 }
 static void poll_step(int64_t wait_ns, int sleep_too, uint32_t event) {
     if (event) { uint64_t r[32] = {0, (uint64_t)&event, 1, (uint64_t)wait_ns}; svc_thread(0x18, r); assert(r[0] == R_TIMEOUT); }
@@ -102,6 +108,36 @@ static void *signaller(void *unused) {
     g_unlock();
     uint64_t r[32] = {(uint64_t)&condition_key, 1}; svc_thread(0x1D, r);
     return NULL;
+}
+static void *addr_signaller(void *unused) {
+    (void)unused;
+    g_lock();
+    while (!waiter_ready) g_cond_wait(&ready_cv, NULL);
+    assert(g_wait && g_wait->wkind == 3 && g_wait->waddr == (uint64_t)&addr_word);
+    g_unlock();
+    uint64_t r[32] = {(uint64_t)&addr_word, 0, 0, 1}; svc_thread(0x35, r);
+    return NULL;
+}
+static void *sync_canceller(void *unused) {
+    (void)unused;
+    g_lock();
+    while (!waiter_ready) g_cond_wait(&ready_cv, NULL);
+    assert(g_wait && g_wait->wkind == 4);
+    g_unlock();
+    uint64_t r[32] = {me_handle}; svc_thread(0x19, r);
+    return NULL;
+}
+static void zero_addr_run(void) {
+    atomic_store(&addr_word, 1);
+    atomic_fetch_add(&poll_clock, 30000);
+    uint64_t b0 = backoffs();
+    for (int i = 0; i < 200; i++) {
+        assert(addr_wait(0, 0x1234) == R_TIMEOUT);
+        assert(backoffs() == b0);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    assert(addr_wait(0, 0x1234) == R_TIMEOUT);
+    assert(backoffs() == b0 + 1);
 }
 int main(void) {
     alarm(20);
@@ -152,6 +188,72 @@ int main(void) {
     assert(backoffs() == b0 + 1);
     poll_step(500, 0, 0); assert(backoffs() == b0 + 1);
     puts("PASS: a lengthened wait returns at the signal and the next poll starts a new run");
+
+    // Zero-timeout waits (TimedWaitLightEvent(ev, 0) → svcWaitForAddress(..., 0), WaitSynchronization(..., 0), WaitProcessWideKeyAtomic(..., 0)):
+    // back off at 2 ms when callee-saved registers repeat, wake immediately on signal, never back off while making progress, and never consume CancelSynchronization.
+    zero_addr_run();
+    puts("PASS: 0 ns WaitForAddress waits back off at 2 ms, not before");
+    poll_run(0, 0, 0);
+    poll_run(0, 0, ev_r);
+    puts("PASS: 0 ns condition variable and WaitSynchronization waits back off at 2 ms");
+
+    // Alternating 0 ns WaitForAddress and SleepThread(0) with two distinct x19–x28 register sets (two-slot signature)
+    atomic_fetch_add(&poll_clock, 30000); b0 = backoffs();
+    for (int i = 0; i < 202; i++) {
+        assert(addr_wait(0, 0xaaaa) == R_TIMEOUT);
+        uint64_t yr[32] = {0}; yr[19] = 0xbbbb; svc_thread(0x0B, yr);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    assert(backoffs() > b0);
+    puts("PASS: alternating 0 ns WaitForAddress and yield with two register sets backs off");
+
+    // Progress in x19–x28 (e.g. a CPU work loop polling TryWaitSystemEvent per item) never backs off
+    atomic_fetch_add(&poll_clock, 30000); b0 = backoffs();
+    for (int i = 0; i < 300; i++) {
+        uint64_t wr[32] = {0, (uint64_t)&ev_r, 1, 0}; wr[19] = (uint64_t)i + 1;
+        svc_thread(0x18, wr); assert(wr[0] == R_TIMEOUT);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    assert(backoffs() == b0);
+    puts("PASS: 0 ns polls whose x19–x28 move (progress) never back off");
+
+    // A lengthened 0 ns WaitForAddress wakes immediately on SignalToAddress
+    zero_addr_run();
+    b0 = backoffs(); waiter_ready = 0; signal_wait = 1;
+    assert(!pthread_create(&s, NULL, addr_signaller, NULL));
+    assert(addr_wait(0, 0x1234) == 0);
+    assert(!pthread_join(s, NULL)); signal_wait = 0;
+    assert(backoffs() == b0 + 1);
+    assert(addr_wait(0, 0x1234) == R_TIMEOUT);
+    assert(backoffs() == b0 + 1);
+    puts("PASS: a lengthened 0 ns WaitForAddress returns at the signal and resets the run");
+
+    // Zero-timeout WaitSynchronization neither consumes a pending CancelSynchronization nor returns R_CANCELLED if cancelled during backoff
+    poll_run(0, 0, ev_r);
+    r[0] = me_handle; svc_thread(0x19, r); assert(r[0] == 0);
+    b0 = backoffs();
+    { uint64_t wr[32] = {0, (uint64_t)&ev_r, 1, 0}; svc_thread(0x18, wr); assert(wr[0] == R_TIMEOUT); }
+    assert(backoffs() == b0);
+    { uint64_t wr[32] = {0, (uint64_t)&ev_r, 1, (uint64_t)-1}; svc_thread(0x18, wr); assert(wr[0] == R_CANCELLED); }
+    poll_run(0, 0, ev_r);
+    waiter_ready = 0; signal_wait = 1;
+    assert(!pthread_create(&s, NULL, sync_canceller, NULL));
+    { uint64_t wr[32] = {0, (uint64_t)&ev_r, 1, 0}; svc_thread(0x18, wr); assert(wr[0] == R_TIMEOUT); }
+    assert(!pthread_join(s, NULL)); signal_wait = 0;
+    { uint64_t wr[32] = {0, (uint64_t)&ev_r, 1, (uint64_t)-1}; svc_thread(0x18, wr); assert(wr[0] == R_CANCELLED); }
+    puts("PASS: 0 ns WaitSynchronization preserves pending and concurrent CancelSynchronization");
+
+    // DM_YIELD_BACKOFF=0 disables 0 ns wait backoff as well
+    g_bo_cap = 0;
+    atomic_fetch_add(&poll_clock, 30000); b0 = backoffs();
+    for (int i = 0; i < 300; i++) {
+        assert(addr_wait(0, 0x1234) == R_TIMEOUT);
+        atomic_fetch_add(&poll_clock, 10000);
+    }
+    assert(backoffs() == b0);
+    g_bo_cap = 250000;
+    puts("PASS: with the back-off off, 0 ns waits never back off");
+
     r[0] = ev_w; svc_thread(0x16, r); r[0] = ev_r; svc_thread(0x16, r);
     return 0;
 }

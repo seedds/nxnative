@@ -92,6 +92,10 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
             self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
+            self.assertEqual(po.HOST_CONSTANTS['dm_mwa3_fc'], (220, True))   # dmsh_abi.h DMSH_MWA_FC: per target OS (host_constants)
+            self.assertEqual(po.host_constants('macos', '27.0')['dm_mwa3_fc'], (220, False))
+            self.assertEqual(po.host_constants('macos', '26.0')['dm_mwa3_fc'], (220, True))
+            self.assertEqual(po.host_constants('ios', '27.0')['dm_mwa3_fc'], (220, True))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -263,14 +267,24 @@ class Compute(unittest.TestCase):
         self.assertEqual(pipes, [('c1_b', 'main0'), ('c2_b', 'main0')])   # each once
         self.assertEqual(left, {'reflection': 3, 'library': 1, 'entry': 1, 'constants': 1})
 
-    def test_border_constant_kernel_is_specialized(self):   # the border corrections' constant alone: specialized as cps_new looks up the common dispatch's pipeline (cps_new_b)
+    def test_border_constant_kernel_is_specialized(self):   # host constants (border, KK3): specialized as cps_new looks up the common dispatch's pipeline (cps_new_b)
         self.shader('kb', {'stage': 'cs'}, {'_b': [('main0', ('dm_border_off',))]})
+        self.shader('km', {'stage': 'cs'}, {'_b': [('main0', ('dm_mwa3_fc',))]})
+        self.shader('kbm', {'stage': 'cs'}, {'_b': [('main0', ('dm_border_off', 'dm_mwa3_fc'))]})
         self.shader('kbs', {'stage': 'cs'}, {'_b': [('main0', ('dm_border_off', 'spvLinearTextureAlignmentOverride'))]})
-        pipes, left = po.plan_compute(self.d, CHAIN, ['kb_b', 'kbs_b'])
-        self.assertEqual(pipes, [('kb_b', 'main0')]); self.assertEqual(left['constants'], 1)
-        j = po.script(self.d, [], pipes)
-        self.assertEqual(j['pipeline_descriptors']['compute_pipeline_descriptors'], [{'compute_function_descriptor': 'fnd:kb_b.main0.host'}])
-        self.assertEqual(j['function_descriptors']['specialized_function_descriptors'][0]['constant_values'][0]['id'], {'data': 216})
+        pipes, left = po.plan_compute(self.d, CHAIN, ['kb_b', 'km_b', 'kbm_b', 'kbs_b'])
+        self.assertEqual(pipes, [('kb_b', 'main0'), ('km_b', 'main0'), ('kbm_b', 'main0')]); self.assertEqual(left['constants'], 1)
+        j27 = po.script(self.d, [], pipes, po.host_constants('macos', '27.0'))
+        self.assertEqual(j27['pipeline_descriptors']['compute_pipeline_descriptors'],
+                         [{'compute_function_descriptor': 'fnd:kb_b.main0.host'}, {'compute_function_descriptor': 'fnd:km_b.main0.host'}, {'compute_function_descriptor': 'fnd:kbm_b.main0.host'}])
+        specs27 = {s['label']: s['constant_values'] for s in j27['function_descriptors']['specialized_function_descriptors']}
+        self.assertEqual(specs27['kb_b.main0.host'], [{'id_type': 'FunctionConstantIndex', 'id': {'data': 216}, 'value_type': 'ConstantBool', 'value': {'data': True}}])
+        self.assertEqual(specs27['km_b.main0.host'], [{'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': False}}])
+        self.assertEqual(specs27['kbm_b.main0.host'], [{'id_type': 'FunctionConstantIndex', 'id': {'data': 216}, 'value_type': 'ConstantBool', 'value': {'data': True}},
+                                                       {'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': False}}])
+        j26 = po.script(self.d, [], [('km_b', 'main0')], po.host_constants('macos', '26.0'))
+        self.assertEqual(j26['function_descriptors']['specialized_function_descriptors'][0]['constant_values'],
+                         [{'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': True}}])
 
     def test_pipelines_from_a_library_image(self):   # one-file libraries (b-<chain>.img, shader_lib.py), as dmsh_build.py writes them: read in place, as plan reads the bases
         self.shader('c1', {'stage': 'cs'}, {'_b': [('main0', False)]})
@@ -474,8 +488,8 @@ class Build(BuildCase):
         self.main('--depth', 'gl')
         self.assertEqual(len(self.calls), 2)
         original = po.script
-        def changed(lib_dir, bases, computes=()):
-            config = original(lib_dir, bases, computes)
+        def changed(lib_dir, bases, computes=(), constants_map=None):
+            config = original(lib_dir, bases, computes, constants_map)
             config['pipeline_descriptors']['render_pipeline_descriptors'][0]['raster_sample_count'] = 4
             return config
         with mock.patch.object(po, 'script', changed):

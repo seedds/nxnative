@@ -24,5 +24,6 @@ The development playtests used `DM_PSO_PREBUILD=0` to compile pipelines on deman
 
 ## Found on this game
 
+- [Open users handed over between programs](../../../docs/reference/services.md#open-users-handed-over-between-programs): preserves the user context for the in-game campaign switch.
 - [A program introduced by an NSP update has no base NCA](../../../docs/reference/packing.md#a-program-introduced-by-an-nsp-update-has-no-base-nca). War of the Chosen is wholly in `v131072` and its RomFS was extracted with strict integrity checks.
 - [Unreal Engine 3 shaders in a shared buffer](../../../docs/reference/shaders.md#unreal-engine-3-shaders-in-a-shared-buffer). The same `UNIS` reader covers both campaigns, resolving 33,034 shader keys for XCOM 2 and 39,939 for War of the Chosen.

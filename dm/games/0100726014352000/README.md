@@ -9,7 +9,9 @@ On the Mac (2026-11-12, from a fresh save): the Blizzard logo movie, the title, 
 | Setting | Where | Why |
 |---|---|---|
 | Offline play without a recent online login | [`patches.py`](patches.py) | the game allows offline play only within 30 days of a Battle.net login; see [Found on this game](#found-on-this-game). Bound to the game: `CUTS` for 1.0.34.0 and the same cut as a function-matched rule (`MATCH_CUTS`) for other builds |
+| `OBS_ZLIB` (`hle_zlib.c`) | [`patches.py`](patches.py) | 1.0.35 (`v2293760`) statically links a slow scalar zlib; `CUTS` and `OBS_ZLIB` route `inflateInit_`, `inflateInit2_`, `inflate` and `inflateEnd` to Apple `libz` |
 | `present_interval display` | [`game.tsv`](game.tsv) | the game asks for interval 2 (30 fps, as on the Switch); its logic runs on its own clock, so at 60 fps the same 3 s walk from the Rogue Encampment's start ends at the same place as at 30 |
+| `depth_mode zero` | [`game.tsv`](game.tsv) | the game sets near = 0 at startup (log: `this run needs ... depth near=0`), so offline pipeline archives use `main0_z` vertex entries to match |
 | 4 GB layout: `mem_reserve 0x100000000`, `app_pool 0xCD500000`, `mem_used 0x4c00000` | `game.tsv` | the survey's guesses held: no system resource, `main` sets a heap of the pool less its modules (3.14 GB on the Mac); the rewritten modules are 72 MB, over the default 64 MB |
 | `shader_groups /data/=data` | `game.tsv` | the CASC storage; see [Shaders](#shaders) |
 
@@ -44,5 +46,5 @@ Game behaviour:
 
 - Not run on the iPhone.
 - No fight yet: the route reached the camp's gate in the 10 minutes of a gameplay test.
-- Long frames in the camp, about six a minute at 30 fps: 80 to 105 ms with submit and GPU at 5 to 7 ms (the game's own CPU work), and single first-use pipeline builds (50 to 90 ms).
+- Long frames in the camp, about six a minute at 30 fps: 80 to 105 ms with submit and GPU at 5 to 7 ms (the game's own CPU work), and single first-use pipeline builds (50 to 90 ms). On `1.0.35` (`v2293760`) at `60 fps` on Apple M4, `DM_HITCH_DUMP=25:25` caught the main thread in `inflate_fast` (`main+0xf43430`), the job wait loop (`main+0x14f7058`), and a mutex wait (`main+0x8dee6c`). Routing `zlib` through `OBS_ZLIB` to Apple `libz` cut `>23 ms` overworld spikes from `32` (`110 s` run) to `3` (`104 s` run). Use `DM_FPS_TARGET=30` if you want smoother pacing without `>16.7 ms` spikes.
 - Only update 1.0.34.0 is registered; the base game alone (v0) is not checked.

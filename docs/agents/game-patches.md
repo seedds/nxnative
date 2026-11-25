@@ -50,6 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: Rise has not been verified with the engine matcher that finds Apollo Justice | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
+| `build` → `engine` | zlib inflate redirected to Apple libz (OBS_ZLIB) | frame rate | blocked: OBS gates have no function-matched form yet | checked: tested on 1.0.35 (v2293760) overworld traversal on Apple M4 (2026-11-25) | 1 | [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md) | 1.0.35 statically links a slow scalar zlib; OBS_ZLIB routes inflateInit2_, inflateInit_, inflate and inflateEnd to Apple libz (hle_zlib.c) |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | cutscene fade scheduling uses the sequence frame rate | frame rate | blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs | checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity | 1 | [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) | the title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
@@ -70,7 +71,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Catherine: Full Body](#catherine-full-body) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
-| [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
+| [Diablo II: Resurrected](#diablo-ii-resurrected) | 8 | 4 | 0 | 1 | 0 | `game`, `build` → `engine` |
 | [Digimon Story Time Stranger](#digimon-story-time-stranger) | 0 | 0 | 0 | 2 | 0 | `game` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -300,10 +301,22 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Diablo II: Resurrected](../../dm/games/0100726014352000/README.md), `0100726014352000`, [patches.py](../../dm/games/0100726014352000/patches.py).
 
 - **`game`**, runtime, at goal, checked: MATCH_CUTS enrolled on 1.0.34.0; the base game has no such check (2026-11-12): offline play without a Battle.net login in the last 30 days. The game's own offline policy (a saved last-online time), which an offline host cannot satisfy; function-matched (MATCH_CUTS) over the game's updates
+- **`build` → `engine`**, frame rate, blocked: OBS gates have no function-matched form yet, checked: tested on 1.0.35 (v2293760) overworld traversal on Apple M4 (2026-11-25): zlib inflate redirected to Apple libz (OBS_ZLIB). 1.0.35 statically links a slow scalar zlib; OBS_ZLIB routes inflateInit2_, inflateInit_, inflate and inflateEnd to Apple libz (hle_zlib.c)
 
 - **1.0.34.0 `main`** `db0507f3…` ([patches.py:9](../../dm/games/0100726014352000/patches.py#L9))
   - cut `+0x1979bc`: offline allowed (last online within 30 days): cset w8,lt → mov w8,#1
   - cut `+0x1979c4`: offline allowed (no "User Last Online" setting): mov w8,wzr → mov w8,#1
+- **1.0.35 `main`** `721f42ea…` ([patches.py:14](../../dm/games/0100726014352000/patches.py#L14))
+  - cut `+0x1979bc`: offline allowed (last online within 30 days): cset w8,lt → mov w8,#1
+  - cut `+0x1979c4`: offline allowed (no "User Last Online" setting): mov w8,wzr → mov w8,#1
+  - cut `+0xf40ef0`: zlib inflateInit2_ → nop; ret (host OBS_ZLIB takes over)
+  - cut `+0xf410a0`: zlib inflateInit_ → nop; ret (host OBS_ZLIB takes over)
+  - cut `+0xf41200`: zlib inflate → nop; ret (host OBS_ZLIB takes over)
+  - cut `+0xf42d50`: zlib inflateEnd → nop; ret (host OBS_ZLIB takes over)
+  - gate 283 at `+0xf40ef0`: OBS_ZLIB kind 1: inflateInit2_ → host libz
+  - gate 27 at `+0xf410a0`: OBS_ZLIB kind 0: inflateInit_ → host libz
+  - gate 539 at `+0xf41200`: OBS_ZLIB kind 2: inflate → host libz
+  - gate 795 at `+0xf42d50`: OBS_ZLIB kind 3: inflateEnd → host libz
 - **function-matched** (`main` of builds without CUTS): offline allowed without a recent Battle.net login: 1 function, 2 cuts
 
 ### Digimon Story Time Stranger

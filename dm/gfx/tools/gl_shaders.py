@@ -221,11 +221,10 @@ def uni_members(refl, ms, prefix, base, f, bools, active):
 
 # GLSL ES 1.00 (#version 100 or unversioned) and legacy desktop GLSL (#version 110 / 120 / 130): `attribute`, `varying`, `texture2D`/`texture3D`, `gl_FragColor`,
 # precision statements and lowp / mediump / highp qualifiers. ES 1.00 promotes to `#version 310 es`; legacy desktop GLSL promotes to `#version 450 core`, preserving
-# desktop implicit int-to-float conversions and sampler types without ES precision qualifiers (such as `sampler3D`). The texture functions stay for fixups() after preprocessing.
+# desktop implicit int-to-float conversions and sampler types without ES precision qualifiers (such as `sampler3D`). Precision statements/qualifiers and texture
+# functions are rewritten after `glslangValidator -E` so comments are stripped and macros (such as `#define LOWPREC lowp`) are expanded first.
 def promote_legacy(t, stage, renamed=None, desktop=False):
     if renamed is None: renamed = {}
-    t = re.sub(r'^[ \t]*precision[ \t]+\w+[ \t]+\w+[ \t]*;\r?[ \t]*\r?\n', '', t, flags=re.M)
-    t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
     t = re.sub(r'\battribute\b', 'in', t)
     t = re.sub(r'\bvarying\b', 'out' if stage == 'vert' else 'in', t)
     if stage == 'frag' and 'gl_FragColor' in t:
@@ -233,8 +232,18 @@ def promote_legacy(t, stage, renamed=None, desktop=False):
     t = rename_identifier(t, 'sample', 'gm_sample', renamed)   # `sample` became a reserved word after ES 1.00 (GameMaker's sprite shaders use it as a variable)
     # `texture` became a built-in function after ES 1.00, and a name declared `texture` redefines it (Fate/hollow ataraxia REMASTERED: `uniform sampler2D texture;`); a call stays
     t = rename_identifier(t, 'texture', 'dm_texture', renamed, keep_calls=True)
-    header = '#version 450 core\n' if desktop else '#version 310 es\nprecision highp float;\nprecision highp int;\n'
-    return header + t
+    return ('#version 450 core\n' if desktop else '#version 310 es\n') + t
+
+def strip_legacy_precision(t, desktop=False):
+    """Strip legacy precision statements and qualifiers after preprocessing (comments gone, macros expanded), then set ES 3.10 defaults."""
+    t = re.sub(r'\bprecision\s+(?:lowp|mediump|highp)\s+\w+\s*;', '', t)
+    t = re.sub(r'\b(?:lowp|mediump|highp)\b[ \t]*', '', t)
+    if desktop: return t
+    lines = t.splitlines()
+    at = 1
+    while at < len(lines) and (not lines[at].strip() or lines[at].lstrip().startswith(('#extension', '#line'))):
+        at += 1
+    return '\n'.join((*lines[:at], 'precision highp float;', 'precision highp int;', *lines[at:])) + ('\n' if t.endswith('\n') else '')
 
 def es100(t, stage, renamed=None):
     return promote_legacy(t, stage, renamed, desktop=False)
@@ -324,15 +333,20 @@ def argument_names(spv):
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
     t = src.decode('latin1'); renamed = {}
-    v = re.search(r'^[ \t]*#version[ \t]+(\d+)[^\n]*\n?', t, re.M)
+    v = re.search(r'^[ \t]*#[ \t]*version[ \t]+(\d+)([^\r\n]*)\r?\n?', t, re.M)
     desktop_legacy = bool(v and v.group(1) in ('110', '120', '130'))
-    if not v or v.group(1) == '100' or desktop_legacy:
+    legacy = not v or v.group(1) == '100' or desktop_legacy
+    if legacy:
         src = promote_legacy(t.replace(v.group(0), '', 1) if v else t, stage, renamed, desktop=desktop_legacy).encode('latin1')
+    elif v and v.group(1) in ('310', '320') and re.match(r'^[ \t]*(?:$|//|/\*)', v.group(2)):
+        # GLSL 310/320 exist only in OpenGL ES; NVIDIA accepts them without `es`, while glslang -E requires it.
+        src = (t[:v.end(1)] + ' es' + t[v.end(1):]).encode('latin1')
     g = os.path.join(tmp, f'{key}.{stage}'); spv = g + '.spv'; msl = os.path.join(tmp, f'{key}_{stage[0]}.metal')
     open(g + '.in', 'wb').write(src)
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
+    if legacy: pre = strip_legacy_precision(pre, desktop=desktop_legacy)
     if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     fixed = fixups(pre, stage, renamed)
     open(g, 'w').write(fixed)

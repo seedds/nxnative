@@ -4,6 +4,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 
 ## Thread creation and cores
 
+### Concurrent first use of scheduler settings
+
+- **Symptom:** TSan reports races when guest threads first yield, sleep briefly, or enter rewritten spin waits together; a concurrent caller could also see `DM_YIELD_BACKOFF`'s default cap before its configured cap and start threshold were parsed.
+- **Cause:** `hle_thread.c` lazily parsed `DM_YIELD_BACKOFF`, `DM_YIELD_CLOCK`, `DM_SPIN`, and `DM_SPIN_POLL` on unlocked hot paths (`backoff_init`, `thr_yield`, `dm_spin_wait`), and `backoff_init` wrote the default cap (`>= 0`) before parsing the environment string.
+- **Fix:** `yield_spin_init` reads all four settings once in `svc_thread_main_init`, before any other guest thread exists (alongside `qos_map_init`, `DM_PREEMPT`, and `DM_WAKE_UNLOCKED`), with safe compile-time defaults on the file-scope statics. Hot-path readers drop their lazy-init branches with no per-call synchronization; defaults, parsing, logging, and scheduling behavior are unchanged.
+- **Check:** `make -C dm/host/tests GAME=<id> scheduler-config-tsan` runs eight simultaneous workers across `yield_backoff_cap`, `yield_backoff_ns`, `thr_yield`, and `dm_spin_wait` in fresh processes for default, custom, disabled, and empty environment settings under TSan; `t_pollwait`, `t_clockwait`, and `t_preempt` also pass.
+- **Found on:** a code audit (PR #2031), with host unit tests; no game failure is known.
+
 ### Publishing a new thread's scheduler fields
 
 - **Symptom:** TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411).
@@ -86,6 +94,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Fix:** the pause takes a reference (`thr_t.refs`, the count synchronization waits already take) before the loop and drops it with `thr_put` after; the last holder of a closed, exited thread frees it.
 - **Check:** `t_pause` exit_and_close_during_pause: a pause waits on a thread in host code, its handle is closed and it exits. Before, ASan found the use-after-free; after, the pause returns and the object is freed.
 - **Found on:** a code audit, with host unit tests; no game failure is known.
+
+### A pause before StartThread, a second pause and a resume without a pause succeeded
+
+- **Symptom:** none seen in a game. `SetThreadActivity` returned success where Horizon answers `InvalidState` (0xFA01), and a thread paused before `StartThread` ran once started while the requester believed it stopped (GitHub issue #1855).
+- **Cause:** the SVC checked only the handle and the caller's own thread (returning `InvalidState` rather than `Busy`). A pause of a thread not yet started or already exited set `paused` at once (`thread_main` waits only for `started`, so the thread entered guest code with the request pending and no handler to stop it), a second pause or a resume of a thread that was not paused succeeded and changed nothing, any activity value other than 1 was treated as a resume, and concurrent `SetThreadActivity` / `GetThreadContext3` calls were not serialized across an in-flight pause wait (a concurrent resume could clear `pause_req` mid-loop and strand the pauser). Horizon's `svc::SetThreadActivity` / `svc::GetThreadContext3` (`kern_svc_activity.cpp`, `kern_svc_thread.cpp`) reject activity values outside `{0, 1}` with `InvalidEnumValue` (0xF001) and the caller's own thread with `Busy` (0xF401); `KThread::SetActivity` / `KThread::GetThreadContext3` (`kern_k_thread.cpp`) serialize on `m_activity_pause_lock`, accept only a Waiting or Runnable thread with no matching request pending (`InvalidState`, 0xFA01), and zero the context without failing if a paused thread has since exited.
+- **Fix:** `hle_thread.c` (SVCs 0x32 and 0x33) validates the activity enum (`R_BAD_ENUM`), answers `R_BUSY` for the caller's own thread, serializes `SetThreadActivity` and `GetThreadContext3` per target across in-flight pause waits (`act_busy` / `act_waiters` under `G`, holding a reference via `thr_t.refs`), and answers `R_BAD_STATE` without changing state for unstarted/exited threads, duplicate pauses and unpaused resumes; a pause sets `paused` at once only for a thread inside an SVC. `thread_exit` clears `svc_regs` / `ctx_ok` and broadcasts `pcv` if a pause is pending, so a thread that exits during a pause wakes the requester at once, a subsequent pause or resume answers `R_BAD_STATE`, and `GetThreadContext3` on a paused exited thread returns zeroed context without reading dead stack memory.
+- **Check:** `t_pause`'s `invalid_states` (self `0xF401` on both SVCs, invalid enum `0xF001`, pause/resume before `StartThread`, pause/resume/`GetThreadContext3` on exited threads, unpaused resume, duplicate pause with context preserved, duplicate resume) and `concurrent_activity_serialized` (`GetThreadContext3` and resume racing an in-flight host-code pause). `t_pause` and `t_pause_stress` pass plain and under ASan/UBSan; `t_pause`'s `invalid_states` / `concurrent_activity_serialized` and the `hle_thread.c` TSan tests pass with zero TSan warnings.
+- **Found on:** no game. IL2CPP pauses only threads attached to its runtime, which have started; a collector that pauses a thread list while another thread starts new ones would see the difference.
 
 ### SVCs leave the stack below sp untouched
 

@@ -176,6 +176,129 @@ int main(void) { @autoreleasepool {
     CHECK(!g_treg[5].sp, "gone descriptor removed without reading freed pool object");
     CHECK(!munmap(dead, page), "temporary object page released");
 
+    // Sparse buffer-backed textures (LINEAR and TARGET_BUFFER) across a sparse run merge (mtl_pool_replace):
+    // mapping an adjacent range replaces the run's Metal buffer without touching the texture's own pages.
+    // The old run buffer stays resident until the texture refreshes onto the new run buffer, block-linear
+    // textures in the same merged run are not re-uploaded, and unmapping drops the texture so the run buffer retires.
+    {
+        const uint32_t L1 = 0xff22aa44, L2 = 0xff55cc88;
+        for (unsigned i = 0; i < 0x10000 / 4; i++) { ((uint32_t *)(mem + 0x60000))[i] = L1; ((uint32_t *)(mem + 0x70000))[i] = L2; }
+        const uint64_t lv = 0x200000;
+        CHECK(map(&virt, &phys, lv, 0x60000, 0x10000), "linear sparse run mapped");
+        NVNtexture ltx, bltx;
+        h_nvnTextureBuilderSetDefaults(&tb);
+        h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D);
+        h_nvnTextureBuilderSetWidth(&tb, 64); h_nvnTextureBuilderSetHeight(&tb, 64);
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+        h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_LINEAR);
+        h_nvnTextureBuilderSetStride(&tb, 256);
+        h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&virt, lv);
+        CHECK(h_nvnTextureInitialize(&ltx, &tb), "linear texture in sparse pool");
+        h_nvnTextureBuilderSetDefaults(&tb);
+        h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D);
+        h_nvnTextureBuilderSetWidth(&tb, 32); h_nvnTextureBuilderSetHeight(&tb, 32);
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+        h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+        h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&virt, lv);   // one 64 KB sparse tile [lv, lv+0x10000), strictly inside the first run
+        CHECK(h_nvnTextureInitialize(&bltx, &tb), "block-linear texture in same sparse run");
+        const tex_t *lt = (const tex_t *)&ltx, *blt = (const tex_t *)&bltx;
+        mtl_reg_tex(6, lt, NULL); mtl_reg_tex(7, blt, NULL);
+        g_seen_done[0] |= (1u << 6) | (1u << 7); g_seen_typed[0][0] |= (1u << 6) | (1u << 7);
+        next_sub();
+        pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+        CHECK(gpu_read(table, 6) == L1, "sparse linear texture reads mapped run");
+        CHECK(gpu_read(table, 7) == L1, "block-linear texture in same run reads mapped run");
+        id<MTLTexture> lt_old = tex_get(lt->serial);
+        id<MTLBuffer> b_old = lt_old ? lt_old.buffer : nil;
+        CHECK(lt_old && b_old, "sparse linear texture is backed directly by the run buffer");
+        pthread_mutex_lock(&g_res_mu); int old_res = b_old && [g_res_objects containsObject:b_old]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(old_res, "old run buffer is resident");
+        // Verify DM_RES_CHECK=1 visits bindless registered views and their backing buffers.
+        g_res_check_on = 1;
+        treg_res_check();
+        pthread_mutex_lock(&g_res_mu);
+        NSArray *u_tex = g_res_last_use ? [g_res_last_use objectForKey:lt_old] : nil;
+        NSArray *u_buf = g_res_last_use ? [g_res_last_use objectForKey:b_old] : nil;
+        pthread_mutex_unlock(&g_res_mu);
+        g_res_check_on = 0;
+        CHECK(u_tex && u_buf && [u_buf[0] unsignedLongLongValue] == g_fence + 1, "DM_RES_CHECK tracks bindless linear texture and its backing run buffer");
+        uint64_t reup_before = g_pkg_reuploads;
+        // Map the adjacent 64 KB run: vrun_set merges [lv, lv+0x10000) and [lv+0x10000, lv+0x20000) into a new Metal buffer.
+        CHECK(map(&virt, &phys, lv + 0x10000, 0x70000, 0x10000), "adjacent range mapped to trigger run merge");
+        mtl_sub_commit(); mtl_drain();
+        pthread_mutex_lock(&g_res_mu); int kept_res = [g_res_objects containsObject:b_old]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(kept_res, "replaced run buffer stays resident while the linear texture still references it");
+        mtl_sub_begin();   // treg_sparse_notes notes the linear texture's serial, not the block-linear one
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t ep = treg_ep();
+        int lin_invalid = g_treg[6].view_ser != ep;
+        int bl_valid = g_treg[7].view_ser == ep;
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(lin_invalid && bl_valid, "run merge invalidates only the buffer-backed linear texture, not the block-linear texture");
+        pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+        CHECK(gpu_read(table, 6) == L1, "linear texture reads cleanly after run merge");
+        CHECK(g_pkg_reuploads == reup_before, "block-linear texture in merged run is not re-uploaded");
+        id<MTLTexture> lt_new = tex_get(lt->serial);
+        id<MTLBuffer> b_new = lt_new ? lt_new.buffer : nil;
+        CHECK(lt_new && b_new && b_new != b_old, "linear texture switched to the merged run's new Metal buffer");
+        next_sub();   // drain retire_resume(b_old)
+        pthread_mutex_lock(&g_res_mu); int old_gone = ![g_res_objects containsObject:b_old]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(old_gone, "old run buffer leaves residency once the linear texture switches to the new buffer");
+        // Unmapping the linear texture's range drops the texture and releases the run buffer.
+        CHECK(map(&virt, NULL, lv, 0, 0x10000), "linear texture's range unmapped");
+        next_sub();
+        pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
+        CHECK(tex_get(lt->serial) == nil, "unmapping drops the sparse linear texture");
+        next_sub();
+        pthread_mutex_lock(&g_res_mu); int new_gone = ![g_res_objects containsObject:b_new]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(new_gone, "unmapped run buffer leaves residency instead of staying pinned");
+        mtl_reg_tex(6, NULL, NULL); mtl_reg_tex(7, NULL, NULL);
+        h_nvnTextureFinalize(&ltx); h_nvnTextureFinalize(&bltx);
+
+        // Same run-merge lifetime check for TARGET_BUFFER (including clipped size extending past the first run).
+        const uint64_t bv = 0x300000;
+        CHECK(map(&virt, &phys, bv, 0x60000, 0x10000), "buffer texture sparse run mapped");
+        NVNtexture btx;
+        h_nvnTextureBuilderSetDefaults(&tb);
+        h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_BUFFER);
+        h_nvnTextureBuilderSetWidth(&tb, 0x20000 / 4);   // 128 KB descriptor over a 64 KB run: exercises clipped mtl_addr(..., 1)
+        h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32UI);
+        h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&virt, bv);
+        CHECK(h_nvnTextureInitialize(&btx, &tb), "clipped buffer texture in sparse pool");
+        const tex_t *bt = (const tex_t *)&btx;
+        mtl_reg_tex(8, bt, NULL);
+        next_sub();
+        os_unfair_lock_lock(&g_rmu); void *bv_old = tex_fast(8); os_unfair_lock_unlock(&g_rmu);
+        id<MTLTexture> bt_old = (__bridge id<MTLTexture>)bv_old;
+        id<MTLBuffer> tb_old = bt_old ? bt_old.buffer : nil;
+        CHECK(bt_old && tb_old, "clipped buffer texture resolves onto the first run buffer");
+        CHECK(map(&virt, &phys, bv + 0x10000, 0x70000, 0x10000), "adjacent range mapped to merge buffer texture's run");
+        mtl_sub_commit(); mtl_drain();
+        pthread_mutex_lock(&g_res_mu); int tb_kept = [g_res_objects containsObject:tb_old]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(tb_kept, "replaced run buffer stays resident while buffer texture still references it");
+        mtl_sub_begin();
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t ep2 = treg_ep();
+        int tb_invalid = g_treg[8].view_ser != ep2;
+        void *bv_new = tex_fast(8);
+        os_unfair_lock_unlock(&g_rmu);
+        id<MTLTexture> bt_new = (__bridge id<MTLTexture>)bv_new;
+        id<MTLBuffer> tb_new = bt_new ? bt_new.buffer : nil;
+        CHECK(tb_invalid && bt_new && tb_new && tb_new != tb_old, "buffer texture invalidates on run merge and switches to the merged run buffer");
+        next_sub();
+        pthread_mutex_lock(&g_res_mu); int tb_old_gone = ![g_res_objects containsObject:tb_old]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(tb_old_gone, "buffer texture's old run buffer leaves residency after switch");
+        CHECK(map(&virt, NULL, bv, 0, 0x20000), "buffer texture's range unmapped");
+        next_sub();
+        os_unfair_lock_lock(&g_rmu); void *bv_none = tex_fast(8); os_unfair_lock_unlock(&g_rmu);
+        CHECK(bv_none == NULL && tex_get(bt->serial) == nil, "unmapping drops the sparse buffer texture");
+        next_sub();
+        pthread_mutex_lock(&g_res_mu); int tb_new_gone = ![g_res_objects containsObject:tb_new]; pthread_mutex_unlock(&g_res_mu);
+        CHECK(tb_new_gone, "unmapped buffer texture's run buffer leaves residency");
+        mtl_reg_tex(8, NULL, NULL);
+        h_nvnTextureFinalize(&btx);
+    }
+
     h_nvnTextureFinalize(&tx);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     mtl_sub_commit(); mtl_drain(); free(mem);

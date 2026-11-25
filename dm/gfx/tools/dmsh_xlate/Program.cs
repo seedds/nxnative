@@ -23,7 +23,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-static class SwshXlate
+static partial class SwshXlate
 {
     // NVN's handle tables in c[2], byte offsets, 8 bytes per slot (one layout in every game, see dm/gfx/tools/dmsh_build.py): combined textures 0x20 + 8 r, images 0x120 + 8 r (8 slots),
     // separate textures 0x168 + 8 r (slot 128 + r), separate samplers 0x568 + 8 r
@@ -204,11 +204,9 @@ static class SwshXlate
 
     static int Main(string[] args)
     {
-        if (args.Length == 1 && args[0] == "--source-sha")   // first 16 digits of the sha256 of the embedded Program.cs + csproj (same convention as dmsh_chain.py)
+        if (args.Length == 1 && args[0] == "--source-sha")   // stamped at publish time from dmsh_chain.py --xlate-source-sha
         {
-            var asm = typeof(SwshXlate).Assembly; var ms = new MemoryStream();
-            foreach (var n in new[] { "src0", "src1" }) asm.GetManifestResourceStream(n).CopyTo(ms);
-            Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(ms.ToArray()))[..16].ToLowerInvariant());
+            Console.WriteLine(SourceSha);
             return 0;
         }
         var jobs = JsonNode.Parse(File.ReadAllText(args[0])).AsArray(); string outDir = args[1]; Directory.CreateDirectory(outDir);

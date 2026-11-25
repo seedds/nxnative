@@ -84,6 +84,7 @@ def build(gid, patched, control, other_programs=()):
         return macros[name].strip('"')
 
     def shown(cond, n):
+        if '&' in cond: return all(shown(c, n) for c in cond.split('&'))
         if cond == 'always': return True
         if cond == 'mac-mic': return mac_mic
         if cond == 'vi-hdr':

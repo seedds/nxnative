@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Give a Switch module's data segment a 16 KB page of its own: move ro and data (and bss) up by whole 4 KB pages so data starts at or past the end of text rounded up to 16 KB.
+"""Give a Switch module's writable data a 16 KB page of its own: move data and bss up by whole 4 KB pages so data starts at or past the end of text rounded up to 16 KB.
 Usage: mod_layout.py <in.nso|in.nro> [out.nro]   (prints what it moves; writes out.nro only for an NRO)
 
 Why: Horizon maps modules at 4 KB, the Mac and iOS hosts at 16 KB. loader.c seals [0, text_end rounded up to 16 KB) read + execute (and gen_embed.py puts the same range in __TEXT),
 so a module whose data starts below that boundary has read-only data: the first R_AARCH64_RELATIVE into it stops the game with SIGBUS in relocate()
-(FINAL FANTASY VIII Remastered: Math.nro is text 0x1000, ro 0x1000, data 0x1000; Platform.nro text 0x1000, ro 0x2000, data 0x1000). Moving ro with data keeps every ro <-> data
-distance; only references between text and the moved part change, by D:
-  - the NRO header (when NRO0: module size, text / ro / data offsets), the MOD0 offset at +4, and MOD0's offsets whose target and MOD0 lie on different sides
+(FINAL FANTASY VIII Remastered: Math.nro is text 0x1000, ro 0x1000, data 0x1000; Platform.nro text 0x1000, ro 0x2000, data 0x1000). Keep ro in place to preserve the
+linker's relative references between text and ro, including signed jump-table entries. References crossing into or out of the moved part change by D:
+  - the NRO header (when NRO0: module size, ro size and data offset), the MOD0 offset at +4, and MOD0's offsets whose target and MOD0 lie on different sides
   - the dynamic section's address tags, symbol values (excluding STT_TLS), RELA / JMPREL offsets and RELATIVE (and symbol-less ABS64) addends, DT_RELR offsets and slot addends
   - in text: adrp (D is whole 4 KB pages, so the low 12 bits an add / ldr supplies stay right), adr and literal loads whose target is in the moved part
   - .eh_frame_hdr's table, .eh_frame's pc-relative / data-relative pointers, and any LSDA explicit lpstart pointer
@@ -45,20 +45,20 @@ def relayout_module(mod):
     if not D: return mod, 0, []
     if to or tsz > ro or ro + rsz > do or do + dsz != len(mod.image) or ro % PAGE or do % PAGE or D % PAGE:
         raise Error(f'unexpected segments text {to:#x}+{tsz:#x} ro {ro:#x}+{rsz:#x} data {do:#x}+{dsz:#x} image {len(mod.image):#x}')
-    mv = lambda a: a + D if a >= ro else a
+    mv = lambda a: a + D if a >= do else a
     old = bytes(mod.image)
-    new = bytearray(old[:ro]) + bytearray(D) + bytearray(old[ro:])
+    new = bytearray(old[:do]) + bytearray(D) + bytearray(old[do:])
     n = {'adrp': 0, 'adr': 0, 'literal': 0, 'reloc': 0, 'relr': 0, 'sym': 0, 'eh': 0, 'dyn': 0}
 
     def put(fmt, o_old, v): struct.pack_into(fmt, new, mv(o_old), v)
 
-    # NRO header (in text, not moved): update offsets so loader.c's NRO data check (m->base + 0x30 == m->data_off) agrees
+    # An NRO's segments are contiguous, so include the padding in its read-only segment.
     if len(old) >= 0x40 and old[0x10:0x14] == b'NRO0':
         size = struct.unpack_from('<I', old, 0x18)[0]
         if size != len(old): raise Error(f'NRO header size {size:#x} != image {len(old):#x}')
+        rsz += D
         struct.pack_into('<I', new, 0x18, size + D)
-        struct.pack_into('<I', new, 0x24, tsz + D)
-        struct.pack_into('<I', new, 0x28, ro + D)
+        struct.pack_into('<I', new, 0x2c, rsz)
         struct.pack_into('<I', new, 0x30, do + D)
 
     # MOD0: offset at +4, and six offsets relative to MOD0 itself
@@ -138,11 +138,11 @@ def relayout_module(mod):
             imm = sx(((w >> 5) & 0x7FFFF) << 2 | (w >> 29) & 3, 21)
             if w >> 31:
                 t = (a & ~0xFFF) + (imm << 12)
-                if t < ro: continue
+                if t < do: continue
                 imm += D >> 12; n['adrp'] += 1
             else:
                 t = a + imm
-                if t < ro: continue
+                if t < do: continue
                 imm += D; n['adr'] += 1
             if not -(1 << 20) <= imm < 1 << 20: raise Error(f'adr(p) at {a:#x} out of range after the move')
             imm &= 0x1FFFFF
@@ -150,14 +150,18 @@ def relayout_module(mod):
             struct.pack_into('<I', new, a, w)
         elif w & 0x3B000000 == 0x18000000 and (w & 0xFF000000) != 0xDC000000:   # ldr / ldrsw / prfm (literal), excluding unallocated opc=3 V=1
             imm = sx((w >> 5) & 0x7FFFF, 19); t = a + imm * 4
-            if t < ro: continue
+            if t < do: continue
             imm += D >> 2
             if not -(1 << 18) <= imm < 1 << 18: raise Error(f'literal load at {a:#x} out of range after the move')
             struct.pack_into('<I', new, a, (w & 0xFF00001F) | (imm & 0x7FFFF) << 5); n['literal'] += 1
 
     # .eh_frame_hdr and .eh_frame (old offsets; a pointer read at o from base b to target t is rewritten as mv(t) - mv(b))
     ehs, ehe = m0 + mod0[3], m0 + mod0[4]
-    if ehe - ehs >= 8 and old[ehs] == 1:
+    has_eh_hdr = ehe - ehs >= 8 and old[ehs] == 1
+    has_raw_eh = (not has_eh_hdr and ehe == ehs and mod0[3] != 0 and
+                  ehs + 8 <= len(old) and struct.unpack_from('<I', old, ehs)[0] not in (0, 0xFFFFFFFF) and
+                  struct.unpack_from('<I', old, ehs + 4)[0] == 0)
+    if has_eh_hdr or has_raw_eh:
         def fix(o, enc, optional=False):
             """rewrite the encoded pointer at old offset o; returns (old target, size)"""
             enc &= 0x7F   # strip DW_EH_PE_indirect: adjust the stored pointer itself, not its dereference
@@ -173,20 +177,21 @@ def relayout_module(mod):
             if not lo_v <= nv <= hi_v: raise Error(f'encoded pointer {enc:#x} at {o:#x} overflows after the move ({nv:#x})')
             if nv != v: put(f, o, nv); n['eh'] += 1
             return t, sz
-        _, penc, cenc, tenc = old[ehs:ehs + 4]
-        o = ehs + 4
-        ehf = None
-        if penc != 0xFF:
-            ehf, s = fix(o, penc); o += s
-        if cenc == 0xFF:
-            cnt = 0
-        elif (cenc & 0xF) in (0x3, 0xB):
-            cnt = struct.unpack_from('<I' if (cenc & 0xF) == 3 else '<i', old, o)[0]; o += 4
-        else:
-            raise Error(f'eh_frame_hdr count encoding {cenc:#x}')
-        if tenc not in (0xFF, 0):
-            for _ in range(cnt):
-                o += fix(o, tenc)[1]; o += fix(o, tenc)[1]
+        ehf = ehs if has_raw_eh else None
+        if has_eh_hdr:
+            _, penc, cenc, tenc = old[ehs:ehs + 4]
+            o = ehs + 4
+            if penc != 0xFF:
+                ehf, s = fix(o, penc); o += s
+            if cenc == 0xFF:
+                cnt = 0
+            elif (cenc & 0xF) in (0x3, 0xB):
+                cnt = struct.unpack_from('<I' if (cenc & 0xF) == 3 else '<i', old, o)[0]; o += 4
+            else:
+                raise Error(f'eh_frame_hdr count encoding {cenc:#x}')
+            if tenc not in (0xFF, 0):
+                for _ in range(cnt):
+                    o += fix(o, tenc)[1]; o += fix(o, tenc)[1]
         # walk .eh_frame
         if ehf is not None:
             cies, o = {}, ehf
@@ -230,9 +235,9 @@ def relayout_module(mod):
                                 if lpe != 0xFF: fix(lsda + 1, lpe)
                 o = end
 
-    notes = [f'moved ro and data by {D:#x}: ro {ro:#x} -> {ro + D:#x}, data {do:#x} -> {do + D:#x}',
+    notes = [f'moved data by {D:#x}: {do:#x} -> {do + D:#x}',
              ', '.join(f'{k} {v}' for k, v in n.items())]
-    return nso.Module(new, ((0, tsz), (ro + D, rsz), (do + D, dsz)), mod.bss, mod.build_id), D, notes
+    return nso.Module(new, ((0, tsz), (ro, rsz), (do + D, dsz)), mod.bss, mod.build_id), D, notes
 
 
 def main():

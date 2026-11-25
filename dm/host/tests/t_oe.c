@@ -100,6 +100,55 @@ static void plan_checks(void) {
     prog_plan_free(&P);
     unlink(path); unlink(tsv); if (chdir(old)) {} rmdir(dir);
 }
+static int lang_is(const char *want) {
+    uint64_t got = h_oe_GetLang(); char exp[8] = {0};
+    strncpy(exp, want, sizeof exp - 1);
+    return !memcmp(&got, exp, 8);
+}
+static int write_nacp_flag(const char *path, uint32_t flag) {
+    uint8_t nacp[0x4000] = {0};
+    nacp[0x302C] = (uint8_t)(flag & 0xff); nacp[0x302D] = (uint8_t)((flag >> 8) & 0xff);
+    nacp[0x302E] = (uint8_t)((flag >> 16) & 0xff); nacp[0x302F] = (uint8_t)((flag >> 24) & 0xff);
+    FILE *f = fopen(path, "wb"); if (!f) return 0;
+    size_t n = fwrite(nacp, 1, sizeof nacp, f); fclose(f);
+    return n == sizeof nacp;
+}
+static void lang_checks(void) {
+    char dir[] = "/tmp/t_oe_lang.XXXXXX", nacp[4200], other[4200], rom[4200];
+    if (!mkdtemp(dir)) { CHECK(0, "lang: a scratch folder"); return; }
+    snprintf(nacp, sizeof nacp, "%s/control.nacp", dir);
+    snprintf(other, sizeof other, "%s/other.nacp", dir);
+    snprintf(rom, sizeof rom, "%s/RomFS", dir);
+    unsetenv("DM_LANG"); unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom, 1);
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: missing control.nacp falls back to en-US / Americas");
+    CHECK(write_nacp_flag(nacp, (1u << 1) | (1u << 2)), "lang: write en-GB + ja control.nacp");
+    CHECK(lang_is("en-GB") && h_oe_GetRegion() == 2, "lang: en-GB without en-US beside DM_ROMFS selects en-GB / Europe");
+    CHECK(write_nacp_flag(nacp, (1u << 0) | (1u << 1)), "lang: write en-US + en-GB control.nacp");
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: en-US preferred when supported");
+    CHECK(write_nacp_flag(nacp, 1u << 2), "lang: write ja-only control.nacp");
+    CHECK(lang_is("ja") && h_oe_GetRegion() == 0, "lang: single non-English language selects ja / Japan");
+    CHECK(write_nacp_flag(nacp, 1u << 14), "lang: write zh-Hans-only control.nacp");
+    CHECK(lang_is("zh-Hans") && h_oe_GetRegion() == 4, "lang: zh-Hans selects zh-Hans / HK-TW-KR");
+    CHECK(write_nacp_flag(nacp, 1u << 16), "lang: write pl-only control.nacp");
+    CHECK(lang_is("pl") && h_oe_GetRegion() == 2, "lang: bit 16 selects pl");
+    CHECK(write_nacp_flag(nacp, 1u << 17), "lang: write th-only control.nacp");
+    CHECK(lang_is("th") && h_oe_GetRegion() == 2, "lang: bit 17 selects th");
+    CHECK(write_nacp_flag(nacp, 0), "lang: write empty-flag control.nacp");
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: zero SupportedLanguageFlag falls back to en-US");
+    CHECK(write_nacp_flag(nacp, 1u << 18), "lang: write unknown-bit control.nacp");
+    CHECK(lang_is("en-US"), "lang: unknown SupportedLanguageFlag bit falls back to en-US");
+    FILE *f = fopen(nacp, "wb"); if (f) { uint8_t short_buf[16] = {0}; fwrite(short_buf, 1, sizeof short_buf, f); fclose(f); }
+    CHECK(lang_is("en-US"), "lang: truncated control.nacp falls back to en-US");
+    CHECK(write_nacp_flag(nacp, 1u << 2) && write_nacp_flag(other, 1u << 3), "lang: write both nacp files");
+    setenv("DM_CONTROL_NACP", other, 1);
+    CHECK(lang_is("fr") && h_oe_GetRegion() == 2, "lang: DM_CONTROL_NACP takes precedence over DM_ROMFS sibling");
+    setenv("DM_LANG", "", 1);
+    CHECK(lang_is("fr"), "lang: empty DM_LANG falls back to control.nacp");
+    setenv("DM_LANG", "zh-CN", 1);
+    CHECK(lang_is("zh-CN") && h_oe_GetRegion() == 4, "lang: explicit DM_LANG passes through unchanged over control.nacp");
+    unsetenv("DM_LANG"); unsetenv("DM_CONTROL_NACP"); unsetenv("DM_ROMFS");
+    unlink(nacp); unlink(other); rmdir(dir);
+}
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "inactivity extension starts disabled");
@@ -213,5 +262,6 @@ int main(void) {
     reset(); h_oe_EnableCrashReport(); h_oe_DisableCrashReport();
     CHECK(empty() && h_oe_GetFocus() == 1, "crash-report service switches require no SDK proxy or notifications");
     plan_checks();
+    lang_checks();
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

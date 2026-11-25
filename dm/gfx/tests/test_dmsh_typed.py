@@ -52,7 +52,18 @@ class Typed(unittest.TestCase):
         full = dmsh_side.shared_body(MAIN) + dmsh_entry.fs_uint(MAIN)
         _, info = dmsh_side.unit(full)
         self.assertEqual(info, {'alpha': ['main0_a'], 'logic': []})
-        self.assertEqual(dmsh_entry.typed_ops(full), {'alpha': True, 'logic': True})
+        self.assertEqual(dmsh_entry.typed_ops(full), {'alpha': True, 'logic': True, 'dual': True})
+        self.assertIn('float4 m_1_du [[color(0), index(1), function_constant(dm_du)]];', full)
+        self.assertIn('constant bool dm_uf1 = !dm_ui1 && !dm_si1 && !dm_du;', full)
+        self.assertIn('constant bool dm_uf2 = !dm_ui2 && !dm_si2 && !dm_du;', full)
+
+    def test_dual_source_gates(self):   # dual-source requires matching widths on colours 0 and 1 and no untyped colour >= 1
+        one = MAIN.replace('    float4 m_1 [[color(1)]];\n', '').replace('    out.m_1 = as_type<float4>(uint4(0x3e800000u, 0xbf000000u, 0x3f800000u, 0x40400000u));\n', '')
+        self.assertFalse(dmsh_entry.typed_ops(dmsh_entry.fs_uint(one))['dual'])
+        mismatch = MAIN.replace('float4 m_1 [[color(1)]];', 'float2 m_1 [[color(1)]];')
+        self.assertFalse(dmsh_entry.typed_ops(dmsh_entry.fs_uint(mismatch))['dual'])
+        half_c2 = MAIN.replace('float m_2 [[color(2)]];', 'half m_2 [[color(2)]];')
+        self.assertFalse(dmsh_entry.typed_ops(dmsh_entry.fs_uint(half_c2))['dual'])
 
     def test_reflection_classes(self):   # what main0 declares, which the host compares with the pipeline's targets (pso_cls)
         r = dmsh_reflect.raster_facts('ps', MAIN.replace('float4 m_1', 'uint4 m_1').replace('float m_2', 'int m_2'))

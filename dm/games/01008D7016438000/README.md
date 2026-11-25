@@ -20,7 +20,7 @@ No `patches.py`, no `sdk_patches.py` cut for its `sdk` build (`2d369d99…`), no
 
 ## Found on this game
 
-Nothing: no host change was needed.
+- **Guest clock frozen and clock reads parked during NVN `mtl_prepare()` and `pso4_init()`** (`hle_os.c`, `nvn_mtl.m`): [Guest threads running ahead during the prepare step or archive open](../../../docs/reference/nvn-objects.md#guest-threads-running-ahead-during-the-prepare-step-or-archive-open) (reported on this release from a USB 2.0 disk in PR #2936).
 
 ## Open
 

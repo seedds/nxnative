@@ -692,12 +692,12 @@ def inline_in_containers(path):
 
 def pak_shader_sources(path, key=None):
     """(scan inline packages or adjacent IoStore bundles, try extracting shader archives).
-    Versions 4 and ordinary v8 use the inline scan. Short v8 and v9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
+    Version 4 uses the inline scan. Versions 8 and 9 can supply both sources: .ushaderbytecode for extraction, and .uexp, a global shader cache or adjacent inline export bundles.
     Version 11 uses the inline scan when its directory names no .ushaderbytecode and names either .uexp or a global shader cache beside inline export bundles. An empty v11 index supplies neither.
     Encrypted paks with no key that can hold shared archives are sent for extraction so it can report the missing key."""
     with open(path, 'rb') as f:
-        enc, ioff, isz, methods, ver = footer(f)
-        if ver == 9 or ver == 8 and len(methods) == 4:
+        enc, ioff, isz, _, ver = footer(f)
+        if ver in (8, 9):
             if enc and not key: return False, True
             pak = Pak(path, key)
             with pak.f:
@@ -725,7 +725,7 @@ def inline_shaders(path, key=None):
 
 def unreal_paks(romfs, inline=None, mains=()):
     """Unreal paks under the RomFS. inline=None lists all parsed paks, True selects the inline scan, False selects archive extraction (pak_shader_sources).
-    A mixed short v8 or v9 pak appears in both selections. mains: the ExeFS mains whose key opens an encrypted index (Keys)."""
+    A mixed v8 or v9 pak appears in both selections. mains: the ExeFS mains whose key opens an encrypted index (Keys)."""
     out, keys = [], Keys(mains)
     for p in paks(romfs):
         try: k = keys(p) if mains else None

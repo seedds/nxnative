@@ -282,12 +282,15 @@ static void ds4_send(int p) {
 }
 // As the emulators feed SDL: the strong motor follows the low band and the weak one the high band, mostly from the left and the right motor
 // respectively, linearly. The combined level of the Core Haptics route (dm_haptics_level) would run both motors on either band.
+static void erm_mix(const dm_haptic_state *s, uint8_t out[2]) {
+    const dm_vibration *l = &s->motor[0], *r = &s->motor[1];
+    out[0] = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
+    out[1] = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+}
 static void ds4_apply(dm_haptic_state s) {
     ds4_out *o = &ds4[s.player];
     if (!o->dev) return;
-    const dm_vibration *l = &s.motor[0], *r = &s.motor[1];
-    o->motor[0] = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
-    o->motor[1] = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+    erm_mix(&s, o->motor);
     if (o->motor[0] == o->sent[0] && o->motor[1] == o->sent[1]) return;
     ds4_send(s.player);
 }
@@ -411,6 +414,101 @@ static void pro_release(int p) {
     if (o->dev && memcmp(o->sent, jc1_neutral_rumble, 8)) pro_send(self.player, jc1_neutral_rumble);
 }
 @end
+// An 8BitDo Ultimate 2 Wireless in its own mode (2DC8:6012, firmware 1.03 and later): GameController lists it with no haptics localities ("localities none,
+// 0 channels"), so Core Haptics cannot drive it. Its two rotating motors take output report 0x05 ({0x05, low motor, high motor, 0, 0}), as SDL's hidapi
+// 8BitDo driver sends it. Changes are paced to ABITDO_MIN_NS with peak-hold across the pacing interval so 5 ms pulses are not dropped and Bluetooth LE is
+// not flooded at 200 Hz, an active level is refreshed every ABITDO_REFRESH_NS, and a normal stop sends ABITDO_STOPS zero reports so a lost BLE stop does not
+// leave the motors running. Uses the same linear erm_mix (DM_RUMBLE_GAIN, DM_RUMBLE_MIN) as the DualShock 4 route; only controllers with no localities of
+// their own take it.
+#define ABITDO_MIN_NS     20000000ull
+#define ABITDO_REFRESH_NS 50000000ull
+enum { ABITDO_STOPS = 3 };
+typedef struct {
+    IOHIDDeviceRef dev;
+    uint64_t id, gen, last, due;   // id: its registry entry; gen: cancels stale dispatch_after ticks; last/due: CLOCK_MONOTONIC ns
+    uint8_t cur[2], peak[2], sent[2];
+    int stops;                     // zero reports still to send on a normal transition to silence
+    BOOL armed;
+} abitdo_out;
+static abitdo_out abitdo[DM_PLAYERS];
+static void abitdo_want(const abitdo_out *o, uint8_t out[2]) {
+    for (int i = 0; i < 2; i++) out[i] = o->peak[i] ? o->peak[i] : o->cur[i];
+}
+static BOOL abitdo_send(int p, const uint8_t m[2]) {
+    abitdo_out *o = &abitdo[p]; const uint8_t r[5] = {0x05, m[0], m[1], 0, 0};
+    IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, sizeof r);
+    o->last = now_ns();
+    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: 8BitDo output report 0x05: IOReturn 0x%x\n", e); return NO; }
+    o->sent[0] = m[0]; o->sent[1] = m[1];
+    return YES;
+}
+static void abitdo_step(int p);
+static void abitdo_arm(int p, uint64_t t, uint64_t target) {
+    abitdo_out *o = &abitdo[p];
+    if (o->armed && o->due <= target) return;
+    uint64_t gen = ++o->gen; o->armed = YES; o->due = target;
+    int64_t wait = target > t ? (int64_t)(target - t) : 0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, wait), queue, ^{
+        if (abitdo[p].gen != gen) return;
+        abitdo[p].armed = NO;
+        abitdo_step(p);
+    });
+}
+static void abitdo_step(int p) {
+    abitdo_out *o = &abitdo[p];
+    if (!o->dev) return;
+    uint8_t m[2];
+    abitdo_want(o, m);
+    BOOL on = m[0] || m[1], dirty = m[0] != o->sent[0] || m[1] != o->sent[1], stopping = !on && (dirty || o->stops > 0);
+    if (!on && !stopping) return;
+    uint64_t t = now_ns(), need = (dirty || stopping) ? ABITDO_MIN_NS : ABITDO_REFRESH_NS;
+    if (!o->last || t >= o->last + need) {
+        BOOL ok = abitdo_send(p, m);
+        t = o->last;
+        o->peak[0] = o->peak[1] = 0;
+        if (ok) { if (on) o->stops = ABITDO_STOPS; else if (o->stops > 0) o->stops--; }
+        else if (!on) { o->stops = 0; return; }
+        abitdo_want(o, m);
+        on = m[0] || m[1]; dirty = m[0] != o->sent[0] || m[1] != o->sent[1]; stopping = !on && (dirty || o->stops > 0);
+        if (!on && !stopping) return;
+        need = (dirty || stopping) ? ABITDO_MIN_NS : ABITDO_REFRESH_NS;
+    }
+    abitdo_arm(p, t, o->last + need);
+}
+static void abitdo_apply(dm_haptic_state s) {
+    abitdo_out *o = &abitdo[s.player];
+    if (!o->dev) return;
+    uint8_t m[2];
+    erm_mix(&s, m);
+    for (int i = 0; i < 2; i++) {
+        o->cur[i] = m[i];
+        if (m[i] > o->peak[i]) o->peak[i] = m[i];
+    }
+    abitdo_step(s.player);
+}
+static void abitdo_release(int p) {
+    abitdo_out *o = &abitdo[p];
+    uint64_t gen = o->gen + 1;
+    o->gen = gen; o->armed = NO;
+    if (o->dev) {
+        if (o->sent[0] || o->sent[1]) { const uint8_t z[2] = {0, 0}; abitdo_send(p, z); }
+        IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev);
+    }
+    *o = (abitdo_out){0};
+    o->gen = gen;
+}
+@interface DmAbitdoChannel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (abitdo_apply)
+@end
+@implementation DmAbitdoChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+- (void)stop {
+    abitdo_out *o = &abitdo[self.player];
+    o->cur[self.motor] = o->peak[self.motor] = 0;
+    if (o->cur[0] || o->cur[1] || o->peak[0] || o->peak[1]) return;
+    o->gen++; o->armed = NO; o->stops = 0;
+    if (o->dev && (o->sent[0] || o->sent[1])) { const uint8_t z[2] = {0, 0}; abitdo_send(self.player, z); }
+}
+@end
 // The first non-synthetic HID device of the vendor, with one of the products, that no other player drives (ds4[] / pro[]: taken), opened for player p. The registry
 // is asked at each connect: an IOHIDManager that is never scheduled keeps the devices of the moment its matching was set, so a controller turned on later found none
 // and stayed on Core Haptics, and one that came back got its dead device. A scheduled one would depend on its arrival callback running before GameController's connect;
@@ -480,6 +578,29 @@ static BOOL ds4_route(int p, GCController *controller) {
             ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
     return YES;
 }
+// Only a controller with no haptics of its own whose name says 8BitDo, while a free live non-synthetic 2DC8:6012 gamepad/joystick HID device accepts output
+// report 0x05: probing a zero report skips dead Bluetooth entries (#2237) and firmware that lacks report 0x05
+static BOOL abitdo_route(int p, GCController *controller) {
+    if (!controller.vendorName || controller.haptics.supportedLocalities.count ||
+        [controller.vendorName rangeOfString:@"8BitDo" options:NSCaseInsensitiveSearch].location == NSNotFound) return NO;
+    static const int pids[] = {0x6012};
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x2DC8, pids, 1, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && abitdo[q].dev && abitdo[q].id == i) return YES; return NO; },
+                                  ^BOOL(IOHIDDeviceRef d) {
+                                      int page = [(__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsagePageKey)) intValue];
+                                      int usage = [(__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsageKey)) intValue];
+                                      if (page != 1 || (usage != 4 && usage != 5)) return NO;
+                                      const uint8_t z[5] = {0x05, 0, 0, 0, 0};
+                                      return IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, z[0], z, sizeof z) == kIOReturnSuccess;
+                                  }, &id);
+    if (!dev) return NO;
+    abitdo_out *o = &abitdo[p];
+    o->dev = dev; o->id = id; o->gen++;
+    for (int m = 0; m < 2; m++) { DmAbitdoChannel *c = [DmAbitdoChannel new]; c.player = p; c.motor = m; c.target = @"8BitDo report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the 8BitDo output report 0x05 (%s)\n", p + 1, controller.vendorName.UTF8String,
+            [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport");
+    return YES;
+}
 #endif
 
 static void (*sinks[DM_PLAYERS])(const dm_haptic_state *);   // a player's own output instead of engines (dm_haptics_apple_set_sink)
@@ -496,6 +617,7 @@ static void apply(dm_haptic_state s) {
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
         if ([out.firstObject isKindOfClass:DmProChannel.class]) { pro_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmAbitdoChannel.class]) { abitdo_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
@@ -520,11 +642,11 @@ static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
 #if !TARGET_OS_IPHONE
-    ds4_release(p); pro_release(p);
+    ds4_release(p); pro_release(p); abitdo_release(p);
 #endif
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
-    if (controller && (ds4_route(p, controller) || pro_route(p, controller))) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    if (controller && (ds4_route(p, controller) || pro_route(p, controller) || abitdo_route(p, controller))) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;

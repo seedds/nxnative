@@ -138,6 +138,13 @@ class NeedleTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'lie outside'):
             split.pacx4_parts(d[:-1], 'cut.pac')   # the root's last chunk cut short
 
+    def test_pacx403_invalid_lz4_chunk(self):
+        d = bytearray(pacx403([]))
+        root, stored = struct.unpack_from('<II', d, 0x10)
+        d[root:root + stored] = bytes(stored)
+        with self.assertRaisesRegex(SystemExit, r'^\[RED\] corrupt\.pac: PACx 403 root: invalid LZ4 chunk'):
+            split.pacx4_parts(d, 'corrupt.pac')
+
     def test_pacx403_truncated_header_and_root_chunk_table(self):
         deps = 0x18
         d = pacx403([], deps=deps)

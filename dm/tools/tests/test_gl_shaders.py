@@ -256,6 +256,27 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             self.assertIn('t:texture=0:1:sampler2D', r[1])
             self.assertTrue(any(x.startswith('u:sample=') for x in r[1]), r[1])
 
+    def test_precision_statements_with_comments_macros_or_inline_code(self):
+        body = b'varying vec2 v; uniform sampler2D t; void main(){ gl_FragColor = texture2D(t, v); }\n'
+        cases = (
+            b'precision mediump float; // default\n' + body,
+            b'precision mediump float; ' + body,
+            b'precision\tlowp int; precision highp float;\n' + body,
+            b'#define LOWPREC lowp\nprecision LOWPREC float; // default\nLOWPREC vec4 tint(LOWPREC vec4 c){ return c; }\n'
+            b'varying vec2 v; uniform sampler2D t; void main(){ gl_FragColor = tint(texture2D(t, v)); }\n',
+            b'precision /* c */ mediump /* d */ float;\n' + body,
+            b'#version 120\nprecision mediump float; // default\n' + body,
+        )
+        for src in cases:
+            with self.subTest(src=src[:44]), tempfile.TemporaryDirectory() as d:
+                self.assertIsInstance(gl_shaders.translate(src, 'frag', 'k', d), tuple)
+
+    def test_precision_words_in_identifiers_stay(self):
+        src = '#version 310 es\nfloat precision_scale = 1.0;\nfloat highp_bias = 0.5;\n'
+        out = gl_shaders.strip_legacy_precision(src)
+        self.assertIn('float precision_scale = 1.0;', out)
+        self.assertIn('float highp_bias = 0.5;', out)
+
     def test_legacy_desktop_varyings_link_after_macro_expansion(self):
         vert = b'#version 120\nattribute vec4 p;\n#define COLOR gl_FrontColor\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_Position = p; COLOR = p; TEX(0) = p; }\n'
         frag = b'#version 110\n#define COLOR gl_Color\n#define TEX(i) gl_TexCoord[i]\nvoid main() { gl_FragData[0] = COLOR * TEX(0); }\n'
@@ -289,6 +310,27 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             self.assertEqual(samplers['t:u_plain'].count(':'), 2)   # no explicit binding: defaults to 0, NOT glslang's --amb slot
             self.assertTrue(samplers['t:u_uv'].endswith(':sampler2D:1'), samplers['t:u_uv'])
             self.assertTrue(samplers['t:u_lut'].endswith(':sampler2D:3'), samplers['t:u_lut'])
+
+    def test_es_versions_without_profile_get_es_and_keep_original_key(self):
+        # FINAL FANTASY VII (#3292): ES 3.20 shaders with precision/layout declare `#version 320` without `es`.
+        body = (b'precision highp float;\nlayout(location = 0) in vec2 uv;\n'
+                b'uniform sampler2D tex;\nout vec4 color;\nvoid main() { color = texture(tex, uv); }\n')
+        for header in (b'#version 320\n', b'#version 320\r\n', b'#version 320 // ff7\n',
+                       b'#version 320 /* ff7 */\n', b'#version 310\n', b'#version 320 es\n'):
+            src = header + body
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as tmp:
+                rows = gl_shaders.one((src, 'frag', '/ff7/shaders/test.glsl'), tmp)
+                self.assertEqual(len(rows), 1)
+                key, stage, fields, msl, _ = rows[0]
+                self.assertEqual(stage, 'frag', fields)
+                self.assertEqual(key, gl_shaders.hashlib.sha256(src).hexdigest()[:16])
+                self.assertIn('t:tex=0:1:sampler2D', fields)
+                self.assertIn(f'gl_{key}_f', Path(msl).read_text())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            err = gl_shaders.translate(b'#version 320 core\n' + body, 'frag', '3292' + 'e' * 12, tmp)
+            self.assertIsInstance(err, str)
+            self.assertIn('glslang -E:', err)
 
 
 class MainStrings(unittest.TestCase):

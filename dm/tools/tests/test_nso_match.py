@@ -16,6 +16,7 @@ import struct
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import patch
 
@@ -408,6 +409,29 @@ class Matching(unittest.TestCase):
                 with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
             self.assertIn("function patch 'heap' skipped", printed.getvalue())
             self.assertNotIn('[RED]', printed.getvalue())
+
+    def test_alias_only_cuts_recorded_for_both_registered_and_matched_rules(self):
+        # ALIAS_CUTS (build-keyed CUTS) and alias_only=True on MATCH_CUTS both feed ALIAS_APPLIED for fixups.tsv
+        with self.assertRaises(ValueError): validate(dict(self.rule, alias_only='yes'))
+        source = TOOLS / 'patch_nso.py'; tree = ast.parse(source.read_text())
+        start = next(i for i, n in enumerate(tree.body) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'SHARED')
+        end = next(i for i, n in enumerate(tree.body[start:], start) if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == 'KEYS')
+        code = compile(ast.Module(body=tree.body[start:end], type_ignores=[]), str(source), 'exec')
+        gid, known = '0100000000000001', 'ab' * 16
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'tools').mkdir(); (root / 'tools/sdk_patches.py').write_text(''); (root / 'tools/engine_patches.py').write_text('')
+            g = root / 'games' / gid; g.mkdir(parents=True)
+            rule = dict(self.rule, alias_only=True)
+            (g / 'patches.py').write_text(
+                f"CUTS = {{{known!r}: [(0x108, 'e00317aa', '1f2003d5', 'alias')]}}\n"
+                f"ALIAS_CUTS = {{{known!r}: [0x108]}}\n"
+                f"MATCH_CUTS = {{'main': [{rule!r}]}}\n")
+            for bid, expected_nb in ((known, '1f2003d5'), ('00' * 16, 'e0124091')):
+                img = bytearray(self.original)
+                ns: dict[str, Any] = dict(__file__=str(root / 'tools/patch_nso.py'), os=os, glob=glob, importlib=importlib,
+                                          MOD=SimpleNamespace(build_id=bytes.fromhex(bid)), IMG=img, TEXT_END=0x2000, NAME='main', outdir=str(root / f'out_{bid}'))
+                with patch.dict(os.environ, DM_GAME=gid): exec(code, ns)
+                self.assertEqual([(c[0], c[1], c[2]) for c in ns['ALIAS_APPLIED']], [(0x108, 'e00317aa', expected_nb)])
 
 
 class RegionGates(unittest.TestCase):

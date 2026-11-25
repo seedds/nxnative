@@ -17,6 +17,7 @@ void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
 void mtl_pool_del(const void *mem);
 void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
+void mtl_sparse_alias_delta(int delta);   // active sparse virtual pools with mapped runs (resource_vis MTL4VisibilityOptionResourceAlias)
 void dm_gfx_addr_note(uint64_t a, char *note, size_t n);   // what the graphics layer knows of an address (the crash dump, red lines)
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);

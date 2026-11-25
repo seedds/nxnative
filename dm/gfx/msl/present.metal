@@ -44,12 +44,13 @@ static float4 sample_row(texture2d<float> t, sampler s, float3 px, float3 wx, fl
 // rectangle or a 1280x720 window) is filtered over each pixel's footprint with a separable tent kernel stretched by the
 // scale, two texels an axis per bilinear fetch: one bilinear tap weighs texels unevenly by pixel-centre phase, so edges
 // stair-step and crawl as they move (minification aliasing), and past 2:1 texels are skipped entirely. Fetches stay within
-// the crop (edge: its first and last texel centres in uv).
+// the crop (edge: its first and last texel centres in uv). Output alpha is forced to 1.0: Switch scan-out ignores swapchain
+// alpha, and a non-opaque CAMetalLayer (DM_MAC_COMPOSITED / mirrored fullscreen) composites against the window backing.
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     float2 uv = in.uv * c.rect.zw + c.rect.xy;
     float2 size = float2(t.get_width(), t.get_height());
     float2 step = abs(float2(dfdx(uv.x), dfdy(uv.y))) * size;   // texels per pixel: uv is linear over the triangle, so the derivatives are exact
-    if (step.x < 1.001 && step.y < 1.001) return t.sample(s, clamp(uv, c.edge.xy, c.edge.zw));
+    if (step.x < 1.001 && step.y < 1.001) return float4(t.sample(s, clamp(uv, c.edge.xy, c.edge.zw)).rgb, 1.0);
     float2 inv_size = 1.0 / size, p = uv * size;
     float2 lo = min(c.edge.xy, c.edge.zw) * size, hi = max(c.edge.xy, c.edge.zw) * size;   // first and last texel centres of the crop, texel units
     float3 px, wx, py, wy;
@@ -58,5 +59,5 @@ fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler
     float4 sum = wy.x * sample_row(t, s, px, wx, py.x);
     if (wy.y > 0.0) sum += wy.y * sample_row(t, s, px, wx, py.y);
     if (wy.z > 0.0) sum += wy.z * sample_row(t, s, px, wx, py.z);
-    return sum;
+    return float4(sum.rgb, 1.0);
 }

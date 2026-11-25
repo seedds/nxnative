@@ -69,7 +69,7 @@ def payoff(gap):   # the Gaps order: open gaps, then blocked, kept and unreviewe
 # The host's build-keyed rows: (table, the start of the row's label ('' = any), main build ('' = any), entry); the first that fits classifies a row
 HOST_BINDING = [
     ('k_locks', 'RE Engine', '', {'what': "RE Engine's frame limit at a fixed pointer", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
-     'why': 'engine code other RE Engine games ship', 'blocked': 'one RE Engine game here'}),
+     'why': 'engine code other RE Engine games ship', 'blocked': 'Rise has not been verified with the engine matcher that finds Apollo Justice'}),
     ('k_locks', 'NLG', '', {'what': "Next Level Games' frame limiter target at a fixed address", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_locks', 'Criterion', '', {'what': "Criterion's 60 fps mode, frame ticks and game step at fixed addresses", 'now': 'build', 'goal': 'engine', 'purpose': 'frame rate',

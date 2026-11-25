@@ -118,7 +118,6 @@ The scripts in `tools/`; usage is written in each file's header:
 | `dmsh_dryrun.py` | Dry-run conversion of the whole library, measuring only "can it be converted" |
 | `gen_protos.py` | Generates `nvn_protos.h` / the thunks |
 | `tbdr_budget.py`, `tbdr_load_dead.py`, `tbdr_store_dead.py`, `tbdr_pass_merge.py` | Read the `DM_NVN_PASSDUMP` log and analyze the load / store volume of each render pass's attachments per frame |
-| `passgpu_top.py` | Reads the `DM_NVN_PASSGPU` output and lists GPU time by pass |
 
 ## Building
 
@@ -192,7 +191,7 @@ Logging and capture:
 | `DM_NVN_SHOT_OUT=WxH` | Makes the screenshot above capture the picture after upscaling to this resolution instead |
 | `DM_NVN_TEXDUMP=frame:path` | Saves each color render target used in that frame as an image |
 | `DM_NVN_PASSDUMP=frame` or `start-end` | Writes each render pass's attachments, samples and presentation for these frames to standard error entry by entry, for analysis by `tools/tbdr_*.py`; additionally setting `DM_NVN_PASSDUMP_ALL` logs every draw |
-| `DM_NVN_PASSGPU=file` | Per-pass GPU time (requires device support for counter sampling at stage boundaries) |
+| `DM_NVN_GPUPROF=frame` / `start-end` / `every:N` | Logs per-encoder Metal 4 GPU timestamps and attachment traffic (`[gpuprof]` lines, summarized by `dm/tools/gpuprof.py`) |
 | `DM_NVN_PROF=1` | Wraps the implemented NVN functions in a timing wrapper and collects the time each function takes during recording |
 
 Comparison and testing:

@@ -80,7 +80,9 @@ class Alias(unittest.TestCase):
 
     def test_derived_profile_takes_the_title_and_program_ids(self):
         d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', BID)
-        (d / 'ExeFS/main.npdm').write_bytes(b'META' + bytes(0x7c) + b'ACI0' + bytes(0xc) + struct.pack('<Q', PROGRAM) + bytes(0x20))
+        meta = bytearray(0xb8); meta[:4] = b'META'; meta[0x20:0x24] = b'ACI0'; meta[0x30:0x38] = b'1.0.0\0\0\0'
+        struct.pack_into('<II', meta, 0x70, 0x80, 0x38); meta[0x80:0x84] = b'ACI0'; struct.pack_into('<Q', meta, 0x90, PROGRAM)
+        (d / 'ExeFS/main.npdm').write_bytes(bytes(meta))
         g = game.load(f'{PROFILE:016X}'); out = self.tmp / 'derived' / g.id
         nsp.derive_profile(g, out, 'v0', d, ['main'], OTHER)
         h = game.Game(out)

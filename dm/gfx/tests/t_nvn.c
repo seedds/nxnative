@@ -16,6 +16,8 @@ void nvn_present_config(int hz, int display_mode);
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
 static _Atomic uint64_t g_test_focus_in;
 uint64_t dm_focus_in_since(void) { return atomic_load(&g_test_focus_in); }   // overrides nvn_mtl.m's weak stub for fstep_tick settle-alignment tests
+static char g_test_offscreen_native;
+int dm_native_window_offscreen(const void *native) { return native == &g_test_offscreen_native; }   // overrides t_host_stubs.c's weak stub to exercise WindowBuilderSetNativeWindow -> WindowInitialize
 
 static int g_fail, g_n;
 #define EXPECT(name, want, got) do { long long w_ = (long long)(want), g_ = (long long)(got); g_n++;                 \
@@ -1469,6 +1471,49 @@ int main(void) {
         P(nvnWindowFinalize)(&win);
         P(nvnEventFinalize)(&ev);
         P(nvnMemoryPoolFinalize)(&ep);
+    }
+
+    // 6a2. Off-screen native window (dm_native_window_offscreen: GameChat's virtual camera): initialized through WindowBuilderSetNativeWindow,
+    // respects SetNumActiveTextures, rotates without pacing or counting as game frames, safely replaces owned sync states (fenced 3 / 4), and finalizes cleanly
+    {
+        NVNwindowBuilder owb; NVNwindow off;
+        NVNtexture *sc3[3] = {&sc[0], &sc[1], &sc[0]};
+        typedef void (*set_b)(NVNwindowBuilder *, int);
+        P(nvnWindowBuilderSetDevice)(&owb, &dev); P(nvnWindowBuilderSetDefaults)(&owb);
+        P(nvnWindowBuilderSetNativeWindow)(&owb, &g_test_offscreen_native);
+        P(nvnWindowBuilderSetTextures)(&owb, 3, sc3);
+        ((set_b)proc("nvnWindowBuilderSetNumActiveTextures"))(&owb, 2);
+        EXPECT("off-screen WindowInitialize succeeds", 1, P(nvnWindowInitialize)(&off, &owb));
+        EXPECT("off-screen flag set from native window", 1, ((win_t *)&off)->offscreen);
+        EXPECT("display window stays on screen", 0, ((win_t *)&win)->offscreen);
+
+        NVNsync os; P(nvnSyncInitialize)(&os, &dev);
+        // Pre-populate os with an owned logical receipt (fenced == 3) and then a deferred acquire wait (fenced == 4) before reusing it on the off-screen window
+        P(nvnQueueFenceSync)(&q, &os, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        uint64_t f0 = dm_nvn_frame_count(); int oi[3] = {-1, -1, -1};
+        EXPECT("off-screen acquire replaces fenced==3 sync", NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS, P(nvnWindowAcquireTexture)(&off, &os, &oi[0]));
+        EXPECT("off-screen acquire sets fenced==2", 2, ((sync_t *)&os)->fenced);
+        P(nvnQueueWaitSync)(&q, &os);
+        P(nvnQueuePresentTexture)(&q, &off, oi[0]);
+
+        NVNwindow on_win; P(nvnWindowInitialize)(&on_win, &wb);
+        int on_idx = -1; P(nvnWindowAcquireTexture)(&on_win, &os, &on_idx);
+        EXPECT("on-screen acquire sets fenced==4", 4, ((sync_t *)&os)->fenced);
+        EXPECT("off-screen acquire replaces fenced==4 sync", NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS, P(nvnWindowAcquireTexture)(&off, &os, &oi[1]));
+        EXPECT("off-screen acquire resets fenced==2", 2, ((sync_t *)&os)->fenced);
+        P(nvnQueuePresentTexture)(&q, &off, oi[1]);
+        P(nvnWindowFinalize)(&on_win);
+
+        P(nvnWindowAcquireTexture)(&off, &os, &oi[2]);
+        P(nvnQueuePresentTexture)(&q, &off, oi[2]);
+        EXPECT("off-screen active textures rotate 0,1,0", 0x010, oi[0] << 8 | oi[1] << 4 | oi[2]);
+        EXPECT("off-screen presents are not frames", 1, dm_nvn_frame_count() == f0);
+        NVNsyncWaitResult owr = P(nvnSyncWait)(&os, UINT64_MAX);
+        EXPECT("off-screen acquire sync signaled (0 or 1)", 1, owr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || owr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        EXPECT("off-screen acquire sync already signaled after wait", 0, P(nvnSyncWait)(&os, 0));
+        P(nvnQueueFinish)(&q);
+        P(nvnSyncFinalize)(&os);
+        P(nvnWindowFinalize)(&off);
     }
 
     // 6b. Readback: pixel (x,y) = {x*16+y, y*16+x, 0x55, 0xAA} (expected values computed directly from the formula)

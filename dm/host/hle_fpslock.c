@@ -235,12 +235,12 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
-// The row of a target frame rate the game steps by, at the place the rewriter found (dm/tools/fps_target.py; main's fixups FPS_TARGET_PTR, FPS_TARGET_FIELD): an int32 frame rate in the
-// object a global points to, which the game's readers divide 60.0 by to step it, and which the game sets to 30 or 60 itself. Fire Emblem Fortune's Weave's gxc graphics object holds it
-// (+0x1dc; its present asks for interval 60 / target), so at 60 the game asks for interval 1 and steps by 1.0 a frame. 0 rows: not found in this main
+// The rewriter found either the integer rate the game steps by or RE Engine's
+// floating-point MaxFps. RE Engine keeps its separate base rate as a time unit.
 static int target_row(const module_t *m, lock_t *out) {
     if (!m->fps_target_ptr) return 0;
-    *out = (lock_t){ "", "target frame rate", m->fps_target_ptr, m->fps_target_field, FPS_I32, 1, 0 };
+    *out = (lock_t){ "", m->fps_target_f32 ? "RE Engine MaxFps" : "target frame rate", m->fps_target_ptr, m->fps_target_field,
+        m->fps_target_f32 ? FPS_F32 : FPS_I32, 1, 0 };
     return 1;
 }
 

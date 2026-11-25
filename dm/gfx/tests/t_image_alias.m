@@ -60,7 +60,7 @@ static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount=2;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
     [at setAddress:args.gpuAddress atIndex:0]; [at setAddress:out.gpuAddress atIndex:1];
-    id<MTL4ComputeCommandEncoder> e=enc_c_begin(nil); [e setArgumentTable:at]; enc_c_pso(e,ps);
+    id<MTL4ComputeCommandEncoder> e=enc_c_begin(); [e setArgumentTable:at]; enc_c_pso(e,ps);
     enc_c_dispatch(e,MTLSizeMake((t.width+7)/8,(t.height+7)/8,1),MTLSizeMake(8,8,1)); enc_c_end(e);
     mtl_sub_commit(); mtl_drain();
     CHECK(!mtl_last_commit_error(),"indirect Metal 4 read completes with only the heap resident");
@@ -79,7 +79,7 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
     [at setTexture:t.gpuResourceID atIndex:0];
-    id<MTL4ComputeCommandEncoder> e=enc_c_begin(nil); [e setArgumentTable:at]; enc_c_pso(e,ps);
+    id<MTL4ComputeCommandEncoder> e=enc_c_begin(); [e setArgumentTable:at]; enc_c_pso(e,ps);
     enc_c_dispatch(e,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1)); enc_c_end(e);
     id<MTLBuffer> out=read_image(t); uint32_t *p=out.contents; int valid=p[0]==seed+5;
     for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);

@@ -426,6 +426,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
         else if (!strcmp(key, "FPS_TARGET_FIELD")) m->fps_target_field = (uint32_t)v;
+        else if (!strcmp(key, "FPS_TARGET_F32")) m->fps_target_f32 = v == 1;
         else if (!strcmp(key, "MONOLITH_INTERVAL")) m->monolith_interval = v;
         else if (!strcmp(key, "ALIAS_CUT")) {
             char ob[40], nb[40]; size_t n;

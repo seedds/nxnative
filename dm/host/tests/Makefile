@@ -27,6 +27,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	TMPDIR="$(abspath $(B))" $(B)/t_mii_sysdata $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_apple $(QUIET)
 	$(B)/t_audio
 	$(B)/t_output_stream
 	$(B)/t_mii
@@ -197,15 +198,18 @@ $(B)/t_mii_sysdata: t_mii_sysdata.c ../hle_fs.c ../hle_account_users.c ../accoun
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_mii_sysdata.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c -lz
 $(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
-run: $(B)/t_save_sync $(B)/t_save_sync_metadata
+run: $(B)/t_save_sync $(B)/t_save_sync_metadata $(B)/t_save_sync_apple
 $(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. -o $@ t_save_sync_metadata.c
+$(B)/t_save_sync_apple: t_save_sync_apple.m ../save_sync.c ../save_sync_apple.m ../save_sync.h | $(B)
+	$(CLANG) -O1 -fobjc-arc -Wall -Werror -Wno-unused-function -I.. -o $@ t_save_sync_apple.m ../save_sync.c ../save_sync_apple.m -framework Foundation
 .PHONY: save-sync
-save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
+save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata $(B)/t_save_sync_apple
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
+	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_apple $(QUIET)
 AUDIO_INPUT_STUB = ../audio_input.c audio_input_platform_stub.c
 AUDIO_INPUT_DEPS = $(AUDIO_INPUT_STUB) ../audio_input.h
 $(B)/t_audio: t_audio.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

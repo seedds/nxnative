@@ -3100,11 +3100,17 @@ static void gpu_tag_begin(uint64_t f) {
     }
     atomic_fetch_add_explicit(&g_gpu[k].pending, 1, memory_order_acq_rel);
 }
+// Valid completed GPU interval from Metal feedback: finite, positive, ordered, and already elapsed on Metal's clock.
+// Missing start times (0, Big Brain Academy) or faulted command buffers (unwritten UINT64_MAX tick sentinel ≈ 6.15e9 s
+// on Apple Silicon's 125/3 timebase) would otherwise poison frame/upload durations, spans, mtl_gpu_done, and integer casts.
+static inline int gpu_time_valid(double g0, double g1) {
+    return isfinite(g0) && isfinite(g1) && g0 > 0 && g1 > g0 && g1 <= CACurrentMediaTime();
+}
 static void gpu_tag_done(uint64_t f, double g0, double g1) {
     unsigned k = f % GRING; uint64_t tag = f + 1;
     if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != tag) return;
-    double d = g1 - g0;
-    if (d > 0 && g0 > 0) {   // a command buffer can complete with no start time (0, while a movie's frames upload each frame in Big Brain Academy: Brain vs. Brain), and its span would be the whole clock
+    if (gpu_time_valid(g0, g1)) {
+        double d = g1 - g0;
         atomic_fetch_add_explicit(&g_gpu[k].ns, (uint64_t)(d * 1e9), memory_order_relaxed);
         uint64_t s0 = (uint64_t)(g0 * 1e9), s1 = (uint64_t)(g1 * 1e9), v;
         for (v = atomic_load_explicit(&g_gpu[k].t0, memory_order_relaxed); s0 < v && !atomic_compare_exchange_weak_explicit(&g_gpu[k].t0, &v, s0, memory_order_relaxed, memory_order_relaxed);) {}
@@ -4173,8 +4179,8 @@ static void up_flush(void) {
             own_epoch();   // Make the view cache of every texture ID take the slow path once (on a cache hit tex_mtl is not passed through and this record is not seen)
             MLOG("%supload command buffer dropped: the %lu textures of this batch are marked unwritten and re-uploaded on next use (%d awaiting re-upload)", fake_lost ? "DM_TEST_UP_LOST: " : "", (unsigned long)dsts.count, n);
         }
-        double d = f.GPUEndTime - f.GPUStartTime;
-        if (d > 0) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)(d * 1e9));
+        double g0 = f.GPUStartTime, g1 = f.GPUEndTime;
+        if (gpu_time_valid(g0, g1)) atomic_fetch_add(&g_upload_gpu_ns, (uint64_t)((g1 - g0) * 1e9));
         @autoreleasepool { [views removeAllObjects]; }   // upload-only integer views share their targets' residency
         if (staging.count) {
             // Keep the slot busy through retirement to bound staging memory during a burst.

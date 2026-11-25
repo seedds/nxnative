@@ -816,9 +816,9 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
                     g = NS(id='game', folder=root / str(derived), build=root / 'build', ver='v0',
                            patched=root / 'patched_v0', derived=derived, env=lambda tree, config=env: dict(config))
                     tree = NS(id='tree', path=root, py=lambda code, e: 'main')
-                    process = NS(poll=lambda: 0, returncode=0)
+                    group = NS(p=NS(poll=lambda: 0, returncode=0), finish=lambda: 0, stragglers=[])
                     with patch.object(regress, 'rewriter_key', return_value='key'), patch.object(regress, 'say'), \
-                         patch.object(regress.subprocess, 'Popen', return_value=process) as spawn, patch.object(regress.time, 'sleep'):
+                         patch.object(regress.proc_group, 'Group', return_value=group) as spawn, patch.object(regress.time, 'sleep'):
                         dst, _ = regress.modules_for(tree, g, True, 1)
                     selected = spawn.call_args.kwargs['env']
                     self.assertEqual(selected.get('DM_GAMES_DIR'), env['DM_GAMES_DIR'] if derived else None)
@@ -842,10 +842,10 @@ out = Path(sys.argv[2]) / 'b-v'; out.mkdir(parents=True, exist_ok=True)
                 (out / f'{mod}.patched.bin').write_bytes(b'patched:' + data)
                 (out / f'{mod}.fixups.tsv').write_text('# BUILD_ID\taaa\n')
                 (out / f'{mod}.gates.tsv').write_text('')
-                return NS(poll=lambda: 0, returncode=0)
+                return NS(p=NS(poll=lambda: 0, returncode=0), finish=lambda: 0, stragglers=[])
 
             with patch.object(regress, 'rewriter_key', return_value='rev1'), patch.object(regress, 'say'), \
-                 patch.object(regress.subprocess, 'Popen', side_effect=fake_rewrite) as spawn, patch.object(regress.time, 'sleep'):
+                 patch.object(regress.proc_group, 'Group', side_effect=fake_rewrite) as spawn, patch.object(regress.time, 'sleep'):
                 dst1, key1 = regress.modules_for(tree, g, True, 1)
                 self.assertEqual((dst1 / 'main.patched.bin').read_bytes(), b'patched:main-v1')
                 self.assertEqual(spawn.call_count, 1)

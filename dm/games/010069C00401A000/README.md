@@ -10,19 +10,28 @@ Base game with Update 1.22 (`v131072`). No game-specific patches, configuration 
 - **Game mode:** Hard
 - **macOS Game Mode:** Off
 - **Display composition:** Composited
-- **Captured FPS:** 59.01
-- **Captured GPU time:** 9.19 ms
-- **Captured frame interval:** 16.95 ms
-- **Metal memory:** 823.80 MB
-- **App memory:** 2.33 GB
 
-The gameplay screenshot was captured during a character-death event in a fast-paced Hard-mode section. The performance overlay's frame-time graph shows spikes at the same time as the death/explosion sequence. These brief events were not noticeable during play. The screenshot is a momentary reading, not a claim that every frame ran at exactly 59.01 FPS.
+A separate gameplay screenshot captured during a character-death event showed 59.01 FPS, 9.19 ms GPU time, and a 16.95 ms frame interval. Metal memory was 823.80 MB and app memory was 2.33 GB. The frame-time graph shows spikes during the death/explosion sequence. These brief events were not noticeable during play. This is a momentary capture, not a claim that every frame ran at exactly 59.01 FPS.
 
 A separate sustained-play session lasted approximately four hours. Gameplay remained consistently around 60 FPS, with occasional dips to 59 FPS and no noticeable stuttering. The MacBook Air remained barely warm throughout, even while resting on a lap.
 
-## Frame-time capture
+## Completed first-mission capture
 
-A separate capture recorded 11,923 frames over approximately 3 minutes 19 seconds:
+The first mission was played through to completion with frame-time recording enabled. The capture shown in the NX2Apple performance panel is timestamped **2026-11-25 19:43:39** and reports:
+
+- Frames recorded: 23,006
+- Reported frame rate: 60 FPS
+- Median frame time: 16.7 ms
+- 99th-percentile frame time: 18.2 ms
+- Slowest frame: 144 ms
+- Recorded hitches: 10
+- Dropped frames: 3,697
+
+At the reported 60 FPS, 23,006 frames represent approximately 6 minutes 23 seconds of captured frames. The graph shows brief frame-time spikes against an otherwise comparatively stable baseline. The dropped-frame count is included as reported by the tool and should not be conflated with the separate hitch count. This capture covers a completed first mission, rather than a short isolated gameplay moment.
+
+## Earlier frame-time capture
+
+A separate earlier capture recorded 11,923 frames over approximately 3 minutes 19 seconds:
 
 - Median frame time: 16.7 ms
 - 99th-percentile frame time: 18.1 ms
@@ -30,7 +39,7 @@ A separate capture recorded 11,923 frames over approximately 3 minutes 19 second
 - Recorded hitches: 8
 - Dropped frames: 121
 
-The recorded spikes coincided with character-death events during the Hard-mode session. They were not noticeable during play. They are retained in the measurements rather than excluded; this is an observed correlation, not proof of the underlying technical cause.
+In that earlier Hard-mode session, the recorded spikes coincided with character-death events and were not noticeable during play. The spikes are retained in the measurements rather than excluded; this is an observed correlation, not proof of the underlying technical cause.
 
 ## Profile notes
 

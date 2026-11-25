@@ -17,6 +17,7 @@ app_category	public.app-category.role-playing-games
 
 # ---- Versions ----
 build	v2228224	1.0.34.0	main=db0507f36b84200ac05f75d76ed5026f	subsdk0=507f19d1240d09d00992248e8a0fd77e	sdk=2d369d9999e3e10e665106f840ffff9b
+build	v2293760	1.0.35	main=721f42ea94fe5f6f1af00ba3836032a8	subsdk0=507f19d1240d09d00992248e8a0fd77e	sdk=2d369d9999e3e10e665106f840ffff9b
 package	v2228224
 shader_versions	v2228224
 
@@ -45,3 +46,4 @@ shader_note	Diablo II: Resurrected shaders
 # The game asks for present interval 2 (30 fps, as on the Switch); its logic runs on its own clock, so one frame per display tick is 60 fps at the same game speed (the same 3 s walk from the
 # Rogue Encampment's start ends at the same place at 30 and at 60 fps)
 present_interval	display
+depth_mode	zero

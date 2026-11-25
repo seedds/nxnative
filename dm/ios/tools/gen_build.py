@@ -15,13 +15,14 @@ cmd = subprocess.run(['make', '-s', '-n', '-B', '-C', host, 'dmhost', 'MSL_SDK=i
 # gen/vpx and gen/dav1d): header paths keep this order, so the host's headers are found first
 lines = [shlex.split(l) for l in cmd.splitlines() if l.lstrip().startswith('clang')]
 lines.sort(key=lambda t: any(a.startswith(('gen/vpx/', 'gen/dav1d/')) for a in t))
-srcs, incs, defs, fws = [], [], [], []
+srcs, incs, defs, fws, libs = [], [], [], [], []
 for toks in lines:
     i = 0
     while i < len(toks):
         t = toks[i]
         if t == '-framework': fws.append(toks[i + 1]); i += 2; continue
-        if t.startswith('-I'):
+        if t.startswith('-l'): libs.append(t)
+        elif t.startswith('-I'):
             d = os.path.normpath(os.path.join(host, t[2:]))
             if d not in incs: incs.append(d)
         elif t.startswith('-D'): defs.append(t)
@@ -47,4 +48,4 @@ sdk = subprocess.run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], capture_
 fws = list(dict.fromkeys(fws))
 mac_only = [f for f in fws if not os.path.isdir(f'{sdk}/System/Library/Frameworks/{f}.framework')]
 if mac_only: print('gen_build: not in the iOS SDK, left out of the link: ' + ' '.join(mac_only), file=sys.stderr)
-print('DM_FRAMEWORKS = ' + ' '.join(f'-framework {f}' for f in fws if f not in mac_only))
+print('DM_FRAMEWORKS = ' + ' '.join([f'-framework {f}' for f in fws if f not in mac_only] + list(dict.fromkeys(libs))))

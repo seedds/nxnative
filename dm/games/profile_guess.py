@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TypedDict
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
+sys.path.insert(0, str(HERE.parent / 'tools')); import npdm as _npdm, nso_syms   # NPDM reader; dynamic symbols, the host's hooks
 from romfs import Path, os, open, is_image, source, reuse_descriptors
 from romfs_image import ARTIFACTS   # a dump tool's files in a RomFS folder, not game files
 
@@ -116,14 +116,15 @@ def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: fr
 
 def npdm(path):   # (system resource size, program ID) from main.npdm; a non-zero system resource means virtual address memory (Engage 16 MB); (0, None) without the file
     if not Path(path).exists(): return 0, None
-    d = Path(path).read_bytes(); a = d.find(b'ACI0')
-    return (struct.unpack_from('<I', d, 0x14)[0] if d[:4] == b'META' else 0), (struct.unpack_from('<Q', d, a + 0x10)[0] if a >= 0 else None)
+    d = Path(path).read_bytes()
+    try: pid = _npdm.program_id(d)
+    except _npdm.Error: pid = None
+    return _npdm.sys_resource(d), pid
 
 
 def aarch64(path):   # main.npdm's flags (META +0xc) bit 0, Is64BitInstruction; clear = a 32-bit ARM program (Pikmin 3 Deluxe), which Apple silicon cannot run; True without the file
     if not Path(path).exists(): return True
-    d = Path(path).read_bytes()
-    return d[:4] != b'META' or bool(d[0xc] & 1)
+    return _npdm.aarch64(Path(path).read_bytes())
 
 
 def facts_of(exefs, romfs):

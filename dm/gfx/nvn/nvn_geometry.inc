@@ -1348,7 +1348,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
             const uint8_t *p; op_hdr h; const void *a;
             while (op_next(&cur, &p, &h, &a) && p != g_geo_run[i].op) state_op(h.op, a);
         }
-        if (!ce) ce = enc_c_begin(NULL);
+        if (!ce) ce = enc_c_begin();
         geo_gs_one(ce, &g_geo_run[i]);
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
@@ -1357,7 +1357,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {
-        if (!ce) ce = enc_c_begin(NULL);
+        if (!ce) ce = enc_c_begin();
         else [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         enc_c_pso(ce, pack[3]);
         for (int i = 0; i < n; i++) if (g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) {
@@ -1366,7 +1366,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
     }
     if (packs > small) for (int stage = 0; stage < 3; stage++) {
-        if (!ce) ce = enc_c_begin(NULL);
+        if (!ce) ce = enc_c_begin();
         else [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         enc_c_pso(ce, pack[stage == 1 && legacy ? 4 : stage]);
         for (int i = 0; i < n; i++) if (g_geo_run[i].emits && !g_geo_run[i].direct_count && (legacy || g_geo_run[i].groups > 1024)) {
@@ -1377,7 +1377,7 @@ static void geo_draw_(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
     }
     for (int i = 0; i < n; i++) if (g_geo_run[i].lean && !g_geo_run[i].direct_count) {
-        if (!ce) ce = enc_c_begin(NULL);
+        if (!ce) ce = enc_c_begin();
         else [ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         enc_c_pso(ce, g_geo_lean_k[1]); enc_c_args(ce, g_geo_run[i].lean_job, 0);
         enc_c_dispatch(ce, MTLSizeMake((g_geo_run[i].packed_size / 4 + 63) / 64, 1, 1), MTLSizeMake(64, 1, 1));

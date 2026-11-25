@@ -510,6 +510,30 @@ def ps_omap(code):
 
 NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NVN2 graphics stage indices (PRAGMATA's banks: vertex c[25], hull and mesh c[26], domain c[27], geometry c[28], pixel c[29])
 
+def unity_acescc_lut(code):
+    # The Unity Post Processing v1 LUT generator in Outer Wilds lost the two
+    # half-subnormal constants in ACES_to_ACEScc when compiled for Maxwell.
+    # Match the shader's bytes so other LUT variants keep their own math. The
+    # offsets are from the SPH, and only the offline translator sees this copy.
+    if len(code) != 4304 or hashlib.sha256(code).hexdigest() != '4beffc02e07565c3d9ee6e3b33d6f456f4eae4d16fbe2986417b5d9986a00b00':
+        return code
+    patched = bytearray(code)
+    # RRO.EX2 R5, R5 is already a no-op in the translator. Use its slot to
+    # load 2^-16 into the unused R254. Each low branch then computes
+    # x * 0.5 + 2^-16 and tests x < 2^-15 before selecting its logarithm.
+    for offset, word in (
+        (0x148, 0x010378000007F0FE),  # MOV32I R254, 2^-16
+        (0x248, 0x32807F3F00070402),  # FFMA R2, R4, 0.5, R254
+        (0x260, 0x36B103B800070407),  # FSETP.LT.AND P0, PT, R4, 2^-15, PT
+        (0x278, 0x32807F3F00070503),  # FFMA R3, R5, 0.5, R254
+        (0x280, 0x36B103B80007050F),  # FSETP.LT.AND P1, PT, R5, 2^-15, PT
+        (0x2F8, 0x32807F3F00070503),  # FFMA R3, R5, 0.5, R254
+        (0x348, 0x36B103B800070507),  # FSETP.LT.AND P0, PT, R5, 2^-15, PT
+    ):
+        struct.pack_into('<Q', patched, offset, word)
+    return bytes(patched)
+
+
 def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698'), 0x38); code = rec[0x38:ci]; stage = name[:2]
     # Short NVN2 graphics control sections have no optional stage byte.
@@ -552,6 +576,7 @@ def job_for(key, name, rec, w):
             # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
             if any(code[0x30:0x100]): sys.exit(f'[RED] {key}: compute code area +0x30..+0x100 is not all zero, so the instructions do not start at +0x100')
             code = code[0x100:]
+        if stage == 'ps': code = unity_acescc_lut(code)
         tf = tf_layout(key, rec[ci:]) if stage in ('vs', 'gs') else None
         if tf: extra['tf'] = tf
     if stage == 'ps' and early_fragment_tests(rec[ci:], code): extra['early_fragment_tests'] = True

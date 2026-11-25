@@ -34,7 +34,7 @@ static uint32_t gpu_read(id<MTLBuffer> table, unsigned slot) {
     MTL4ArgumentTableDescriptor *d = [MTL4ArgumentTableDescriptor new]; d.maxBufferBindCount = 2;
     id<MTL4ArgumentTable> args = rec_table([g_dev newArgumentTableWithDescriptor:d error:nil]);
     [args setAddress:table.gpuAddress atIndex:0]; [args setAddress:out.gpuAddress atIndex:1];
-    id<MTL4ComputeCommandEncoder> enc = enc_c_begin(nil); [enc setArgumentTable:args]; enc_c_pso(enc, ps);
+    id<MTL4ComputeCommandEncoder> enc = enc_c_begin(); [enc setArgumentTable:args]; enc_c_pso(enc, ps);
     enc_c_dispatch(enc, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1)); enc_c_end(enc);
     next_sub();
     CHECK(!mtl_last_commit_error(), "the reader's submission completes");

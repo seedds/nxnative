@@ -57,7 +57,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN | — |
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN | — |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN | — |
-| [Apollo Justice: Ace Attorney Trilogy](010020D01B890000/README.md) | `010020D01B890000` | 1.0.1 | 15.3.2 | Capcom's RE Engine, Havok, Wwise | NVN | — |
+| [Apollo Justice: Ace Attorney Trilogy](010020D01B890000/README.md) | `010020D01B890000` | 1.0.1 | 15.3.2 | Capcom's RE Engine, Havok, Wwise | NVN | [60 fps target](010020D01B890000/README.md#frame-rate) |
 | [Assassin's Creed III Remastered](01007F600B134000/README.md) | `01007F600B134000` | 1.0.0 (provisional Mac profile) | 5.4.0 | Ubisoft Scimitar / Anvil | NVN | — |
 | [Atelier Ryza: Ever Darkness & the Secret Hideout DX](0100199023B2E000/README.md) | `0100199023B2E000` | 1.2.0 | 18.3.2 | Gust's engine on Koei Tecmo's KTGL | NVN | — |
 | [Baba Is You](01002CD00A51C000/README.md) | `01002CD00A51C000` | 1.0.12 | 19.3.3 | Multimedia Fusion 2 game on MP2 Games' runtime (Lua) | NVN | — |
@@ -180,6 +180,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 | — |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN | — |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN | — |
+| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | [60 fps target](01003DC0144B6000/README.md#frame-rate) |
 | [Overcooked! All You Can Eat](0100F28011892000/README.md) | `0100F28011892000` | 1.0.12 | 10.4.1 | Unity 2019.4.11f1 IL2CPP, FMOD | NVN | 60 fps target |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN | — |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN | 60 fps target |

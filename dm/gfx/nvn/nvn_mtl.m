@@ -439,7 +439,7 @@ static void cb_end(id cb, id<MTLResidencySet> also) {
 // A classic command buffer on g_q, the sets named (nothing else calls commandBuffer on g_q: the same test)
 static id<MTLCommandBuffer> cl_cb(void) { id<MTLCommandBuffer> cb = [g_q commandBuffer]; res_name(cb, nil); return cb; }
 static NSHashTable *g_res_objects;
-static _Atomic unsigned g_image_heap_n, g_big_n, g_pair_n, g_sparse_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN); g_pair_n: storage pairs (pair_texture); g_sparse_n: sparse virtual pools whose runs alias physical pools and replaced run buffers
+static _Atomic unsigned g_image_heap_n, g_image_heap_comp_n, g_big_n, g_pair_n, g_sparse_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN); g_pair_n: storage pairs (pair_texture); g_sparse_n: sparse virtual pools whose runs alias physical pools and replaced run buffers
 static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOptionDevice | (g_image_heap_n || g_big_n || g_pair_n || g_sparse_n ? MTL4VisibilityOptionResourceAlias : 0); }
 void mtl_sparse_alias_delta(int delta) {
     if (delta > 0) atomic_fetch_add(&g_sparse_n, (unsigned)delta);
@@ -577,7 +577,7 @@ static void rh_wait(id<MTLHeap> heap) {
 typedef struct { uint64_t serial, wh; } fam_pool_ser;
 @interface NvImageHeap : NSObject { @public id<MTLHeap> heap; _Atomic uint64_t valid_wh; uint8_t compressed; os_unfair_lock pool_lk; fam_pool_ser *pool_sers; uint32_t npool_sers, cappool_sers; } @end   // a resolution family's heap (image_texture)
 @implementation NvImageHeap
-- (void)dealloc { free(pool_sers); rh_wait(heap); atomic_fetch_sub(&g_image_heap_n, 1); }
+- (void)dealloc { free(pool_sers); rh_wait(heap); if (compressed) atomic_fetch_sub(&g_image_heap_comp_n, 1); atomic_fetch_sub(&g_image_heap_n, 1); }
 @end
 static char g_image_heap_owner_key, g_rh_owner_key;
 static void args_dirty_all(void);
@@ -590,8 +590,8 @@ static int fam_nocomp(void) {
     return v;
 }
 static inline NvImageHeap *fam_owner(id<MTLTexture> t0, uint64_t *wh_out) {
+    if (!t0 || !atomic_load_explicit(&g_image_heap_n, memory_order_relaxed)) return nil;
     id<MTLTexture> t = t0;
-    if (!t) return nil;
     while (t.parentTexture) t = t.parentTexture;
     NvImageHeap *o = objc_getAssociatedObject(t, &g_image_heap_owner_key);
     if (!o) return nil;
@@ -599,6 +599,7 @@ static inline NvImageHeap *fam_owner(id<MTLTexture> t0, uint64_t *wh_out) {
     return o;
 }
 static inline int fam_is_valid(id<MTLTexture> t) {
+    if (!t || !atomic_load_explicit(&g_image_heap_comp_n, memory_order_relaxed)) return 1;
     uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
     return !o || !o->compressed || atomic_load_explicit(&o->valid_wh, memory_order_acquire) == wh;
 }
@@ -606,7 +607,7 @@ static int treg_serial_held(uint64_t serial);
 // The serials the family's pool walks saw (pool_entry, img_pool_elem, pool_seen_scan; callers hold g_rmu), for a size switch to note (fam_set_valid). On a new serial, drop
 // entries no pool ID registers any more (a re-registration of their ID unlinked them from g_treg_serial) before growing, so target re-initialization churn does not keep
 // obsolete serials or flood own_note on size switches.
-static void fam_track_pool_serial(NvImageHeap *o, uint64_t serial, uint64_t wh) {
+static void fam_track_pool_serial(__unsafe_unretained NvImageHeap *o, uint64_t serial, uint64_t wh) {
     if (!o || !serial) return;
     os_unfair_lock_lock(&o->pool_lk);
     for (uint32_t i = 0; i < o->npool_sers; i++) if (o->pool_sers[i].serial == serial) { o->pool_sers[i].wh = wh; os_unfair_lock_unlock(&o->pool_lk); return; }
@@ -6342,7 +6343,9 @@ static id<MTLTexture> image_texture(const tex_t *t, MTLTextureDescriptor *d0) {
     if (fresh) {
         if (!family) return nil;
         int reused; id<MTLHeap> heap = rh_heap(capacity, d.storageMode, d.cpuCacheMode, d.hazardTrackingMode, &reused); if (!heap) return nil;   // from the recycled heaps
-        owner = [NvImageHeap new]; owner->heap = heap; owner->compressed = (uint8_t)!nocomp; atomic_store_explicit(&owner->valid_wh, 0, memory_order_relaxed); atomic_fetch_add(&g_image_heap_n, 1);
+        owner = [NvImageHeap new]; owner->heap = heap; owner->compressed = (uint8_t)!nocomp; atomic_store_explicit(&owner->valid_wh, 0, memory_order_relaxed);
+        if (owner->compressed) atomic_fetch_add(&g_image_heap_comp_n, 1);
+        atomic_fetch_add(&g_image_heap_n, 1);
     }
     id<MTLTexture> mt = [owner->heap newTextureWithDescriptor:d offset:0]; if (!mt) return nil;
     objc_setAssociatedObject(mt, &g_image_heap_owner_key, owner, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -8505,7 +8508,7 @@ void mtl_prog_snapshot(prog_t *copy,const prog_t *source) {
 
 // ---------- Descriptor pool: texture ID / sampler ID → object ----------
 // At registration the whole texture object is snapshotted (NVN semantics: the descriptor has been written into the pool); view: the MTLTexture for that ID (a view or the base texture, held via CFBridgingRetain) and the serial-table / guest-write generations at the time it was obtained
-typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view_id, view_rid, view_ser, view_dirty, view_stamp; const void *view_span; int view_pkg; uint32_t view_pf; uint8_t view_tt;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty); view_pf / view_tt: immutable pixelFormat / textureType of view
+typedef struct { tex_t t; int ok; view_t v; int has_v; void *view, *view_fam; uint64_t view_id, view_rid, view_fam_wh, view_ser, view_dirty, view_stamp; const void *view_span; int view_pkg; uint32_t view_pf; uint8_t view_tt;   // view_pkg: CPU-written (packaged); only those depend on guest writes (view_dirty); view_pf / view_tt / view_fam / view_fam_wh: immutable pixelFormat / textureType / compressed NvImageHeap owner (retained via view) and effective geometry of view
                  void *palt[4], *palt_of[4]; uint64_t palt_rid[4];   // palt[k]: the view a texture pool table of layered type k (pool_lk) holds for the ID (pool_fit), apart from alt so slot binds and tables do not take turns
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
@@ -8599,7 +8602,7 @@ static int border_need(NvShader *sh, int nvn_stage);
 // so a linear texture built directly on a pool kept the whole pool buffer alive (6 to 17 finalized 16 MB pool buffers stayed alive in Engage's title demo). If the ID is still used, the next lookup rebuilds it on the slow path
 static void treg_drop_im(treg_t *r) { if (r->im) { defer_obj_unref((__bridge id)r->im); CFRelease(r->im); r->im = r->im_of = NULL; r->im_rid = 0; } }   // the image class view (img_fit)
 static void treg_drop_views(treg_t *r) {
-    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; r->view_id = r->view_rid = 0; r->view_pf = 0; r->view_tt = 0; }
+    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; r->view_fam = NULL; r->view_id = r->view_rid = r->view_fam_wh = 0; r->view_pf = 0; r->view_tt = 0; }
     if (r->alt) { defer_obj_unref((__bridge id)r->alt); CFRelease(r->alt); r->alt = r->alt_of = NULL; r->alt_rid = 0; }
     for (int k = 0; k < 4; k++) if (r->palt[k]) { defer_obj_unref((__bridge id)r->palt[k]); CFRelease(r->palt[k]); r->palt[k] = r->palt_of[k] = NULL; r->palt_rid[k] = 0; }
     treg_drop_im(r);
@@ -9073,7 +9076,7 @@ static void *tex_by_id_ref(int tid) {
         // used to keep the cached texture and mark it valid again, and the fast paths (tex_fast_rid) gave the pool tables its resource ID after the host had released it and dropped
         // its residency: GPU page faults in the shaders that sample it (docs/reference/rendering.md, "A texture ID with no texture kept its cached view")
         if (base && (base == v || v.parentTexture == base)) { rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, base); return rp->view; }
-        defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_rid = 0; rp->view_pf = 0; rp->view_tt = 0; v = nil;
+        defer_obj_unref(v); CFRelease(rp->view); rp->view = NULL; rp->view_fam = NULL; rp->view_rid = rp->view_fam_wh = 0; rp->view_pf = 0; rp->view_tt = 0; v = nil;
     } else base = treg_tex(rp);
     treg_t r = *rp;
     if (!base) { if (rp->gone) { static uint64_t n; if (n++ < 4) MLOG("texture ID %d read after its memory pool was finalized ser=%llu %ux%u format %#x: treated as an empty slot (%llu so far)", tid, (unsigned long long)rp->t.serial, rp->t.d.width, rp->t.d.height, rp->t.d.format, (unsigned long long)n); } return NULL; }
@@ -9146,7 +9149,9 @@ static void *tex_by_id_ref(int tid) {
         }
         g_treg_transient[g_ntreg_transient++] = tid; rp->transient_sub = g_sub_serial;
     }
-    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = v.gpuResourceID._impl; rp->view_tt = (uint8_t)v.textureType; rp->view_pf = (uint32_t)v.pixelFormat; rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, base);
+    rp->view = (void *)CFBridgingRetain(v); rp->view_rid = v.gpuResourceID._impl; rp->view_tt = (uint8_t)v.textureType; rp->view_pf = (uint32_t)v.pixelFormat;
+    { uint64_t fwh = 0; NvImageHeap *fo = fam_owner(v, &fwh); rp->view_fam = (fo && fo->compressed) ? (__bridge void *)fo : NULL; rp->view_fam_wh = rp->view_fam ? fwh : 0; }
+    rp->view_ser = sg; rp->view_dirty = dg; treg_pkg_stamp(rp, base);
     if (rp->stand) { treg_drop_stand(rp); g_stand_done++; }   // the tables take the ID again (own_note), or are updated by pool_seen_scan
     return rp->view;
 }
@@ -9386,6 +9391,28 @@ static inline __attribute__((always_inline)) uint64_t tex_fast_rid_meta(int tid,
 }
 static inline __attribute__((always_inline)) uint64_t tex_fast_rid(int tid, void **out) {
     return tex_fast_rid_meta(tid, out, NULL, NULL);
+}
+// Hot-path compressed resolution-family checks using the immutable owner/geometry cached on treg_t beside rp->view (no parentTexture / objc_getAssociatedObject per bind). Caller holds g_rmu.
+static inline __attribute__((always_inline)) int treg_fam_valid(int tid, __unsafe_unretained id<MTLTexture> t) {
+    if (tid >= 0 && tid < g_ntreg && (g_treg[tid].view == (__bridge void *)t || (g_treg[tid].im == (__bridge void *)t && g_treg[tid].im_of == g_treg[tid].view))) {
+        void *fam = g_treg[tid].view_fam;
+        return __builtin_expect(!fam, 1) || atomic_load_explicit(&((__bridge NvImageHeap *)fam)->valid_wh, memory_order_acquire) == g_treg[tid].view_fam_wh;
+    }
+    return fam_is_valid(t);
+}
+static inline __attribute__((always_inline)) int treg_fam_pool_ok(int tid, __unsafe_unretained id<MTLTexture> t, uint64_t serial) {
+    if (tid >= 0 && tid < g_ntreg && g_treg[tid].view == (__bridge void *)t) {
+        void *fam = g_treg[tid].view_fam;
+        if (__builtin_expect(!fam, 1)) return 1;
+        __unsafe_unretained NvImageHeap *fo = (__bridge NvImageHeap *)fam; uint64_t fwh = g_treg[tid].view_fam_wh;
+        fam_track_pool_serial(fo, serial, fwh);
+        return atomic_load_explicit(&fo->valid_wh, memory_order_acquire) == fwh;
+    }
+    if (!atomic_load_explicit(&g_image_heap_comp_n, memory_order_relaxed)) return 1;
+    uint64_t fwh = 0; NvImageHeap *fo = fam_owner(t, &fwh);
+    if (!fo || !fo->compressed) return 1;
+    fam_track_pool_serial(fo, serial, fwh);
+    return atomic_load_explicit(&fo->valid_wh, memory_order_acquire) == fwh;
 }
 static MTLSamplerAddressMode wrapm(int w) {
     switch (w) { case 0: case 7: return MTLSamplerAddressModeClampToEdge; case 1: return MTLSamplerAddressModeRepeat;
@@ -14379,8 +14406,7 @@ static void pool_seen_scan(void) {
             if (!g_treg[id_].view && !pkg_shared(&g_treg[id_].t) && !tex_get(g_treg[id_].t.serial)) { if (g_walk_req >= POOL_REQ_BYTES) return; g_walk_req += pool_tex_size(&g_treg[id_].t); }
             g_seen_todo[i] &= ~(1u << b);
             void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (!tv || !tr) continue;
-            { uint64_t fwh = 0; NvImageHeap *fo = fam_owner((__bridge id<MTLTexture>)tv, &fwh);
-              if (fo && fo->compressed) { fam_track_pool_serial(fo, g_treg[id_].t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) continue; } }
+            if (!treg_fam_pool_ok(id_, (__bridge id<MTLTexture>)tv, g_treg[id_].t.serial)) continue;
             MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents) continue;
@@ -14480,8 +14506,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, uint64_t limit, int *gone
     if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
     void *tv = NULL; uint8_t vtt = 0; uint64_t tr = tex_fast_rid_meta(id_, &tv, &vtt, NULL);
     if (!tv) return 0;
-    { uint64_t fwh = 0; NvImageHeap *fo = fam_owner((__bridge id<MTLTexture>)tv, &fwh);
-      if (fo && fo->compressed) { fam_track_pool_serial(fo, r->t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) return 0; } }
+    if (!treg_fam_pool_ok(id_, (__bridge id<MTLTexture>)tv, r->t.serial)) return 0;
     MTLTextureType got = (MTLTextureType)vtt; g_treg[id_].tt1 = vtt + 1;
     id<MTLTexture> chk = (__bridge id<MTLTexture>)tv;
     if (got != (MTLTextureType)dtt) {   // a view when a shader read the ID through this table's type (pool_fit); else the dummy
@@ -14855,8 +14880,7 @@ static int img_pool_elem(int tid, const nvn_rbind *b, uint64_t *rid, uint32_t *l
     void *tv = NULL; uint64_t tr = tex_fast_rid(tid, &tv);
     id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
     if (!t || !tr) return 0;
-    { uint64_t fwh = 0; NvImageHeap *fo = fam_owner(t, &fwh);
-      if (fo && fo->compressed) { fam_track_pool_serial(fo, r->t.serial, fwh); if (atomic_load_explicit(&fo->valid_wh, memory_order_acquire) != fwh) return 0; } }
+    if (!treg_fam_pool_ok(tid, t, r->t.serial)) return 0;
     id<MTLTexture> base = t; NSUInteger l0 = 0, s0 = 0;
     while (base.parentTexture) { l0 += base.parentRelativeLevel; s0 += base.parentRelativeSlice; base = base.parentTexture; }
     int swz_only = !(t.usage & MTLTextureUsageShaderWrite) && (base.usage & MTLTextureUsageShaderWrite);
@@ -15362,7 +15386,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
         if (samp) { int sid = c2s == SAMP_FROM_UBO_HANDLES ? ubo_samp_id(w[k * 2]) : c2s; if (samp_known(sid) && samp_fast(sid)) r = samp_rid(sid); }
         else { int tid = ubo_tex_id(w[k * 2]); if (tid >= 0 && tid < g_ntreg && g_treg[tid].ok && (g_treg[tid].view || (!g_treg[tid].gone && tex_storage_live(&g_treg[tid].t)))) {   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint8_t vtt = 0; uint64_t tr = tex_fast_rid_meta(tid, &tv, &vtt, NULL); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-                if (t && !fam_is_valid(t)) { t = nil; tr = 0; }
+                if (t && !treg_fam_valid(tid, t)) { t = nil; tr = 0; }
                 if (t && vtt != b->dtt) { uint64_t r2 = 0; t = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); tr = t ? r2 : 0; }   // a handle the shader does not pick here may be another kind
                 if (t && b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) lead[k] = tbuf_lead(tid, t);
                 if (t) { if (__builtin_expect(g_res_check_on, 0)) res_check(t, "htab_gpu", tid); r = tr; p->ser[k] = g_treg[tid].t.serial; } } }
@@ -15707,7 +15731,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 int tid = ubo_tex_id(ubo_handle(nvn_stage, reg, b->off + 8 * k)); if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok) tid = -1;   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint8_t vtt = 0; uint64_t trid = tid >= 0 ? tex_fast_rid_meta(tid, &tv, &vtt, NULL) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
+                if (t && !treg_fam_valid(tid, t)) { t = nil; trid = 0; }
                 if (t && vtt == MTLTextureTypeTextureBuffer && b->dtt == MTLTextureType2D && b->f1d) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_rows_binding(tid, t, b, k, tbias, &r2); if (v) { t = v; trid = r2; vtt = (uint8_t)v.textureType; } }
                 if (t && vtt != b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); t = v; trid = v ? r2 : 0; }   // a handle the shader does not pick here may be another kind
                 if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; } else real |= 1ull << k;
@@ -15734,7 +15758,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             void *tv = NULL; uint8_t vtt = 0; uint32_t vpf = 0; uint64_t trid = tid >= 0 ? tex_fast_rid_meta(tid, &tv, &vtt, &vpf) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
             int snap = fb_snapshot_slot(nvn_stage, t);
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; vtt = (uint8_t)t.textureType; vpf = (uint32_t)t.pixelFormat; }
-            else if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
+            else if (t && !treg_fam_valid(tid, t)) { t = nil; trid = 0; }
             if (t && passdump() && tid >= 0 && tid < g_ntreg) PD("R %llu st%d ser=%llu", g_stat_pass, nvn_stage, g_treg[tid].t.serial);
             if (bl) PD("B %llu st%d tex reg%d tid=%d %s ser=%llu fmt=%lu %lux%lux%lu view_lv=%lu+%lu view_sl=%lu array=%lu target=%lu swz=%d%d%d%d mtl=%p", g_stat_pass, nvn_stage, reg, tid, t ? "real" : "dummy", t && tid >= 0 && tid < g_ntreg ? g_treg[tid].t.serial : 0ull,
                        (unsigned long)t.pixelFormat, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.depth,
@@ -15769,7 +15793,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             id<MTLTexture> t = img_binding(tid, b, &trid, &real);
             int snap = real && g_fb_n && !b->rw && !b->atom && fb_image_view(tid, b, t) ? fb_snapshot_slot(nvn_stage, t) : -1;
             if (snap >= 0) { t = g_fb_use[snap]; trid = g_fb_rid[snap]; }
-            else if (real && !b->rw && !b->atom && !fam_is_valid(t)) { t = dummy_img(b->dtt, b->dpf); trid = t.gpuResourceID._impl; real = 0; }
+            else if (real && !b->rw && !b->atom && !treg_fam_valid(tid, t)) { t = dummy_img(b->dtt, b->dpf); trid = t.gpuResourceID._impl; real = 0; }
             else if (real && t.textureType == MTLTextureTypeTextureBuffer) {   // a buffer image: its view starts before its offset, and the shader moves its coordinates by the elements in between (tbuf_lead)
                 uint32_t lead = tbuf_lead(tid, t);
                 if (b->tbx) { if (tbias) tbias[b->tbx - 1] = lead; }
@@ -15813,7 +15837,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 uint64_t hk = k < 128 ? (S.tex[nvn_stage][k] ? S.tex[nvn_stage][k] : S.tex[nvn_stage][NVN_SEPTEX_SLOT0 + k]) : 0; int tid = bound_tex_id(bound_handle(hk));
                 void *tv = NULL; uint8_t vtt = 0; uint64_t trid = tid >= 0 ? tex_fast_rid_meta(tid, &tv, &vtt, NULL) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
+                if (t && !treg_fam_valid(tid, t)) { t = nil; trid = 0; }
                 if (b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) {
                     if (t && vtt != MTLTextureTypeTextureBuffer) t = nil;   // a slot the shader does not pick here may hold another kind of texture
                     if (!t) { t = dummy_tbuf(b->dpf); trid = g_dummy_tbuf_rid[b->dpf & 3]; }
@@ -15852,7 +15876,7 @@ static int encode_args_full(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stag
             for (int k = 0; k < b->n; k++) {
                 int tid = bound_tex_id(c2_handle(nvn_stage, b->off + 8u * k));   // a separate sampler word ORed in (soff) holds only a sampler ID
                 void *tv = NULL; uint8_t vtt = 0; uint64_t trid = tid >= 0 ? tex_fast_rid_meta(tid, &tv, &vtt, NULL) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-                if (t && !fam_is_valid(t)) { t = nil; trid = 0; }
+                if (t && !treg_fam_valid(tid, t)) { t = nil; trid = 0; }
                 if (t && vtt == MTLTextureTypeTextureBuffer && b->dtt == MTLTextureType2D && b->f1d) { uint64_t r2 = 0; id<MTLTexture> v = tbuf_rows_binding(tid, t, b, k, tbias, &r2); if (v) { t = v; trid = r2; vtt = (uint8_t)v.textureType; } }
                 if (t && vtt != b->dtt) { uint64_t r2 = 0; id<MTLTexture> v = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); t = v; trid = v ? r2 : 0; }   // an element the shader does not pick here may be another kind
                 if (!t) { t = dummy_tex(b->dtt, b->dpf); trid = g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3]; } else if (k < 64) real |= 1ull << k;

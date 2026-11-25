@@ -12770,17 +12770,16 @@ static int pso_pend_kick_d(const pso_key *k, MTLRenderPipelineDescriptor *d, int
     pso_pend_start(slot, gen, d, pso_off(k, (__bridge NvShader *)k->fs, 0), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     return 1;
 }
-static int pso_pend_kick_budget(const pso_key *k, NvShader *vs, NvShader *fs, int spec, PsoPredictBudget *budget) {   // the submit thread
+static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec, PsoPredictBudget *budget) {   // the submit thread
     if (hm_get_id(&g_pso, k)) return 0;
     PD("J pipeline source=predict key=%016llx vs=%s fs=%s depth=%u stencil=%u samples=%u", (unsigned long long)nvn_hm_hash(k, sizeof *k), vs->key, fs ? fs->key : "-", k->dfmt, k->sfmt, k->samples);
     return pso_pend_kick_d(k, pso_desc(k, vs, fs, nil, 0), spec, budget);
 }
-static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec) { return pso_pend_kick_budget(k, vs, fs, spec, nil); }
-// Nonblocking admission of a speculative guess: no speculative backlog in front of a demanded compile
-static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_pend_kick_(k, vs, fs, 1); }
+// Nonblocking admission of a speculative guess: no speculative backlog in front of a demanded compile; budget optionally bounds guesses per prediction
+static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs, PsoPredictBudget *budget) { return pso_pend_kick_(k, vs, fs, 1, budget); }
 // A later draw of this submission as the scan met it, which would wait for its pipeline: admitted whatever runs. Its draw takes it when built, or makes it at once while it is
 // still queued (pso_pend_take), so it never waits behind the others; the Metal compiler service builds them side by side
-static int pso_pend_kick_next(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_pend_kick_(k, vs, fs, 2); }
+static int pso_pend_kick_next(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_pend_kick_(k, vs, fs, 2, nil); }
 // A pipeline served by a hybrid stand-in is a demand even if its background build has not finished when the process exits. Record it for the next start's prepare step,
 // independently of build admission; the existing writer drops the identical completion row. The map bounds early recording to 65,536 keys and avoids serializing repeated
 // stand-in draws (submit thread). DM_PSO_DEMAND_RECORD=0 keeps record-on-completion. Measurements and the prepare-time tradeoff: docs/reference/shaders.md.
@@ -16372,7 +16371,7 @@ static void pso_predict_rest_(void) {
         }
         if (hy && hybrid_get(qk, qv, qf) != nil) continue;   // a whole pipeline (no base to look up): its stand-in, as before
         if (i < na) g_pp_admit += (uint64_t)pso_pend_kick_next(qk, qv, qf);
-        else admitted += pso_pend_kick_budget(qk, qv, qf, 1, budget);
+        else admitted += pso_pend_kick(qk, qv, qf, budget);
     }
     g_pp_admit += (uint64_t)admitted;
     memcpy(&S, &Ssave, sizeof S); R.sc = sc0; R.has_sc = has_sc0; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();

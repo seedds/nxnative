@@ -2,6 +2,8 @@
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
+//   Left stick (DM_TOUCH_STICK, launcher setting): floating by default: it centres where the thumb lands (anywhere free in the left third) and its centre follows a thumb past its reach; digital
+//     snaps that to 8 directions at full tilt with a haptic tick per direction (grid and menu games: Fire Emblem's profile); fixed keeps the ring's centre, as before.
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
@@ -122,6 +124,8 @@ static const CGFloat
     K_STICK_GRAB = 1.4,                             // how near the ring centre a touch-down grabs a stick (times the ring radius)
     K_FULL = 0.8,                                   // full tilt at this fraction of the ring radius (the knob still travels to the ring edge)
     K_DEAD = 0.1,                                   // stick dead zone (times the ring radius)
+    K_FLOAT_FULL = 46,                              // floating left stick (DM_TOUCH_STICK float / digital): full tilt this far from where the thumb landed (a shorter reach than the fixed stick's K_FULL * K_STICK_R)
+    K_DIGI_DEAD = 18, K_DIGI_R = 40,                // digital left stick: no direction within this distance of the centre; the centre follows the thumb past K_DIGI_R so a reversal answers at once
     // controls only the 3D layout has
     K_LOW_X = 231, K_LOW_Y = 64,                    // D-pad centre from the outer edge and the bottom (inward of and below the left stick, as on a Pro Controller)
     K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11,     // D-pad: arm outer edge from the centre, half-width, tip from the centre
@@ -151,6 +155,9 @@ static void pads_start(void);   // Physical controllers, below
     NSMapTable<UITouch *, NSNumber *> *_owner;     // touch → control (with the key for C_BTN or the stick for C_STICK, << 8)
     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
+    int _stickMode;                                // DM_TOUCH_STICK: 0 fixed (the ring's centre), 1 floating (centred where the thumb lands), 2 digital (floating, snapped to 8 directions)
+    CGPoint _lCentre;                              // the floating left stick's centre while held
+    int _digiSector;                               // digital left stick: the direction held (0..7, 45° each from right), -1 none; a change gives one haptic tick
     uint64_t _faceBits, _dpadBits, _btnBits;
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
@@ -187,6 +194,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [(UIView *)environment setNeedsLayout];
         }];
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
+        const char *sm = getenv("DM_TOUCH_STICK");   // launcher setting (settings.tsv): float by default, digital for grid and menu games (Fire Emblem), fixed = the ring's centre as before
+        _stickMode = !sm || !strcmp(sm, "float") ? 1 : !strcmp(sm, "digital") ? 2 : 0; _digiSector = -1;
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -290,7 +299,8 @@ static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPoint
     CGRect s = self.corner;
     return side(s, 0, K_STICK_X * self.u, CGRectGetMaxY(s) - K_PAD_Y * self.u);
 }
-- (CGPoint)stickCentre:(int)i { return i ? _rCentre : self.stickHome; }
+- (CGPoint)stickCentre:(int)i { return i ? _rCentre : _stick[0] && _stickMode ? _lCentre : self.stickHome; }
+- (BOOL)inLeftArea:(CGPoint)p { CGRect b = _layout.controls; return p.x <= CGRectGetMinX(b) + b.size.width * K_RSWIPE; }   // the floating left stick's area: the left third, wherever no key takes the touch
 - (CGFloat)stickR:(int)i { return (i ? K_RSTICK_R : K_STICK_R) * self.u; }
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 - (CGPoint)dpadCenter {
@@ -374,17 +384,24 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     for (UITouch *t in _owner) { uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff);
         if (c == C_BTN) btn |= 1ull << (v >> 8);
         else if (c == C_DPAD) dpad |= [self dpadAt:[t locationInView:self]]; }
-    int32_t ax[4] = {0};
+    int32_t ax[4] = {0}; int sector = -1;
     for (int i = 0; i < 2; i++) {
-        CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD;
+        CGPoint o = [self knobOffset:i]; CGFloat R = [self stickR:i], d = hypot(o.x, o.y), dz = R * K_DEAD, full = R * K_FULL;
+        if (i == 0 && _stickMode == 2) {   // digital: beyond the dead circle the direction snaps to the nearest of 8, at full tilt (a D-pad with the stick's reach)
+            if (d < K_DIGI_DEAD * self.u) continue;
+            sector = (int)lrint(atan2(-o.y, o.x) / M_PI_4) & 7; double a = sector * M_PI_4;
+            ax[0] = (int32_t)lrint(cos(a) * 32767); ax[1] = (int32_t)lrint(sin(a) * 32767); continue;
+        }
+        if (i == 0 && _stickMode == 1) { full = K_FLOAT_FULL * self.u; dz = full * K_DEAD; }   // floating: a shorter reach to full tilt
         if (d <= dz) continue;
-        CGFloat m = fmin((d - dz) / (R * K_FULL - dz), 1) / d;   // outside the dead zone: 0 rising to full at the full-tilt radius
+        CGFloat m = fmin((d - dz) / (full - dz), 1) / d;   // outside the dead zone: 0 rising to full at the full-tilt radius
         ax[i * 2] = (int32_t)lrint(o.x * m * 32767); ax[i * 2 + 1] = (int32_t)lrint(-o.y * m * 32767);   // host: up is positive; rounded so full tilt is exactly 32767
     }
     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits;
     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
     unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
-    if (pressed || (gripping & ~_hapticSticks)) {
+    BOOL turned = sector >= 0 && sector != _digiSector; _digiSector = _stick[0] ? sector : -1;   // digital: each new direction taps once, like a D-pad click
+    if (pressed || turned || (gripping & ~_hapticSticks)) {
         [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
     }
     _hapticSticks = gripping;
@@ -423,6 +440,7 @@ int front_web_touch(void);
     if (dist(p, self.faceCenter) / (self.faceGap + MAX(self.faceR * 1.6, self.faceHitR)) <= 1) return YES;
     if (_full && dist(p, self.dpadCenter) / MAX(self.dpadR * K_DPAD_GRAB, _layout.separated ? 22 : 0) < 1) return YES;
     if (!_stick[0] && dist(p, self.stickHome) / MAX([self stickR:0] * K_STICK_GRAB, _layout.separated ? 22 : 0) < 1) return YES;
+    if (_stickMode && !_stick[0] && [self inLeftArea:p]) return YES;
     return _full && !_stick[1] && [self inRightArea:p];
 }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
@@ -443,7 +461,9 @@ int front_web_touch(void);
         CGFloat f = dist(p, self.faceCenter) / (self.faceGap + MAX(self.faceR * 1.6, self.faceHitR)); if (f <= best) { best = f; kind = C_FACE; }
         if (_full) { CGFloat d = dist(p, self.dpadCenter) / MAX(self.dpadR * K_DPAD_GRAB, _layout.separated ? 22 : 0); if (d < best) { best = d; kind = C_DPAD; } }
         if (!_stick[0]) { CGFloat s = dist(p, self.stickHome) / MAX([self stickR:0] * K_STICK_GRAB, _layout.separated ? 22 : 0); if (s < best) { best = s; kind = C_STICK; } }
+        if (kind == C_NONE && _stickMode && !_stick[0] && [self inLeftArea:p]) { kind = C_STICK; idx = 0; }   // floating left stick: any free touch in the left third
         if (kind == C_NONE && _full && !_stick[1] && [self inRightArea:p]) { kind = C_STICK; idx = 1; _rCentre = p; }   // the right stick: centred where the touch lands
+        if (kind == C_STICK && idx == 0) { _lCentre = _stickMode ? p : self.stickHome; _digiSector = -1; }   // floating: the centre is where the thumb landed, so the landing itself pushes nowhere
         if (kind == C_FACE) { [_owner setObject:@(C_FACE) forKey:t]; [_faceOf setObject:@([self faceAt:p]) forKey:t]; }
         else if (kind == C_DPAD) [_owner setObject:@(C_DPAD) forKey:t];
         else if (kind == C_STICK) { [_owner setObject:@(C_STICK | (uint64_t)idx << 8) forKey:t]; _stick[idx] = t; _stickNow[idx] = p; }
@@ -459,7 +479,9 @@ int front_web_touch(void);
         if (c == C_FACE) [_faceOf setObject:@([self faceAt:p]) forKey:t];
         else if (c == C_STICK) { _stickNow[v >> 8] = p;
             if ((v >> 8) == 1) { CGFloat d = dist(p, _rCentre), R = [self stickR:1];   // the right stick's centre follows a finger past its radius, so turning back responds at once
-                if (d > R) _rCentre = CGPointMake(p.x - (p.x - _rCentre.x) * R / d, p.y - (p.y - _rCentre.y) * R / d); } }
+                if (d > R) _rCentre = CGPointMake(p.x - (p.x - _rCentre.x) * R / d, p.y - (p.y - _rCentre.y) * R / d); }
+            else if (_stickMode) { CGFloat d = dist(p, _lCentre), R = (_stickMode == 2 ? K_DIGI_R : K_FLOAT_FULL) * self.u;   // the floating left stick likewise, at its own reach
+                if (d > R) _lCentre = CGPointMake(p.x - (p.x - _lCentre.x) * R / d, p.y - (p.y - _lCentre.y) * R / d); } }
         else if (c == C_GAME) game = YES;
     }
     if (game) [self pushGame];
@@ -551,8 +573,10 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
         _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }
-    CGPoint h = self.stickHome, o = [self knobOffset:0];
-    _knob.position = CGPointMake(h.x + o.x, h.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
+    CGPoint h = self.stickHome, c = [self stickCentre:0], o = [self knobOffset:0];
+    if (_stick[0] && _stickMode == 2 && _digiSector >= 0) { CGFloat r = K_DIGI_R * self.u; o = CGPointMake(cos(_digiSector * M_PI_4) * r, -sin(_digiSector * M_PI_4) * r); }   // digital: the knob shows the snapped direction
+    _ring.position = CGPointMake(c.x - h.x, c.y - h.y);   // the ring (drawn at the home position) moves with a floating centre and returns on release
+    _knob.position = CGPointMake(c.x + o.x, c.y + o.y); _knob.fillColor = (_stick[0] ? k_on : k_idle).CGColor;
     [CATransaction commit];
 }
 

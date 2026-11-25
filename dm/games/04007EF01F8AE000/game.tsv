@@ -11,6 +11,8 @@ name	Fire Emblem Fortune's Weave
 ipa	FireEmblemFortunesWeave.ipa
 app_category	public.app-category.role-playing-games
 pad_layout	full
+# grid cursor and menus: the virtual left stick snaps to 8 directions and floats under the thumb (DM_TOUCH_STICK)
+touch_stick	digital
 
 # ---- Versions ----
 build	v131072	v131072	main=db93b0125f4850601d61c3edde012f8e	subsdk2=7d73f8e808341683306a4425a4989ed5	sdk=5b1602f3a2965f44ab13124cadbdf148

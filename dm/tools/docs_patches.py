@@ -132,6 +132,8 @@ SWITCH_BINDING = [
     ('look_dead', '', {'what': "pointer look: the right stick's round deadzone (Pokopia)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'tuned per game against its own stick curve'}),
     ('look_cam', '', {'what': "pointer look written straight into the camera object (hle_hid.c look_cam)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
      'why': "a main build ID and the camera object's address per build; a rewriter pattern for the camera object would cover new versions"}),
+    ('touch_stick', '', {'what': "the virtual left stick's default mode on the iPhone: floating, digital 8-way or fixed (DmGamepad.m)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'a feel choice per game: grid and menu games (Fire Emblem) want snapped directions, free movement wants an analog floating stick; the player can change it in the launcher'}),
     ('s2_hid_stubs', '', {'what': 'Switch 2 streamplay and vibration-graph calls as inert stubs (hle_offline.c)', 'now': 'game', 'goal': 'host', 'purpose': 'runtime',
      'why': 'a host-side streamplay and HD rumble 2 graph would serve every Switch 2 game; until then only a game whose SDK the host cannot otherwise satisfy opts in, since the stubs replace constructors'}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),

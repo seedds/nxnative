@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Game language](#game-language), [Picture](#picture), [Rotation](#rotation), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Left stick](#left-stick), [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -114,6 +114,10 @@ Off by default. On, the app stays alive when you switch to another app or lock t
 
 **Microphone (Mac).** Apps that support microphone input have this switch off by default. Turn it on and press Play to grant macOS access. The first enabled launch can ask even if the settings window is hidden. Choose an input device while the switch is on. Microphone gain is under Advanced settings.
 
+
+### Left stick
+
+How the on-screen left stick behaves. **Floating**, the default, puts the stick wherever your thumb lands in the left third of the screen, so the landing itself pushes nowhere and the stick follows a thumb that drifts. **Digital 8-way** floats too and snaps a short flick to one of eight directions at full tilt, with a tap per direction, for grid cursors and menus; Fire Emblem starts with it. **Fixed** keeps the drawn ring's centre as the stick's centre.
 
 ### Touch feedback
 

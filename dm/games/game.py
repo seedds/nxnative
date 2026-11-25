@@ -188,6 +188,8 @@ def header_one(g):
     if aba not in ('on', 'off'): sys.exit(f'{g.id}: alloc_big_align must be on or off: {aba}')
     sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
+    ts = g.get('touch_stick', 'float')   # the virtual left stick's first mode (DmGamepad.m, launcher setting DM_TOUCH_STICK): float = centred where the thumb lands, digital = floating + snapped to 8 directions (grid and menu games), fixed = the ring's centre
+    if ts not in ('float', 'digital', 'fixed'): sys.exit(f'{g.id}: touch_stick must be float, digital or fixed: {ts}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
     if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')
     lr = float(g.get('look_rate', '0'))   # pointer look (hle_hid.c dm_look_add): the camera's turn rate at full right-stick tilt, degrees per second; 0 = off (the pointer is not a look control)
@@ -271,6 +273,7 @@ def header_one(g):
          f'#define DM_GAME_ENC_THREAD {int(et == "on")}',
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
+         f'#define DM_GAME_TOUCH_STICK "{ts}"',   # the launcher's default for the left-stick setting (settings.tsv)
          f'#define DM_GAME_LOOK_RATE {lr!r}f',   # pointer look (hle_hid.c)
          f'#define DM_GAME_LOOK_DEAD {ld!r}f',
          f'#define DM_GAME_LOOK_CAM {q(lc)}',

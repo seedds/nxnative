@@ -37,6 +37,7 @@ DM_COOP_RELAY	text	21		always	Game	Relay address	A relay you trust, as IPv4[:por
 DM_COOP_INTERACT	toggle	-	0	always	Game	Interact everywhere	Experimental: in every town, not only Palette Town, visitors can use moves and items and build. Every player needs it on.	needs=DM_COOP=auto
 DM_COOP_STORY	toggle	-	0	always	Game	Story co-op	Experimental, with Interact everywhere: visitors can talk to the town's story characters. Story requests still count only for the host. Every player needs it on.	needs=DM_COOP=auto
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
+DM_TOUCH_STICK	choice	float=Floating,digital=Digital 8-way,fixed=Fixed	DM_GAME_TOUCH_STICK	platform:ios	Controls	Left stick	Floating: the stick appears where your thumb lands. Digital 8-way: a short flick snaps to one of eight directions, for menus and grids. Fixed: the stick stays in its corner.
 DM_LOOK_SCALE	range	0.25:3.0:0.05	1.0	DM_GAME_LOOK_RATE!=0.0f	Controls	Look sensitivity		level=basic
 DM_LOOK_INVERT_Y	toggle	-	0	DM_GAME_LOOK_RATE!=0.0f	Controls	Invert look up and down
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic

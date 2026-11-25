@@ -309,6 +309,17 @@ check_t_pool_notes: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pool_replay: t_pool_replay.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_replay.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
 check_t_pool_replay: RUN_ENV = MTL_DEBUG_LAYER=1
+t_pool_stats: t_pool_stats.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_stats.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+# The power line's read of the pool tables against their rebuilds on another thread (issue #3300): an unlocked read is a data race report of the ThreadSanitizer build,
+# which the run list's check runs too (the plain build alone cannot see the race)
+t_pool_stats_tsan: t_pool_stats.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -fsanitize=thread -o $@ t_pool_stats.m ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX)) $(FW)
+.PHONY: check_t_pool_stats pool-stats-tsan
+check_t_pool_stats: t_pool_stats pool-stats-tsan
+	MTL_DEBUG_LAYER=1 ./t_pool_stats
+pool-stats-tsan: t_pool_stats_tsan
+	TSAN_OPTIONS=halt_on_error=1:abort_on_error=0 ./t_pool_stats_tsan   # exit, not abort: the crash handler would report the abort
 t_htab_update: t_htab_update.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_htab_update.m $(MTL_T_SRC) $(FW)
 check_t_htab_update: RUN_ENV = MTL_DEBUG_LAYER=1

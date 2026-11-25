@@ -319,6 +319,21 @@ static void pool_serials(void) {
         os_unfair_lock_lock(&o->pool_lk); uint32_t nb=o->npool_sers, capb=o->cappool_sers; os_unfair_lock_unlock(&o->pool_lk);
         CHECK(nb==1+BURST && capb>=1+BURST,"live burst serials grow the family list while registered");
         for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
+        // Even before another fam_track_pool_serial miss, fam_set_valid must prune the unregistered burst serials and emit notes only for the live serial.
+        sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);
+        uint64_t notes_b=atomic_load(&g_ser_gen)-sg;
+        os_unfair_lock_lock(&o->pool_lk); uint32_t nb2=o->npool_sers; int hasb2=nb2==1 && o->pool_sers[0].serial==live; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(nb2==1 && hasb2 && notes_b==2,"size round trip immediately after unregistering a burst prunes dead serials and emits only 2 notes");
+        // Re-create a burst, unregister it, then insert one new serial: fam_track_pool_serial must also drop all unregistered burst serials immediately.
+        for (int i=0;i<BURST;i++) {
+            burst[i]=image(&pool,998500+i,1440,810); burst[i].d.format=NVN_FORMAT_RGBA16F; burst[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&burst[i].d,&burst[i].L); mtl_tex_init(&burst[i]);
+            CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"second burst texture joins the compressed family");
+            mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
+            int g=0,l=0,lr=0,tr=0,d=0;
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        }
+        for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
         tex_t *after=&t[cur]; *after=image(&pool,999000,1440,810); after->d.format=NVN_FORMAT_RGBA16F; after->d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&after->d,&after->L); mtl_tex_init(after);
         CHECK(fam_owner(tex_mtl(after),NULL)==o,"post-burst texture joins the compressed family");
         mtl_reg_tex(ID,after,NULL); live=after->serial;

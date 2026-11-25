@@ -603,6 +603,7 @@ static inline int fam_is_valid(id<MTLTexture> t) {
     uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
     return !o || !o->compressed || atomic_load_explicit(&o->valid_wh, memory_order_acquire) == wh;
 }
+static os_unfair_lock g_rmu;
 static int treg_serial_held(uint64_t serial);
 // The serials the family's pool walks saw (pool_entry, img_pool_elem, pool_seen_scan; callers hold g_rmu), for a size switch to note (fam_set_valid). On a new serial, drop
 // entries no pool ID registers any more (a re-registration of their ID unlinked them from g_treg_serial) before growing, so target re-initialization churn does not keep
@@ -627,9 +628,18 @@ static void fam_set_valid(NvImageHeap *o, uint64_t wh) {
     if (prev == wh) return;
     atomic_store_explicit(&o->valid_wh, wh, memory_order_release);
     args_dirty_all();
-    uint64_t stack_s[32], *sers = stack_s; uint32_t ns = 0, cap = 32;
     os_unfair_lock_lock(&o->pool_lk);
+    uint32_t any = o->npool_sers;
+    os_unfair_lock_unlock(&o->pool_lk);
+    if (!any) return;
+    uint64_t stack_s[32], *sers = stack_s; uint32_t ns = 0, cap = 32;
+    os_unfair_lock_lock(&g_rmu);
+    os_unfair_lock_lock(&o->pool_lk);
+    uint32_t keep = 0;
     for (uint32_t i = 0; i < o->npool_sers; i++) {
+        uint64_t ser = o->pool_sers[i].serial;
+        if (!treg_serial_held(ser)) continue;
+        o->pool_sers[keep++] = o->pool_sers[i];
         uint64_t ewh = o->pool_sers[i].wh;
         if (ewh != prev && ewh != wh) continue;
         if (ns == cap) {
@@ -639,9 +649,11 @@ static void fam_set_valid(NvImageHeap *o, uint64_t wh) {
             if (sers == stack_s) memcpy(nb, stack_s, ns * sizeof *nb);
             sers = nb;
         }
-        sers[ns++] = o->pool_sers[i].serial;
+        sers[ns++] = ser;
     }
+    o->npool_sers = keep;
     os_unfair_lock_unlock(&o->pool_lk);
+    os_unfair_lock_unlock(&g_rmu);
     for (uint32_t i = 0; i < ns; i++) own_note(sers[i]);
     if (sers != stack_s) free(sers);
 }

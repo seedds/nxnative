@@ -5,7 +5,70 @@
 static int checks, fails;
 #define CHECK(c) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); } } while (0)
 
+static void check_shield_sticks(void) {
+    const int vid = 0x0955, pid = 0x7210;
+    const uint32_t usages[] = {0x30, 0x31, 0x32, 0x35};
+    const int axes[] = {PH_X, PH_Y, PH_Z, PH_RZ};
+    pad_hid h;
+    int32_t s[4];
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    for (int i = 0; i < 4; i++) {
+        int a = pad_hid_axis_for_device(vid, pid, 1, 1, usages[i]);
+        CHECK(a == axes[i]);
+        h.has[a] = 1;
+        h.axis[a] = pad_hid_axis_norm(vid, pid, 1, a, 0x7fff, -1, 0);
+        CHECK(fabsf(h.axis[a]) < 0.001f);
+        CHECK(pad_hid_axis_norm(vid, pid, 1, a, -32768, -1, 0) > 0);
+        CHECK(pad_hid_axis_norm(vid, pid, 1, a, 65535, -1, 0) == 1);
+    }
+    pad_hid_sticks(&h, s);
+    CHECK(s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0);
+    for (int i = 0; i < 4; i++) {
+        int a = axes[i];
+        h.axis[a] = pad_hid_axis_norm(vid, pid, 1, a, -1, -1, 0);
+        pad_hid_sticks(&h, s);
+        CHECK(s[i] == (i % 2 ? -DM_STICK_MAX : DM_STICK_MAX));
+        h.axis[a] = pad_hid_axis_norm(vid, pid, 1, a, 0, -1, 0);
+        pad_hid_sticks(&h, s);
+        CHECK(s[i] == (i % 2 ? DM_STICK_MAX : -DM_STICK_MAX));
+        h.axis[a] = pad_hid_axis_norm(vid, pid, 1, a, 0x7fff, -1, 0);
+    }
+    CHECK(pad_hid_axis_for_device(vid, pid, 2, 1, 0x30) == -1);
+    CHECK(pad_hid_axis_for_device(vid, pid, 2, 1, 0x31) == -1);
+    CHECK(pad_hid_axis_for_device(vid, pid + 1, 2, 1, 0x31) == PH_Y);
+    CHECK(pad_hid_axis_for_device(vid, pid, 1, 2, 0xc5) == PH_BRAKE);
+    CHECK(pad_hid_axis_norm(vid, pid, 1, PH_BRAKE, 0, -1, 0) == -1);
+    // Replay the measured trigger sweep, including its release. Both triggers must clear independently.
+    const long sweep[] = {0, 5305, 16397, 26314, 44624, 65535, 20445, 0};
+    for (int a = PH_BRAKE; a <= PH_ACCEL; a++) {
+        h.has[a] = 1;
+        for (unsigned i = 0; i < sizeof sweep / sizeof *sweep; i++) {
+            h.axis[a] = pad_hid_axis_norm(vid, pid, 1, a, sweep[i], -1, 0);
+            uint64_t bit = a == PH_BRAKE ? DM_BTN_ZL : DM_BTN_ZR;
+            CHECK(!!(pad_hid_buttons(&h) & bit) == (sweep[i] > 32767));
+        }
+    }
+    uint32_t back = pad_hid_button_for_device(vid, pid, 1, 9, 12);
+    uint32_t start = pad_hid_button_for_device(vid, pid, 1, 12, 0x224);
+    h.buttons = 1u << (back - 1);
+    CHECK(pad_hid_buttons(&h) == DM_BTN_MINUS);
+    h.buttons |= 1u << (start - 1);
+    CHECK(pad_hid_buttons(&h) == (DM_BTN_PLUS | DM_BTN_MINUS));
+    h.buttons &= ~(1u << (back - 1));
+    CHECK(pad_hid_buttons(&h) == DM_BTN_PLUS);
+    h.buttons = 0;
+    CHECK(pad_hid_buttons(&h) == 0);
+    CHECK(pad_hid_button_for_device(vid, pid, 1, 12, 0x223) == 0);
+    CHECK(pad_hid_button_for_device(vid, pid + 1, 1, 12, 0x224) == 0);
+    CHECK(pad_hid_button_for_device(vid, pid + 1, 1, 9, 12) == 12);
+    CHECK(pad_hid_button_for_device(vid, pid, 2, 9, 12) == 12);
+    CHECK(pad_hid_axis_norm(vid, pid + 1, 1, PH_Y, 0, -1, 0) == 1);
+    CHECK(pad_hid_axis_norm(vid + 1, pid, 1, PH_Y, 0, -1, 0) == 1);
+    CHECK(pad_hid_axis_norm(vid, pid, 1, PH_Y, 127, 0, 254) == 0);
+}
+
 int main(void) {
+    check_shield_sticks();
     pad_hid h; int32_t s[4];
     pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
     CHECK(pad_hid_buttons(&h) == 0);

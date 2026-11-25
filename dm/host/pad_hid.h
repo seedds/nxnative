@@ -99,6 +99,29 @@ static int pad_hid_axis_for(enum pad_hid_layout layout, int axis) {
     return axis;
 }
 static float pad_hid_norm(long v, long min, long max) { return max > min ? (float)(2.0 * (v - min) / (max - min) - 1) : 0; }
+// SHIELD 2015: the four absolute sticks are in report 1. Report 2 is a mouse collection whose relative X/Y
+// otherwise overwrite the left stick. The hat and face-button layout follow the normal HID path.
+static int pad_hid_axis_for_device(int vid, int pid, uint32_t report, uint32_t page, uint32_t usage) {
+    int a = pad_hid_axis_of(page, usage);
+    if (vid == 0x0955 && pid == 0x7210 && page == 1 && report == 2 && (a == PH_X || a == PH_Y)) return -1;
+    return a;
+}
+// SHIELD report 1: Back is button usage 12, Play is Consumer AC Back (0x224).
+// Translate to the default map's Minus/Plus usages, so DM_HID_MAP still applies.
+static uint32_t pad_hid_button_for_device(int vid, int pid, uint32_t report, uint32_t page, uint32_t usage) {
+    if (vid == 0x0955 && pid == 0x7210 && report == 1) {
+        if (page == 12 && usage == 0x224) return 12;
+        if (page == 9 && usage == 12) return 11;
+    }
+    return page == 9 && usage >= 1 && usage <= 32 ? usage : 0;
+}
+static float pad_hid_axis_norm(int vid, int pid, uint32_t report, int a, long v, long min, long max) {
+    // IOHID publishes -1..0 for this descriptor's 16-bit stick and trigger fields. Recover the unsigned bits.
+    if (vid == 0x0955 && pid == 0x7210 && report == 1 && min == -1 && max == 0 &&
+        (a == PH_X || a == PH_Y || a == PH_Z || a == PH_RZ || a == PH_BRAKE || a == PH_ACCEL))
+        return pad_hid_norm((uint16_t)v, 0, UINT16_MAX);
+    return pad_hid_norm(v, min, max);
+}
 // A raw axis (-1..1, report 0x3F) measured from its rest, a full deflection reaching 1: report 0x3F carries the sticks uncalibrated, off centre and short of the axis's range
 // (a PowerA NANO's rest 9 and 11% off centre, its reach about 0.78 of the axis from there: a full push read 61 to 74%). The first value is the rest, unless it is too far out to
 // be one (a stick held while the pad connects: the axis's middle stands in). Each side's reach starts at PAD_HID_RAW_REACH and only grows. Report 0x30 has the pad's own

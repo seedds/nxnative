@@ -73,16 +73,18 @@ static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef
     IOHIDElementRef e = IOHIDValueGetElement(v);
     uint32_t page = IOHIDElementGetUsagePage(e), usage = IOHIDElementGetUsage(e);
     CFIndex x = IOHIDValueGetIntegerValue(v), min = IOHIDElementGetLogicalMin(e), max = IOHIDElementGetLogicalMax(e);
-    if (page == kHIDPage_Button && usage >= 1 && usage <= 32) {
-        uint32_t bit = 1u << (usage - 1), was = d->st.buttons & bit;
+    uint32_t button = pad_hid_button_for_device(d->vid, d->pid, IOHIDElementGetReportID(e), page, usage);
+    if (button) {
+        uint32_t bit = 1u << (button - 1), was = d->st.buttons & bit;
         d->st.buttons = x ? d->st.buttons | bit : d->st.buttons & ~bit;
         if (g_hidpad_log && x && !was) LOG("[hid] %s: button usage %u", d->name, usage);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Hatswitch) {
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
-        int a = pad_hid_axis_of(page, usage); if (a < 0) return;
+        uint32_t report = IOHIDElementGetReportID(e);
+        int a = pad_hid_axis_for_device(d->vid, d->pid, report, page, usage); if (a < 0) return;
         a = pad_hid_axis_for(d->st.layout, a);
-        float n = pad_hid_norm(x, min, max);
+        float n = pad_hid_axis_norm(d->vid, d->pid, report, a, x, min, max);
         d->st.axis[a] = d->st.layout == PAD_HID_NINTENDO ? pad_hid_raw_axis(&d->st, a, n) : n;
     }
     hidpad_read(d);
@@ -326,7 +328,7 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     uint8_t has[PH_AXES] = {0};
     for (id o in els) {
         IOHIDElementRef e = (__bridge IOHIDElementRef)o; uint32_t page = IOHIDElementGetUsagePage(e);
-        int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
+        int a = pad_hid_axis_for_device(d->vid, d->pid, IOHIDElementGetReportID(e), page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
     enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has);

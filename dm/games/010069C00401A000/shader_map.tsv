@@ -1,25 +1,2 @@
-# kind: evidence  RIVE: Ultimate Edition shaders (GLSLC in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
-# column 5 records where each key first appears; no PC shader pairing supplied
+# No game-derived shader records are committed for this profile.
 package	index	stage	dm_ctl_sha16	source
-ps_shaders.bin	0	pixel	47160c3d9c1b48b0	/shaders/0326224004D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	0	vertex	5108c53f091161c9	/shaders/0326224004D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	1	pixel	b009c0d7af520ffa	/shaders/13E5B87204D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	1	vertex	e05ad1d6e9c970d0	/shaders/13E5B87204D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	2	vertex	349102532212fe6d	/shaders/68091E8304D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	2	pixel	70904b249f1cecf6	/shaders/68091E8304D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	3	vertex	01951b9e0dd09141	/shaders/6D9239B604D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	3	pixel	9aeedf835be60bbc	/shaders/6D9239B604D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	4	pixel	1cddedfc819b6967	/shaders/7BCE29BC04D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	4	vertex	a99757f5c776f2a9	/shaders/7BCE29BC04D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	5	pixel	25af579a01be3abd	/shaders/81F5BE5D04D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	5	vertex	cf92ce1dc212c2f6	/shaders/81F5BE5D04D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	6	pixel	2c2580ac62205d69	/shaders/ABD49DA404D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	6	vertex	8b4448a2ccaec4a1	/shaders/ABD49DA404D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	7	vertex	291cfaaceb70e979	/shaders/AC1E6AC204D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	7	pixel	5334dac2cd135258	/shaders/AC1E6AC204D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	8	pixel	f350a6d848056b90	/shaders/ADACA16F04D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	8	vertex	f3575ed40b9ecb4e	/shaders/ADACA16F04D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	9	pixel	3d8e761cff181812	/shaders/B74F995D04D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	9	vertex	a7be033834b510ea	/shaders/B74F995D04D1FD84.esh#GLSLC@0x8c#var
-vs_shaders.bin	10	vertex	632d07a9564f78ec	/shaders/B8920F0604D1FD84.esh#GLSLC@0x8c#var
-ps_shaders.bin	10	pixel	f1feead80b3671bc	/shaders/B8920F0604D1FD84.esh#GLSLC@0x8c#var

@@ -1311,7 +1311,12 @@ HLE_FORCE("_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc", "fsp-srv → 
 }
 
 // ---------- Directories ----------
-typedef struct { DIR *d; char path[1024]; DirectoryEntry *snap; int64_t nsnap, psnap; int mode; } dirh_t;
+typedef struct {
+    DIR *d; char path[1024];
+    const romfs_img *img; uint64_t img_first, img_count, img_pos;
+    DirectoryEntry *snap; int64_t nsnap, psnap;
+    int mode;
+} dirh_t;
 typedef struct { const char *name; size_t at; } name_at;
 static int name_at_cmp(const void *a, const void *b) {
     const name_at *x = a, *y = b; int c = strcmp(x->name, y->name);
@@ -1380,17 +1385,13 @@ HLE_FORCE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", "fsp-srv → o
     Result (*sdk_open)(uint64_t *, const char *, int) = sdk_path_call(path, "_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci");
     if (sdk_open) return sdk_opened(sdk_open(out, path, mode), out, "_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE");
     int mi; int64_t k;
-    if (img_path(path, &mi, &k)) {   // an image directory: its children are one run of entries, listed from a snapshot like the overlay's
+    if (img_path(path, &mi, &k)) {   // an image directory: its children are one immutable run in the image index, streamed by cursor without allocating a snapshot
         if (k >= 0 && g_mnt[mi].img->e[k].type) errno = ENOTDIR, k = -1;
         if (k < 0) return err_res("opendir", path);
         const romfs_img *m = g_mnt[mi].img; const img_ent *x = &m->e[k];
-        dirh_t *h = calloc(1, sizeof *h); if (!h || !(h->snap = calloc(x->b ? x->b : 1, sizeof *h->snap))) die("RomFS image directory allocation failed");
-        h->nsnap = (int64_t)x->b; h->mode = mode; strlcpy(h->path, path, sizeof h->path);
-        for (uint64_t j = 0; j < x->b; j++) {
-            const img_ent *c = &m->e[x->a + j]; DirectoryEntry *o = &h->snap[j];
-            memcpy(o->name, m->names + c->name, c->nlen < sizeof o->name ? c->nlen : sizeof o->name - 1);
-            o->type = c->type ? ENT_FILE : ENT_DIR; o->size = c->type ? (int64_t)c->b : 0;
-        }
+        dirh_t *h = calloc(1, sizeof *h);
+        if (!h) return err_res("directory allocation", path);
+        h->img = m; h->img_first = x->a; h->img_count = x->b; h->mode = mode; strlcpy(h->path, path, sizeof h->path);
         *out = (uint64_t)h; return RES_OK;
     }
     HP(path); DIR *d = opendir(hp);
@@ -1409,6 +1410,17 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
     SDK_HANDLE(hh, "_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", Result (*)(int64_t *, DirectoryEntry *, uint64_t, int64_t), RES_FAIL, count, ents, hh, max);
     if (!hh) { *count = 0; return RES_FAIL; }
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
+    if (h->img) {
+        while (n < max && h->img_pos < h->img_count) {
+            const img_ent *c = &h->img->e[h->img_first + h->img_pos++];
+            if (!(h->mode & (c->type ? DIRMODE_FILE : DIRMODE_DIR))) continue;
+            DirectoryEntry *o = &ents[n++]; memset(o, 0, sizeof *o);
+            size_t l = c->nlen < sizeof o->name ? c->nlen : sizeof o->name - 1;
+            memcpy(o->name, h->img->names + c->name, l);
+            o->type = c->type ? ENT_FILE : ENT_DIR; o->size = c->type ? (int64_t)c->b : 0;
+        }
+        *count = n; return RES_OK;
+    }
     if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
     int dfd = dirfd(h->d);
     while (n < max) {
@@ -1476,6 +1488,12 @@ HLE_FORCE("_ZN2nn2fs8ReadFileENS0_10FileHandleElPvmRKNS0_10ReadOptionE", "fsp-sr
 HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv; directory entry count (filtered by the mode given at open, read position untouched)", Result, h_fs_DirCount, int64_t *out, uint64_t hh) { dm_thread_service_request();
     SDK_HANDLE(hh, "_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", Result (*)(int64_t *, uint64_t), RES_FAIL, out, hh);
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0;
+    if (h->img) {
+        int want = h->mode & (DIRMODE_DIR | DIRMODE_FILE);
+        if (want == (DIRMODE_DIR | DIRMODE_FILE)) n = (int64_t)h->img_count;
+        else if (want) for (uint64_t i = 0; i < h->img_count; i++) if (want & (h->img->e[h->img_first + i].type ? DIRMODE_FILE : DIRMODE_DIR)) n++;
+        *out = n; return RES_OK;
+    }
     if (h->snap) { for (int64_t i = 0; i < h->nsnap; i++) if (h->mode & (h->snap[i].type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE)) n++; *out = n; return RES_OK; }
     DIR *d = opendir(h->path); if (!d) return err_res("opendir", h->path);
     struct dirent *e;

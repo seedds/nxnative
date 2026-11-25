@@ -1,0 +1,3 @@
+# RIVE: Ultimate Edition (`010069C00401A000`)
+
+Base game with Update 1.22. No game-specific configuration, patches or pipeline modifications are required; the game works with the default pipeline. **Plays on the Mac** (M1 MacBook Air, 16 GB RAM, macOS 27): approximately four hours of sustained gameplay at a consistent 60 fps, with occasional dips to 59 fps and no noticeable stuttering. The MacBook Air remained barely warm throughout the session, even while resting on a lap.

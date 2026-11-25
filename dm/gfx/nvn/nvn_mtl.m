@@ -8189,11 +8189,15 @@ static os_unfair_lock g_fn4_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn4;   // id<MTLFunction> → MTL4FunctionDescriptor
 static id<MTLFunction> fn4_note(id<MTLFunction> f, id<MTLLibrary> lib, NSString *name, MTLFunctionConstantValues *cv) {
     if (!f || !lib || !name) return f;
+    // Never publish an unspecialized descriptor for a function that declares function constants: Metal shares one MTLFunction object device-wide per function content,
+    // so publishing cv=nil would race concurrent Metal 4 pipeline builds (validateWithDevice abort: "cannot be used to build a pipeline state").
+    if (!cv && f.functionConstantsDictionary.count) return f;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
     MTL4FunctionDescriptor *d = ld;
     if (cv) { MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; d = sd; }
     os_unfair_lock_lock(&g_fn4_lock);
     if (!g_fn4) g_fn4 = [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality valueOptions:NSPointerFunctionsStrongMemory capacity:0];   // by identity: a function made again from the same library and name (other constants: bf_fn) is another function
+    if (!cv && [[g_fn4 objectForKey:f] isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) { os_unfair_lock_unlock(&g_fn4_lock); return f; }
     [g_fn4 setObject:d forKey:f];
     os_unfair_lock_unlock(&g_fn4_lock);
     return f;
@@ -8228,6 +8232,17 @@ static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionCo
     if (![g_fn_dev objectForKey:f]) [g_fn_dev setObject:[FnDev new] forKey:f];
     os_unfair_lock_unlock(&g_fn_dev_lock);
     return fn4_note(f, lib, name, cv);
+}
+// Loads an entry point from lib and records its Metal 4 descriptor in one step, specializing defaults before touching g_fn4 so no concurrent thread ever sees an unspecialized
+// descriptor for a function that declares function constants. Sets dm_blend_off = false explicitly when declared so the base descriptor and FN_OFF_BORDER match the offline pair archive.
+static id<MTLFunction> fn_load(id<MTLLibrary> lib, NSString *name, NSError **e) {
+    if (!lib || !name) return nil;
+    id<MTLFunction> f = [lib newFunctionWithName:name];
+    if (!f) return nil;
+    if (!f.functionConstantsDictionary.count) return fn4_note(f, lib, name, nil);
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    if (f.functionConstantsDictionary[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    return fn_spec(lib, name, cv, e);
 }
 // The function an MTLDevice pipeline is built from: f specialized through its library (once) when fn_spec left it unspecialized, else f itself
 static id<MTLFunction> fn_dev(id<MTLFunction> f) {
@@ -8369,13 +8384,16 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
             for (NSUInteger i = 0; i < reads.count; i++) { int k = [reads[i] intValue]; if (k >= 0 && k < GEO_CAPTURE_WORDS) o->geo_slot[k] = (int16_t)i; }
             o->geo_words = (uint32_t)reads.count;
         } }
-    o->fn = fn4_note([lib newFunctionWithName:entry], lib, entry, nil); o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
+    NSError *fe = nil;
+    o->fn = fn_load(lib, entry, &fe);
+    if (!o->fn && fe) { MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String); o->fn = [lib newFunctionWithName:entry]; }
+    o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key); o->ventry = entry;
     if (stage == 0 && !layer) {   // the same entry point in the side libraries <key>_bp and <key>_bv (pull_load, vin_fn), by the names the reflection gives them
         o->pentry = side_entry(j[@"pull"], ez ? @"entry_z" : @"entry", entry);
         o->wlentry = side_entry(j[@"pull"], ez ? @"entry_z_wl" : @"entry_wl", [entry stringByAppendingString:@"_wl"]);
         o->vinentry = side_entry(j[@"vin"], ez ? @"entry_z" : @"entry", entry);
     }
-    if (o->mesh_notask && !(o->mesh_obj = j[@"entry_object"] ? fn4_note([lib newFunctionWithName:j[@"entry_object"]], lib, j[@"entry_object"], nil) : nil))
+    if (o->mesh_notask && !(o->mesh_obj = fn_load(lib, j[@"entry_object"], NULL)))
         MLOG("[RED] mesh shader %s: no object entry point (entry_object) in its library: its draws are skipped", pc.UTF8String);
     // writes the layer: its passes are layered and its pipelines get an input class (pso_desc). main0 / main0_z by the reflection's layer_out (dmsh_entry.py layer_out), the layer entry points always
     if (stage == 0) { o->layer_out = layer || [j[@"layer_out"] boolValue]; o->viewport_mask = !layer && [j[@"viewport_mask"] boolValue]; }
@@ -8383,32 +8401,19 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_bz = [j[@"blend_zero"] boolValue];
     if (stage == 1) o->has_logic = [j[@"logic"] isKindOfClass:[NSDictionary class]];
-    // A function that declares function constants cannot go into a pipeline until it is specialized, even when every constant is optional. SPIRV-Cross declares one for shaders that read a
-    // texel buffer (spvLinearTextureAlignmentOverride, used only through is_function_constant_defined; one of Pokémon Legends: Z-A's imgui pixel shaders, 2bd5037003980716): an empty set of
-    // values keeps its default. Without it the first pipeline with that shader failed Metal's validation (`fragmentFunction main0 cannot be used to build a pipeline state`)
+    // A function that declares function constants cannot go into a pipeline until it is specialized, even when every constant is optional (fn_load specializes defaults before touching g_fn4).
     if (j[@"entry_discard"]) {
-        o->discard_fn = fn4_note([lib newFunctionWithName:j[@"entry_discard"]], lib, j[@"entry_discard"], nil);
-        if (o->discard_fn.functionConstantsDictionary.count) {
-            MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; NSError *error = nil;
-            o->discard_fn = fn_spec(lib, j[@"entry_discard"], cv, &error);
-        }
+        o->discard_fn = fn_load(lib, j[@"entry_discard"], NULL);
         if (!o->discard_fn) MLOG("[RED] shader %s: no rasterizer-discard entry point %s in its library", pc.UTF8String, [j[@"entry_discard"] UTF8String]);
     }
     if (j[@"entry_tf"]) {   // transform feedback capture entry point (dmsh_build.py vs_tf) and the bytes per vertex of each feedback buffer
-        o->tf_fn = fn4_note([lib newFunctionWithName:j[@"entry_tf"]], lib, j[@"entry_tf"], nil); NSArray *ts = j[@"tf_strides"];
+        o->tf_fn = fn_load(lib, j[@"entry_tf"], NULL); NSArray *ts = j[@"tf_strides"];
         for (NSUInteger b = 0; b < 4 && b < ts.count; b++) o->tf_stride[b] = (uint16_t)[ts[b] unsignedIntValue];
         if (!o->tf_fn) MLOG("[RED] shader %s: no transform feedback entry point %s in its library", pc.UTF8String, [j[@"entry_tf"] UTF8String]);
     }
     if (stage == 1 && [j[@"entry_u"] isKindOfClass:NSString.class]) { o->u_name = j[@"entry_u"]; o->u_side = [j[@"entry_u_side"] boolValue];   // in the side library: looked up when a pipeline takes it (typed_fn)
         o->u_alpha = [j[@"entry_u_alpha"] boolValue]; o->u_logic = [j[@"entry_u_logic"] boolValue]; o->u_dual = [j[@"entry_u_dual"] boolValue];
         if (!o->u_side) { o->ulib = lib; o->ulib_state = 1; if (![lib newFunctionWithName:o->u_name]) { MLOG("[RED] shader %s: no typed-output entry point %s in its library", pc.UTF8String, o->u_name.UTF8String); o->u_name = nil; } } }
-    if (o->fn.functionConstantsDictionary.count) {   // a compute shader's pipeline is looked up by this specialized descriptor too (cps_new); the MTLDevice builds it from fn_dev's
-        // Set dm_blend_off = false explicitly when declared so the shader's base descriptor and FN_OFF_BORDER match the offline pair archive (pre_fn, pso_offline.py)
-        NSError *fe = nil; MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-        if (o->fn.functionConstantsDictionary[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
-        id<MTLFunction> f = fn_spec(lib, entry, cv, &fe);
-        if (f) o->fn = f; else MLOG("[RED] shader %s: specializing its function constants failed: %s", pc.UTF8String, fe.localizedDescription.UTF8String);
-    }
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
@@ -10357,8 +10362,7 @@ static id<MTLFunction> vin_fn(NvShader *vs) {   // the shadow-input entry point,
         vs->vfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bv.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSString *name = vs->vinentry ?: vs->ventry;   // the reflection's name for it in this library (shader_load)
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = fn_load(lib, name, &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->vfn = f; vs->vfn_state = 1; g_vin_loaded++; }
@@ -10377,14 +10381,12 @@ static void pull_load(NvShader *vs) {
         vs->pfn_state = 2;
         size_t kl = strlen(vs->key); NSString *path = [NSString stringWithFormat:@"%@/%.*s_bp.metallib", g_msl_dir, (int)(kl > 2 ? kl - 2 : kl), vs->key];
         NSString *name = vs->pentry ?: vs->ventry;
-        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = lib && name ? fn4_note([lib newFunctionWithName:name], lib, name, nil) : nil;
-        if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);
+        NSError *e = nil; id<MTLLibrary> lib = lib_from_file(path, &e); id<MTLFunction> f = fn_load(lib, name, &e);
         const char *why = !lib ? "no library" : !f ? "no entry point" : NULL;
         if (f && vs->rf.nb && [f newArgumentEncoderWithBufferIndex:vs->rf.abi].encodedLength != vs->arg_len) { why = "its argument buffer differs from the base library's"; f = nil; }
         if (f) { vs->pfn = f; vs->pfn_state = 1;
-            NSString *wn = vs->wlentry ?: [NSString stringWithFormat:@"%@_wl", vs->ventry]; id<MTLFunction> w = fn4_note([lib newFunctionWithName:wn], lib, wn, nil);
-            if (w && w.functionConstantsDictionary.count) w = fn_spec(lib, wn, [MTLFunctionConstantValues new], &e);
-            vs->wlfn = w; }
+            NSString *wn = vs->wlentry ?: [NSString stringWithFormat:@"%@_wl", vs->ventry];
+            vs->wlfn = fn_load(lib, wn, &e); }
         else { static _Atomic int n; if (n++ < 8) MLOG("[RED] pulling library of %s not usable (%s%s%s): its draws wait for their pipelines", vs->key, why, e ? ": " : "", e ? e.localizedDescription.UTF8String : ""); }
     }
 }
@@ -10932,8 +10934,7 @@ static id<MTLFunction> at_fn(NvShader *fs, id<MTLFunction> base) {
         fs->afn_state = 2;
         id<MTLLibrary> lib = bx_lib(fs, &e); const char *why = lib ? NULL : "no library";
         if (!why) {
-            NSString *name = [fs->fn.name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn4_note([lib newFunctionWithName:name], lib, name, nil);
-            if (f && f.functionConstantsDictionary.count) f = fn_spec(lib, name, [MTLFunctionConstantValues new], &e);   // as shader_load
+            NSString *name = [fs->fn.name stringByAppendingString:@"_a"]; id<MTLFunction> f = fn_load(lib, name, &e);
             if (!f) why = "no entry point";
             else if (!fn_args_match(fs, f)) why = "its argument buffer differs from the base library's";
             else fs->afn = f;

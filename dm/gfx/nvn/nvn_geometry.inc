@@ -424,10 +424,7 @@ static void gcp_count(NvProg *pr, int why) {
 }
 static NSMutableDictionary *g_geo_mesh_runfn;   // a mesh entry → its run twin (dm_mesh_run..., dmsh_mesh.py), or NSNull: none in the library, or its pipeline failed
 // Generated mesh entries inherit the vertex library's constants. Keep their descriptors so fn_dev and fn_dev_b can materialize the defaults or the specialization without the border corrections, as for shader_load.
-static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) {
-    id<MTLFunction> f = [lib newFunctionWithName:name];
-    return f.functionConstantsDictionary.count ? fn_spec(lib, name, [MTLFunctionConstantValues new], NULL) : fn4_note(f, lib, name, nil);
-}
+static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) { return fn_load(lib, name, NULL); }
 // The mesh entry for this draw's program, or nil (the compute path draws it)
 static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!geo_mesh_on()) { g_geo_why = GCP_OFF; return nil; }

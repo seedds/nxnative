@@ -1787,6 +1787,31 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("constants: that pipeline went through the MTLDevice", legacy0 + 1, g_pb_legacy);
         EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
         EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
+        // fn4_note(..., nil) must never publish or downgrade to an unspecialized descriptor for a function declaring constants, and concurrent fn_load never exposes an unspecialized window
+        id<MTLLibrary> bl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_blend_off [[function_constant(217)]];\n"
+            "fragment float4 bfs() { return is_function_constant_defined(dm_blend_off) && dm_blend_off ? float4(1) : float4(0); }\n" options:nil error:&err];
+        id<MTLFunction> raw_bfs = [bl newFunctionWithName:@"bfs"];
+        fn4_note(raw_bfs, bl, @"bfs", nil);
+        EXPECT("constants: fn4_note(nil) refuses function with constants", 1, fn4_of(raw_bfs) == nil);
+        id<MTLFunction> bf = fn_load(bl, @"bfs", &se);
+        EXPECT("constants: fn_load specializes dm_blend_off function", 1, bf != nil && [fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        fn4_note(raw_bfs, bl, @"bfs", nil);
+        EXPECT("constants: fn4_note(nil) does not downgrade specialized descriptor", 1, [fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        __block _Atomic int bad_race = 0;
+        dispatch_group_t rg = dispatch_group_create();
+        dispatch_queue_t rq = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        for (int t = 0; t < 4; t++) dispatch_group_async(rg, rq, ^{
+            for (int i = 0; i < 2000; i++) {
+                if (t == 0) {
+                    if (![fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) atomic_fetch_add(&bad_race, 1);
+                } else {
+                    id<MTLFunction> rf = fn_load(bl, @"bfs", NULL);
+                    if (!rf || ![fn4_of(rf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) atomic_fetch_add(&bad_race, 1);
+                }
+            }
+        });
+        dispatch_group_wait(rg, DISPATCH_TIME_FOREVER);
+        EXPECT("constants: concurrent fn_load never exposes unspecialized descriptor", 0, atomic_load(&bad_race));
     }
     repeated_archive_miss();
     spec_desc_ownership();

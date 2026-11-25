@@ -45,7 +45,7 @@ static void *late_event(void *p) { dm_guest_sleep_ns(30000000); h_sk_EventFdWrit
 int main(void) {
     setenv("DM_NETWORK", "lan", 1);
     CHECK(dm_net_enabled(), "DM_NETWORK=lan turns the transport on");
-    uint8_t a[16], b[16], from[16]; char data[64]; unsigned n;
+    uint8_t a[16] = {0}, b[16] = {0}, from[16] = {0}; char data[64]; unsigned n;
 
     // EventFd stays the offline service's, below the transport's range
     int event = h_sk_EventFd(0, 6);
@@ -53,6 +53,7 @@ int main(void) {
 
     // UDP: Horizon's address layout both ways, data and source, and Linux errno numbers
     int u = bound(2, a), v = bound(2, b);
+    assert(dm_net_owns(u) && dm_net_owns(v));   // the rest indexes fd_sets with them
     CHECK(u >= DM_NET_FD_BASE && v >= DM_NET_FD_BASE && u != v, "network sockets start at DM_NET_FD_BASE");
     CHECK(a[0] == 16 && a[1] == 2 && a[4] == 127 && port_of(a), "GetSockName writes {16, AF_INET, port, 127.0.0.1}");
     CHECK(h_nsk_SendTo(u, "ping", 4, 0, b, 16) == 4, "SendTo another loopback socket");
@@ -106,7 +107,7 @@ int main(void) {
     CHECK(h_sk_Recv(v, data, sizeof data, 0x80) == -1 && h_sk_GetLastError() == 9, "a closed descriptor is EBADF");
 
     // Poll and Select: network descriptors, POLLNVAL for a closed one, and a set mixing an EventFd with a socket wakes on either
-    v = bound(2, b); h_nsk_SendTo(u, "p", 1, 0, b, 16);
+    v = bound(2, b); assert(dm_net_owns(v)); h_nsk_SendTo(u, "p", 1, 0, b, 16);
     sk_pollfd p[3] = {{v, 1, 0}, {u, 1, 0}, {event, 1, 0}};
     CHECK(h_sk_Poll(p, 3, 1000) == 1 && (p[0].revents & 1) && !p[1].revents && !p[2].revents, "Poll: the socket with data is readable, nothing else");
     uint64_t rs[16] = {0}; rs[v >> 6] |= 1ull << (v & 63); rs[u >> 6] |= 1ull << (u & 63); int64_t stv[2] = {1, 0};

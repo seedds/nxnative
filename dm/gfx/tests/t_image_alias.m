@@ -276,6 +276,40 @@ static void cross_size_read(void) {
     for (int i=0;i<2;i++) mtl_tex_release(&a[i]);
     mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
 }
+// A pool ID registered again and again with a new texture over one family's storage (a game initializing a target again, each time with a new serial): the family's list of the
+// serials its pool walks saw (fam_track_pool_serial), which a size switch notes (fam_set_valid), drops when full those no pool ID registers any more. It kept every one (issue #3301)
+static void pool_serials(void) {
+    if (fam_nocomp()) return;
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
+    pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
+    enum { ROUNDS=1000, ID=201 }; tex_t t[2], big; int cur=0; uint64_t wh=0, live=0;
+    big=image(&pool,995999,1600,900); big.d.format=NVN_FORMAT_RGBA16F; big.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&big.d,&big.L); mtl_tex_init(&big);   // the target's other size, live throughout
+    NvImageHeap *o=nil;
+    for (int i=0;i<ROUNDS;i++) { @autoreleasepool {
+        tex_t *n=&t[cur]; *n=image(&pool,996000+i,1440,810); n->d.format=NVN_FORMAT_RGBA16F; n->d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&n->d,&n->L); mtl_tex_init(n);
+        if (!i) { o=fam_owner(tex_mtl(&big),NULL); CHECK(o && o->compressed,"the target's two sizes form a compressed family"); }
+        NvImageHeap *no=fam_owner(tex_mtl(n),&wh);
+        CHECK(no && no==o,"each texture over the storage joins that family");
+        mtl_reg_tex(ID,n,NULL); live=n->serial;
+        int g=0,l=0,lr=0,tr=0,d=0;
+        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        if (i) mtl_tex_release(&t[!cur]);   // the texture it replaced ends
+        cur=!cur;
+    } }
+    if (o) {
+        os_unfair_lock_lock(&o->pool_lk); uint32_t n=o->npool_sers; int has=0; for (uint32_t i=0;i<n;i++) has|=o->pool_sers[i].serial==live; os_unfair_lock_unlock(&o->pool_lk);
+        printf("family pool serials after %d registrations of one ID: %u\n",ROUNDS,n);
+        CHECK(n<16,"the family keeps a few pool serials, not one for each texture the ID ever held");
+        CHECK(has,"it keeps the serial the ID holds now");
+        uint64_t sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);   // a size switch to the ID's size and away: each notes the serials of both sizes
+        uint64_t notes=atomic_load(&g_ser_gen)-sg;
+        CHECK(notes>=1 && notes<SER_NOTES,"a size switch notes fewer serials than the note list holds, not every serial the ID ever held");
+    }
+    mtl_reg_tex_gone(ID); mtl_tex_release(&t[!cur]); mtl_tex_release(&big);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
+}
 int main(void) { @autoreleasepool {
     mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
     posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -316,6 +350,7 @@ int main(void) { @autoreleasepool {
     atomic_colour(&pool);
     depth_planes(&pool);
     cross_size_read();
+    pool_serials();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.

@@ -320,6 +320,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 
 ## Found on this game
 
+- [A resolution family kept every pool serial its walks saw](../../../docs/reference/rendering.md#a-resolution-family-kept-every-pool-serial-its-walks-saw): found by reading the code after submit and present time climbed over a session (GitHub issue #3301). Not run on the game; whether it is that slowdown's cause is open.
 - [A scaler the ring gave up left the residency set at once](../../../docs/reference/rendering.md#a-scaler-the-ring-gave-up-left-the-residency-set-at-once): a possible cause of the GPU address faults with `DM_UPSCALER=metalfx` and dynamic resolution ([GitHub issue #1810](https://github.com/seedds/nxnative/issues/1810)), found by reading the code; not run on the game.
 - [Center and back channels silent on an audio interface](../../../docs/reference/audio.md#center-and-back-channels-silent-on-an-audio-interface): ocarina notes were almost silent on a 22-output interface treated as 5.1 (issue #3263). The fix is in the host, not yet confirmed on that hardware.
 - [An IPA without prewarm files since absent attributes read offset 16](../../../docs/reference/rendering.md#an-ipa-without-prewarm-files-since-absent-attributes-read-offset-16). Resolved: on host `62f65f7` an iPhone 17 Pro build got no prewarm files and its first start compiled 5,832 bases in a 446 s prepare step; with slot 30 at a stride of 32, `metal-tt` built all 13 files for `applegpu_g18p`.

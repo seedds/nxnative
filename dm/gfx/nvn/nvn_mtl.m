@@ -602,13 +602,22 @@ static inline int fam_is_valid(id<MTLTexture> t) {
     uint64_t wh = 0; NvImageHeap *o = fam_owner(t, &wh);
     return !o || !o->compressed || atomic_load_explicit(&o->valid_wh, memory_order_acquire) == wh;
 }
+static int treg_serial_held(uint64_t serial);
+// The serials the family's pool walks saw (pool_entry, img_pool_elem, pool_seen_scan; callers hold g_rmu), for a size switch to note (fam_set_valid). A full list first drops those no
+// pool ID registers any more (a registration of their ID took them out of g_treg_serial): a game that initializes a target again over the same storage gives it a new serial each
+// time, and the list kept every one, each walk of the family's IDs searching it and each size switch noting them all (issue #3301)
 static void fam_track_pool_serial(NvImageHeap *o, uint64_t serial, uint64_t wh) {
     if (!o || !serial) return;
     os_unfair_lock_lock(&o->pool_lk);
     for (uint32_t i = 0; i < o->npool_sers; i++) if (o->pool_sers[i].serial == serial) { o->pool_sers[i].wh = wh; os_unfair_lock_unlock(&o->pool_lk); return; }
     if (o->npool_sers == o->cappool_sers) {
-        o->cappool_sers = o->cappool_sers ? o->cappool_sers * 2 : 8;
-        o->pool_sers = realloc_or_die(o->pool_sers, o->cappool_sers * sizeof *o->pool_sers, "resolution family pool serials");
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < o->npool_sers; i++) if (treg_serial_held(o->pool_sers[i].serial)) o->pool_sers[n++] = o->pool_sers[i];
+        o->npool_sers = n;
+        if (!o->cappool_sers || n > o->cappool_sers / 2) {   // more than half still registered: room to grow, so the next drop is as far away again
+            o->cappool_sers = o->cappool_sers ? o->cappool_sers * 2 : 8;
+            o->pool_sers = realloc_or_die(o->pool_sers, o->cappool_sers * sizeof *o->pool_sers, "resolution family pool serials");
+        }
     }
     o->pool_sers[o->npool_sers++] = (fam_pool_ser){serial, wh};
     os_unfair_lock_unlock(&o->pool_lk);
@@ -8508,6 +8517,7 @@ typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view
 enum { STAND_NO = 1, STAND_WAIT = 2 };   // treg_t.stand_no: no stand-in while the registration stands; none until a mapping over its pages notes it (treg_sparse_notes)
 static treg_t *g_treg; static int g_ntreg;
 static nvn_hmap g_treg_serial = {.klen = 8};   // serial → first registered descriptor index + 1, under g_rmu
+static int treg_serial_held(uint64_t serial) { return nvn_hm_get(&g_treg_serial, &serial) != NULL; }   // a pool ID registers it; caller holds g_rmu
 // Texture ID views are valid for an epoch (view_ser), not for every serial table change: ser_sync takes the notes (own_note) and sends only the IDs registered with a noted serial
 // down the slow path; a change without a note starts a new epoch, which sends them all (what every g_ser_gen bump did before). A battle map in Fire Emblem: Fortune's Weave changes a
 // few serials a frame (the per-stage program ring in bind_stages among them), and each change made the next pool walk (pool_gpu) resolve all ~5,000 IDs again, 2 ms a frame.

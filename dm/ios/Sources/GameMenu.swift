@@ -53,6 +53,7 @@ private func gameMenuItems() -> [UIMenuElement] {
         }
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
+    items.append(UIMenu(options: .displayInline, children: [cheatsMenuItem()]))   // the Cheats screen (CheatsMenu.swift)
     return items
 }
 

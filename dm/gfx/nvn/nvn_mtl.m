@@ -8145,15 +8145,36 @@ static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionCo
     os_unfair_lock_unlock(&g_fn_dev_lock);
     return fn4_note(f, lib, name, cv);
 }
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): KK_WORKAROUND_3 rewrites spvSubgroupBallot behind the bool function constant dm_mwa3_fc (DMSH_MWA_FC, default true).
+// The GPU compiler of macOS 15.4 to 26 speculates simd_ballot out of divergent branches (Apple FB20113490); macOS 27's compiler is fixed, so the host sets dm_mwa3_fc false on
+// macOS 27 and later and true on macOS < 27 and iOS (matching pso_offline.py's per-target specialization so KK3 shaders stay in offline pipeline archives). DM_NVN_METALWA=0 / 1 overrides.
+static int mwa_on(void) {
+    static int v; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("DM_NVN_METALWA"); int on = 1;
+#if !TARGET_OS_IPHONE
+        on = ![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){27, 0, 0}];
+#endif
+        if (e && *e) on = strcmp(e, "0") != 0;
+        if (!on || (e && *e)) MLOG("Metal compiler workaround KK3: %s (%s)", on ? "on" : "off", e && *e ? "DM_NVN_METALWA" : "macOS 27 or later");
+        v = on;
+    });
+    return v;
+}
+static void fc_set_mwa(MTLFunctionConstantValues *cv, NSDictionary *fc) {
+    if (fc[@"dm_mwa3_fc"]) { BOOL on = mwa_on() ? YES : NO; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_MWA_FC]; }
+}
 // Loads an entry point from lib and records its Metal 4 descriptor in one step, specializing defaults before touching g_fn4 so no concurrent thread ever sees an unspecialized
-// descriptor for a function that declares function constants. Sets dm_blend_off = false explicitly when declared so the base descriptor and FN_OFF_BORDER match the offline pair archive.
+// descriptor for a function that declares function constants. Sets dm_blend_off = false and dm_mwa3_fc = mwa_on() explicitly when declared so the base descriptor and FN_OFF_BORDER match the offline pair archive.
 static id<MTLFunction> fn_load(id<MTLLibrary> lib, NSString *name, NSError **e) {
     if (!lib || !name) return nil;
     id<MTLFunction> f = [lib newFunctionWithName:name];
     if (!f) return nil;
-    if (!f.functionConstantsDictionary.count) return fn4_note(f, lib, name, nil);
+    NSDictionary *fc = f.functionConstantsDictionary;
+    if (!fc.count) return fn4_note(f, lib, name, nil);
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-    if (f.functionConstantsDictionary[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    if (fc[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    fc_set_mwa(cv, fc);
     return fn_spec(lib, name, cv, e);
 }
 // The function an MTLDevice pipeline is built from: f specialized through its library (once) when fn_spec left it unspecialized, else f itself
@@ -8209,7 +8230,7 @@ static FnOff *fn_off(id<MTLFunction> f, int mask) {
         NSDictionary *fc = ld ? [ld.library newFunctionWithName:ld.name].functionConstantsDictionary : nil;   // the entry's, not f's: a specialized f lists no constants
         int border = (mask & FN_OFF_BORDER) && fc[@"dm_border_off"], blend = (mask & FN_OFF_BLEND) && fc[@"dm_blend_off"];
         if (!border && !blend) { o->none = 1; return nil; }
-        if (!cv) cv = [MTLFunctionConstantValues new];
+        if (!cv) { cv = [MTLFunctionConstantValues new]; fc_set_mwa(cv, fc); }
         BOOL yes = YES; if (border) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; if (blend) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
         o->cv = cv; o->d4 = sd;
@@ -8276,8 +8297,8 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
                if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
-        NSError *ge = nil; MTLFunctionConstantValues *gcv = [MTLFunctionConstantValues new];
-        o->geo_fn = fn_spec(lib, j[@"entry_geometry_capture"], gcv, &ge);
+        NSError *ge = nil;
+        o->geo_fn = fn_load(lib, j[@"entry_geometry_capture"], &ge);
         if (!o->geo_fn) MLOG("[RED] vertex shader %s: geometry capture entry failed: %s", pc.UTF8String, ge.localizedDescription.UTF8String);
     }
     NSDictionary *ts = j[@"tess"];
@@ -10808,6 +10829,7 @@ static id<MTLFunction> side_spec(id<MTLLibrary> lib, NSString *name, uint32_t cl
         [cv setConstantValue:&u type:MTLDataTypeBool atIndex:DMSH_UINT_FC + n]; [cv setConstantValue:&si type:MTLDataTypeBool atIndex:DMSH_SINT_FC + n]; [cv setConstantValue:&on type:MTLDataTypeBool atIndex:DMSH_LOGIC_FC + n]; }
     [cv setConstantValue:&a type:MTLDataTypeBool atIndex:DMSH_TYPED_ALPHA_FC]; [cv setConstantValue:&l type:MTLDataTypeBool atIndex:DMSH_TYPED_LOGIC_FC];
     [cv setConstantValue:&d type:MTLDataTypeBool atIndex:DMSH_TYPED_DUAL_FC];
+    fc_set_mwa(cv, [lib newFunctionWithName:name].functionConstantsDictionary);
     return fn_lib_spec(lib, name, cv, e);
 }
 // The side library <key>_bx (dmsh_side.py: the alpha test and logic operation entry points and the typed-output one), loaded once on first need; nil when it is not there or failed
@@ -12297,18 +12319,21 @@ static long arch_harvest_wait(dispatch_time_t until) {
 }
 // A function the border corrections' constant specializes: its compute pipeline is in the bundle and the archive by that descriptor. Any other function with constants is built
 // from fn_dev's specialization and is not looked up or captured
-static int fd_border_fc(MTL4FunctionDescriptor *fd) {
+static int fd_host_fc(MTL4FunctionDescriptor *fd) {
     if (![fd isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) return 0;
     MTL4FunctionDescriptor *ld = ((MTL4SpecializedFunctionDescriptor *)fd).functionDescriptor;
     if (![ld isKindOfClass:MTL4LibraryFunctionDescriptor.class]) return 0;
     MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)ld;
     // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
-    return [l.library newFunctionWithName:l.name].functionConstantsDictionary[@"dm_border_off"] != nil;
+    NSDictionary *fc = [l.library newFunctionWithName:l.name].functionConstantsDictionary;
+    if (!fc.count) return 0;
+    for (NSString *k in fc) if (![k isEqualToString:@"dm_border_off"] && ![k isEqualToString:@"dm_blend_off"] && ![k isEqualToString:@"dm_mwa3_fc"]) return 0;
+    return 1;
 }
 static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError **e) {   // off: without the border corrections (fn_off), the common dispatch's
     pso4_init();
     MTL4FunctionDescriptor *fd = fn4_of_b(f, off); MTL4ComputePipelineDescriptor *d = nil; id<MTLComputePipelineState> ps = nil; uint64_t t0 = bp_now();
-    if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_border_fc(fd)) {   // a specialized one: fn_spec's or fn_off's, of a function with the border constant
+    if ([fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] || fd_host_fc(fd)) {   // a specialized one: fn_spec's or fn_off's, of a function with only host-specialized constants (pso_offline.py HOST_CONSTANTS)
         d = [MTL4ComputePipelineDescriptor new]; d.computeFunctionDescriptor = fd;
         if (g_arch_bundle && (ps = [g_arch_bundle newComputePipelineStateWithDescriptor:d error:nil])) atomic_fetch_add(&g_cps_arch, 1);
         else { int from_run = 0; if ((ps = arch_lookup(d, 1, &from_run))) {   // arch_capture_cs writes them to plain files only
@@ -13045,13 +13070,15 @@ static NSDictionary<NSString *, NSString *> *pre_fail_load(NSString *path, NSStr
     if ([head isEqualToString:pre_fail_head(want)]) return pairs;
     *other = 1; return @{};
 }
-static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the pair archive's specialization: unused border corrections off, blend fix-up on (false) so one base serves every blend state (pso_offline.py HOST_CONSTANTS, hybrid_get)
+static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   // the pair archive's specialization: unused border corrections off, blend fix-up on (false) so one base serves every blend state, KK3 per runtime OS (pso_offline.py HOST_CONSTANTS, hybrid_get)
     id<MTLFunction> f = [lib newFunctionWithName:name]; if (!f) return nil;
     MTL4LibraryFunctionDescriptor *ld = [MTL4LibraryFunctionDescriptor new]; ld.library = lib; ld.name = name;
-    if (!f.functionConstantsDictionary.count) return ld;
+    NSDictionary *fc = f.functionConstantsDictionary;
+    if (!fc.count) return ld;
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
-    if (f.functionConstantsDictionary[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
-    if (f.functionConstantsDictionary[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    if (fc[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
+    if (fc[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    fc_set_mwa(cv, fc);
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; return sd;
 }
 static NSDictionary *pre_json(NSString *key) { NSData *d = msl_data([NSString stringWithFormat:@"%@/%@_b.json", g_msl_dir, key]); return d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:nil] : nil; }
@@ -16646,6 +16673,7 @@ static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const 
     for (int i = 0; i < nfc; i++) { int v = fx[i]; [cv setConstantValue:&v type:MTLDataTypeInt atIndex:(NSUInteger)i]; }
     for (int q = 0; q < 8; q++) { bool b = fbmask >> q & 1; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(32 + q)]; }
     for (int j = 0; j < fs->rf.nfo; j++) for (int q = 0; q < 8; q++) { bool b = lmap[q] == fs->rf.fo_color[j]; [cv setConstantValue:&b type:MTLDataTypeBool atIndex:(NSUInteger)(64 + 8 * j + q)]; }
+    fc_set_mwa(cv, [lib newFunctionWithName:@"main0_f"].functionConstantsDictionary);
     NSError *e = nil; id<MTLFunction> f = fn4_note(dev_fn(lib, @"main0_f", cv, &e), lib, @"main0_f", cv);
     if (!f) MLOG("[RED] readable-tile version specialization failed %s (mask %02x): %s", fs->key, fbmask, e.localizedDescription.UTF8String);
     NvBfFn *s = [NvBfFn new]; s->k = k; s->fn = f;

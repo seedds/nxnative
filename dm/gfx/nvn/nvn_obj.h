@@ -318,6 +318,7 @@ double mtl_gpu_ms(uint64_t f);
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
+int mtl_gpu_done(uint64_t f, uint64_t *t1);   // 1 when all of frame f's command buffers completed (latest GPUEnd in *t1, 0 if none had a time), 0 while running, -1 if no record
 void mtl_stats(uint64_t *passes, uint64_t *draws);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
 void mtl_use_stats(uint64_t *call, uint64_t *skip);

@@ -15,6 +15,7 @@ static int observed_wait(pthread_cond_t *, pthread_mutex_t *);
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe::ExecuteProgram: not exercised here
 void dm_host_shutdown(const char *why) { (void)why; }
 void dm_hid_opmode_changed(void) {}   // hle_hid.c: the npads follow the mode; not exercised here
+unsigned dm_account_pushed_users(void) { return 0; }
 #undef pthread_cond_wait
 static _Atomic int waiting, resumed, finish;
 static uint32_t message;

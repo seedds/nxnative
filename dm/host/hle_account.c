@@ -19,9 +19,31 @@ static pthread_mutex_t g_account_lock = PTHREAD_MUTEX_INITIALIZER;
 static account_session *g_account_sessions;
 static uint64_t g_account_token = UINT64_C(0x5553455200000000);
 static int g_last_user;
+static unsigned g_pushed_users;   // bitmask snapshotted by PushOpenUsers for the next program (oe::ExecuteProgram)
+static int g_open_popped;         // incoming DM_OPEN_USERS handoff is consumed at most once per process
 static unsigned opened_users(void) {   // g_account_lock held
     unsigned mask = 0;
     for (account_session *s = g_account_sessions; s; s = s->next) mask |= 1u << s->user;
+    return mask;
+}
+static unsigned parse_open_users(const char *text) {
+    if (!text || !*text) return 0;
+    unsigned mask = 0;
+    for (const char *p = text; *p; p++) {
+        unsigned d;
+        if (*p >= '0' && *p <= '9') d = (unsigned)(*p - '0');
+        else if (*p >= 'a' && *p <= 'f') d = (unsigned)(*p - 'a' + 10);
+        else if (*p >= 'A' && *p <= 'F') d = (unsigned)(*p - 'A' + 10);
+        else return 0;
+        mask = (mask << 4) | d;
+        if (mask >= (1u << DM_USERS)) return 0;
+    }
+    return mask;
+}
+unsigned dm_account_pushed_users(void) {
+    pthread_mutex_lock(&g_account_lock);
+    unsigned mask = g_pushed_users;
+    pthread_mutex_unlock(&g_account_lock);
     return mask;
 }
 static int list_users(Uid *out, int max, unsigned mask) {
@@ -95,9 +117,30 @@ static Result show_selector(Uid *out, const void *settings, int creator) {
 HLE_FORCE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", "native user choice, respecting excluded UIDs and skip settings", Result, h_acc_ShowSel, Uid *out, const void *settings) {
     DM_APPLET("user selector"); return show_selector(out, settings, 0);
 }
-// The host runs one program and has no sessions handed over by an earlier program.
-HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "no users handed over by another program", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
-HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "the host runs only this program", void, h_acc_PushOpen, void) {}
+// Open users handed over by the previous program through oe::ExecuteProgram (DM_OPEN_USERS).
+// PopOpenUsers consumes the handoff once and opens fresh sessions in this process (never copying
+// tokens from the previous process). PushOpenUsers snapshots open users in memory; oe::ExecuteProgram
+// emits DM_OPEN_USERS into the next process's environment without mutating this process's environ.
+HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "consume users handed over by the previous program", void, h_acc_PopOpen, int *n, UserHandle *out, int max) {
+    unsigned mask = 0;
+    pthread_mutex_lock(&g_account_lock);
+    if (!g_open_popped) {
+        g_open_popped = 1;
+        mask = parse_open_users(getenv("DM_OPEN_USERS"));
+    }
+    pthread_mutex_unlock(&g_account_lock);
+    int count = 0;
+    for (int i = 0; out && i < DM_USERS && count < max; i++) if (mask & (1u << i)) {
+        Uid uid = user_uid(i);
+        if (open_user(out + count, &uid) == RES_OK) count++;
+    }
+    if (n) *n = count;
+}
+HLE_FORCE("_ZN2nn7account13PushOpenUsersEv", "snapshot current open users for the next program", void, h_acc_PushOpen, void) {
+    pthread_mutex_lock(&g_account_lock);
+    g_pushed_users = opened_users();
+    pthread_mutex_unlock(&g_account_lock);
+}
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user (returns bool)", unsigned, h_acc_TryOpenPre, UserHandle *h) { return open_user(h, &k_uid) == RES_OK; }
 // SDK 6 uses the Result; newer SDKs ignore it. Preserve that shared ABI.
 HLE_FORCE("_ZN2nn7account19OpenPreselectedUserEPNS0_10UserHandleE", "open a session for the launch user", Result, h_acc_OpenPre, UserHandle *h) { return open_user(h, &k_uid); }

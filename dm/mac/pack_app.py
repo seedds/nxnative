@@ -435,6 +435,8 @@ def pack(a):
         a = argparse.Namespace(**vars(a))
         for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'mesh_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
             if getattr(a, name, None): setattr(a, name, str(Path(getattr(a, name)).resolve()))
+        overlays = [Path(p).resolve() for p in (vars(a).get('overlay') or []) if p and Path(p).is_dir()]
+        vars(a)['overlay'] = [str(p) for p in overlays]
         mods, msls, pso, tables, pairs, mpairs, fonts, files = selected_inputs(a)
         runtime_python = getattr(a, 'runtime_python', None)
         runtime = []
@@ -472,7 +474,7 @@ def pack(a):
             return [['.', *as_packed([p, *rows[0][1:]], last.get(p), moved)[1:]]] if Path(p).is_file() and len(rows) == 1 else rows
         romfs_rows = tree(a.romfs)
         inputs = {'options': vars(a), 'files': [as_packed(file_row(p, True), last.get(str(p)), moved) if p in large else file_row(p) for p in files + sources],
-                  'trees': [(p, romfs_rows if p == a.romfs else inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                  'trees': [(p, romfs_rows if p == a.romfs else inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, str(Path(a.romfs).parent / PROGRAM_ROMFS), *(str(p) for p in overlays), *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
                   'runtime_python': inventory(runtime_python) if runtime_python else None,
                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
                             str(sdk), run(['xcrun', '--sdk', 'macosx', '--show-sdk-version']).strip(),
@@ -516,6 +518,7 @@ def pack(a):
     if pairs: shutil.copyfile(pairs, dm / 'pso_pairs.tsv')   # the split's copy, for a profile without the table
     if mpairs: shutil.copyfile(mpairs, dm / 'mesh_pairs.tsv')
     if fonts: copy(fonts, dm / 'font', False)
+    for ov in overlays: copy([ov], dm / ov.name, False)
     if a.env_file: shutil.copyfile(a.env_file, dm / 'env.txt')
     if a.settings: shutil.copyfile(a.settings, dm / 'launcher.json')
     if a.control_nacp: shutil.copyfile(a.control_nacp, res / 'control.nacp')
@@ -608,6 +611,7 @@ def parse(argv):
     ap.add_argument('--tables', required=True, help='the game profile folder (shader_map.tsv and the tables beside it)')
     ap.add_argument('--runtime-python', help='bundle the NVN shader compiler with this relocatable Python installation')
     ap.add_argument('--font', required=True, help='the folder of the shared-font stand-ins (nintendo_ext.ttf)')
+    ap.add_argument('--overlay', action='append', help='a RomFS overlay folder (overlay_<layout>) copied into Resources/dm/')
     ap.add_argument('--aoc', help='the DLC RomFS images or folders by index')
     ap.add_argument('--pso', help='the pipeline archive made offline for this Mac (pso_offline.py --platform macos output: <arch>.mtl4a, prebuilt.tsv)')
     ap.add_argument('--pso-pairs', help='pso_pairs.tsv for a profile that has none (the shader split\'s copy)')

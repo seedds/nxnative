@@ -127,6 +127,8 @@ dm/gfx/nvn/msl_image.h	*:*	reads each shader from the one-file library: every NV
 dm/tools/shader_lib.py	*:*	the shader libraries as one file: every NVN game build and regress chain
 dm/tools/shader_cache.py	*:*	the compile cache as one file: every NVN game build and regress chain
 dm/tools/tree_tar.py	*:*	one tar in place of Xcode's derived data and quiet work folders: every game build
+dm/tools/oot_pad_overlay.m	hle:*fs*	Ocarina of Time controller diagram and callout texture overlay generator
+scripts/oot_pad_overlay.py	hle:*fs*	Ocarina of Time PlayStation and Xbox controller RomFS overlay generator
 dm/tools/nro_collect.py	*:*	NRO discovery from game resources during packing
 dm/tools/nx_extract/*	*:*	NSP extraction: every game's resource inputs
 dm/tools/nx_extract_bin/*	*:*	fallback: the extractor binary, when its sources are not in the range

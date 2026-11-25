@@ -1,0 +1,11 @@
+# Use a fixed hub save with the Slosher equipped and the default camera, stored locally at saves/slosher-hub beside the build folder.
+# The title input uses presented frames so loading time does not move the attacks into the title screen.
+# Alternate attacks with swimming in the painted floor to refill ink throughout the measuring window.
+# Animated ink varies at wall-clock screenshot times, so this route compares timing, reach, errors and memory without screenshot hashes.
+save	saves/slosher-hub
+keys	f1200:ZL+ZR~f12,f2100:ZR~f3*120/120,f2130:ZL~f60*120/120
+secs	300
+quick	240
+reach	3000@210
+window	180	90
+hang	30

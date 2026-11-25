@@ -45,6 +45,27 @@ Motion aiming works with a pair of original (Switch 1) Joy-Cons, clean and 1 to 
 
 The work folder's `run/drive.sh <name> <secs> "<sec> <control line>"…` boots in a window with the HUD, raises it and appends control lines (`A~0.1`, `LUp~4`, `shot <path>`, `passdump 1`, `texdump <path with %d>`). With the save at the start of the dialogue, four presses of A get to the beach at about 75 s. `DM_NVN_SHOT=<frames>:<relative path>` takes consecutive frames: the path must have no space, as the driver's environment is split on them.
 
+The [regression route](smoke.tsv) and the `slosher-hub` [benchmark route](bench.tsv) start from a fixed hub save with the Slosher equipped and the default camera.
+Create the fixture by equipping the Slosher at the hub spawn, saving and quitting, then copying the committed save folder to `<NSP folder>/saves/slosher-hub`.
+Keep this fixture local and use the same bytes for both revisions.
+The runners copy the fixture for each run and disable cloud-save writes.
+The route alternates bucket attacks with ink refills without moving the player or camera.
+Its measurement window covers 180 through 270 seconds after host start to allow loading and initial pipeline compilation to finish.
+Animated ink makes wall-clock screenshot hashes unsuitable for this route, so `smoke.tsv` checks frame times, frame reach, errors and memory without screenshot comparisons.
+The benchmark takes a visual-check screenshot after the measurement window.
+
+```sh
+python3 scripts/bench.py "<NSP folder>/0400380020056000_build" \
+  --route slosher-hub --save "<NSP folder>/saves/slosher-hub" \
+  --env DM_OPMODE=1 --env DM_FOCUS_KEEP=1 --env DM_WINDOW_TOP=1 --runs 3
+```
+
+Keep the game window visible throughout each measurement.
+The host logs `window covered` when macOS suppresses its display link, which invalidates frame-time comparisons.
+This route covers sustained hub rendering and Slosher effects.
+Tutorial stages and boss fights need separate routes.
+The reported gameplay slowdown still needs a matched baseline and candidate comparison.
+
 ## Open
 
 - A GPU address fault after 4-6 minutes of the tutorial on an M5, Metal 4, then a frozen picture while the game runs on ([issue #1289](https://github.com/seedds/nxnative/issues/1289)), and after 12 minutes on an M5 Max (3 failed of 357,641 command buffers). Never on the M4 Pro (to frame 31,200, as far as the first fort) or the M6. Cause unknown. All 18 of the M5's macOS reports are reads at address 0 (one at 0x40), in data master 2 (the fragment stage on the M6): a binding whose base address is 0, not a freed or evicted object, which faults at its own address, nor an overrun ([A GPU fault at address 0](../../../docs/reference/rendering.md#a-gpu-fault-at-address-0)). `DM_RES_CHECK=1` cannot see it and reported nothing. Not the cube in a cube array slot below: those 180 binds all come at frame 0. No game shader is in every failed command buffer. The next log from an M5 has `[RED] zero GPU address` lines, and after each failure the zero addresses its command buffer was handed, or none.

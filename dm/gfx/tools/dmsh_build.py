@@ -193,18 +193,27 @@ def publish_library(label, on_progress=None):
     without unpacking loose files back onto the full drive; otherwise the staged outputs go back into the folder, which works as it is, and a folder restore that fails too removes what it
     wrote and stops the build"""
     d = label_dir(label); image = shader_lib.image_of(d); prefix = f'{STAGE}/{label}/'
-    files = {}
+    files, share = {}, {}
     old = OLD_IMAGE.get(label)
     if old is not None:
-        for p in old.iterdir():
-            m = OUT_KEY.match(p.name)
-            if (m and owned_output(m.group(1))) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
-            files[p.name] = str(p)
-    staged = STORE.names(prefix)
-    for n in staged: files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
+        old_img = romfs.Image(old)
+        for name, k in old_img.children(0):
+            m = OUT_KEY.match(name)
+            if (m and owned_output(m.group(1))) or (name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
+            files[name] = str(old / name)
+            share[name] = ('old', *old_img.entry(k)[:2])
+    staged = STORE.blob_ids(prefix)
+    for n, blob in staged.items():
+        short = n[len(prefix):]
+        files[short] = (lambda n=n: STORE.get(n))
+        share[short] = ('blob', blob)
     for n in os.listdir(d):
-        if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)): files[n] = os.path.join(d, n)
-    try: shader_lib.write(files, image, on_progress=on_progress) if on_progress else shader_lib.write(files, image)
+        if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)):
+            files[n] = os.path.join(d, n)
+            share.pop(n, None)
+    try:
+        if on_progress: shader_lib.write(files, image, on_progress=on_progress, share=share or None)
+        else: shader_lib.write(files, image, share=share or None)
     except (OSError, ValueError) as e:
         cache_full = getattr(STORE, 'full', False)
         def stop(why, err2=None):

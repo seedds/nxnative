@@ -4,6 +4,14 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ## Frame step
 
+### Invalid GPU completion times inflate frame diagnostics
+
+- **Symptom:** after a GPU address fault, a frame's diagnostic GPU time is trillions of milliseconds while adjacent frames report ordinary timings.
+- **Cause:** `gpu_tag_done` accepted any positive duration with a positive start, and `up_flush` (`g_upload_gpu_ns`) accepted any positive duration. Missing or corrupt completion feedback (for example an unwritten `UINT64_MAX` tick sentinel converted through Apple Silicon's `125/3` timebase, ~`6.15e9` s, on a faulted command buffer) could supply a non-finite or future endpoint, poisoning the summed duration (`mtl_gpu_ms`, `@upload_gpu_ms`), the frame span (`mtl_gpu_span`), and `mtl_gpu_done` (`vfh_vsync`).
+- **Fix:** `gpu_time_valid` (`nvn_mtl.m`) accepts only finite, positive, ordered endpoints that have elapsed on Metal's host clock (`CACurrentMediaTime`), shared by `gpu_tag_done` and `up_flush`. Invalid feedback still retires its pending completion, but adds neither duration nor span; valid work in the same frame remains counted. This changes timing accumulation, not GPU execution or fault recovery.
+- **Check:** `t_gpu_timing` (missing, negative, reversed, equal, NaN, infinite, future, and #1737-magnitude endpoints; mixed valid/invalid frames across `mtl_gpu_ms`, `mtl_gpu_span`, and `mtl_gpu_done`; ring slot reuse).
+- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), [issue #1737](https://github.com/seedds/nxnative/issues/1737). The underlying intermittent GPU address fault remains open.
+
 ### Frame cap checked and used from the same sample
 
 - **Symptom:** clang reports division by zero in `fstep_tick` (`hle_nvn.c`).

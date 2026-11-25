@@ -74,15 +74,15 @@ static int pad_gip_decode(pad_gip *g, const uint8_t *r, size_t n, uint8_t ack[GI
         int was = g->guide; g->guide = (r[4] & 3) != 0;
         return g->guide != was;
     }
-    if (r[0] != GIP_CMD_INPUT || n < 18) return 0;
+    if (r[0] != GIP_CMD_INPUT || n < 18 || r[3] < 14 || n < (size_t)4 + r[3]) return 0;
     static const struct { uint8_t byte, bit; uint64_t to; } map[] = {
         {4, 2, DM_BTN_PLUS}, {4, 3, DM_BTN_MINUS}, {4, 4, DM_BTN_B}, {4, 5, DM_BTN_A}, {4, 6, DM_BTN_Y}, {4, 7, DM_BTN_X},
         {5, 0, DM_BTN_UP}, {5, 1, DM_BTN_DOWN}, {5, 2, DM_BTN_LEFT}, {5, 3, DM_BTN_RIGHT}, {5, 4, DM_BTN_L}, {5, 5, DM_BTN_R}, {5, 6, DM_BTN_LS}, {5, 7, DM_BTN_RS},
     };
     uint64_t m = 0;
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) if (r[map[i].byte] >> map[i].bit & 1) m |= map[i].to;
-    if ((r[6] | r[7] << 8) > 255) m |= DM_BTN_ZL;   // triggers 0..1023, actuate above 25% (as front_mac.m, PR #2504)
-    if ((r[8] | r[9] << 8) > 255) m |= DM_BTN_ZR;
+    if (((r[6] | r[7] << 8) & 0x3ff) > 255) m |= DM_BTN_ZL;   // triggers 0..1023, actuate above 25% (as front_mac.m, PR #2504)
+    if (((r[8] | r[9] << 8) & 0x3ff) > 255) m |= DM_BTN_ZR;
     int32_t s[4];
     pad_hid_stick(pad_gip_axis(r + 10), pad_gip_axis(r + 12), &s[0], &s[1]);
     pad_hid_stick(pad_gip_axis(r + 14), pad_gip_axis(r + 16), &s[2], &s[3]);

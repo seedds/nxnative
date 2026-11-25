@@ -79,6 +79,23 @@ class StorageBounds(unittest.TestCase):
         push = [b for b in binds if b['kind'] == abi.KIND_SBUF_PUSH]
         self.assertEqual([b.get('sbx') for b in push], [0])
 
+    def test_first_store_hoists_real_bounded_words(self):
+        # Maxwell STG.E.32 [Ra + imm24], Rs at byte offsets 0, 4, 8 storing RZ (0u) into c[0][0x110]
+        def stg_off(a, rs, off): return 0xeed8 << 48 | 4 << 48 | 1 << 45 | (off & 0xffffff) << 20 | PT << 16 | a << 8 | rs
+        body = (iadd_c(2, RZ, 0, 0x110, cc=True), iadd_c(3, RZ, 0, 0x114, x=True),
+                stg_off(2, RZ, 0), stg_off(2, RZ, 4), stg_off(2, RZ, 8), EXIT)
+        _, msl, _ = self.translate(dict(stage='cs', shared=0x1000), code(*body))
+        self.assertRegex(msl, r'\(\*spvDescriptorSet0\.cp_s0\)\._m0\[int\(_\d+\)\] = 0u;')
+        m = re.search(r'kernel void main0\([^\n]*\)\n\{\n(.*?)\n\}', msl, re.S)
+        self.assertIsNotNone(m, msl)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import test_dmsh_first_store
+        import dmsh_rewrite
+        src = (test_dmsh_first_store.BODY % (5, '!=')).replace('        (*spvDescriptorSet0.cp_s0)._m0[1] = 0u;\n', m.group(1) + '\n')
+        out, stores = dmsh_rewrite.first_store(src, [32, 1, 1])
+        self.assertEqual(stores, [('cp_s0', 0, 0), ('cp_s0', 1, 0), ('cp_s0', 2, 0)])
+        self.assertNotIn('if (!_71)', out)
+
     @unittest.skipUnless(os.environ.get('DMSH_TEST_METAL'), 'set DMSH_TEST_METAL=1 to compile with the Metal compiler')
     def test_it_compiles(self):
         body = (inst(*ULDC64_C0_10) + inst(*S2R_R5) + inst(*waiting(LDG_R8_R5_UR4)) + inst(*MOV_R20_UR4) + inst(*MOV_R21_UR5) + inst(*ATOMG_ADD) +

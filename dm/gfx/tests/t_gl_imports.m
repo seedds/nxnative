@@ -1,5 +1,6 @@
 // Direct GL imports and eglGetProcAddress must reach the same implementations (issue #228), including big-stack entries.
 #include "../gl/hle_gl.m"
+#include "../nvn/nvn_protos.h"
 #include <assert.h>
 #include <unistd.h>
 
@@ -333,7 +334,7 @@ static void test_packed_uploads(void) {
 static void test_doom3(void) {
     // An ARB name of a core function gets the core entry; ARB_fragment_program's own names have theirs; an ARB name of nothing stays missing
     assert(gl_lookup("glBindBufferARB") == gl_lookup("glBindBuffer") && gl_lookup("glBindBuffer"));
-    assert(gl_lookup("glActiveTextureARB") == (void *)h_glActiveTexture);
+    assert(gl_lookup("glActiveTextureARB") == (void *)h_glActiveTexture_ctx);
     assert(gl_lookup("glCompressedTexSubImage2DARB") == import("glCompressedTexSubImage2D"));
     assert(gl_lookup("glGenProgramsARB") == import("glGenProgramsARB") && !gl_lookup("glNoSuchFunctionARB") && !gl_lookup("ARB"));
     static const char *const need[] = {"GL_ARB_multitexture", "GL_ARB_texture_compression", "GL_EXT_texture_compression_s3tc", "GL_ARB_vertex_buffer_object", "GL_ARB_map_buffer_range",
@@ -556,19 +557,19 @@ static void test_sampler_objects(int gpu) {
 
 // Extension names by gl_aliases.h (Fate/hollow ataraxia REMASTERED asks for its framebuffer functions by their EXT names, issue #2818), never by a stripped suffix; binds that
 // make a name glGen* never gave; EGL's current context, display and surfaces, per thread
-typedef struct { void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
+typedef struct { EGLContext context; void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
 static void *other_thread(void *arg) {
     egl_attempt *seen = arg; seen->before = h_eglGetCurrentContext();
-    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, (EGLContext)2);
+    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, seen->context);
     seen->after = h_eglGetCurrentContext(); seen->error = h_eglGetError(); seen->next_error = h_eglGetError();
     return NULL;
 }
 static void test_extension_names_and_egl(void) {
-    assert(gl_lookup("glGenFramebuffersEXT") == (void *)h_glGenFramebuffers && gl_lookup("glCheckFramebufferStatusEXT") == (void *)h_glCheckFramebufferStatus);
-    assert(gl_lookup("glBindRenderbufferEXT") == (void *)h_glBindRenderbuffer && gl_lookup("glBindFramebufferEXT") == gl_lookup("glBindFramebuffer"));
-    assert(gl_lookup("glGenFramebuffersOES") == (void *)h_glGenFramebuffers && gl_lookup("glBindVertexArrayOES") == (void *)h_glBindVertexArray);
+    assert(gl_lookup("glGenFramebuffersEXT") == (void *)h_glGenFramebuffers_ctx && gl_lookup("glCheckFramebufferStatusEXT") == (void *)h_glCheckFramebufferStatus_ctx);
+    assert(gl_lookup("glBindRenderbufferEXT") == (void *)h_glBindRenderbuffer_ctx && gl_lookup("glBindFramebufferEXT") == gl_lookup("glBindFramebuffer"));
+    assert(gl_lookup("glGenFramebuffersOES") == (void *)h_glGenFramebuffers_ctx && gl_lookup("glBindVertexArrayOES") == (void *)h_glBindVertexArray_ctx);
     assert(!gl_lookup("glVertexAttribPointerNV") && !gl_lookup("glPolygonOffsetEXT") && !gl_lookup("glDrawArraysEXTRA"));   // another function under the stripped name
-    assert(gl_lookup("glGetProgramivARB") == (void *)h_glGetProgramivARB && gl_lookup("glGetProgramivARB") != gl_lookup("glGetProgramiv"));
+    assert(gl_lookup("glGetProgramivARB") == (void *)h_glGetProgramivARB_ctx && gl_lookup("glGetProgramivARB") != gl_lookup("glGetProgramiv"));
     GLint v = 0; h_glGetProgramivARB(0x8804, 0x88b6, &v); assert(v == 1);   // FRAGMENT_PROGRAM_ARB: within the native limits
     // a bind of a name never generated makes it (GL ES, the compatibility profile, EXT_framebuffer_object)
     assert(!rb_of(77) && !fb_of(78));
@@ -580,23 +581,205 @@ static void test_extension_names_and_egl(void) {
     assert(h_eglGetProcAddress("eglGetCurrentDisplay") == (void *)h_eglGetCurrentDisplay_bs && h_eglGetProcAddress("eglMakeCurrent") == (void *)h_eglMakeCurrent_bs);
     assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
     EGLDisplay d = (EGLDisplay)&g_egl;
-    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, (EGLContext)2);
-    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentDisplay() == d);
+    EGLContext context = h_eglCreateContext(d, NULL, NULL, NULL); assert(context);
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, context);
+    assert(h_eglGetCurrentContext() == context && h_eglGetCurrentDisplay() == d);
     assert(h_eglGetCurrentSurface(0x3059) == (EGLSurface)3 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && !h_eglGetCurrentSurface(0x3000));
-    egl_attempt seen = {0}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    egl_attempt seen = {.context = context}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
     assert(!seen.before && !seen.bound && !seen.after && seen.error == 0x3002 && seen.next_error == 0x3000);   // BAD_ACCESS, cleared on read
-    assert(h_eglGetCurrentContext() == (EGLContext)2 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && h_eglGetError() == 0x3000);
+    assert(h_eglGetCurrentContext() == context && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && h_eglGetError() == 0x3000);
     h_eglMakeCurrent(d, NULL, NULL, NULL); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
     pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
-    assert(!seen.before && seen.bound && seen.after == (EGLContext)2 && seen.error == 0x3000);   // released here, acquired there; thread exit releases it too
-    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, (EGLContext)2); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+    assert(!seen.before && seen.bound && seen.after == context && seen.error == 0x3000);   // released here, acquired there; thread exit releases it too
+    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, context); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+    assert(h_eglDestroyContext(d, context));
+}
+
+static void test_egl_client_api(void) {
+    EGLDisplay d = &g_egl;
+    const EGLint renderable[] = {EGL_RENDERABLE_TYPE, 0x40, 0x3038};
+    const EGLint requested[] = {0x3098, 3, 0x3038};
+    EGLConfig cfg;
+    EGLint n;
+    assert(h_eglChooseConfig(d, renderable, &cfg, 1, &n) && n == 1);
+    assert(h_eglGetConfigAttrib(d, cfg, EGL_RENDERABLE_TYPE, &n) && (n & 0x40));
+    EGLContext es = h_eglCreateContext(d, cfg, NULL, requested);
+    assert(es && h_eglMakeCurrent(d, NULL, NULL, es));
+    const char *(*get_string)(GLenum) = import("glGetString");
+    void (*get_integer)(GLenum, GLint *) = import("glGetIntegerv");
+    int major, minor;
+    assert(sscanf(get_string(GL_VERSION), "OpenGL ES %d.%d", &major, &minor) == 2);
+    assert(major == 3 && minor == 0);
+    get_integer(GL_MAJOR_VERSION, &n); assert(n == major);
+    get_integer(GL_MINOR_VERSION, &n); assert(n == minor);
+    get_integer(GL_MAX_TEXTURE_SIZE, &n); assert(n >= 2048);
+    get_integer(0x8dfa, &n); assert(n == 1);   // GL_SHADER_COMPILER
+    assert(!strcmp(get_string(GL_SHADING_LANGUAGE_VERSION), "OpenGL ES GLSL ES 3.00"));
+    GLuint fbo;
+    uint32_t (*is_framebuffer)(GLuint) = import("glIsFramebuffer");
+    h_glGenFramebuffers(1, &fbo); assert(!is_framebuffer(fbo));
+    h_glBindFramebuffer(GL_FRAMEBUFFER, fbo); assert(is_framebuffer(fbo));
+    h_glDeleteFramebuffers(1, &fbo); assert(!is_framebuffer(fbo));
+    assert(h_eglBindAPI(EGL_OPENGL_API) && h_eglQueryAPI() == EGL_OPENGL_API);
+    EGLContext desktop = h_eglCreateContext(d, NULL, NULL, NULL);
+    assert(desktop && h_eglMakeCurrent(d, NULL, NULL, desktop));
+    assert(!strcmp(get_string(GL_VERSION), "4.5.0 NVIDIA 349.00"));
+    assert(h_eglMakeCurrent(d, NULL, NULL, es));
+    assert(!strcmp(get_string(GL_VERSION), "OpenGL ES 3.0"));
+    GLuint rb;
+    h_glGenRenderbuffers(1, &rb);
+    h_glBindRenderbuffer(GL_RENDERBUFFER, rb);
+    rb_of(rb)->fmt = F_D32FS8;
+    rb_of(rb)->w = 1;
+    h_glGetRenderbufferParameteriv(GL_RENDERBUFFER, 0x8d55, &n); assert(n == 8);
+    h_glGenFramebuffers(1, &fbo); h_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    h_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rb);
+    get_integer(0xd56, &n); assert(n == 32);
+    get_integer(0xd57, &n); assert(n == 8);
+    assert(h_eglReleaseThread());
+    assert(h_eglQueryAPI() == EGL_OPENGL_ES_API);
+    assert(h_eglDestroyContext(d, desktop) && h_eglDestroyContext(d, es));
+    puts("EGL client APIs: per-context OpenGL ES version and texture limits: OK");
+}
+
+typedef struct { EGLContext context; GLuint texture; void *sync; } shared_objects;
+static void *shared_render_thread(void *arg) {
+    const shared_objects *shared = arg;
+    EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = import("eglMakeCurrent");
+    assert(make_current(&g_egl, NULL, NULL, shared->context));
+    GLint viewport[4];
+    void (*get_integer)(GLenum, GLint *) = import("glGetIntegerv");
+    get_integer(GL_VIEWPORT, viewport);
+    assert(viewport[2] == 0 && viewport[3] == 0);
+    get_integer(GL_FRAMEBUFFER_BINDING, viewport);
+    assert(viewport[0] == 0);
+    assert(((uint32_t (*)(void *))import("glIsSync"))(shared->sync));
+    id<MTLTexture> image = (__bridge_transfer id<MTLTexture>)dm_gl_retain_texture_2d(shared->texture);
+    assert(image.width == 4 && image.height == 2);
+    ((void (*)(GLint, GLint, GLsizei, GLsizei))import("glViewport"))(0, 0, 7, 5);
+    return NULL;   // the thread's exit releases its context
+}
+static void test_shared_contexts(void) {
+    dev_init();
+    EGLContext first = h_eglCreateContext(&g_egl, NULL, NULL, NULL);
+    EGLContext shared = h_eglCreateContext(&g_egl, NULL, first, NULL);
+    EGLContext isolated = h_eglCreateContext(&g_egl, NULL, NULL, NULL);
+    assert(first && shared && isolated && first != shared && shared != isolated);
+    assert(h_eglMakeCurrent(&g_egl, NULL, NULL, first));
+    GLuint texture, fb;
+    h_glGenTextures(1, &texture); h_glBindTexture(GL_TEXTURE_2D, texture);
+    // Exercise the stack-argument wrapper as well as the context switch.
+    void (*tex_image)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *) = import("glTexImage2D");
+    uint8_t pixels[32] = {0x3c, 0x51, 0x60, 0xff};
+    tex_image(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    h_glGenFramebuffers(1, &fb); h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    h_glViewport(0, 0, 4, 2);
+    void *fence = h_glFenceSync(0x9117, 0);
+    shared_objects work = {shared, texture, fence};
+    pthread_t th; assert(!pthread_create(&th, NULL, shared_render_thread, &work));
+    assert(!pthread_join(th, NULL));
+    GLint viewport[4];
+    ((void (*)(GLenum, GLint *))import("glGetIntegerv"))(GL_VIEWPORT, viewport);
+    assert(viewport[2] == 4 && viewport[3] == 2);
+    assert(h_eglDestroyContext(&g_egl, first));
+    assert(h_eglMakeCurrent(&g_egl, NULL, NULL, shared));
+    h_glGetIntegerv(GL_VIEWPORT, viewport);
+    assert(viewport[2] == 7 && viewport[3] == 5);
+    assert(!fb_of(fb) && h_glIsSync(fence) && tex_of(texture));
+    assert(h_eglMakeCurrent(&g_egl, NULL, NULL, isolated));
+    assert(!h_glIsSync(fence) && !tex_of(texture));
+    assert(h_eglReleaseThread());
+    assert(h_eglDestroyContext(&g_egl, shared));
+    assert(h_eglDestroyContext(&g_egl, isolated));
+    puts("EGL shared contexts: two threads, local bindings and share-group names: OK");
+}
+
+static PFNNVNDEVICEGETPROCADDRESSPROC nvn_loader(void) {
+    unsigned long bytes;
+    const hle_force_ent *hooks = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &bytes);
+    for (unsigned long i = 0; i < bytes / sizeof *hooks; i++)
+        if (!strcmp(hooks[i].name, "nvnBootstrapLoader"))
+            return (PFNNVNDEVICEGETPROCADDRESSPROC)((PFNNVNBOOTSTRAPLOADERPROC)hooks[i].fn)("nvnDeviceGetProcAddress");
+    return NULL;
+}
+
+static void test_nvn_interop(void) {
+    EGLContext ctx = h_eglCreateContext(&g_egl, NULL, NULL, NULL);
+    assert(h_eglMakeCurrent(&g_egl, NULL, NULL, ctx));
+    PFNNVNDEVICEGETPROCADDRESSPROC nvn = nvn_loader();
+    assert(nvn);
+#define NV_CALL(name) ((NVNT_##name)nvn(NULL, #name))
+    GLuint name;
+    h_glGenTextures(1, &name); h_glBindTexture(GL_TEXTURE_2D, name);
+    h_glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 2);
+    NVNtextureBuilder builder = {0};
+    NVNtexture texture = {0};
+    NV_CALL(nvnTextureBuilderSetDefaults)(&builder);
+    NV_CALL(nvnTextureBuilderSetGLTextureName)(&builder, name);
+    assert(NV_CALL(nvnTextureBuilderGetGLTextureName)(&builder) == name);
+    assert(NV_CALL(nvnTextureInitialize)(&texture, &builder));
+    assert(NV_CALL(nvnTextureGetWidth)(&texture) == 4 && NV_CALL(nvnTextureGetHeight)(&texture) == 2);
+    assert(NV_CALL(nvnTextureGetFormat)(&texture) == NVN_FORMAT_RGBA8);
+    h_glDeleteTextures(1, &name);
+    NV_CALL(nvnTextureFinalize)(&texture);
+
+    NVNdevice device = {0};
+    NVNdeviceBuilder db = {0};
+    NV_CALL(nvnDeviceBuilderSetDefaults)(&db); assert(NV_CALL(nvnDeviceInitialize)(&device, &db));
+    NVNqueueBuilder qb = {0};
+    NVNqueue queue = {0};
+    NV_CALL(nvnQueueBuilderSetDefaults)(&qb); NV_CALL(nvnQueueBuilderSetDevice)(&qb, &device);
+    assert(NV_CALL(nvnQueueInitialize)(&queue, &qb));
+    // Hold the initial GL work on the GPU to distinguish queue waits from
+    // immediate success and to exercise a deleted GL name's imported fence.
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    [cb_get() encodeWaitForEvent:gate value:1];
+    void *first = h_glFenceSync(0x9117, 0);
+    NVNsync imported = {0}, nv_done = {0};
+    int status = -1;
+    typedef NVNboolean (*import_sync)(NVNsync *, NVNdevice *, const void *, int *);
+    typedef int (*export_sync)(const NVNsync *, void **);
+    assert(((import_sync)nvn(NULL, "nvnSyncInitializeFromFencedGLSync"))(&imported, &device, first, &status) && !status);
+    h_glDeleteSync(first);
+    assert(NV_CALL(nvnSyncWait)(&imported, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+    assert(NV_CALL(nvnQueueWaitSync)(&queue, &imported));
+    NV_CALL(nvnSyncFinalize)(&imported);
+    assert(NV_CALL(nvnSyncInitialize)(&nv_done, &device));
+    NV_CALL(nvnQueueFenceSync)(&queue, &nv_done, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+    void *converted = NULL;
+    assert(!((export_sync)nvn(NULL, "nvnSyncCreateGLSync"))(&nv_done, &converted) && converted);
+    h_glWaitSync(converted, 0, UINT64_MAX);
+    h_glDeleteSync(converted);
+    void *last = h_glFenceSync(0x9117, 0);
+    h_glFlush();
+    GLint fence_status;
+    GLsizei count;
+    h_glGetSynciv(last, GL_SYNC_STATUS, 1, &count, &fence_status);
+    assert(count == 1 && fence_status == GL_UNSIGNALED);
+    assert(h_glClientWaitSync(last, 0, 0) == GL_TIMEOUT_EXPIRED);
+    gate.signaledValue = 1;
+    GLenum waited = h_glClientWaitSync(last, 0, 5000000000);
+    assert(waited == GL_CONDITION_SATISFIED || waited == GL_ALREADY_SIGNALED);
+    h_glGetSynciv(last, GL_SYNC_STATUS, 1, &count, &fence_status);
+    assert(count == 1 && fence_status == GL_SIGNALED);
+    h_glDeleteSync(last);
+    assert(NV_CALL(nvnSyncWait)(&nv_done, 5000000000) <= NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    NV_CALL(nvnSyncFinalize)(&nv_done);
+    NV_CALL(nvnQueueFinalize)(&queue);
+    NV_CALL(nvnDeviceFinalize)(&device);
+    assert(h_eglReleaseThread());
+    assert(h_eglDestroyContext(&g_egl, ctx));
+#undef NV_CALL
+    puts("OpenGL–NVN interop: shared texture and round-trip GPU fence: OK");
 }
 
 // The other calls Fate/hollow ataraxia REMASTERED makes that the layer lacked (issue #2818): glValidateProgram after each link, glLineWidth, glClearTexImage on its new textures
 static void test_program_validation(void) {
-    static shsamp samplers[] = {{"flat", 0, T_SAMP2D}, {"cube", 1, T_SAMPCUBE}};
+    static shsamp samplers[] = {{.name = "flat", .slot = 0, .type = T_SAMP2D, .unit = -1},
+                                {.name = "cube", .slot = 1, .type = T_SAMPCUBE, .unit = -1}};
     static shinfo vsi = {.ub_slot = -1}, fsi = {.frag = 1, .ub_slot = -1, .nt = 2, .t = samplers};
     GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER), was = S.prog;
+    assert(h_glIsProgram(pr) && !h_glIsProgram(vs) && !h_glIsProgram(0));
     shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new]; shader_of(fs)->si = &fsi; shader_of(fs)->fn = (id)[NSObject new];
     h_glAttachShader(pr, vs); h_glAttachShader(pr, fs); h_glLinkProgram(pr); h_glUseProgram(pr);
     GLint v; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0);   // no validation yet
@@ -617,7 +800,7 @@ static void test_program_validation(void) {
     // Explicit layout(binding = N) on samplers initializes u->unit at link time; unqualified samplers stay at unit 0.
     char row_ok[] = "0123456789abcdef\tfrag\tr:0:4 t:u_y=0:1:sampler2D t:u_uv=2:3:sampler2D:1\tmain#0";
     shinfo parsed = {0};
-    assert(sh_read_row(row_ok, &parsed) && parsed.nt == 2 && parsed.t[0].unit == 0 && parsed.t[1].unit == 1);
+    assert(sh_read_row(row_ok, &parsed) && parsed.nt == 2 && parsed.t[0].unit == -1 && parsed.t[1].unit == 1);
     sh_free(&parsed);
     char row_bad[] = "0123456789abcdef\tfrag\tr:0:2 t:u_uv=0:1:sampler2D:999\tmain#0";
     assert(!sh_read_row(row_bad, &parsed));
@@ -728,7 +911,7 @@ static void test_active_attributes(void) {
 }
 
 static void test_fate_calls(void) {
-    assert(import("glValidateProgram") == (void *)h_glValidateProgram && import("glLineWidth") == (void *)h_glLineWidth);
+    assert(import("glValidateProgram") == (void *)h_glValidateProgram_ctx && import("glLineWidth") == (void *)h_glLineWidth_ctx);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
     GLuint pr = h_glCreateProgram(); h_glValidateProgram(pr); GLint v = 0; h_glGetProgramiv(pr, GL_VALIDATE_STATUS, &v); assert(v == 0 && h_glGetError() == GL_NO_ERROR);
     char log[160]; GLsizei len; h_glGetProgramInfoLog(pr, sizeof log, &len, log); assert(len > 0 && strstr(log, "linked"));
@@ -877,12 +1060,17 @@ static void test_fixed_function(int gpu) {
     const EGLint compat[] = {0x3098, 3, 0x30fb, 2, 0x30fd, 2, 0x3038};
     const EGLint gl31[] = {0x3098, 3, 0x30fb, 1, 0x3038};
     const EGLint forward[] = {0x3098, 3, 0x30fc, 2, 0x3038};
-    h_eglCreateContext(NULL, NULL, NULL, core); assert(!g_ctx_fixed);
-    h_eglCreateContext(NULL, NULL, NULL, gl31); assert(!g_ctx_fixed);
-    h_eglCreateContext(NULL, NULL, NULL, forward); assert(!g_ctx_fixed);
-    h_eglCreateContext(NULL, NULL, NULL, compat);
-    GLint profile; h_glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile); assert(g_ctx_fixed && profile == 2);
-    h_eglCreateContext(NULL, NULL, NULL, NULL); assert(g_ctx_fixed);
+    const EGLint *profiles[] = {core, gl31, forward, compat};
+    for (unsigned i = 0; i < sizeof profiles / sizeof *profiles; i++) {
+        EGLContext ctx = h_eglCreateContext(NULL, NULL, NULL, profiles[i]); assert(ctx);
+        assert(h_eglMakeCurrent(NULL, NULL, NULL, ctx));
+        GLint profile; h_glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+        assert(g_ctx_fixed == (i == 3) && profile == (i == 3 ? 2 : 1));
+        assert(h_eglDestroyContext(NULL, ctx));
+        assert(h_eglReleaseThread());
+    }
+    EGLContext ctx = h_eglCreateContext(NULL, NULL, NULL, NULL); assert(ctx);
+    assert(h_eglMakeCurrent(NULL, NULL, NULL, ctx) && g_ctx_fixed);
 
     __typeof__(S) saved = S;
     h_glActiveTexture(GL_TEXTURE0);
@@ -963,7 +1151,8 @@ static void test_fixed_function(int gpu) {
     }
     assert(h_glGetError() == GL_NO_ERROR);
     S = saved;
-    h_eglCreateContext(NULL, NULL, NULL, core);
+    assert(h_eglReleaseThread());
+    assert(h_eglDestroyContext(NULL, ctx));
     puts("GL fixed-function context, texture environment and draw: OK");
 }
 
@@ -1067,6 +1256,23 @@ static int test_capture_shaders(void) {
     h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     assert(!memcmp(pixel, want_bind, sizeof want_bind) && h_glGetError() == GL_NO_ERROR);
 
+    const GLchar *frag_array = "#version 300 es\nprecision highp float;\nuniform sampler2D tex[2];\n"
+                               "out vec4 color;\nvoid main() { color = vec4(texture(tex[0], vec2(0.5)).r, texture(tex[1], vec2(0.5)).g, 0.0, 1.0); }";
+    GLuint fsa = h_glCreateShader(GL_FRAGMENT_SHADER), pra = h_glCreateProgram();
+    h_glShaderSource(fsa, 1, &frag_array, NULL); h_glCompileShader(fsa);
+    h_glAttachShader(pra, vsb); h_glAttachShader(pra, fsa); h_glLinkProgram(pra);
+    h_glGetProgramiv(pra, GL_LINK_STATUS, &status); assert(status);
+    GLint a0 = h_glGetUniformLocation(pra, "tex"), a1 = h_glGetUniformLocation(pra, "tex[1]");
+    assert(a0 > 0 && a1 > a0 && h_glGetUniformLocation(pra, "tex[2]") == -1);
+    h_glGetUniformiv(pra, a1, v1); assert(v1[0] == 0);
+    h_glUseProgram(pra);
+    const GLint units[] = {0, 1}; h_glUniform1iv(a0, 2, units);
+    h_glGetUniformiv(pra, a1, v1); assert(v1[0] == 1);
+    h_glDrawArrays(GL_TRIANGLES, 0, 3);
+    h_glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    assert(!memcmp(pixel, want_bind, sizeof want_bind) && h_glGetError() == GL_NO_ERROR);
+    h_glUseProgram(0); h_glDeleteProgram(pra); h_glDeleteShader(fsa);
+
     h_glUseProgram(0); h_glDeleteProgram(prb); h_glDeleteShader(vsb); h_glDeleteShader(fsb);
     h_glDeleteProgram(pr3); h_glDeleteShader(vs3); h_glDeleteShader(fs3);
     h_glDeleteTextures(2, bt); h_glDeleteTextures(1, &lut3d);
@@ -1093,7 +1299,9 @@ static int srgb_pixel(int x, const float color[4], int encode, const char *label
 // GL_FRAMEBUFFER_SRGB chooses framebuffer conversion and destination blending; sampling
 // still decodes an sRGB texture. No guest shader or game data is used.
 static int test_framebuffer_srgb(void) {
-    dev_init(); h_eglCreateContext(NULL, NULL, NULL, NULL);
+    dev_init();
+    EGLContext ctx = h_eglCreateContext(NULL, NULL, NULL, NULL); assert(ctx);
+    assert(h_eglMakeCurrent(NULL, NULL, NULL, ctx));
     assert(import("glEnable") == (void *)h_glEnable_bs);
     assert(import("glDisable") == (void *)h_glDisable_bs);
     __typeof__(S) saved = S; __typeof__(F) fsaved = F;
@@ -1201,6 +1409,8 @@ static int test_framebuffer_srgb(void) {
     checks++;
     h_glBindFramebuffer(GL_FRAMEBUFFER, 0); h_glDeleteFramebuffers(1, &sample_fb); h_glDeleteTextures(2, sample);
     h_glBindVertexArray(0); h_glDeleteVertexArrays(1, &vao); S = saved; F = fsaved;
+    assert(h_eglReleaseThread());
+    assert(h_eglDestroyContext(NULL, ctx));
     printf("GL framebuffer sRGB: %d pixel checks passed\n", checks); return 0;
 }
 
@@ -1369,7 +1579,7 @@ int main(int argc, char **argv) {
     test_sync_names();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
-    assert((void *)create == (void *)h_glCreateShader);
+    assert((void *)create == (void *)h_glCreateShader_ctx);
     GLuint sh = create(GL_VERTEX_SHADER); assert(sh);
     void (*source)(GLuint, GLsizei, const GLchar *const *, const GLint *) = import("glShaderSource");
     const GLchar *text = "void main() {}";
@@ -1492,6 +1702,8 @@ int main(int argc, char **argv) {
     if (!cpu) test_lod_bias();
     test_sampler_objects(!cpu);
     test_extension_names_and_egl();
+    test_egl_client_api();
+    if (!cpu) { test_shared_contexts(); test_nvn_interop(); }
     test_program_validation();
     test_active_attributes();
     test_fate_calls();

@@ -135,6 +135,13 @@ class Sources(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('glslangValidator'), 'glslangValidator is not installed')
 class Translate(unittest.TestCase):
+    def test_es300_preprocesses_before_promoting_for_spirv(self):
+        src = (b'#version 300 es\n#if __VERSION__ != 300\n#error expected ES 3.00\n#endif\n'
+               b'precision mediump float;\nout vec4 color;\nvoid main() { color = vec4(1.0); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            result = gl_shaders.translate(src, 'frag', '3' * 16, tmp)
+            self.assertIsInstance(result, tuple, result)
+
     def test_sampler_buffer_uses_metal_texture_buffer(self):
         src = (b'#version 330\nuniform samplerBuffer lookup;\n'
                b'void main() { gl_Position = texelFetch(lookup, gl_VertexID); }\n')

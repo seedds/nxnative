@@ -949,6 +949,12 @@ def frag_z_snap(msl):
 # (0.2607843279838562): exactly 66.5 once multiplied in float32, so 66 on the Switch, but 66.5000036 exactly, so 67 on the Mac, whose bit 0 sends the lighting to an ambient
 # the G-buffer leaves black. Here the colour becomes rint(float32(saturate(c) * scale)) / scale, which Apple's conversion stores as that integer. Only where the stored value is the
 # conversion of the shader's colour: blending off, MIN or MAX (they pick one of two stored values) or a logic operation; a blended sum is rounded after the blend, which a shader cannot reach.
+# A 16-bit float target (ROUND_F16) takes the float converted toward zero: NVIDIA's colour unit converts a float into a narrower float that way (Direct3D's conversion rule, which the
+# hardware implements for every API), and an Apple M5 Pro does the same, but an M4 (the iPad's) rounds it to nearest even, half an ulp either way. Super Mario Bros. Wonder draws the
+# player behind the course's back layer with its own linear depth in an RG16F target, and later compares that half against the scene's linear depth plus 1e-5 (a tenth of the half
+# ulp at that depth): where the nearest-even half lay above the float, the player showed as the silhouette colour. Here the float is truncated by its bits to what a half holds:
+# the top 10 mantissa bits in the normal range, fewer below it (the half denormal grid), a signed zero below that grid, the largest finite half for an overflow (the conversion rule
+# clamps), NaN and Inf kept; the result is a half's exact value, which Apple's conversion stores as it is.
 BLEND_ZERO = '''struct dm_blend_state { uint zero; uint round; };   // see dmsh_rewrite.py blend_zero
 static inline __attribute__((always_inline)) float4 dm_bz(float4 c, uint m)
 {
@@ -960,6 +966,13 @@ static inline __attribute__((always_inline)) float4 dm_rop(float4 c, uint m)
 {
     m &= %du;
     if (m == 0u) return c;
+    if (m == %du) {   // a 16-bit float target: the float truncated to a half's bits (toward zero), by the float32 exponent e
+        uint4 u = as_type<uint4>(c), e = (u >> 23u) & 0xffu, sg = u & 0x80000000u;
+        uint4 t = u & ~((uint4(1u) << clamp(126u - min(e, 113u), 13u, 24u)) - 1u);   // 10 mantissa bits from e = 113 (2^-14, the smallest normal half), one fewer per exponent below
+        t = select(t, sg, e < 103u);   // below the half denormal grid (2^-24): a signed zero
+        t = select(t, sg | 0x477fe000u, e > 142u);   // past 65504: the largest finite half
+        return as_type<float4>(select(t, u, e == 255u));   // NaN and Inf as they are
+    }
     float4 s = m == %du ? float4(255.0f) : (m == %du ? float4(65535.0f) : float4(1023.0f, 1023.0f, 1023.0f, 3.0f));
     return rint(precise::clamp(c, 0.0f, 1.0f) * s) / s;   // precise: NaN goes to 0, as both store it; the product is float32's, rint rounds it to nearest even
 }
@@ -988,6 +1001,6 @@ def blend_zero(msl):
     body, k = re.subn(r'^([ \t]*)return out;$', lambda m: f'{m.group(1)}dm_blend0(out, dm_blend);\n{m.group(1)}return out;', body, flags=re.M)
     if not k or k != n: return msl, 0
     bits, rb = abi.BLEND_ZERO_BITS, abi.BLEND_ROUND_BITS
-    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_8, abi.ROUND_16, abi.BLEND_OFF_FC,
+    helper = BLEND_ZERO % ((1 << bits) - 1, (1 << rb) - 1, abi.ROUND_F16, abi.ROUND_8, abi.ROUND_16, abi.BLEND_OFF_FC,
                            ''.join(f'    dm_o.{nm} = dm_rop(dm_bz(dm_o.{nm}, m >> {bits * c}u), r >> {rb * c}u);\n' for nm, c in cols))
     return msl[:e['start']] + helper + '\n' + msl[e['start']:e['head'] - 1] + (', ' if e['params'] else '') + BLEND_ZERO_PARAM + ')' + body + msl[e['end']:], k

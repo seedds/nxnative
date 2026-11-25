@@ -1,7 +1,8 @@
 // NVIDIA's float to normalized conversion through the replay: a pixel shader that writes 256 colours (half steps of 8, 16, 10 and 2 bits, where NVIDIA's colour unit and Apple's
 // differ, then the edges; dmsh_rewrite.py blend_zero's guard in it, from test_dmsh_blend_zero.py --fixture-rop) drawn into RGBA8, RGBA16 and RGB10A2 normalized targets with blending
 // off, with MAX, and with an ADD of ONE and ZERO (a blended sum: rounded after the blend, out of the shader's reach), and the targets read back. Where the stored value is the
-// colour's conversion, it is NVIDIA's: the float32 product rounded to nearest even. The ADD row, and every row with DM_NVN_ROP_ROUND=0, show Apple's conversion as it is: the
+// colour's conversion, it is NVIDIA's: the float32 product rounded to nearest even. The same colours into an RGBA16F target store the half toward zero there (NVIDIA's float
+// conversion); the blended row and DM_NVN_ROP_ROUND=0 store the GPU's own half (toward zero on an M5 Pro, nearest even on an M4). The ADD row, and every row with DM_NVN_ROP_ROUND=0, show Apple's conversion as it is: the
 // exact product rounded to nearest (Sonic Frontiers' flags 66.5 / 255: 66 against 67). rop_word's cases are checked on the state alone. A merged pass's draw (output 0 drawn to
 // attachment 1) is drawn and read back too, with the words bz_bind bound.
 // make GAME=<id> check_t_rop_round (./t_rop_round <dir>)
@@ -15,6 +16,13 @@ static int checks, failed;
 #define CHECK(c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 static unsigned nvidia_unorm(float x, unsigned s) { if (x != x) return 0; x = fminf(fmaxf(x, 0.f), 1.f); volatile float p = x * (float)s; return (unsigned)rintf(p); }   // float32 product, nearest even
 static unsigned apple_unorm(float x, unsigned s) { if (x != x) return 0; x = fminf(fmaxf(x, 0.f), 1.f); return (unsigned)rint((double)x * s); }   // exact in a double (24 + 17 bits)
+static uint16_t half_rtne(float x) { _Float16 h = (_Float16)x; uint16_t b; memcpy(&b, &h, 2); return b; }   // the compiler's conversion: nearest even
+static uint16_t half_rtz(float x) {   // NVIDIA's conversion into a 16-bit float target: toward zero, the largest finite half past 65504, NaN and Inf kept
+    if (x != x || isinf(x)) return half_rtne(x);
+    uint16_t b = half_rtne(x); _Float16 h; memcpy(&h, &b, 2);
+    if (isinf((float)h)) return (b & 0x8000u) | 0x7bffu;
+    return fabsf((float)h) > fabsf(x) ? b - 1 : b;
+}
 enum { O = NVN_BLEND_FUNC_ONE, Z = NVN_BLEND_FUNC_ZERO, ADD = NVN_BLEND_EQUATION_ADD, MAX = NVN_BLEND_EQUATION_MAX, MIN = NVN_BLEND_EQUATION_MIN };
 // rows of every target: blending off, MAX on colour and alpha, a sum of ONE and ZERO
 static const struct { int on, eq; int rounds; } rows[] = {{0, ADD, 1}, {1, MAX, 1}, {1, ADD, 0}};
@@ -23,6 +31,7 @@ static const struct { int nvn; MTLPixelFormat mtl; unsigned bpp; uint32_t cls; }
     {NVN_FORMAT_RGBA8, MTLPixelFormatRGBA8Unorm, 4, DMSH_ROUND_8},
     {NVN_FORMAT_RGBA16, MTLPixelFormatRGBA16Unorm, 8, DMSH_ROUND_16},
     {NVN_FORMAT_RGB10A2, MTLPixelFormatRGB10A2Unorm, 4, DMSH_ROUND_10_2},
+    {NVN_FORMAT_RGBA16F, MTLPixelFormatRGBA16Float, 8, DMSH_ROUND_F16},
 };
 enum { NFMT = sizeof fmts / sizeof *fmts };
 static void stored(int f, const uint8_t *px, unsigned out[4], unsigned sc[4]) {
@@ -131,6 +140,18 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int f = 0; f < NFMT; f++) {
         int differ = 0, flags_seen = 0;
         for (int r = 0; r < NROWS; r++) for (int x = 0; x < W; x++) {
+            if (fmts[f].cls == DMSH_ROUND_F16) {   // the half stored: NVIDIA's (toward zero) where the colour is rounded; the GPU's own otherwise (an M5 Pro truncates, an M4 rounds to nearest)
+                uint16_t h[4]; memcpy(h, (const uint8_t *)pixels[f].contents + (r * W + x) * fmts[f].bpp, 8);
+                uint16_t z = half_rtz(v[x]), n = half_rtne(v[x]);
+                if (r == 0) differ += z != n;
+                if (rows[r].on && rows[r].eq == MAX && !(v[x] > 0.f)) z = n = 0;   // MAX over the clear's 0 keeps 0 for a negative, -Inf or NaN colour
+                for (int c = 0; c < 4; c++) {
+                    int ok = on && rows[r].rounds ? h[c] == z : (h[c] == z || h[c] == n);
+                    if (!ok) fprintf(stderr, "RGBA16F row %d x %d (%.9g) channel %d: got %#x, want %#x (toward zero) or %#x (nearest)\n", r, x, v[x], c, h[c], z, n);
+                    CHECK(ok);
+                }
+                continue;
+            }
             unsigned got[4], sc[4]; stored(f, (const uint8_t *)pixels[f].contents + (r * W + x) * fmts[f].bpp, got, sc);
             for (int c = 0; c < 4; c++) {
                 unsigned nv = nvidia_unorm(v[x], sc[c]), ap = apple_unorm(v[x], sc[c]), want = on && rows[r].rounds ? nv : ap;
@@ -150,7 +171,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     static const struct { MTLPixelFormat f; uint32_t cls; } cases[] = {
         {MTLPixelFormatRGBA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatBGRA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatR8Unorm, DMSH_ROUND_8}, {MTLPixelFormatRG8Unorm, DMSH_ROUND_8},
         {MTLPixelFormatRGBA16Unorm, DMSH_ROUND_16}, {MTLPixelFormatR16Unorm, DMSH_ROUND_16}, {MTLPixelFormatRGB10A2Unorm, DMSH_ROUND_10_2}, {MTLPixelFormatBGR10A2Unorm, DMSH_ROUND_10_2},
-        {MTLPixelFormatRGBA8Unorm_sRGB, 0}, {MTLPixelFormatRGBA8Snorm, 0}, {MTLPixelFormatRGBA16Float, 0}, {MTLPixelFormatRGBA8Uint, 0}, {MTLPixelFormatB5G6R5Unorm, 0},
+        {MTLPixelFormatRGBA16Float, DMSH_ROUND_F16}, {MTLPixelFormatRG16Float, DMSH_ROUND_F16}, {MTLPixelFormatR16Float, DMSH_ROUND_F16},
+        {MTLPixelFormatRGBA8Unorm_sRGB, 0}, {MTLPixelFormatRGBA8Snorm, 0}, {MTLPixelFormatRGBA32Float, 0}, {MTLPixelFormatRG11B10Float, 0}, {MTLPixelFormatRGBA8Uint, 0}, {MTLPixelFormatB5G6R5Unorm, 0},
     };
     for (size_t k = 0; k < sizeof cases / sizeof *cases; k++) {
         g_pass.cfmt[0] = cases[k].f; g_pass.cfmt[3] = cases[k].f;
@@ -165,7 +187,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     static const uint8_t lmap[8] = {0xff, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};   // physical target 1 is output 2
     g_pass.cfmt[0] = 0; g_pass.cfmt[1] = MTLPixelFormatRGBA16Unorm; CHECK(rop_word(lmap) == (on ? (uint32_t)DMSH_ROUND_16 << (2 * DMSH_BLEND_ROUND_BITS) : 0u));
     // pso_blend_live / pso_off must read k->cfmt (not g_pass.cfmt): a normalized target gets blend_live even if g_pass is float/empty, and a float target compiles dm_blend0 out
-    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float;
+    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA32Float;
         pso_key k = {.cfmt = {MTLPixelFormatRGBA8Unorm}, .blend_en = 0, .chmask = 0xf};
         CHECK(pso_blend_live(&k, ps, 0) == (on ? 1 : 0));
         CHECK(pso_off(&k, ps, 0) == (on ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));

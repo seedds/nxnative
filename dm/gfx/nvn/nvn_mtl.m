@@ -10977,14 +10977,17 @@ static uint32_t bz_word(const uint8_t *lm) { return bz_word_for(g_pass.cfmt, lm,
 // and were 67 here, which turned its ambient light off. The pixel shader rounds such outputs itself (dmsh_rewrite.py blend_zero, dm_rop), and which ones and to what width comes from
 // here: DMSH_BLEND_ROUND_BITS bits per colour output, for an 8-bit, 16-bit or RGB10A2 normalized target whose stored value is the conversion of the colour: blending off for it, MIN or
 // MAX on both its colour and alpha (they keep one of two stored values, so a colour rounded first keeps the same one), or a logic operation (which takes the place of blending and
-// rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). sRGB, signed, float, packed 16-bit formats and blended sums (rounded after the blend,
-// out of a shader's reach) keep Apple's conversion. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
-static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized targets as Apple's GPU converts them"); } return v; }
+// rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). A 16-bit float target (R16F, RG16F, RGBA16F) takes DMSH_ROUND_F16 under the same
+// conditions: NVIDIA converts a float into a narrower float toward zero, an M5 Pro does too, but an M4 rounds to nearest (Super Mario Bros. Wonder's back-layer player compares a
+// half depth against the float it came from with a margin below the half ulp). sRGB, signed, 32-bit and packed (RG11B10F, RGB9E5) float formats, packed 16-bit normalized formats and
+// blended sums (rounded after the blend, out of a shader's reach) keep Apple's conversion. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
+static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized and 16-bit float targets as Apple's GPU converts them"); } return v; }
 static uint32_t rop_class(MTLPixelFormat f) {
     switch (f) {
         case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: return DMSH_ROUND_8;
         case MTLPixelFormatR16Unorm: case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: return DMSH_ROUND_16;
         case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatBGR10A2Unorm: return DMSH_ROUND_10_2;
+        case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: return DMSH_ROUND_F16;
         default: return 0;
     }
 }

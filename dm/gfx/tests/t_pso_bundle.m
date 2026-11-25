@@ -39,6 +39,13 @@ int main(void) { @autoreleasepool {
         NSMutableData *header = [NSMutableData dataWithLength:32]; memcpy(header.mutableBytes, magics[i], 4); [header writeToFile:bad atomically:YES];
         EXPECT("archive guard: bare header refused", 0, arch_file_ok(bad));
     }
+    // # cover padding sections are skipped by pre_parse and pre_parse_files, resetting on # kind: and isolating headerless later files (no Metal compiler needed).
+    @autoreleasepool {
+        NSString *cov = @"# kind: evidence\nv1\tf1\n# cover: single-stage padding pairs\nv1\tf2\n# kind: evidence\nv1\tfc\n# cover\nv1\tf3\n";
+        EXPECT("cover: pre_parse skips # cover and resets on # kind:", 2, pre_parse(cov).count);
+        EXPECT("cover: pre_parse_files isolates headerless second file", 2, pre_parse_files(@[@"# kind: evidence\nv1\tf1\n# cover: padding\nv1\tf2\n", @"v1\tfc\n"]).count);
+        EXPECT("cover: pre_parse_files deduplicates across files", 1, pre_parse_files(@[@"v1\tf1\n", @"v1\tf1\n"]).count);
+    }
     NSString *v = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n"
         "vertex V main0(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, 1); return o; }\n"
         "vertex V main0_z(uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0.5, 1); return o; }\n";
@@ -273,6 +280,17 @@ int main(void) { @autoreleasepool {
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(sparse, 0));
         EXPECT("probe: no eligible sample cannot establish coverage", 0, pso_bundle_covers(pre_parse(sparse), pre_stamp(sparse, 0), 0, nil));
         put([bundle stringByAppendingPathComponent:@"prebuilt.tsv"], pre_stamp(txt, 0));
+    }
+    // cover-only shader_pairs.tsv builds zero bases in pso_prebuild
+    @autoreleasepool {
+        NSString *sp = [tables stringByAppendingPathComponent:@"shader_pairs.tsv"];
+        NSString *saved = [NSString stringWithContentsOfFile:sp encoding:NSUTF8StringEncoding error:nil];
+        [NSFileManager.defaultManager removeItemAtPath:[arch stringByAppendingPathComponent:@"prebuilt.tsv"] error:nil];
+        put(sp, @"# kind: evidence\n# cover: single-stage padding pairs\nv1\tf1\nv1\tf2\n");
+        reset_counts();
+        EXPECT("cover-only: pso_prebuild builds nothing", -1, pso_prebuild(1, 1, QOS_CLASS_USER_INITIATED));
+        EXPECT("cover-only: zero bases built or archived", 0, g_pre_built + g_pre_archived);
+        put(sp, saved);
     }
     // a folder without this GPU's archive, and a file that is no archive (Metal crashed on one, and on a bare Mach-O header too): no archive, no crash
     @autoreleasepool {

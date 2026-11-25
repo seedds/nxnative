@@ -679,7 +679,8 @@ def interface_check(tree, g, out):
     # Run pso_offline in the tree's own Python process so baseline and candidate never share sys.modules (dmsh_abi, dmsh_side, romfs, ...)
     todo = [tuple(pr) for pr in json.loads(tree.py(
         "import json, sys; sys.path.insert(0, 'dm/gfx/tools'); import pso_offline as po; "
-        "print(json.dumps(po.read_pairs(po.pair_text(json.load(sys.stdin)))))",
+        "paths = json.load(sys.stdin); "
+        "print(json.dumps(po.read_pairs_files(paths) if hasattr(po, 'read_pairs_files') else po.read_pairs(po.pair_text(paths))))",
         env, stdin=json.dumps([str(p) for p in pairs if p.is_file()])))]
     zero = depth_zero(g, tree)
     keys = {k for pr in todo for k in pr}

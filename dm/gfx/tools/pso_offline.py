@@ -78,12 +78,27 @@ def pair_text(paths):
 
 
 def read_pairs(text):
-    """(vertex key, pixel key) per line, in order, without empty lines, comments and repeated lines (pso_prebuild's reading)"""
-    seen, out = set(), []
+    """(vertex key, pixel key) per line, in order, without empty lines, comments, # cover padding sections and repeated lines (pso_prebuild's reading)"""
+    seen, out, cover = set(), [], False
     for line in text.decode('utf-8').split('\n'):
-        if not line or line.startswith('#') or line in seen: continue
+        if not line: continue
+        if line.startswith('#'):
+            if line.startswith('# cover') and (len(line) == 7 or line[7] in ':\t '): cover = True
+            elif line.startswith('# kind:'): cover = False
+            continue
+        if cover or line in seen: continue
         seen.add(line); c = line.split('\t')
         if len(c) >= 2: out.append((c[0], c[1]))
+    return out
+
+
+def read_pairs_files(paths):
+    """read_pairs across files independently so a # cover section in one file never hides a headerless later file."""
+    seen, out = set(), []
+    for p in paths:
+        if not p or not Path(p).is_file(): continue
+        for row in read_pairs(Path(p).read_bytes()):
+            if row not in seen: seen.add(row); out.append(row)
     return out
 
 
@@ -861,7 +876,7 @@ def main(argv=None):
         save_run(work, quick, out, archs)
         return 0
     (work / 'run.key').unlink(missing_ok=True)   # written again at the end of a run that succeeds
-    pairs = read_pairs(text)
+    pairs = read_pairs_files(a.pairs)
     bases, rest, left = plan(lib_dir, chain, pairs, zero)
     shaders = [] if a.no_compute else read_computes(a.shader_map, a.manifest)
     computes, cleft = plan_compute(lib_dir, chain, shaders)
@@ -876,7 +891,8 @@ def main(argv=None):
                       + ', '.join(f'{k} {v}' for k, v in cleft.items()))
     if a.script_only: write_changed(out / 'prebuilt.tsv', st); return 0
     if pairs and not bases and not rest: sys.exit('[RED] pso_offline: no base to build')   # pairs, but the host would leave out every one: wrong or missing libraries
-    if not pairs: print('pso_offline: no pairs (only a header): nothing to build, no archive')   # a profile whose split found no pair (GitHub issue #338)
+    if not pairs and not computes: print('pso_offline: no prebuild pairs or compute shaders: nothing to build, no archive')   # a profile whose split found no prebuild pair (GitHub issue #338) or only padding covers
+    elif not pairs: print('pso_offline: no prebuild pairs (only padding covers or header); building compute pipelines only')
     gpus = archs   # the prewarm files' architectures, also when there is no pair archive
     if not bases and not computes: archs = []   # no pair, or every eligible pair needs device specialization, and no compute pipeline; clear old archives and still write the stamp and the remainder list
     osmin = a.os_min or os_min_default(a.platform); tv = tool_version(a.platform) if bases or computes else 'not used (function constants only)'

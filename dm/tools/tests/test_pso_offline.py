@@ -52,6 +52,15 @@ class Pairs(unittest.TestCase):
         text = b'# header\nv1\tf1\n\nv2\tf2\nv1\tf1\nv3\n v4\tf4\nv1\tf1\textra\n'
         self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v2', 'f2'), (' v4', 'f4'), ('v1', 'f1')])   # the last: another line, the same pair (plan drops the base twice)
 
+    def test_read_pairs_skips_cover_sections_and_resets_across_files(self):
+        text = b'# kind: evidence\nv1\tf1\n# cover: single-stage padding pairs\nv2\tf2\n# kind: evidence\nv3\tf3\n# cover\nv4\tf4\n'
+        self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v3', 'f3')])
+        with tempfile.TemporaryDirectory() as t:
+            a, b = Path(t, 'shader_pairs.tsv'), Path(t, 'pso_pairs.tsv')
+            a.write_bytes(b'# kind: evidence\nv1\tf1\n# cover: padding\nv2\tf2\n')
+            b.write_bytes(b'v3\tf3\n')   # headerless second file must not be hidden by first file's # cover
+            self.assertEqual(po.read_pairs_files([a, b]), [('v1', 'f1'), ('v3', 'f3')])
+
     def test_stamp_matches_the_hosts_format(self):
         text = b'a\tb\n' + b'c\td\n'
         self.assertEqual(po.stamp(CHAIN, False, text), f'chain\t{CHAIN}\ndepth\tnear=-w\npairs\t8\t{hashlib.sha256(text).hexdigest()[:16]}\n')
@@ -571,6 +580,17 @@ class Build(BuildCase):
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])   # the old archive goes: mac_pso() then packs the app without one
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
         self.assertIn('bases\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_cover_only_pairs_skip_bases_and_keep_compute(self):
+        (self.prof / 'shader_pairs.tsv').write_text('# kind: evidence\n# cover: single-stage padding pairs\nv\tf\n')
+        (self.prof / 'shader_map.tsv').write_text('# map\npkg\t0\tcompute\tc\tsrc\n')
+        (self.lib / 'c_b.metallib').write_bytes(metallib([('main0', False)]))
+        self.assertEqual(self.main('--gpu', 'g18p'), 0)
+        self.assertEqual(len(self.calls), 1)
+        script = json.loads(next(self.work.glob('*.mtl4-json')).read_text())
+        self.assertEqual(script['pipeline_descriptors'].get('render_pipeline_descriptors', []), [])
+        self.assertEqual(len(script['pipeline_descriptors']['compute_pipeline_descriptors']), 1)
+        self.assertIn('bases\t0\nrest\t0\ncompute\t1\n', (self.out / 'archive.tsv').read_text())
 
     def test_pairs_all_left_out_is_an_error(self):   # pairs whose libraries the host would not take: still a failure
         (self.prof / 'shader_pairs.tsv').write_text('x\ty\n')

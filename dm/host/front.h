@@ -27,6 +27,8 @@ int front_screen_variable_refresh(void);
 void front_screen_match(int fps);
 // Whether startup fullscreen or a screen mode switch is still settling, so the display link waits before starting (front_mac.m; none on iOS). Any thread
 int front_screen_settling(void);
+// Whether no part of the window is on screen (other windows over it, another Space; front_mac.m; none on iOS). Any thread
+int front_window_covered(void);
 // The shape of the picture the game presents (nvn_mtl.m present_now, present_shape: the layer's, not the crop's, w x h), called when its width / height changes: the front end
 // lays the picture out in that shape instead of 16:9, so a profile with screen_aspect under DM_SCREEN_ASPECT (1920x1344) fills a 1.43:1 screen and touches map onto the picture
 // as drawn. Before the first call the picture is 16:9. Called from the present thread; the front end switches to its main thread and does not block

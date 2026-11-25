@@ -569,8 +569,8 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_players(pad_slot_mask(&g_slots));
     cp_poll();   // one controller fewer to wait for, or one player fewer
 }
-// Xbox One pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP device is a pad, unlike a
-// raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. Its Xbox button is Home (hq_buttons)
+// Wired Xbox One (GIP) and Xbox 360 (XUSB) pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP/XUSB
+// pad is a gamepad, unlike a raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. A GIP pad's Xbox button is Home (hq_buttons)
 static void gippad_read(gip_pad *d) {
     if (!g_input_on) return;
     hq_poll();   // Home and the prompt's A and B come from these pads too

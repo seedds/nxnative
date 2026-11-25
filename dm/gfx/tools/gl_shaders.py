@@ -22,7 +22,7 @@
 #   r:<slot>:<count>                             the argument buffer's Metal buffer slot (-1 when absent), and number of argument IDs
 #   b:<id>:<size>                                the default uniform block: its argument ID and size in bytes
 #   n:<name>=<id>:<size>                         a named uniform block (DOOM 3's matrices_ubo): its argument ID and size in bytes
-#   t:<name>=<texture id>:<sampler id>:<type>[:<unit>]  a combined sampler (-1 sampler ID if MSL omits it; optional initial unit from explicit layout(binding))
+#   t:<name>=<texture id>:<sampler id>:<type>[:<unit>[:<count>]]  a combined sampler (-1 for absent sampler ID or implicit unit; count is for arrays)
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
@@ -36,7 +36,7 @@ from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross bui
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
-TABLE_ABI = '# GL shader ABI 2'   # direct-slot tables cannot be consumed by the argument-buffer host
+TABLE_ABI = '# GL shader ABI 3'   # sampler arrays extend the argument-buffer table
 
 def red(msg): sys.exit('[RED] ' + msg)
 
@@ -346,6 +346,9 @@ def translate(src, stage, key, tmp):
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
+    # Vulkan SPIR-V requires GLSL ES 3.10. Expand macros under the game's
+    # original version before raising the version used by the compiler.
+    pre = re.sub(r'^#version[ \t]+300[ \t]+es\b', '#version 310 es', pre, count=1)
     if legacy: pre = strip_legacy_precision(pre, desktop=desktop_legacy)
     if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     fixed = fixups(pre, stage, renamed)
@@ -357,9 +360,11 @@ def translate(src, stage, key, tmp):
     refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
-    for k in ('textures', 'ubos'):
-        for r in refl.get(k, []):
-            if r.get('array'): return f'{"sampler" if k == "textures" else "uniform block"} array {r["name"]}'
+    for u in refl.get('ubos', []):
+        if u.get('array'): return f'uniform block array {u["name"]}'
+    for t in refl.get('textures', []):
+        if 'array' in t and (len(t['array']) != 1 or not 0 < t['array'][0] <= 96):
+            return f'unsupported sampler array shape for {t["name"]}'
     textures, buffers = argument_names(spv)
     cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-argument-buffer-tier', '1',
            '--msl-texture-buffer-native', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
@@ -372,7 +377,8 @@ def translate(src, stage, key, tmp):
     m = re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m)   # a NaN operand gives the other one, as on the Switch's GPU (vk_shaders.py PRECISE)
     open(msl, 'w').write(m)
     ids = {n: int(i) for n, i in re.findall(r'\b(\w+)\s+\[\[id\((\d+)\)\]\]', m)}
-    f = [f'r:{0 if ids else -1}:{max(ids.values(), default=-1) + 1}']
+    nargs = max(ids.values(), default=-1) + 1
+    f = []
     if stage == 'vert':
         for v in refl.get('inputs', []): f.append(f'a:{v["name"]}={v["location"]}:{v["type"]}')
     else:
@@ -394,9 +400,13 @@ def translate(src, stage, key, tmp):
     for t in refl.get('textures', []):
         name = textures[t['name']]
         if name not in ids: continue
-        unit = bindings.get(t['name'], 0)
-        suffix = f':{unit}' if unit else ''
-        f.append(f't:{t["name"]}={ids[name]}:{ids.get(name + "Smplr", -1)}:{t["type"]}{suffix}')
+        unit = bindings.get(t['name'])
+        tex, samp = ids[name], ids.get(name + 'Smplr', -1)
+        count = t.get('array', [0])[0]
+        nargs = max(nargs, max(tex, samp) + (count or 1))
+        suffix = f':{unit if unit is not None else -1}:{count}' if count else (f':{unit}' if unit else '')
+        f.append(f't:{t["name"]}={tex}:{samp}:{t["type"]}{suffix}')
+    f.insert(0, f'r:{0 if nargs else -1}:{nargs}')
     return msl, game_names(f, renamed)
 
 def one(item, tmp):

@@ -1,0 +1,32 @@
+# Devil May Cry 3 Special Edition 1.0.1, Nintendo SDK 8.2.0, NVN and FMOD.
+# Format: see dm/games/README.md.
+
+title_id	01007B600D5BC000
+program_id	01007B600D5BC000
+
+name	Devil May Cry 3 Special Edition
+ipa	DevilMayCry3SpecialEdition.ipa
+app_category	public.app-category.games
+# Free Style uses the D-pad to change styles.
+pad_layout	full
+
+build	v65536	1.0.1	main=258d8ba560cfa34c3f2250230d8d8483	subsdk0=8df876f80ce4ceee62360b31405c452f	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v65536
+shader_versions	v65536
+
+# subsdk0 is NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	data/dmc3/dmc3-0.nbz
+zip_store	.bank:.mp4:.nbz:.ogg:.metallib
+
+# The NPDM declares zero system resource. The game requests a 3 GiB heap at boot.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+shader_groups	/data/=data
+shader_note	Devil May Cry 3 Special Edition shaders
+# The game selects NVN's zero-to-one depth mode. The offline pipeline archive must match.
+depth_mode	zero

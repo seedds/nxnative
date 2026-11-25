@@ -783,24 +783,87 @@ static void repeated_archive_miss(void) {
     nvn_hm_clear(&g_pbase_miss, hm_rel);
 }
 
-// An app's folder of Metal's build folders (ga_claim): a start with no other copy running lists the earlier runs' folders; a copy started beside it lists none; and once the first
-// exits, a third start still lists none while the second runs, whose folders are live. Each claim opens the lock anew, and flock locks of separate opens conflict as between processes
+// An app's folder of Metal's build folders (ga_claim / ga_remove): a start with no other copy running snapshots only earlier runs' directories with their (dev, ino)
+// identity; a copy started beside it lists none; once the first exits, a third start still lists none while the second runs; and background removal preserves files,
+// symlinks, unrelated directories, post-snapshot directories, and any entry replaced by a new directory, file, or symlink with the same name.
+static NSSet<NSString *> *ga_names(NSArray<GaDir *> *dirs) {
+    NSMutableSet<NSString *> *s = [NSMutableSet setWithCapacity:dirs.count];
+    for (GaDir *g in dirs) [s addObject:g->name];
+    return s;
+}
 static void app_folder_claim(void) {
     EXPECT("app folder: a host without a bundle shares Metal's folder", 0, ga_own());
     EXPECT("app folder: Metal's folder", 1, [ga_dir() hasSuffix:@"/com.apple.gpuarchiver"]);
-    NSString *dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test/com.apple.gpuarchiver"];
-    for (NSString *n in @[@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb"]) [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:n] withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"x" writeToFile:[dir stringByAppendingPathComponent:@"other"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *app_dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test"];
+    NSString *dir = [app_dir stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *d_a = [dir stringByAppendingPathComponent:@"gpuarchiver-aaaaaa"];
+    NSString *d_a_nested = [d_a stringByAppendingPathComponent:@"nested"];
+    NSString *d_b = [dir stringByAppendingPathComponent:@"gpuarchiver-bbbbbb"];
+    NSString *d_rep = [dir stringByAppendingPathComponent:@"gpuarchiver-replaced"];
+    NSString *d_sfile = [dir stringByAppendingPathComponent:@"gpuarchiver-swapfile"];
+    NSString *d_slink = [dir stringByAppendingPathComponent:@"gpuarchiver-swaplink"];
+    for (NSString *p in @[d_a_nested, d_b, d_rep, d_sfile, d_slink])
+        [fm createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"old" writeToFile:[d_a_nested stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_b stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_rep stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_sfile stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_slink stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *other = [dir stringByAppendingPathComponent:@"unrelated"];
+    NSString *other_file = [other stringByAppendingPathComponent:@"state"];
+    [fm createDirectoryAtPath:other withIntermediateDirectories:NO attributes:nil error:nil];
+    [@"keep" writeToFile:other_file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    EXPECT("app folder: nested symlink fixture created", 0, symlink(other.fileSystemRepresentation, [d_a_nested stringByAppendingPathComponent:@"out"].fileSystemRepresentation));
+
+    NSString *file = [dir stringByAppendingPathComponent:@"gpuarchiver-file"];
+    [@"keep" writeToFile:file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *link = [dir stringByAppendingPathComponent:@"gpuarchiver-link"];
+    EXPECT("app folder: matching symlink fixture created", 0, symlink(other.fileSystemRepresentation, link.fileSystemRepresentation));
+
     int a, b, c, d;
-    NSSet<NSString *> *got = ga_claim(dir, &a), *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", nil];
-    EXPECT("app folder: the first copy lists the earlier runs' folders", 1, a >= 0 && [got isEqualToSet:want]);
+    NSArray<GaDir *> *got = ga_claim(dir, &a);
+    NSSet<NSString *> *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", @"gpuarchiver-replaced", @"gpuarchiver-swapfile", @"gpuarchiver-swaplink", nil];
+    EXPECT("app folder: the first copy lists only earlier run directories", 1, a >= 0 && [ga_names(got) isEqualToSet:want]);
+    NSString *late = [dir stringByAppendingPathComponent:@"gpuarchiver-late"], *late_file = [late stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: post-snapshot directory created", 1, [fm createDirectoryAtPath:late withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: post-snapshot file written", 1, [@"live" writeToFile:late_file atomically:NO encoding:NSUTF8StringEncoding error:nil]);
     EXPECT("app folder: a second copy lists none", 1, ga_claim(dir, &b) == nil && b >= 0);
     close(a);   // the first copy quits
     EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
     close(b); close(c);
-    EXPECT("app folder: with no copy running, a start lists them again", 2, ga_claim(dir, &d).count);
+    NSArray<GaDir *> *again = ga_claim(dir, &d);
+    EXPECT("app folder: with no copy running, a start lists old and late directories", 6, again.count);
     close(d);
+
+    // Concurrent-writer mutations after snapshot: keep the old directory's inode allocated across replacement creation so the new directory gets a distinct st_ino.
+    NSString *moved_rep = [app_dir stringByAppendingPathComponent:@"moved-replaced"];
+    NSString *rep_live = [d_rep stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: move replaced fixture aside", 1, [fm moveItemAtPath:d_rep toPath:moved_rep error:nil]);
+    EXPECT("app folder: create replacement directory", 1, [fm createDirectoryAtPath:d_rep withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: write file in replacement directory", 1, [@"live" writeToFile:rep_live atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+    EXPECT("app folder: remove moved old fixture", 1, [fm removeItemAtPath:moved_rep error:nil]);
+
+    EXPECT("app folder: remove swapfile fixture dir", 1, [fm removeItemAtPath:d_sfile error:nil]);
+    EXPECT("app folder: replace with regular file", 1, [@"file" writeToFile:d_sfile atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+
+    EXPECT("app folder: remove swaplink fixture dir", 1, [fm removeItemAtPath:d_slink error:nil]);
+    EXPECT("app folder: replace with symlink", 0, symlink(other.fileSystemRepresentation, d_slink.fileSystemRepresentation));
+
+    EXPECT("app folder: removes only unchanged snapshotted directories", 2, ga_remove(dir, got));
+    struct stat st;
+    EXPECT("app folder: old matching directory a gone", 0, lstat(d_a.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: old matching directory b gone", 0, lstat(d_b.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: unrelated directory retained", 1, [fm fileExistsAtPath:other_file]);
+    EXPECT("app folder: matching regular file retained", 1, lstat(file.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: matching symlink retained without following it", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("app folder: directory created after snapshot retained", 1, [fm fileExistsAtPath:late_file]);
+    EXPECT("app folder: replacement directory with same name retained", 1, [fm fileExistsAtPath:rep_live]);
+    EXPECT("app folder: directory swapped for regular file retained", 1, lstat(d_sfile.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: directory swapped for symlink retained", 1, lstat(d_slink.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
+    EXPECT("app folder: no folder, nothing removed", 0, ga_remove(nil, got));
 }
 
 // Injects per-stride compile failures across both the current compiler and fresh compilers created by ep_new().
@@ -1151,6 +1214,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!cache_path) abort();
     if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
+    if (argc == 2 && !strcmp(argv[1], "--cache-only")) {
+        app_folder_claim();
+        printf("t_pso_archive cache cleanup: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
     int bundle_open = argc == 5 && !strcmp(argv[1], "--bundle-open");
     setenv("DM_PSO_ARCHIVE", bundle_open ? "off" : argc == 3 ? argv[2] : dir, 1);

@@ -110,14 +110,14 @@ FLOAT_ADD = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=
 # Same loop on a storage buffer guarded by TranslationFlags.MetalStorageBounds: out of bounds, the load yields 0.0f and the swap returns 0u, so the loop exits without writing
 FLOAT_ADD_BOUND = re.compile(r'(?m)^(?P<ind> *)bool (?P<again>_\d+);\n(?P=ind)do\n(?P=ind)\{\n'
                              r'(?P=ind)    bool (?P<c1>_\d+) = (?P<cond1>[^;\n]+);\n'
-                             r'(?P=ind)    float (?P<old>_\d+) = as_type<float>\((?P=c1) \? (?P<buf1>\(\*\w+\.\w+\)\._m0)\[(?P=c1) \? (?P<idx1>[^:\n]+) : 0\] : 0u\);\n'
+                             r'(?P=ind)    float (?P<old>_\d+) = as_type<float>\((?P=c1) \? (?P<buf1>\(\*\w+\.\w+\)\._m0)\[(?:(?P=c1) \? (?P<idx1>[^:\n]+) : 0|(?P<bi1>int\((?P=c1)\)))\] : 0u\);\n'
                              r'(?P=ind)    float (?P<sum>_\d+) = (?:(?P=old) \+ (?P<val>[^;\n]+)|spvFAdd\((?P=old), (?P<valp>[^;\n]+)\));\n'
                              r'(?P=ind)    bool (?P<c2>_\d+) = (?P<cond2>[^;\n]+);\n'
                              r'(?P=ind)    uint (?P<want>_\d+) = as_type<uint>\((?P=old)\);\n'
                              r'(?P=ind)    uint (?P<res>_\d+);\n'
                              r'(?P=ind)    if \((?P=c2)\)\n(?P=ind)    \{\n'
                              r'(?P=ind)        uint (?P<seen>_\d+);\n(?P=ind)        do\n(?P=ind)        \{\n(?P=ind)            (?P=seen) = (?P=want);\n'
-                             r'(?P=ind)        \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<buf2>\(\*\w+\.\w+\)\._m0)\[(?P=c2) \? (?P<idx2>[^:\n]+) : 0\], &(?P=seen), as_type<uint>\((?P=sum)\), '
+                             r'(?P=ind)        \} while \(!atomic_compare_exchange_weak_explicit\(\(device atomic_uint\*\)&(?P<buf2>\(\*\w+\.\w+\)\._m0)\[(?:(?P=c2) \? (?P<idx2>[^:\n]+) : 0|(?P<bi2>int\((?P=c2)\)))\], &(?P=seen), as_type<uint>\((?P=sum)\), '
                              r'memory_order_relaxed, memory_order_relaxed\) && (?P=seen) == (?P=want)\);\n'
                              r'(?P=ind)        (?P=res) = (?P=seen);\n'
                              r'(?P=ind)    \}\n(?P=ind)    else\n(?P=ind)    \{\n(?P=ind)        (?P=res) = 0u;\n(?P=ind)    \}\n'
@@ -133,10 +133,15 @@ def float_add_msl(msl):
     out = FLOAT_ADD.sub(lambda m: m.group(0) if m.group('addr') != m.group('addr2') else
                         f"{m.group('ind')}dm_atomic_add_f32((device atomic_float*)&{m.group('addr')}, {m.group('val') or m.group('valp')});\n"
                         f"{m.group('ind')}bool {m.group('again')} = false;\n", msl)
-    out = FLOAT_ADD_BOUND.sub(lambda m: m.group(0) if (m.group('cond1') != m.group('cond2') or m.group('buf1') != m.group('buf2') or m.group('idx1') != m.group('idx2')) else
-                              f"{m.group('ind')}if ({m.group('cond1')})\n{m.group('ind')}{{\n"
-                              f"{m.group('ind')}    dm_atomic_add_f32((device atomic_float*)&{m.group('buf1')}[{m.group('idx1')}], {m.group('val') or m.group('valp')});\n"
-                              f"{m.group('ind')}}}\n{m.group('ind')}bool {m.group('again')} = false;\n", out)
+    def bound_sub(m):
+        idx1 = '1' if m.group('bi1') else m.group('idx1')
+        idx2 = '1' if m.group('bi2') else m.group('idx2')
+        if m.group('cond1') != m.group('cond2') or m.group('buf1') != m.group('buf2') or idx1 != idx2:
+            return m.group(0)
+        return (f"{m.group('ind')}if ({m.group('cond1')})\n{m.group('ind')}{{\n"
+                f"{m.group('ind')}    dm_atomic_add_f32((device atomic_float*)&{m.group('buf1')}[{idx1}], {m.group('val') or m.group('valp')});\n"
+                f"{m.group('ind')}}}\n{m.group('ind')}bool {m.group('again')} = false;\n")
+    out = FLOAT_ADD_BOUND.sub(bound_sub, out)
     if out == msl or '#define DM_ATOMIC_ADD_F32' in out: return out
     head = re.search(r'^using namespace metal;\n', out, re.M)
     if not head: raise ValueError('float_add_msl: no "using namespace metal;" to put dm_atomic_add_f32 after')
@@ -613,23 +618,36 @@ def first_store(msl, local):
         if not m or 1 << int(m.group(7)) != local[1] or 1 << int(m.group(12)) != local[0]: return msl, []
         guard = r'!' + re.escape(m.group(20)) if m.group(20) else re.escape(m.group(19))
     held = re.compile(r'int (\w+) = \w+;\s*if \(%s\)\s*\{\s*\1 = (\d+);\s*\}\s*int (\w+) = \1;\s*' % guard)   # a local that holds a constant in the first invocation
-    # A plain store, or one guarded by TranslationFlags.MetalStorageBounds (c[27] length table): both hoist to the host's pre-dispatch write
-    s_plain = r'\(\*\w+\.\w+\)\._m0\[\d+\] = (?:\d+u|uint\(\w+\));\s*'
-    s_bound = r'bool \w+ = [^;{}]+ < \(\*\w+\.\w+\)\._m0\[\d+\]\.[xyzw];\s*if \(\w+\)\s*\{\s*\(\*\w+\.\w+\)\._m0\[(?:\w+ \? \d+ : 0|\d+)\] = (?:\d+u|uint\(\w+\));\s*\}\s*'
-    block = re.compile(r'if \(%s\)\s*\{\s*((?:(?:%s|%s))+)\}\s*' % (guard, s_plain, s_bound))
+    # A plain store, or one guarded by TranslationFlags.MetalStorageBounds (c[27] length table): both hoist to the host's pre-dispatch write.
+    # For constant word 1, SPIRV-Cross simplifies OpSelect(c, 1, 0) to int(c); tying c to the bounds-check bool guarantees int(c) == 1 inside if (c).
+    s_plain = r'\(\*\w+\.(?P<pn>\w+)\)\._m0\[(?P<pw>\d+)\] = (?P<pv>\d+u|uint\(\w+\));\s*'
+    s_bound = (r'bool (?P<c>\w+) = [^;{}]+ < \(\*\w+\.\w+\)\._m0\[\d+\]\.[xyzw];\s*'
+               r'if \((?P=c)\)\s*\{\s*\(\*\w+\.(?P<bn>\w+)\)\._m0\[(?:(?P=c) \? (?P<bw>\d+) : 0|(?P<bi>int\((?P=c)\))|(?P<bd>\d+))\] = (?P<bv>\d+u|uint\(\w+\));\s*\}\s*')
+    stmt = re.compile(f'(?:{s_plain}|{s_bound})')
+    block_head = re.compile(r'if \(%s\)\s*\{\s*' % guard)
+    block_tail = re.compile(r'\}\s*')
     plain = re.compile(r'int \w+ = [^;{}]*;\s*')   # arithmetic the compiler left between them
     at, out, stores, values = m.end(), msl[:m.end()], [], {}
     while True:
         h = held.match(msl, at)
         if h: values[h.group(3)] = int(h.group(2)); out += msl[at:h.end()]; at = h.end(); continue
-        b = block.match(msl, at)
-        if b:
-            for m2 in re.finditer(r'\(\*\w+\.(\w+)\)\._m0\[(?:\w+ \? (\d+) : 0|(\d+))\] = (\d+u|uint\(\w+\));', b.group(1)):
-                n, w, v = m2.group(1), int(m2.group(2) or m2.group(3)), m2.group(4)
-                if v.endswith('u'): stores.append((n, w, int(v[:-1])))
-                elif v[5:-1] in values: stores.append((n, w, values[v[5:-1]]))
+        bh = block_head.match(msl, at)
+        if bh:
+            pos, bstores = bh.end(), []
+            while True:
+                sm = stmt.match(msl, pos)
+                if not sm: break
+                n = sm.group('pn') or sm.group('bn')
+                w = 1 if sm.group('bi') else int(sm.group('pw') or sm.group('bw') or sm.group('bd'))
+                v = sm.group('pv') or sm.group('bv')
+                if v.endswith('u'): bstores.append((n, w, int(v[:-1])))
+                elif v[5:-1] in values: bstores.append((n, w, values[v[5:-1]]))
                 else: return msl, []
-            at = b.end(); continue
+                pos = sm.end()
+            bt = block_tail.match(msl, pos)
+            if bstores and bt:
+                stores.extend(bstores); at = bt.end(); continue
+            return msl, []
         p = plain.match(msl, at)
         if not p or held.match(msl, p.start()): break
         out += msl[at:p.end()]; at = p.end()

@@ -4231,6 +4231,28 @@ def unzs(path):
     if not did: return zstd_mod().decompress(d)
     return unzs_dict(d, did, path)
 
+def nested_zstd(d, label, limit):
+    """Decode one or more concatenated zstd frames within a byte budget."""
+    zstd = zstd_mod(); parts = []; rem = limit; view = d
+    while view:
+        if view[:4] != ZSTD_MAGIC: red(f'{label}: incomplete or trailing data in a nested zstd frame')
+        did = zs_dict_id(view)
+        if did:
+            if did not in ZDICTS: red(f'{label}: a frame needs zstd dictionary {did}, which Pack/ZsDic.pack.zs does not have')
+            if did not in _ZD:
+                try: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
+                except (zstd.ZstdError, ValueError) as e: red(f'{label}: invalid zstd dictionary {did} ({e})')
+        declared = frame_size(view)
+        if declared is not None and declared > rem: red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+        dec = zstd.ZstdDecompressor(zstd_dict=_ZD[did]) if did else zstd.ZstdDecompressor()
+        try: chunk = dec.decompress(view, max_length=rem + 1)
+        except zstd.ZstdError as e: red(f'{label}: invalid nested zstd frame ({e})')
+        if len(chunk) > rem or not dec.eof and not dec.needs_input:
+            red(f'{label}: zstd archive members expand to more than {NEST} times the file')
+        if not dec.eof: red(f'{label}: incomplete or trailing data in a nested zstd frame')
+        parts.append(chunk); rem -= len(chunk); view = dec.unused_data
+    return parts[0] if len(parts) == 1 else b''.join(parts)
+
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
     if f[:4] == LZ4_FRAME_MAGIC:   # FLG, BD, then the 8-byte content size when FLG bit 3 is set
@@ -4392,10 +4414,11 @@ def unity_text_glslc(x, base):
     return out
 
 NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): real files nest a few. A damaged or crafted one could nest one per header's length, or have every
-            # member point at the same inner archive, its work doubling with each level. Two budgets of NEST times the file bound the work: left[0], the members a file's archives open,
-            # each counted by what it takes up in its archive, and left[1], what its Yaz0 members expand to. Counting a Yaz0 member by what it expands to in the first budget paid twice
-            # for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds one layout archive
-            # that expands 9 times, which then added up to 18 times the file)
+            # member point at the same inner archive, its work doubling with each level. Two budgets start at NEST times the file: left[0], the members a file's archives open,
+            # each counted by what it takes up in its archive, and left[1], what compressed members expand to (shared across the whole file). A decoded compressed member gives
+            # only its own subtree a traversal budget for its remaining levels without crediting siblings or growing left[1]. Counting a Yaz0 member by what it expands to in the
+            # first budget paid twice for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds
+            # one layout archive that expands 9 times, which then added up to 18 times the file)
 VFS2 = b'VFS2'
 VFS2_MAX = 16 << 20   # single GLSLC output upper bound; keeps corrupt/fuzz length prefixes within fuzzlib's allocation cap
 _VFS2_INV = bytes(range(255, -1, -1))
@@ -4497,7 +4520,7 @@ def scan_blob(d, label, out, depth=0, left=None):
     if d[:8] == CIVBSF: out.extend(civbsf_shaders(d, label)); return
     if d[:8] == SUMO_MUX:
         members = list(sumo_members(d, label))
-        if left is None: left = [NEST * sum(len(member) for _, member in members)] * 2   # as with Yaz0, count decoded bytes, not compressed bytes
+        if left is None: n = NEST * sum(len(member) for _, member in members); left = ([n], [n])   # as with Yaz0, count decoded bytes, not compressed bytes
         for nm, member in members: scan_blob(member, label + nm, out, depth + 1, left)
         return
     if d[:4] in (b'HCPS', b'xbc1', b'DRSM', b'DMPA') or d[:8] == b'cmp\0zlib':
@@ -4505,20 +4528,28 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:8] == PACX4:   # LZ4 chunks: as with Yaz0, the budget counts decoded bytes
         parts = pacx4_parts(d, label)
-        if left is None: left = [NEST * max(len(d), sum(len(p) for _, p in parts))] * 2
+        if left is None: n = NEST * max(len(d), sum(len(p) for _, p in parts)); left = ([n], [n])
         for nm, p in parts: scan_blob(p, f'{label}/{nm}', out, depth + 1, left)
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
+    compressed = d[:4] in (b'Yaz0', ZSTD_MAGIC)
     if d[:4] == b'Yaz0':
         if left is not None:   # charged by its header before it is decoded
-            left[1] -= int.from_bytes(d[4:8], 'big')
-            if left[1] < 0: red(f'{label}: the Yaz0 archive members expand to more than {NEST} times the file')
+            left[1][0] -= int.from_bytes(d[4:8], 'big')
+            if left[1][0] < 0: red(f'{label}: the Yaz0 archive members expand to more than {NEST} times the file')
         d = yaz0(d, label)
-    if left is None: left = [NEST * len(d)] * 2   # the file itself: what its archives' members may add up to, and what their Yaz0 may expand to
+    elif d[:4] == ZSTD_MAGIC:
+        d = nested_zstd(d, label, left[1][0] if left is not None else max(16 << 20, 256 * stored))
+        if left is not None: left[1][0] -= len(d)
+    if left is None: n = NEST * len(d); left = ([n], [n])   # the file itself: traversal bytes and compressed-member expansion
     else:
-        left[0] -= stored
-        if left[0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
+        left[0][0] -= stored
+        if left[0][0] < 0: red(f'{label}: the archive members add up to more than {NEST} times the file (members that overlap)')
+        # Children of a decoded archive traverse its decoded storage on their own
+        # remaining-level budget; siblings do not receive this credit, and all
+        # decompression across the file still spends the shared left[1] budget.
+        if compressed: left = ([(NEST - depth) * len(d)], left[1])
     if d[:4] == b'SARC':
         for nm, m in sarc_members(d, label): scan_blob(m, f'{label}/{nm}', out, depth + 1, left)
         return
@@ -5206,7 +5237,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and (b'Yaz0' in d or ZSTD_MAGIC in d)) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 or zstd members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside

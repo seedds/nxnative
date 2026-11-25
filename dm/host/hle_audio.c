@@ -723,12 +723,13 @@ static Result au_start_at(void *g, void *lr) {
 // dm_bigstack_caller gives the game's call site back for the log line
 HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "start playback", Result, h_au_Start, void *g) { return au_start_at(g, dm_bigstack_caller(__builtin_return_address(0))); }
 // After the backend stops, return even its partly played buffer. FMOD can wait for these releases before joining its output thread (Pokemon Brilliant Diamond 1.0.0, PR #190).
-// The stopped backend excludes the consumer; m excludes append/reclaim. Buffers appended while already stopped belong to the next Start, so only a started -> stopped transition calls this.
-static void au_release_pending(aout *a) {
+// The stopped backend excludes the consumer; m excludes append/reclaim. For Stop, buffers appended while already stopped belong to the next Start.
+static bool au_release_pending(aout *a) {
     pthread_mutex_lock(&a->m);
     uint32_t qh = atomic_load_explicit(&a->q_head, memory_order_relaxed), qt = atomic_load_explicit(&a->q_tail, memory_order_acquire);
     uint32_t rr = atomic_load_explicit(&a->rel_head, memory_order_acquire), rw = atomic_load_explicit(&a->rel_tail, memory_order_relaxed);
-    int released = qh != qt;
+    bool released = qh != qt;
+    bool flushed = released || a->staged_pos != a->staged_size;
     while (qh != qt) {
         if (rw - rr >= RELMAX) die("AudioOut released queue overflow while stopping");
         a->rel[rw++ & (RELMAX - 1)] = a->q[qh++ & (QMAX - 1)];
@@ -739,6 +740,7 @@ static void au_release_pending(aout *a) {
     atomic_store_explicit(&a->rel_tail, rw, memory_order_release);
     pthread_mutex_unlock(&a->m);
     if (released) { if (a->event) notify_release(a); if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem); }
+    return flushed;
 }
 static void au_stop_at(void *g, void *lr) {   // lr NULL: the stop inside Close, not logged separately
     aout *a = ao(g);
@@ -751,6 +753,21 @@ static void au_stop_at(void *g, void *lr) {   // lr NULL: the stop inside Close,
     pthread_mutex_unlock(&g_aos_lock);
 }
 HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "stop playback", void, h_au_Stop, void *g) { au_stop_at(g, dm_bigstack_caller(__builtin_return_address(0))); }
+// audout flushes a started output. Quiesce its consumer before returning descriptors and dropping staged PCM, then resume with the same guest playback state.
+HLE_FORCE("_ZN2nn5audio20FlushAudioOutBuffersEPNS0_8AudioOutE", "flush queued audio while playing", bool, h_au_Flush, void *g) {
+    aout *a = ao(g);
+    pthread_mutex_lock(&g_aos_lock);
+    bool flushed = false;
+    if (atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED && queued_pcm_blocks(a)) {
+        au_halt(a);
+        if (a->backend == BK_NULL) null_stop(a);
+        flushed = au_release_pending(a);
+        null_start(a);
+        au_request_start(a);
+    }
+    pthread_mutex_unlock(&g_aos_lock);
+    return flushed;
+}
 static void au_close(void *g, void *lr) {
     au_note(ao(g), "Close", lr);
     au_stop_at(g, NULL);

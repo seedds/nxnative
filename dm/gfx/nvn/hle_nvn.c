@@ -435,6 +435,8 @@ NVN(nvnTextureBuilderSetDepth, void, NVNtextureBuilder *b, int v) { TB(b)->d.dep
 NVN(nvnTextureBuilderSetSize1D, void, NVNtextureBuilder *b, int w) { TB(b)->d.width = w; TB(b)->d.height = TB(b)->d.depth = 1; }
 NVN(nvnTextureBuilderSetLevels, void, NVNtextureBuilder *b, int v) { TB(b)->d.levels = v; }
 NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) { TB(b)->d.format = f; }
+NVN(nvnTextureBuilderSetGLTextureName, void, NVNtextureBuilder *b, uint32_t name) { TB(b)->gl_name = name; }
+NVN(nvnTextureBuilderGetGLTextureName, uint32_t, const NVNtextureBuilder *b) { return ((const tex_builder_t *)b)->gl_name; }
 NVN(nvnTextureBuilderSetSamples, void, NVNtextureBuilder *b, int s) { TB(b)->d.samples = s; }
 NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)->d.stride = (uint32_t)s; }
 NVN(nvnTextureBuilderSetStorage, void, NVNtextureBuilder *b, NVNmemoryPool *p, ptrdiff_t off) { TB(b)->pool = (pool_t *)p; TB(b)->off = off; }
@@ -686,6 +688,12 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     //   previously every init created a new private MTLTexture and the old one stayed in the serial table forever, so GPU memory grew about 13 MB per frame (killed by the memory watchdog at 24 GB)
     if (o->magic == MAGIC('T', 'E', 'X', 0) && o->serial) { static uint64_t n; if (!n++) LOG("[nvn] TextureInitialize on a texture object that is still live (no Finalize): releasing the old host texture (first case ser=%llu)", (unsigned long long)o->serial); uint64_t old = o->serial; if (mtl_tex_release(o)) ft_del(old); }   // and its registration, when that ends the texture (nvnTextureFinalize)
     memset(o, 0, sizeof *o);
+    if (s->gl_name) {
+        o->magic = MAGIC('T', 'E', 'X', 0); o->serial = nvn_new_serial();
+        if (mtl_tex_init_gl(o, s->gl_name)) return 1;
+        memset(o, 0, sizeof *o);
+        return 0;
+    }
     o->magic = MAGIC('T', 'E', 'X', 0); o->d = s->d; o->pool = s->pool; o->off = s->off;
     // NVN2 device flag bit 16 selects X1 order in CPU copies and descriptor word 2 bit 24. Keep the owning device's order in the texture snapshot.
     if (dm_sdk_ounce()) {
@@ -972,6 +980,30 @@ NVN(nvnCommandBufferSaveZCullData, void, NVNcommandBuffer *c, NVNbufferAddress a
 // depth-stencil state still does. The host does no ZCull, so there is nothing to set (Donkey Kong Bananza: EQUAL, 0xff)
 NVN_NOPROTO(nvnCommandBufferSetStencilCullCriteria, void, NVNcommandBuffer *c, int func, int ref) { (void)c; (void)func; (void)ref; }
 static _Atomic uint64_t g_sync_ns;
+__attribute__((weak)) void *dm_gl_event(void) { return NULL; }
+__attribute__((weak)) void *dm_gl_sync_publish(uint64_t serial, int from_nvn) { (void)serial; (void)from_nvn; return NULL; }
+__attribute__((weak)) int dm_gl_sync_serial(const void *sync, uint64_t *serial, int *from_nvn) { (void)sync; (void)serial; (void)from_nvn; return 0; }
+__attribute__((weak)) int dm_gl_wait_serial(uint64_t serial, uint64_t timeout_ns) { (void)serial; (void)timeout_ns; return 0; }
+static int nvn_sync_gpu_point(const sync_t *s, uint64_t *serial, int *from_nvn);
+// The SDK uses two arguments for export and a fourth, status out, for import.
+// 0 is success, 4 means that the interop operation could not be performed.
+NVN_NOPROTO(nvnSyncCreateGLSync, int, const NVNsync *s, void **gl_sync) {
+    uint64_t serial = 0;
+    int from_nvn = 0;
+    if (!gl_sync) return 4;
+    *gl_sync = nvn_sync_gpu_point((const sync_t *)s, &serial, &from_nvn) ? dm_gl_sync_publish(serial, from_nvn) : NULL;
+    return *gl_sync ? 0 : 4;
+}
+NVN_NOPROTO(nvnSyncInitializeFromFencedGLSync, NVNboolean, NVNsync *s, NVNdevice *d, const void *gl_sync, int *status) {
+    (void)d;
+    int from_nvn = 0;
+    uint64_t serial = 0;
+    int valid = dm_gl_sync_serial(gl_sync, &serial, &from_nvn);
+    if (status) *status = valid ? 0 : 4;
+    if (!valid) return 0;
+    *(sync_t *)s = (sync_t){MAGIC('S', 'Y', 'N', 'C'), from_nvn ? 1 : NVN_SYNC_GL, serial};
+    return 1;
+}
 typedef struct acq_wait acq_wait_t;
 static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64_t *gpu_fence_out);
 static void acq_wait_unref(acq_wait_t *aw);
@@ -989,6 +1021,13 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
     // menu's Next) and then waits 15 s on the one it has not fenced yet, aborting on TIMEOUT_EXPIRED or FAILED (main+0x4a8cf0) once two frames are in flight: a shipped path,
     // so on the console that wait does not expire. Answered as a timeout (the host's rule from its first version, with no game behind it), the game aborted at once
     if (!o->fenced) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+    if (o->fenced == NVN_SYNC_GL) {
+        if (dm_gl_wait_serial(o->fence, 0)) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        uint64_t t0 = now_ns();
+        int ok = timeout && dm_gl_wait_serial(o->fence, timeout);
+        atomic_fetch_add(&g_sync_ns, now_ns() - t0);
+        return ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : sync_expired(o, timeout, now_ns() - t0);
+    }
     if (o->fenced == 4) {
         uint64_t ah = nvn_sync_ref_acq(o);
         if (!ah) return NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;

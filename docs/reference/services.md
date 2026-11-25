@@ -1365,6 +1365,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Found on:** [Mario Golf: Super Rush](../../dm/games/0100C9C00E25C000/README.md) (4.0.0): Golf Adventure shows its own "Select a Mii" with the new Mii, starts, and plays its opening in the village (Mac, M6). A Mii shows without a head unless the player supplies the head data ([A console's own Mii database and system data](#a-consoles-own-mii-database-and-system-data)). [Issue #2361](https://github.com/seedds/nxnative/issues/2361) found that the game needs the call to succeed. Also called by Super Smash Bros. Ultimate and Nintendo Switch Sports Resort's `main` (not run).
 - **Check:** `make -C dm/host/tests GAME=<id> build/t_mii && (cd dm/host/tests && build/t_mii)`: the Mii is added after the console's, listed, found by its create ID, kept in the host's file and read back at the next start; the console's file is not written; a damaged host file is refused; a full database cancels.
 
+### A Mii edited in the editor's place
+
+- **Symptom:** a crash (signal 11, address 0, `sdk+0x1e3684`) right after `mii: AppendMii`, when the player makes a Mii (Nintendo Switch Sports Resort: a second Mii).
+- **Cause:** `nn::mii::EditAndUpdateMii` opens the MiiEdit library applet on a Mii and writes the edited one to its first argument. Unhooked, the SDK's `StartImpl` reached `nn::applet::CreateLibraryApplet` with no applet service.
+- **Fix:** `hle_mii.c` `h_mii_EditUpdate` answers as the editor closed with no change: the Mii is copied to the output as given and the call succeeds, as `ShowMiiEdit` is answered ([Mii database answered by the host](#mii-database-answered-by-the-host)).
+- **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (v65536), which calls it right after `AppendMii`: with the hook, making a second Mii no longer crashes and the game goes on with the new Mii (Mac).
+- **Check:** `make -C dm/host/tests GAME=<id> build/t_mii && (cd dm/host/tests && build/t_mii)`: `EditAndUpdateMii` succeeds and gives back the Mii unchanged.
+
 ### A console's own Mii database and system data
 
 - **Symptom:** the game shows only the six default Miis, and a Switch 2 game logs `[RED] fs mount system data MiiResource: the host has no 0400000000000849` (Nintendo Switch Sports Resort: Mii heads cannot be drawn).

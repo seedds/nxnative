@@ -249,6 +249,27 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return found;
         }
 
+        // nxnative: a half-pair atomic add (RED.ADD.F16x2.FTZ.RN and ATOM's F16x2 form): each half of the word plus the same half of the value, as a compare-and-swap loop like
+        // EmitAtomicAddF32. It was dropped with a log line, so Donkey Kong Bananza's muck normal pass summed no face normals and the vertex shader normalized zeros into NaN. Each pair
+        // is added in float32 and rounded to half once: float32's 24 bits are at least 2 * 11 + 2, so that is the half sum rounded to nearest even, as .RN does. Half denormals
+        // are kept, not flushed as .FTZ asks. Returns the word before the add
+        private static Operand EmitAtomicAddF16x2(EmitterContext context, StorageKind storageKind, Operand e0, Operand e1, Operand value)
+        {
+            Operand valLo = context.UnpackHalf2x16Low(value);
+            Operand valHi = context.UnpackHalf2x16High(value);
+            Operand lblRetry = Label();
+            context.MarkLabel(lblRetry);
+
+            Operand expected = context.Load(storageKind, e0, e1);
+            Operand lo = context.FPAdd(context.UnpackHalf2x16Low(expected), valLo);
+            Operand hi = context.FPAdd(context.UnpackHalf2x16High(expected), valHi);
+            Operand found = context.AtomicCompareAndSwap(storageKind, e0, e1, expected, context.PackHalf2x16(lo, hi));
+
+            context.BranchIfTrue(lblRetry, context.ICompareNotEqual(found, expected));
+
+            return found;
+        }
+
         private static Operand EmitAtomicOp(
             EmitterContext context,
             StorageKind storageKind,
@@ -270,6 +291,10 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     else if (type == AtomSize.F32FtzRn)
                     {
                         res = EmitAtomicAddF32(context, storageKind, e0, e1, value);
+                    }
+                    else if (type == AtomSize.F16x2FtzRn)
+                    {
+                        res = EmitAtomicAddF16x2(context, storageKind, e0, e1, value);
                     }
                     else
                     {

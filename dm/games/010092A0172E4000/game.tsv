@@ -1,0 +1,50 @@
+# It Takes Two: Hazelight Studios, Unreal Engine 4 (AngelScript gameplay scripts, 5,655 .as files in RomFS), SDK 13.3.5, NVN, Wwise, the SDK's movie module (subsdk0);
+# update 1.0.3 (v196608). Started from the NSP script's provisional profile (dm/games/profile_guess.py); played on the Mac to the first level (README.md).
+
+# ---- Identity ----
+title_id	010092A0172E4000
+program_id	010092A0172E4000
+
+# ---- App ----
+name	It Takes Two
+ipa	ItTakesTwo.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.3	main=104db32fd10e753898d3957264a24c08	subsdk0=d0f13015e5badf2243d60a2bc9b978dd	sdk=3644a6760469451cabc99f00c540acc2
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Nuts/Content/Paks/Nuts-Switch.pak
+zip_store	.cache:.mp4:.pak:.ttf:.metallib
+
+# ---- Memory ----
+# Engage's 5 GB block, the layout of every game with virtual address memory: the rewriter cuts FMallocBinned3 in any Unreal 4 / 5 main (dm/tools/ue_malloc.py) and gives the 62 GB engine region
+# what the alias region has room for (dm/tools/ue_region.py), 4.06 GB here. The Mac reserves the Switch's 64 GB alias region regardless; the provisional 64 GB block gained the Mac nothing and an iPhone cannot reserve it (GitHub issue #2278, docs/reference/memory.md)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 80 MB of system resource
+sys_resource	0x5000000
+
+# ---- Frame rate ----
+# 60 fps (30 on the Switch): the host writes rhi.SyncInterval 2 -> 1 (found by name, dm/tools/ue_cvar.py); bUseFixedFrameRate is off (no FixedFrameRate write), so the engine
+# steps by the time that passed. Checked 2026-11-20 in The Shed: 60.0 fps in gameplay, the same 2 s stick hold covers the same distance at 30 and 60. 120 not measured.
+fps_target	60
+
+# ---- Shader split ----
+# the decoded shader code archives: the engine's global shaders and the game's material shaders
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	It Takes Two shaders
+
+# heap check: 2026-11-20, heap 0.01 GB
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-20, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within the profile's 64.00 GB alias region (what it takes later in play is not measured here) (rewrite aa7320673719)

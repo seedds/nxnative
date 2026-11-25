@@ -82,6 +82,10 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
             // The pools, indexed by the handle's IDs (nvn_refl.h TEXP / SAMPP): which texture is read is known only when the GPU runs the draw
             else if ([k isEqualToString:@DMSH_KIND_TEX_POOL]) { r->kind = NVN_RB_TEXP; dummy_kind(b[@"elem"], &r->dtt, &r->dpf); o->bindless = o->pool = 1; }
             else if ([k isEqualToString:@DMSH_KIND_SAMP_POOL]) { r->kind = NVN_RB_SAMPP; o->bindless = o->pool = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_IMG_POOL]) { NSString *el_p = b[@"elem"]; r->kind = NVN_RB_IMGP; dummy_kind(el_p, &r->dtt, &r->dpf);
+                r->img_rd = [el_p isKindOfClass:[NSString class]] && [el_p containsString:@"access::read_write"];
+                r->rw = r->img_rd || ([el_p isKindOfClass:[NSString class]] && [el_p containsString:@"access::write"]);
+                o->bindless = o->pool = 1; }   // images indexed by the IDs the shader loads (img_pool_gpu)
             // A table of the handles in a uniform buffer (nvn_refl.h TEXH / SAMPH)
             else if ([k isEqualToString:@DMSH_KIND_TEX_HTAB] || [k isEqualToString:@DMSH_KIND_SAMP_HTAB]) { int samp = [k isEqualToString:@DMSH_KIND_SAMP_HTAB];
                 r->kind = samp ? NVN_RB_SAMPH : NVN_RB_TEXH; if (!samp) dummy_kind(b[@"elem"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = o->htab = 1;
@@ -94,10 +98,12 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 if (r->kind == NVN_RB_TEXA) dummy_kind(el, &r->dtt, &r->dpf);
             }
             else if ([k isEqualToString:@DMSH_KIND_IMG]) { r->kind = NVN_RB_IMG; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf);   // rw: the shader writes it (access::write / read_write; a load-only view of the slot is not)
-                r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
+                r->img_rd = [ty isKindOfClass:[NSString class]] && [ty containsString:@"access::read_write"];
+                r->rw = r->img_rd || ([ty isKindOfClass:[NSString class]] && [ty containsString:@"access::write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
             else if ([k isEqualToString:@DMSH_KIND_TBUF]) { r->kind = NVN_RB_TBUF; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); }
             else if ([k isEqualToString:@DMSH_KIND_IMG_UBO]) { r->kind = NVN_RB_IMGU; dummy_kind(b[@"msl_type"], &r->dtt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
-                r->rw = [ty isKindOfClass:[NSString class]] && ([ty containsString:@"access::write"] || [ty containsString:@"access::read_write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
+                r->img_rd = [ty isKindOfClass:[NSString class]] && [ty containsString:@"access::read_write"];
+                r->rw = r->img_rd || ([ty isKindOfClass:[NSString class]] && [ty containsString:@"access::write"]); r->atom = [b[@"atomic"] boolValue] ? ([ty isKindOfClass:[NSString class]] && [ty containsString:@"<ulong"] ? 2 : 1) : 0; }   // 2: 64-bit atomics (texture2d<ulong>)
             else if ([k isEqualToString:@DMSH_KIND_TBUF_UBO]) { r->kind = NVN_RB_TBUFU; uint8_t tt; dummy_kind(b[@"msl_type"], &tt, &r->dpf); r->off = (uint16_t)[b[@"off"] intValue]; o->bindless = 1;
                 if (b[@"soff"]) { r->soff = (uint16_t)([b[@"soff"] intValue] + 1); r->sreg = (uint8_t)[b[@"sreg"] intValue]; } }
             else if ([k isEqualToString:@DMSH_KIND_SBUF]) { r->kind = NVN_RB_SBUFP; r->rw = sbuf_rw(b); }
@@ -144,7 +150,7 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 r->tbx = (uint16_t)(x + 1); }
             id sx = b[@"sbx"];   // a bounded storage buffer's slot in the length table (dmsh_reflect.py; Ryujinx TranslationFlags.MetalStorageBounds)
             if (sx) { int x = [sx intValue];
-                if (x < 0 || x >= DMSH_SBLEN_SLOTS || (r->kind != NVN_RB_SBUFU && r->kind != NVN_RB_SBUFQ)) FAIL("B binding %s: length table slot %d of a binding that is not a storage buffer by address", nm.UTF8String, x);
+                if (x < 0 || x >= DMSH_SBLEN_SLOTS || (r->kind != NVN_RB_SBUFP && r->kind != NVN_RB_UBOP && r->kind != NVN_RB_SBUFU && r->kind != NVN_RB_SBUFQ)) FAIL("B binding %s: length table slot %d of a binding that is not a storage buffer", nm.UTF8String, x);
                 r->sbx = (uint8_t)(x + 1); }
             id bb = b[@"border_bit"];   // a twin sampler (dmsh_rewrite.py border_emu)
             if (bb) { int bit = [bb intValue]; if (bit < 0 || bit >= DMSH_BORDER_SAMPLERS || (r->kind != NVN_RB_SAMP && r->kind != NVN_RB_SAMPT && r->kind != NVN_RB_SAMPU && r->kind != NVN_RB_SAMPI) || r->n)

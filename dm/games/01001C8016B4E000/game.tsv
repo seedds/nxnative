@@ -11,6 +11,7 @@ build	v196608	1.0.3	main=4b713267a882da35b4789a5e45823ac4	sdk=43211771ed39e7fcef
 build	v0	1.0.0	main=da9da20e1649759ab2e3ebfbd6307c11	sdk=43211771ed39e7fcef03d88e27091831
 package	v196608
 shader_versions	v0
+shader_covers	v196608
 
 modules	main sdk
 romfs_marker	data3.big

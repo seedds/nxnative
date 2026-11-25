@@ -85,17 +85,19 @@ int main(void) { @autoreleasepool {
     int all = 1; for (id<MTLBuffer> s in small) all &= [g_res containsAllocation:s];
     CHECK("everything added is in the set after the commit", all);
 
-    // A change another thread's commit took is in the set when this thread's res_commit returns
+    // A change another thread's commit took is in the set (and any removal's allocation is released) when this thread's res_commit returns
     for (int round = 0; round < 50; round++) {
         id<MTLBuffer> x = buf(BIG_BYTES / 4), y = buf(4096);
+        __weak id<MTLBuffer> weak_d = nil;
+        @autoreleasepool { id<MTLBuffer> d = buf(BIG_BYTES / 8); weak_d = d; res_add(d); res_commit(); res_remove(d); }
         res_add(x);
         dispatch_semaphore_t go = dispatch_semaphore_create(0), fin = dispatch_semaphore_create(0);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ dispatch_semaphore_signal(go); res_commit(); dispatch_semaphore_signal(fin); });
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ dispatch_semaphore_signal(go); res_commit(); dispatch_semaphore_signal(fin); });
         dispatch_semaphore_wait(go, DISPATCH_TIME_FOREVER);
         res_add(y); res_commit();
-        int ok = [g_res containsAllocation:x] && [g_res containsAllocation:y];
+        int ok = [g_res containsAllocation:x] && [g_res containsAllocation:y] && weak_d == nil;
         dispatch_semaphore_wait(fin, DISPATCH_TIME_FOREVER);
-        if (!ok) { CHECK("a change committed by another thread is in the set when res_commit returns", 0); break; }
+        if (!ok) { CHECK("a change committed by another thread is in the set and released when res_commit returns", 0); break; }
         res_remove(x); res_remove(y); res_commit();
     }
     CHECK("racing commits leave nothing queued", !res_pending());

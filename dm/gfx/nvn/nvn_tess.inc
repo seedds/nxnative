@@ -319,7 +319,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         g_draw_binst = binst; args_dirty_all(); encode_args(ge, ds, 4, 1);
         enc_r_vbuf(ge, 13, gj.capture_info); enc_r_vbuf(ge, 14, g_out); enc_r_vbuf(ge, 15, g_par + 16);
         enc_r_draw_indirect(ge, MTLPrimitiveTypePoint, g_ka); enc_r_end(ge);
-        id<MTL4ComputeCommandEncoder> gc2 = enc_c_begin(NULL); geo_gs_gpu(gc2, &gj, gpack); enc_c_end(gc2);
+        id<MTL4ComputeCommandEncoder> gc2 = enc_c_begin(); geo_gs_gpu(gc2, &gj, gpack); enc_c_end(gc2);
         args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
         geo_raster(&gj, 1);
         g_tess_draws++; g_tess_patches += np;

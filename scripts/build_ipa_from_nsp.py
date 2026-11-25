@@ -1008,6 +1008,64 @@ def build_folder(args, nsp_dir, gid):
     return work / 'programs' / f'{gid}_build' if getattr(args, 'in_programs', None) is not None else work
 
 
+SCRATCH_PREFIX = 'nxnative-work-'   # task-owned subdirectories created inside a caller-provided WORK root
+
+
+def sweep_scratch_work(root):
+    """Remove stale task-owned scratch folders left in a caller-provided WORK root by dead builds.
+    Only folders named SCRATCH_PREFIX* carrying a regular pid file whose process is gone are removed:
+    live builds (including an outer multi-program main() in this process), symlinks, and caller-owned entries stay untouched."""
+    try: entries = list(root.iterdir())
+    except OSError: return
+    for d in entries:
+        if not d.name.startswith(SCRATCH_PREFIX) or d.is_symlink() or not d.is_dir(): continue
+        pid_file = d / 'pid'
+        if pid_file.is_symlink() or not pid_file.is_file(): continue
+        try: pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError): continue
+        if pid <= 0: continue
+        try: os.kill(pid, 0); continue   # live process (including this one)
+        except ProcessLookupError: pass
+        except OSError: continue
+        try: rmtree(d)
+        except OSError: pass
+
+
+@contextlib.contextmanager
+def scratch_work(default_dir, gid, environ=None):
+    """Yield the WORK directory for child shader tools.
+    Without a non-blank WORK in the caller's environment, yield default_dir (<build>/tmp) unchanged.
+    With one, resolve it, sweep dead-PID folders from earlier hard-killed runs, create a per-run task-owned
+    subdirectory inside it, and remove only that subdirectory on exit (normal, error, or signal)."""
+    raw = ((os.environ if environ is None else environ).get('WORK') or '').strip()
+    if not raw:
+        yield default_dir
+        return
+    root = Path(os.path.expanduser(raw)).resolve()
+    try:
+        if root.exists() and not root.is_dir():
+            raise BuildError(f'WORK is not a folder: {root}')
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise BuildError(f'cannot use WORK scratch folder {root}: {e}') from e
+    sweep_scratch_work(root)
+    own = None
+    try:
+        own = Path(tempfile.mkdtemp(prefix=f'{SCRATCH_PREFIX}{gid}-', dir=root))
+        (own / 'pid').write_text(f'{os.getpid()}\n')
+    except OSError as e:
+        if own is not None:
+            try: rmtree(own)
+            except OSError: pass
+        raise BuildError(f'cannot create scratch folder in WORK ({root}): {e}') from e
+    say(f'scratch folder (WORK): {own}')
+    try:
+        yield own
+    finally:
+        try: rmtree(own)
+        except OSError: pass
+
+
 def own_profile_folders(args, nsp_dir, app):
     """The folders this script writes a game's provisional and derived profiles to (profile_folder's choices: <NSP folder>/<title ID>_build/profile, <work dir>/profile, --profile-out),
     found without copying anything. A profile there is this script's own output, never a registered one, also when DM_GAMES_DIR reaches it (the bring-up recipe the script prints,
@@ -1730,26 +1788,56 @@ def rewrite(py, repo, exe_dir, out, env, logs, g, provisional=False):
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True); logs.mkdir(parents=True, exist_ok=True)
     if manifest.is_file(): shutil.copyfile(manifest, tmp / 'nro.tsv')   # refused-only manifests preserve the game's offline registration path too
     PROG.set(step=', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''), done=0, total=len(names), unit='modules')
-    procs, logf, todo, cores = {}, {}, list(names), max(2, os.cpu_count() or 4)
+    groups, todo, cores, stop_sig = {}, list(names), max(2, os.cpu_count() or 4), signal.SIGTERM
     jobs = max(1, min(cores, 2 * cores // max(1, len(names))))   # patch_nso.py workers per module, so parallel rewrites don't oversubscribe
     rewrite_env = dict(env, DM_REWRITE_J=str(workers if workers is not None else jobs))
+    def stop_remaining():
+        try: proc_group.stop_all([grp for grp, _ in groups.values()], stop_sig)
+        finally:
+            for _, fh in groups.values(): fh.close()
+            groups.clear()
     try:
-        while todo or procs:
-            while todo and len(procs) < cores:
-                m = todo.pop(0); logf[m] = open(logs / f'rewrite_{m}.log', 'w')
-                procs[m] = subprocess.Popen([str(py), str(repo / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=rewrite_env, stdout=logf[m], stderr=subprocess.STDOUT)
-            for m in [m for m in procs if procs[m].poll() is not None]:
-                p = procs.pop(m); logf[m].close(); PROG.set(done=len(names) - len(todo) - len(procs))
-                if p.returncode:
+        while todo or groups:
+            while todo and len(groups) < cores:
+                m = todo.pop(0); f = open(logs / f'rewrite_{m}.log', 'w')
+                try:
+                    grp = proc_group.Group([str(py), str(repo / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=rewrite_env, stdout=f, stderr=subprocess.STDOUT)
+                except BaseException:
+                    f.close(); raise
+                groups[m] = (grp, f)
+            for m in [m for m, (grp, _) in groups.items() if grp.p.poll() is not None]:
+                grp, f = groups[m]
+                if grp.p.returncode:
+                    rc = grp.p.returncode; stop_remaining()
                     log = logs / f'rewrite_{m}.log'
                     PROG.end(ok=False)
-                    PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
-                    raise BuildError(f'patch_nso.py exit code {p.returncode} on {m} (full output: {log})')
-            time.sleep(0.2)
-    finally:   # an error or an interrupt stops the other rewrites
-        for p in procs.values():
-            if p.poll() is None: p.terminate(); p.wait()
-        for f in logf.values(): f.close()
+                    with open(log, errors='replace') as lf: tail = ''.join(collections.deque(lf, maxlen=40)).rstrip('\n')
+                    PROG.say(f'---- last lines of {log} ----\n' + tail)
+                    raise BuildError(f'patch_nso.py exit code {rc} on {m} (full output: {log})')
+                groups.pop(m)
+                try:
+                    rc = grp.finish()
+                    if grp.stragglers:
+                        msg = f'[RED] patch_nso.py exited, but {proc_group.describe(grp.stragglers)} still ran {grp.drain:g} s later and was stopped: what it writes may be incomplete\n'
+                        os.write(f.fileno(), msg.encode())
+                except BaseException:
+                    groups[m] = (grp, f); raise
+                finally:
+                    if m not in groups: f.close()
+                PROG.set(done=len(names) - len(todo) - len(groups))
+                if rc or grp.stragglers:
+                    stop_remaining()
+                    log = logs / f'rewrite_{m}.log'
+                    PROG.end(ok=False)
+                    with open(log, errors='replace') as lf: tail = ''.join(collections.deque(lf, maxlen=40)).rstrip('\n')
+                    PROG.say(f'---- last lines of {log} ----\n' + tail)
+                    why = f'patch_nso.py exit code {rc} on {m}' if rc else f'patch_nso.py exited on {m}, but {proc_group.describe(grp.stragglers)} still ran {grp.drain:g} s later and was stopped: what it writes may be incomplete'
+                    raise BuildError(f'{why} (full output: {log})')
+            if todo or groups: time.sleep(0.2)
+    except KeyboardInterrupt:
+        stop_sig = signal.SIGINT; raise
+    finally:   # an error or an interrupt stops the other rewrite groups
+        stop_remaining()
     rmtree(kf); swap_in(tmp, out); kf.write_text(f'{key}\n')
     PROG.end(', '.join(mods) + (f' and {len(nros)} NROs' if nros else ''))
     return capture_nro(py, repo, exe_dir, out, nro_dir, env, logs, g, provisional)
@@ -3539,6 +3627,11 @@ def reconcile_provisional_marker(g, rom):
 
 
 def main(args=None):
+    with contextlib.ExitStack() as cleanup:
+        return _main(args, cleanup)
+
+
+def _main(args, cleanup):
     args = args or parse_args([])
     PROG.mode = progress_mode(args.progress or PROGRESS)
     global ALLOW_DAMAGED; ALLOW_DAMAGED = args.allow_damaged or ALLOW_DAMAGED
@@ -3676,8 +3769,9 @@ def main(args=None):
     say('Mac app: the Mac shaders and the Mac host, packed into a Mac app; no iOS shaders, Xcode project or IPA' if mac_pack else 'Mac-only build for development: the Mac shaders and the Mac host, no iOS shaders, Xcode project or IPA' if mac else f'Xcode project: {project}' if prepare_xcode else f'output IPA: {out_ipa}')
     say(f'work folder (extracted game files in extract/, {"kept for the next build" if keep else "deleted after the IPA is built"}): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
-    # DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
+    # DM_GAME picks the profile; DM_ROOT points at <id>_build and WORK defaults to <id>_build/tmp unless caller WORK directs scratch elsewhere
+    work_tmp = cleanup.enter_context(scratch_work(work / 'tmp', g.id))
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work_tmp))
     logs = work / 'logs'
     check_prereqs(env, xlate, mac)
     picks = pick_nsps(fam, have, versions)

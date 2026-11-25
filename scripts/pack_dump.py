@@ -16,21 +16,18 @@
 # A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, filecmp, shutil, struct, subprocess, sys
+import argparse, filecmp, shutil, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import npdm as _npdm, romfs_image
 
 
 class Error(Exception): pass
 
 
 def program_id(npdm):   # the ACI0 program ID of main.npdm
-    d = npdm.read_bytes()
-    if d[:4] != b'META': raise Error(f'{npdm}: not an NPDM')
-    off, size = struct.unpack_from('<II', d, 0x70)
-    if d[off:off + 4] != b'ACI0' or size < 0x18: raise Error(f'{npdm}: no ACI0 section')
-    return struct.unpack_from('<Q', d, off + 0x10)[0]
+    try: return _npdm.program_id(npdm.read_bytes())
+    except _npdm.Error as e: raise Error(f'{npdm}: {e}') from None
 
 
 def clone(src, dst):   # an APFS clone on the same volume, else a copy

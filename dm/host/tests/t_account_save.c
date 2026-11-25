@@ -69,9 +69,9 @@ int main(int argc, char **argv) {
     assert(h_fs_MountSave("p1", &k_uid) == RES_OK);
     assert(g_mnt[0].txn_root != g_mnt[1].txn_root && g_mnt[1].txn_root == g_mnt[2].txn_root);
     Uid unknown = user_uid(7);
-    assert(!h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &unknown));
+    assert(!h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &unknown) && !h_fs_SaveExists(&unknown));
     assert(h_fs_MountSave("unknown", &unknown) != RES_OK && h_fs_MountSaveRO("unknown", DM_GAME_PROGRAM_ID, &unknown) != RES_OK);
-    assert(h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &u2));
+    assert(h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &u2) && h_fs_SaveExists(&u2) && h_fs_SaveExists(&k_uid));
     if (!strcmp(argv[1], "--seed")) {
         assert(h_fs_CreateFile("p1:/hero", 0) == RES_OK && h_fs_CreateFile("p2:/hero", 0) == RES_OK);
         assert(write_user("p1:/hero", "first-A") == RES_OK && write_user("p2:/hero", "first-B") == RES_OK);

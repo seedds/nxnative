@@ -1030,7 +1030,7 @@ class RewriteWorkers(Base):
                 env = {'DM_GAME': str(self.src), 'DM_REWRITE_J': value}
                 with mock.patch.object(nsp, 'collect_nros', return_value={}), mock.patch.object(nsp, 'patch_files', return_value=[]), \
                      mock.patch.object(nsp.os, 'cpu_count', return_value=14), mock.patch.object(nsp.time, 'sleep'), \
-                     mock.patch.object(nsp.subprocess, 'Popen', return_value=mock.Mock(returncode=0, poll=lambda: 0)) as popen:
+                     mock.patch.object(nsp.proc_group, 'Group', return_value=mock.Mock(p=mock.Mock(returncode=0, poll=lambda: 0), finish=lambda: 0, stragglers=[])) as popen:
                     nsp.rewrite(Path(sys.executable), REPO, self.ex / 'ExeFS', out, env, self.tmp / 'logs', g)
                 self.assertEqual(popen.call_args.kwargs['env']['DM_REWRITE_J'], expected)
                 self.assertEqual(env['DM_REWRITE_J'], value)

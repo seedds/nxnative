@@ -33,6 +33,9 @@ sys_resource	0x0
 # Match the depth mode observed at device initialization for offline pipelines.
 depth_mode	zero
 
+# RE Engine MaxFps is discovered from the timing loop and its accessors.
+fps_target	60
+
 # ---- Shader split ----
 shader_groups	re_chunk=sdf
 shader_note	Apollo Justice: Ace Attorney Trilogy shaders

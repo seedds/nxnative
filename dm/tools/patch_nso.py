@@ -213,7 +213,10 @@ for w in ue_cvar_why:
 # ---- A target frame rate the game steps by (main: dm/tools/fps_target.py finds it by the code that reads and sets it, without a build ID) ----
 # The fixups table names the global pointer and the field (FPS_TARGET_PTR, FPS_TARGET_FIELD); the host writes the profile's fps_target there (hle_fpslock.c)
 import fps_target
-FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF) if NAME == 'main' else (None, None, '')
+FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find_re_engine(bytes(IMG), TEXT_END, DATA_OFF) if NAME == 'main' else (None, None, '')
+FPS_TARGET_F32 = FPS_TARGET_PTR is not None
+if NAME == 'main' and not fps_target_why:
+    FPS_TARGET_PTR, FPS_TARGET_FIELD, fps_target_why = fps_target.find(bytes(IMG), TEXT_END, RO_OFF, DATA_OFF)
 if FPS_TARGET_PTR is not None: print(f'{NAME}: {fps_target_why} (fps_target.py)')
 elif fps_target_why.startswith('[RED] '): print(f'[RED] {NAME}: {fps_target_why[6:]}: the host cannot write it')
 
@@ -1961,6 +1964,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if FS_STATE_OFF: f.write(f'# FPS_STATE_OFF\t{FS_STATE_OFF:#x}\n')   # frame step state page (FRAME_STEP): the loader writes the target fps there
     if UE_CALLS: f.write(f'# UE_MALLOC_VT\t{UE_VT:#x}\n# UE_MALLOC_SLOT\t{UE_SLOT:#x}\n')   # Unreal's FMallocBinned3 (ue_malloc.py): its vtable and the slot of its name getter, which names the slot layout
     if FPS_TARGET_PTR is not None: f.write(f'# FPS_TARGET_PTR\t{FPS_TARGET_PTR:#x}\n# FPS_TARGET_FIELD\t{FPS_TARGET_FIELD:#x}\n')   # a target frame rate the game steps by (fps_target.py)
+    if FPS_TARGET_F32: f.write('# FPS_TARGET_F32\t0x1\n')
     if MONOLITH_INTERVAL is not None: f.write(f'# MONOLITH_INTERVAL\t{MONOLITH_INTERVAL:#x}\n')   # native wait and simulation interval (monolith_fps.py)
     if NATIVE_FPS_BLOCKED: f.write('# NATIVE_FPS_BLOCKED\t0x1\n')   # a required matched timing correction was not installed
     if UE_FIXED_PTR is not None: f.write(f'# UE_FIXED_RATE_PTR\t{UE_FIXED_PTR:#x}\n# UE_FIXED_RATE_FIELD\t{UE_FIXED_FIELD:#x}\n# UE_FIXED_RATE_FLAG\t{UE_FIXED_FLAG:#x}\n')   # Unreal's GEngine, UEngine::FixedFrameRate and bUseFixedFrameRate (ue_fixed_rate.py)

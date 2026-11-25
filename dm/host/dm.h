@@ -94,8 +94,9 @@ typedef struct {
     unsigned ue_malloc_slot;   // the slot of its name getter, which names the slot layout
     struct { char name[32]; uint64_t off; } ue_cvar[8];   // Unreal console variables found by their registered names (patch_nso.py, ue_cvar.py; UE_CVAR:<name>): each one's TAutoConsoleVariable
     int n_ue_cvar;
-    uint64_t fps_target_ptr;   // a target frame rate the game steps by, an int32 at [main + fps_target_ptr] + fps_target_field (patch_nso.py, fps_target.py; hle_fpslock.c); 0 = none
+    uint64_t fps_target_ptr;   // target rate at [main + fps_target_ptr] + fps_target_field (fps_target.py); 0 = none
     uint32_t fps_target_field;
+    int fps_target_f32;       // RE Engine MaxFps is float; earlier fixups name an int32 frame rate
     uint64_t monolith_interval; // Monolith's native frame interval, an int32 at main + this (monolith_fps.py); 0 = not found
     struct { uint64_t off; uint8_t len, orig[16], cut[16]; } alias_cut[32];   // iOS-only alias cuts (patch_nso.py ALIAS_CUT rows), undone at load on Mac when alias >= DM_SWITCH_ALIAS
     int n_alias_cut;

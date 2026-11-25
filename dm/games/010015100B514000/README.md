@@ -85,7 +85,7 @@ Game-specific findings; the general host changes they led to are listed under [F
 ## Audio
 
 - The `sdk` carries the audio renderer (SDK 16): the host switches it to CPU rendering with manual execution and drives it from a guest thread, no IPC ([Running the SDK's own renderer on the CPU](../../../docs/reference/audio.md#running-the-sdks-own-renderer-on-the-cpu)).
-- **Resolved:** Mario updates the renderer twice in a row at start-up; with a real audio device the first frame came after both, and the light limiter later crashed on a null state pointer (`ApplyLightLimiterEffect`, `sdk+0x228494`). The `AudioRenderSystem::Update` hook renders a catch-up frame first when nothing was rendered since the last update.
+- **Resolved:** Mario's `WaitSystemEvent` after `RequestUpdate` used to return immediately on stale signals (startup prefill or a frame rendered during `AddLightLimiter`), issuing a second update before any render and crashing `ApplyLightLimiterEffect` (`sdk+0x228494` / `+0x228614`). Until 2026-11 `h_ars_Update` worked around this with synchronous catch-up frames; it now clears `a->ev` atomically on `Update` as Horizon's `AudioRenderSystem::Update` (`sdk+0x20c264`) does, with no catch-up queue ([At least one rendered frame between two updates](../../../docs/reference/audio.md#at-least-one-rendered-frame-between-two-updates)).
 
 ## Services and survey
 

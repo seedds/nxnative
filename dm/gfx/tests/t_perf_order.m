@@ -7,6 +7,7 @@
 
 // Redirect only this translation unit, and only while the CPU budget cases run.
 static int test_budget_active;
+static void (*test_event_completion)(void);
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
     int event_calls, event_success, cond_calls;
@@ -29,16 +30,23 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
     if (test_budget.cond_calls == 1) test_budget.cond_first = test_budget.cond_remaining;
     return ETIMEDOUT;
 }
-@interface WaitBudgetEvent : NSObject
+@interface WaitBudgetEvent : NSObject { uint64_t _signaledValue; }
+@property (nonatomic) uint64_t signaledValue;
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds;
 @end
 @implementation WaitBudgetEvent
+- (uint64_t)signaledValue { return _signaledValue; }
+- (void)setSignaledValue:(uint64_t)value { if (value > _signaledValue) _signaledValue = value; }
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds {
     test_budget.event_calls++;
     test_budget.event_fence = value;
     test_budget.event_ms = milliseconds;
+    if (test_event_completion) {
+        test_event_completion();
+        if (_signaledValue >= value) return YES;
+    }
     test_budget.now += test_budget.event_elapsed;
-    return test_budget.event_success;
+    return test_budget.event_success || _signaledValue >= value;
 }
 @end
 #define clock_gettime_nsec_np test_clock_gettime_nsec_np
@@ -322,6 +330,7 @@ static void hoists(id<MTLLibrary> lib) {
     CHECK("offset sampled storage splits merged pass",draw_samples_rt(drawpr));
     mtl_pool_del(mem); free(mem);
 }
+static void feedback_without_signal(void) { post_complete(1, 0, 0); }
 static void wait_budgets(void) {
     id<MTLSharedEvent> saved_event = g_ev;
     uint64_t saved_done = g_done, saved_fence = g_fence;
@@ -354,9 +363,11 @@ static void wait_budgets(void) {
     for (unsigned si = 0; si < sizeof sites / sizeof *sites; si++) {
         for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
             const typeof(*cases) *c = &cases[i];
+            uint64_t ws_before = g_ws_n[sites[si]];
             test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed};
             printf("budget: %s, site=%d, fast=%d, ledger=%d\n", c->name, sites[si], fast, ws_on());
             CHECK("incomplete fence returns false", !mtl_wait_at(1, c->timeout, sites[si]));
+            CHECK("wait ledger counts the call once", !ws_on() || g_ws_n[sites[si]] - ws_before == 1);
             CHECK("event receives truncated and clamped milliseconds", test_budget.event_calls == fast
                 && (!fast || (test_budget.event_ms == c->event_ms && test_budget.event_fence == 1)));
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
@@ -387,6 +398,17 @@ static void wait_budgets(void) {
         CHECK("CPU event is visible before successful return", event == 47 && g_done == 1
             && g_postr[1].claimed && !g_postr[1].ops);
         CHECK("successful early wait skips feedback wait", test_budget.event_calls == 1 && !test_budget.cond_calls);
+        g_ev = (id<MTLSharedEvent>)[WaitBudgetEvent new];
+        g_done = 0; event = 0;
+        g_postr[1] = (post_rec){.fence = 1, .n = 1, .ops = calloc(1, sizeof(post_op))};
+        g_postr[1].ops[0] = (post_op){.kind = 1, .val = &event, .v = 53};
+        test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = hour};
+        test_event_completion = feedback_without_signal;
+        CHECK("feedback raises the shared event and wakes an infinite wait at once", mtl_wait_at(1, UINT64_MAX, WS_ACQ));
+        CHECK("unsignaled feedback wake publishes CPU effects without timing out or falling back",
+            event == 53 && g_done == 1 && g_ev.signaledValue == 1 && g_postr[1].claimed && !g_postr[1].ops
+            && test_budget.event_calls == 1 && !test_budget.cond_calls && test_budget.now == 1999750000);
+        test_event_completion = NULL;
     }
     test_budget_active = 0; memset(&test_budget, 0, sizeof test_budget);
     g_ev = saved_event; g_done = saved_done; g_fence = saved_fence; g_postr[1] = saved_post;

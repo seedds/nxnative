@@ -8,6 +8,8 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 ## Games
 
+Browse the community [Game Compatibility List](https://heyflorin.github.io/nx-game-list/) ([source](https://github.com/heyflorin/nx-game-list)) to filter games by platform and status or check your own games folder against the expected updates.
+
 The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
 
 These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
@@ -134,6 +136,8 @@ You can also pass a complete update folder directly, for example `~/Games/Donkey
 ## Discussions
 
 Use [Discussions](https://github.com/seedds/nxnative/discussions) for questions, ideas and reports on how games run on your Mac or iPhone. File bug reports in [Issues](https://github.com/seedds/nxnative/issues) and include the log. Follow frame rate, resolution and which Macs hold 60 fps in [Ocarina of Time: state on main](https://github.com/seedds/nxnative/discussions/1789).
+
+Share your game's `pso_user.tsv` in the pinned [prewarm lists discussion](https://github.com/seedds/nxnative/discussions/3291).
 
 ## For developers
 

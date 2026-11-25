@@ -17,6 +17,12 @@ Update 1.9.589692 (v589824) over the supplied base game, SDK 4.4.0, Ubisoft's Sn
 - **Resolved: empty runtime capture stopped packing.** [A GLSL language preamble is not a complete shader](../../../docs/reference/shaders.md#a-glsl-language-preamble-is-not-a-complete-shader). The only `#version` string is a 646-byte header with type macros and no entry point. The initial 30-second run reached its frame loop without calling GLSLC.
 - **Resolved: GLSLC rewrite assertion at `subsdk0+0x7340b8`.** [Index copied before the bounds check](../../../docs/reference/rewriter.md#index-copied-before-the-bounds-check). The copy is 71 instructions before the dispatch, across two switches preserving the index and checked register.
 
+## Frame rate
+
+Snowdrop's present function (`main+0x11084d4` in 1.9.589692) reads a frame limit at object `+0x14`. Its `FLT_MAX` path skips the software wait used for finite limits of 5–30 fps and requests NVN present interval 2. The title profile uses `fps_target 60` and `present_interval display` to pace frames at one display tick through the host. `DM_FPS_TARGET=30` restores two ticks per frame. [Display pacing for a game limited by its present interval](../../../docs/reference/frame-rate.md#a-present-interval-that-is-the-games-only-limit-in-display-mode).
+
+On 2026-11-23, an Apple M6 Mac mini (macOS 27.2.1) ran 1.9.589692 with all four DLC images and 11,625 stamped Mac shader libraries. In 20-second standing samples at the World 1-1 spawn, stock pacing averaged 29.87 fps (33.34 ms median frame time) and the new default averaged 60.00 fps (16.67 ms). A 1.3-second forward stick hold from that spawn collected two coins and stopped at visually matching positions in both runs. Battles and iOS timing remain untested.
+
 ## Mac testing
 
 - **Resolved: first-level pipeline compiler abort.** [An unwritten secondary blend source](../../../docs/reference/rendering.md#an-unwritten-secondary-blend-source). Fragment `fd260ce50f4a5625` writes only colour 0, while the draw uses SRC_ALPHA / SRC1_ALPHA for RGB and ZERO / SRC1_ALPHA for alpha. Metal 4's blend specialization crashed in the compiler service; the MTLDevice path reported the missing secondary output. The host folds factors for an absent secondary source to its zero choice. Matching the original GPU's missing-output value remains open in the reference entry.

@@ -24,7 +24,7 @@
 import argparse, hashlib, mmap, os, re, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import npdm as _npdm, romfs_image
 try: from compression import zstd
 except ImportError:
     try: from backports import zstd   # pyright: ignore[reportMissingImports]  # an optional package, only Python before 3.14 needs it
@@ -98,7 +98,7 @@ def nacp_like(v):
     # An uncompressed NACP title can start with META too. Check the NPDM's ACI0.
     try:
         program_id(v, 'NUP metadata')
-    except (Error, struct.error):
+    except Error:
         return True
     return False
 
@@ -247,10 +247,8 @@ class Nup:
 
 
 def program_id(npdm, where):   # the ACI0 program ID of an NPDM
-    if npdm[:4] != b'META': raise Error(f'{where}: not an NPDM')
-    off, size = struct.unpack_from('<II', npdm, 0x70)
-    if npdm[off:off + 4] != b'ACI0' or size < 0x18: raise Error(f'{where}: no ACI0 section')
-    return struct.unpack_from('<Q', npdm, off + 0x10)[0]
+    try: return _npdm.program_id(npdm)
+    except _npdm.Error as e: raise Error(f'{where}: {e}') from None
 
 
 def is_nup(path):

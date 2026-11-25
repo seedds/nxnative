@@ -24,11 +24,11 @@ def record(code, ctl, extra=False):
     return head + code + ctl
 
 
-def package(body, block=0x40, compress=None):
+def package(body, block=0x40, compress=None, wide=False):
     """An Unreal Engine 3 package of file version 864: a summary, then one compressed chunk of the body in blocks of `block` bytes"""
     blocks = [body[i:i + block] for i in range(0, len(body), block)]
     stored = [compress(b) if compress else b for b in blocks]
-    chunk = shader_split.UE3_TAG + struct.pack('<III', block, sum(map(len, stored)), len(body)) + b''.join(struct.pack('<II', len(s), len(b)) for s, b in zip(stored, blocks))
+    chunk = (shader_split.UE3_TAG + bytes(4) if wide else shader_split.UE3_TAG) + struct.pack('<QQQ' if wide else '<III', block, sum(map(len, stored)), len(body)) + b''.join(struct.pack('<QQ' if wide else '<II', len(s), len(b)) for s, b in zip(stored, blocks))
     summary = shader_split.UE3_TAG + struct.pack('<HH', 864, 0x80e3) + b'summary.'
     return summary + chunk + b''.join(stored), summary
 
@@ -57,16 +57,51 @@ class Ue3CacheTests(unittest.TestCase):
             if oodle_calls is not None: self.assertEqual(len(self.calls), oodle_calls)
             else: self.assertTrue(self.calls)
 
+    def test_zlib_window_headers(self):
+        # Valid zlib headers vary with the window: MK11 uses 0x28 0x15.
+        body = b'TweakvarMap' * 30
+        for wide in (False, True):
+            for bits in range(9, 16):
+                with self.subTest(wide=wide, window=bits):
+                    def compress(b):
+                        z = zlib.compressobj(wbits=bits)
+                        return z.compress(b) + z.flush()
+                    d, summary = package(body, block=512, compress=compress, wide=wide)
+                    self.assertEqual(shader_split.ue3_body(d, 'tweakvars.xxx'), summary + body)
+                    self.assertFalse(self.calls, 'zlib must not be sent to Oodle')
+
     def test_only_zero_padding_can_follow_the_last_chunk(self):
         body = record(*shader(1))
-        d, summary = package(body)
-        self.assertEqual(shader_split.ue3_body(d + bytes(0x8000 - len(d)), 'p.xxx'), summary + body)
-        for tail in (b'\0', b'\0\0\0'):
-            with self.subTest(tail=tail):
-                self.assertEqual(shader_split.ue3_body(d + tail, 'p.xxx'), summary + body)
-        for tail in (b'x', b'\0x\0', b'trailing', shader_split.UE3_TAG + b'\0'):
-            with self.subTest(tail=tail), self.assertRaisesRegex(SystemExit, 'no compressed chunk'):
-                shader_split.ue3_body(d + tail, 'p.xxx')
+        for wide in (False, True):
+            d, summary = package(body, wide=wide)
+            self.assertEqual(shader_split.ue3_body(d + bytes(0x8000 - len(d)), 'p.xxx'), summary + body)
+            for tail in (b'\0', b'\0\0\0'):
+                with self.subTest(wide=wide, tail=tail):
+                    self.assertEqual(shader_split.ue3_body(d + tail, 'p.xxx'), summary + body)
+            for tail in (b'x', b'\0x\0', b'trailing', shader_split.UE3_TAG + b'\0'):
+                with self.subTest(wide=wide, tail=tail), self.assertRaisesRegex(SystemExit, 'no compressed chunk'):
+                    shader_split.ue3_body(d + tail, 'p.xxx')
+
+    def test_wide_chunks(self):
+        body = b''.join(record(*shader(i)) for i in range(3))
+        for compress in (None, zlib.compress, lambda b: b'\x8c\x0a' + b + b'pad'):
+            d, summary = package(body, compress=compress, wide=True)
+            decoded = shader_split.ue3_body(d, 'mk11.xxx')
+            self.assertEqual(decoded, summary + body)
+            self.assertEqual(len(shader_split.ue3_shaders(decoded, 'mk11.xxx')), 3)
+
+    def test_wide_truncated_table(self):
+        d, summary = package(b'a' * 128, wide=True)
+        with self.assertRaisesRegex(SystemExit, 'block table'):
+            shader_split.ue3_body(d[:len(summary) + 40], 'mk11.xxx')
+
+    def test_chunk_totals_checked(self):
+        for wide in (False, True):
+            d, summary = package(b'a' * 128, wide=wide)
+            d = bytearray(d)
+            struct.pack_into('<Q' if wide else '<I', d, len(summary) + (16 if wide else 8), 1)
+            with self.assertRaisesRegex(SystemExit, 'totals differ'):
+                shader_split.ue3_body(d, 'p.xxx')
 
     def test_records_of_both_caches(self):
         shaders = [shader(i, 0x100 + 0x80 * (i % 2)) for i in range(4)]
@@ -74,6 +109,48 @@ class Ue3CacheTests(unittest.TestCase):
         got = shader_split.ue3_shaders(d, 'g.bin')
         self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', k, c) for c, k in shaders])
         self.assertTrue(all('#UE3@' in w for w, *_ in got))   # single-stage programs (separable_pairs)
+
+    def test_control_first_records(self):
+        code, ctl = shader(1)
+        ctl = bytearray(ctl + b'compiler text' * 80)
+        struct.pack_into('<I', ctl, 0x20, len(ctl))
+        head = struct.pack('<IIII', len(ctl), len(code), 0, len(ctl))
+        data = head + ctl + code
+        self.assertEqual(shader_split.ue3_shaders(data, 'mk11.xxx'), [('mk11.xxx#UE3@10', 'ps', bytes(ctl), code)])
+        self.assertEqual(shader_split.ue3_shaders(data[:-1], 'cut.xxx'), [])
+        bad = bytearray(data); struct.pack_into('<I', bad, 12, len(ctl) - 1)
+        self.assertEqual(shader_split.ue3_shaders(bad, 'bad.xxx'), [])
+
+    def test_control_first_extra_data_and_headerless_compute(self):
+        code, ctl = shader(2)
+        ctl = bytearray(ctl + b'compiler text' * 80)
+        struct.pack_into('<I', ctl, 0x20, len(ctl))
+        struct.pack_into('<3I', ctl, 0x748, 8, 4, 1)
+        code = bytes(len(code))   # no graphics / compute code-area header
+        stored = bytes(ctl) + b'additional reflection'
+        data = struct.pack('<IIII', len(stored), len(code), 0, len(stored)) + stored + code
+        got = shader_split.ue3_shaders(data, 'mk11.xxx')
+        self.assertEqual([(st, c, k) for _, st, c, k in got], [('cs', stored, code)])
+
+    def test_unis_resolves_independent_shared_buffer_offsets(self):
+        code1, ctl1 = shader(1)
+        code2, ctl2 = shader(2)
+        header = shader_split.UE3_TAG + struct.pack('<HHI', 846, 108, 32)
+        header += b'\x10\0\0\0UniShaderBuffer\0'
+        blocks = ctl2 + ctl1, code1 + code2, b'reflection'
+        sidecar = header + bytes(0x30) + b''.join(struct.pack('<I', len(b)) + b for b in blocks)
+        buffers = shader_split.ue3_shared_buffers(sidecar, 'UniShaderBuffer-NX64.upk')
+
+        def ref(code_off, ctl_off):
+            return struct.pack('<I4s6I', 0x20, b'UNIS', 1, len(code1), code_off, len(ctl1), ctl_off, 0) + bytes(4)
+
+        cache = b'BMSG' + ref(0, len(ctl2)) + ref(len(code1), 0) + ref(0, len(ctl2))
+        got = shader_split.ue3_shared_shaders(cache, 'cache', *buffers)
+        self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', ctl1, code1), ('ps', ctl2, code2)])
+        with self.assertRaisesRegex(SystemExit, 'outside'):
+            shader_split.ue3_shared_shaders(ref(2 * len(code1), 0), 'cache', *buffers)
+        with self.assertRaisesRegex(SystemExit, 'reflection array'):
+            shader_split.ue3_shared_buffers(sidecar[:-1], 'UniShaderBuffer-NX64.upk')
 
     def test_key_skip_masks_the_compile_information(self):
         (c1, k1), (_, k2) = shader(1), shader(2)

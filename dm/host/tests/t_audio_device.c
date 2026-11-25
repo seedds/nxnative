@@ -31,15 +31,18 @@ static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *p
 #define AudioObjectGetPropertyData mock_aogpd
 static OSStatus mock_aogpds(AudioObjectID, const AudioObjectPropertyAddress *, UInt32, const void *, UInt32 *);
 #define AudioObjectGetPropertyDataSize mock_aogpds
-static AudioObjectPropertyListenerProc system_route_listener, device_route_listener;
+static AudioObjectPropertyListenerProc system_route_listener, device_route_listener, layout_route_listener;
 static OSStatus mock_route_add(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
     assert(!ctx);
     if (id == kAudioObjectSystemObject) { assert(pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice); system_route_listener = cb; }
+    else if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout) { assert(pa->mScope == kAudioObjectPropertyScopeOutput); layout_route_listener = cb; }
     else { assert(pa->mSelector == kAudioDevicePropertyStreamFormat); device_route_listener = cb; }
     return noErr;
 }
 static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAddress *pa, AudioObjectPropertyListenerProc cb, void *ctx) {
-    (void)id; (void)pa; (void)cb; (void)ctx; device_route_listener = NULL; return noErr;
+    (void)id; (void)cb; (void)ctx;
+    if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout) layout_route_listener = NULL; else device_route_listener = NULL;
+    return noErr;
 }
 #define AudioObjectAddPropertyListener mock_route_add
 #define AudioObjectRemovePropertyListener mock_route_remove
@@ -129,9 +132,33 @@ static OSStatus mock_remove(AudioUnit au, AudioUnitPropertyID id, AudioUnitPrope
 // The system's default output and its stream format (its output channels): the route the host reads. A system object, unlike the unit's CurrentDevice, which disposal clears
 enum { SYS_OUT = 100 };
 static _Atomic AudioDeviceID default_device = SYS_OUT;
+// The device's preferred speaker layout. By default a six-or-more channel route is a labelled 5.1 system, as an HDMI sink reports it; test_route_layouts sets the others
+static struct { int custom, error; AudioChannelLayoutTag tag; AudioChannelBitmap bitmap; UInt32 n; AudioChannelLabel labels[22]; } route_layout;
+static pthread_mutex_t route_layout_mu = PTHREAD_MUTEX_INITIALIZER;   // a queued route check may read the layout while the fixture changes it
+#define SET_LAYOUT(...) do { pthread_mutex_lock(&route_layout_mu); __VA_ARGS__; pthread_mutex_unlock(&route_layout_mu); } while (0)
+static UInt32 mock_layout_size(void) {
+    UInt32 n = route_layout.custom ? route_layout.n : 6;
+    return (UInt32)(offsetof(AudioChannelLayout, mChannelDescriptions) + n * sizeof(AudioChannelDescription));
+}
+static void mock_layout(AudioChannelLayout *l) {
+    static const AudioChannelLabel five_one[6] = {kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center, kAudioChannelLabel_LFEScreen, kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround};
+    memset(l, 0, mock_layout_size());
+    l->mChannelLayoutTag = route_layout.custom ? route_layout.tag : kAudioChannelLayoutTag_UseChannelDescriptions;
+    l->mChannelBitmap = route_layout.custom ? route_layout.bitmap : 0;
+    l->mNumberChannelDescriptions = route_layout.custom ? route_layout.n : 6;
+    for (UInt32 i = 0; i < l->mNumberChannelDescriptions; i++) l->mChannelDescriptions[i].mChannelLabel = route_layout.custom ? route_layout.labels[i] : five_one[i];
+}
 static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz, void *data) {
-    (void)q; (void)qd; (void)sz;
+    (void)q; (void)qd;
     if (pa->mSelector == kAudioHardwarePropertyDefaultOutputDevice) { assert(id == kAudioObjectSystemObject); *(AudioDeviceID *)data = default_device; return noErr; }
+    if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout) {
+        assert(pa->mScope == kAudioObjectPropertyScopeOutput);
+        pthread_mutex_lock(&route_layout_mu);
+        OSStatus st = route_layout.error ? route_layout.error : *sz < mock_layout_size() ? kAudioHardwareBadPropertySizeError : noErr;
+        if (!st) { *sz = mock_layout_size(); mock_layout(data); }
+        pthread_mutex_unlock(&route_layout_mu);
+        return st;
+    }
     if (pa->mSelector == kAudioDevicePropertyStreamFormat) {
         assert((id == SYS_OUT || id == SYS_OUT + 1) && pa->mScope == kAudioObjectPropertyScopeOutput);
         AudioStreamBasicDescription f = {.mChannelsPerFrame = (UInt32)unit.route_ch}; memcpy(data, &f, sizeof f); return noErr;
@@ -139,7 +166,14 @@ static OSStatus mock_aogpd(AudioObjectID id, const AudioObjectPropertyAddress *p
     return kAudioHardwareUnknownPropertyError;   // no device name (DM_AUDIO_DEVICE is unset in this test)
 }
 static OSStatus mock_aogpds(AudioObjectID id, const AudioObjectPropertyAddress *pa, UInt32 q, const void *qd, UInt32 *sz) {
-    (void)id; (void)pa; (void)q; (void)qd; (void)sz; return kAudioHardwareUnknownPropertyError;   // device lists: none (DM_AUDIO_DEVICE is unset here)
+    (void)id; (void)q; (void)qd;
+    if (pa->mSelector == kAudioDevicePropertyPreferredChannelLayout) {
+        pthread_mutex_lock(&route_layout_mu);
+        OSStatus st = route_layout.error; if (!st) *sz = mock_layout_size();
+        pthread_mutex_unlock(&route_layout_mu);
+        return st;
+    }
+    return kAudioHardwareUnknownPropertyError;   // device lists: none (DM_AUDIO_DEVICE is unset here)
 }
 static OSStatus mock_init(AudioUnit au) { assert(au == fake_au()); return unit.init_error; }
 static dispatch_semaphore_t start_entered, start_allowed, guest_returned, device_stopped, guest_closed, device_disposed;
@@ -287,6 +321,66 @@ static void test_route_without_output(void) {
     until = now_ns() + NSEC_PER_SEC;
     while (dm_audio_route() != 2 && now_ns() < until) usleep(1000);
     assert(dm_audio_route() == 2);
+}
+// The route is 5.1 only when the device's speaker layout says so, whatever its channel count (issue 3263)
+static int route_with_labels(int channels, UInt32 n, const AudioChannelLabel *labels) {
+    SET_LAYOUT(memset(&route_layout, 0, sizeof route_layout);
+               route_layout.custom = 1; route_layout.tag = kAudioChannelLayoutTag_UseChannelDescriptions; route_layout.n = n;
+               for (UInt32 i = 0; i < n; i++) route_layout.labels[i] = labels ? labels[i] : kAudioChannelLabel_Unknown);
+    unit.route_ch = channels;
+    return dm_audio_output_channels();
+}
+static void test_route_layouts(void) {
+    enum { L = kAudioChannelLabel_Left, R = kAudioChannelLabel_Right, C = kAudioChannelLabel_Center, LFE = kAudioChannelLabel_LFEScreen,
+           LS = kAudioChannelLabel_LeftSurround, RS = kAudioChannelLabel_RightSurround,
+           LSD = kAudioChannelLabel_LeftSurroundDirect, RSD = kAudioChannelLabel_RightSurroundDirect,
+           RL = kAudioChannelLabel_RearSurroundLeft, RR = kAudioChannelLabel_RearSurroundRight,
+           U = (int)kAudioChannelLabel_Unknown };
+    assert(layout_route_listener);
+    // An audio interface: discrete outputs, unlabelled or with stereo monitors on the first two
+    assert(route_with_labels(22, 22, NULL) == 2);
+    AudioChannelLabel monitors[22] = {L, R}; for (int i = 2; i < 22; i++) monitors[i] = (AudioChannelLabel)U;
+    assert(route_with_labels(22, 22, monitors) == 2);
+    assert(route_with_labels(6, 6, NULL) == 2);
+    const AudioChannelLabel no_center[6] = {L, R, U, LFE, LS, RS}, no_back[6] = {L, R, C, LFE, U, U}, one_back[6] = {L, R, C, LFE, LS, U};
+    assert(route_with_labels(6, 6, no_center) == 2 && route_with_labels(6, 6, no_back) == 2 && route_with_labels(6, 6, one_back) == 2);
+    // Layouts whose surround labels Core Audio's ChannelMap leaves unmapped stay stereo
+    const AudioChannelLabel mixed_back[6] = {L, R, C, LFE, LS, RR};
+    const AudioChannelLabel unmapped_71[8] = {L, R, C, LFE, LSD, RSD, RL, RR};
+    assert(route_with_labels(6, 6, mixed_back) == 2 && route_with_labels(8, 8, unmapped_71) == 2);
+    // Surround systems: HDMI's order, rear speakers, 5.0 (five or six channels), and 5.1 on non-front outputs of an interface
+    const AudioChannelLabel hdmi[8] = {L, R, LFE, C, LS, RS, RL, RR}, rear[6] = {L, R, C, LFE, RL, RR}, five[5] = {L, R, C, LS, RS};
+    assert(route_with_labels(8, 8, hdmi) == 6 && route_with_labels(6, 6, rear) == 6);
+    assert(route_with_labels(6, 5, five) == 6 && route_with_labels(5, 5, five) == 6);
+    AudioChannelLabel offset_51[22]; for (int i = 0; i < 22; i++) offset_51[i] = (AudioChannelLabel)U;
+    offset_51[2] = L; offset_51[3] = R; offset_51[4] = C; offset_51[5] = LFE; offset_51[6] = LS; offset_51[7] = RS;
+    assert(route_with_labels(22, 22, offset_51) == 6);
+    // Mapped speakers must fall within the stream's output channels
+    assert(route_with_labels(2, 8, hdmi) == 2 && route_with_labels(4, 8, hdmi) == 2);
+    const AudioChannelLabel past_six[8] = {L, R, C, LFE, U, U, LS, RS};
+    assert(route_with_labels(6, 8, past_six) == 2 && route_with_labels(8, 8, past_six) == 6);
+    // Standard layouts and bitmaps
+    route_with_labels(6, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_MPEG_5_1_A); assert(dm_audio_output_channels() == 6);
+    route_with_labels(5, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_MPEG_5_0_A); assert(dm_audio_output_channels() == 6);
+    route_with_labels(6, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_Stereo); assert(dm_audio_output_channels() == 2);
+    route_with_labels(22, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_DiscreteInOrder | 22); assert(dm_audio_output_channels() == 2);
+    route_with_labels(7, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_DTS_6_1_B); assert(dm_audio_output_channels() == 2);
+    route_with_labels(6, 0, NULL); SET_LAYOUT(route_layout.tag = kAudioChannelLayoutTag_UseChannelBitmap;
+               route_layout.bitmap = kAudioChannelBit_Left | kAudioChannelBit_Right | kAudioChannelBit_Center | kAudioChannelBit_LFEScreen | kAudioChannelBit_LeftSurround | kAudioChannelBit_RightSurround);
+    assert(dm_audio_output_channels() == 6);
+    SET_LAYOUT(route_layout.bitmap = kAudioChannelBit_Left | kAudioChannelBit_Right); assert(dm_audio_output_channels() == 2);
+    // A device with no readable layout stays audible as stereo
+    route_with_labels(8, 8, hdmi); SET_LAYOUT(route_layout.error = kAudioHardwareUnknownPropertyError);
+    assert(dm_audio_output_channels() == 2);
+    // A speaker change reaches the route through the layout listener
+    route_with_labels(8, 8, hdmi); assert(dm_audio_output_channels() == 6 && dm_audio_route() == 6);
+    SET_LAYOUT(route_layout.labels[3] = kAudioChannelLabel_Unknown);
+    AudioObjectPropertyAddress pa = {kAudioDevicePropertyPreferredChannelLayout, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain};
+    layout_route_listener(SYS_OUT, 1, &pa, NULL);
+    uint64_t until = now_ns() + NSEC_PER_SEC;
+    while (dm_audio_route() != 2 && now_ns() < until) usleep(1000);
+    assert(dm_audio_route() == 2);
+    SET_LAYOUT(memset(&route_layout, 0, sizeof route_layout)); unit.route_ch = 2; dm_audio_route_changed();
 }
 static void wait_for_phase(aout *a, int phase) {
     uint64_t until = now_ns() + 3 * NSEC_PER_SEC;
@@ -551,6 +645,7 @@ int main(void) {
     aout failed = {.ch = 2};
     assert(au_create(&failed, 2) == kAudioUnitErr_FailedInitialization && !failed.au && unit.disposals == 13);
     unit.init_error = 0; test_sink_route();
+    test_route_layouts();
     puts("audio device: buffer configuration, blocked start, callback handoff, retry and lifecycle passed");
     return 0;
 }

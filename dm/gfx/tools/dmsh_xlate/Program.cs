@@ -23,7 +23,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-static class SwshXlate
+static partial class SwshXlate
 {
     // NVN's handle tables in c[2], byte offsets, 8 bytes per slot (one layout in every game, see dm/gfx/tools/dmsh_build.py): combined textures 0x20 + 8 r, images 0x120 + 8 r (8 slots),
     // separate textures 0x168 + 8 r (slot 128 + r), separate samplers 0x568 + 8 r
@@ -73,6 +73,7 @@ static class SwshXlate
         public int[] QueryAmpereComputeC0Layout() => _job["nvn2_cs"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;
         public int QueryAmpereStageBank() => _job["stage_bank"] is JsonNode b ? (int)b : -1;   // an NVN2 graphics stage's own bank, its push block 1 + stage index (dmsh_build.py job_for)
         public int[] QueryAmpereStageMemory() => _job["stage_memory"] is JsonArray l ? l.Select(v => (int)v).ToArray() : null;   // a task or mesh shader (dmsh_meshstage.py)
+        public int QueryAmpereStageInputWords() => _job["stage_input_words"] is JsonNode n ? (int)n : 0;   // a mesh shader's spilled task payload (dmsh_meshstage.py)
         public uint ConstantBuffer1Read(int offset) { if (offset >= 0 && offset + 4 <= _c1.Length) return BitConverter.ToUInt32(_c1, offset); Notes.Add($"c1 read out of bounds +{offset:X} (c1 length {_c1.Length})"); return 0; }
         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
         // The translator's own messages (a bindless read it resolved, or could not and removed, its result 0; an invalid encoding) go into the notes, marked, which dmsh_build.py counts apart
@@ -203,11 +204,9 @@ static class SwshXlate
 
     static int Main(string[] args)
     {
-        if (args.Length == 1 && args[0] == "--source-sha")   // first 16 digits of the sha256 of the embedded Program.cs + csproj (same convention as dmsh_chain.py)
+        if (args.Length == 1 && args[0] == "--source-sha")   // stamped at publish time from dmsh_chain.py --xlate-source-sha
         {
-            var asm = typeof(SwshXlate).Assembly; var ms = new MemoryStream();
-            foreach (var n in new[] { "src0", "src1" }) asm.GetManifestResourceStream(n).CopyTo(ms);
-            Console.WriteLine(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(ms.ToArray()))[..16].ToLowerInvariant());
+            Console.WriteLine(SourceSha);
             return 0;
         }
         var jobs = JsonNode.Parse(File.ReadAllText(args[0])).AsArray(); string outDir = args[1]; Directory.CreateDirectory(outDir);

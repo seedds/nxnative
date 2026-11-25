@@ -131,14 +131,18 @@ static void count_one(nvn_hmap *m, const void *o, int d) {
     else if (n > 1) nvn_hm_put(m, &k, (void *)(n - 1));
     else if (n) { nvn_hm_del(m, &k); retire_resume(o); gone_note(o); }   // a slot written past these helpers (a test's table) was never counted: nothing to take away
 }
-// An entry that holds a view holds the textures the view is of as well, and they are counted with it: an sRGB / linear twin's serial holds a view of the shared texture
-// (tex_mtl_), so that texture is in use as long as the twin's entry is. Counted alone, the view left its parent looking unheld: a takeover evicted it under a live twin
-// (alias_take_over), and its retirement took it out of the residency set while pool tables still named the view (GitHub issue #2125). A view's parent never changes, so
-// what an entry adds it takes away
+// An entry that holds a view holds the textures the view is of and any backing pool buffer as well, and they are counted with it: an sRGB / linear twin's serial holds a view of the
+// shared texture (tex_mtl_), and a buffer or linear texture holds its pool's buffer, so neither can leave the residency set while an entry still names it. Counted alone, a view left
+// its parent looking unheld (GitHub issue #2125), and a buffer-backed texture left its replaced sparse-pool run buffer looking unheld (GitHub issue #3229). A texture's parent chain
+// and backing buffer never change, so what an entry adds it takes away
 static void count_add(nvn_hmap *m, const void *o, int d) {
     count_one(m, o, d);
     id t = (__bridge id)o;
-    if (t && [t respondsToSelector:@selector(parentTexture)]) for (id<MTLTexture> p = ((id<MTLTexture>)t).parentTexture; p; p = p.parentTexture) count_one(m, (__bridge void *)p, d);
+    if (t && [t respondsToSelector:@selector(parentTexture)]) {
+        id<MTLTexture> root = (id<MTLTexture>)t;
+        for (id<MTLTexture> p = root.parentTexture; p; p = p.parentTexture) { root = p; count_one(m, (__bridge void *)p, d); }
+        if ([root respondsToSelector:@selector(buffer)] && root.buffer) count_one(m, (__bridge void *)root.buffer, d);
+    }
 }
 static void held_add(const void *o, int d) { count_add(&g_by_serial_held, o, d); }
 static void ghost_held_add(const void *o, int d) { count_add(&g_ghost_held, o, d); }
@@ -612,9 +616,49 @@ void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {
         uint64_t k; memcpy(&k, tables[j]->keys + (size_t)i * 8, 8); fn(k, (__bridge id)tables[j]->vals[i], j);
     }
 }
-static void expect_one(CFMutableDictionaryRef want, id o) {   // o, and each texture it is a view of, once more
-    for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil)
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial)) {
+    uint32_t n = 0;
+    for (int j = 0; j < 2; j++) {   // the keys first, then the deletes (a delete moves entries)
+        nvn_hmap *t = j ? &g_ghost : &g_by_serial; uint64_t *ks = NULL; uint32_t nk = 0;
+        for (uint32_t i = 0; i < t->cap; i++) {
+            if (!t->vals[i] || !gone((__bridge id)t->vals[i])) continue;
+            uint64_t *nks = realloc(ks, (nk + 1) * sizeof *ks); if (!nks) ODIE("the dropped serials"); ks = nks; memcpy(&ks[nk++], t->keys + (size_t)i * 8, 8);
+        }
+        for (uint32_t i = 0; i < nk; i++) { if (j) ghost_del_locked(ks[i]); else live_del_locked(ks[i]); if (each) each(ks[i]); }
+        n += nk; free(ks);
+    }
+    return n;
+}
+void own_drop_object(id obj) {
+    if (!obj) return;
+    pthread_mutex_lock(&g_smu);
+    CFMutableSetRef gone = CFSetCreateMutable(NULL, 0, NULL);
+    if (!gone) ODIE("the dropped texture set");
+    CFSetAddValue(gone, (__bridge const void *)obj);
+    uint64_t *sers = NULL; uint32_t nsers = 0;
+    drop_entries_naming_locked(gone, 1, 1, &sers, &nsers);
+    free(sers);
+    CFRelease(gone);
+    uint32_t n = 0; alias_key *ks = NULL;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (g_alias.vals[i] != (__bridge void *)obj) continue;
+        alias_key *nk = realloc(ks, (n + 1) * sizeof *nk); if (!nk) ODIE("the dropped shared keys");
+        ks = nk; memcpy(&ks[n++], g_alias.keys + (size_t)i * g_alias.klen, sizeof *ks);
+    }
+    for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
+    free(ks);
+    pthread_mutex_unlock(&g_smu);
+}
+static void expect_one(CFMutableDictionaryRef want, id o) {   // o, each texture it is a view of, and any backing buffer, once more
+    id last = nil;
+    for (; o; o = [o respondsToSelector:@selector(parentTexture)] ? ((id<MTLTexture>)o).parentTexture : nil) {
+        last = o;
         CFDictionarySetValue(want, (__bridge const void *)o, (const void *)((uintptr_t)CFDictionaryGetValue(want, (__bridge const void *)o) + 1));
+    }
+    if (last && [last respondsToSelector:@selector(buffer)]) {
+        id buf = ((id<MTLTexture>)last).buffer;
+        if (buf) CFDictionarySetValue(want, (__bridge const void *)buf, (const void *)((uintptr_t)CFDictionaryGetValue(want, (__bridge const void *)buf) + 1));
+    }
 }
 static int counts_match(const char *what, CFMutableDictionaryRef want, const nvn_hmap *held, char *why, size_t n) {
     for (uint32_t i = 0; i < held->cap; i++) {

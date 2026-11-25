@@ -1,6 +1,6 @@
 // nn::friends (friends / presence / invitations, out of scope): every interface that connects to the friends service is cut to "unavailable".
 // Not cut: the getters of Friend / Profile / FriendPresence and the constructors of Friend / Profile / UserPresence (they only read and write the game's own objects and do not go through the service).
-// Unless stated otherwise, Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
+// Unless stated otherwise (presence and the notification queue are local and succeed), Result returns RES_FAIL; bool returns false; event pointers get a SystemEvent that is bound to a kernel event and never fires.
 #include "hle.h"
 
 // Notification event that never fires (GetSystemEvent-style calls return a pointer; bound on the guest thread on first use)
@@ -13,19 +13,35 @@ HLE_FORCE("_ZN2nn7friends12AsyncContextC1Ev", "async context creates no session 
 HLE_FORCE("_ZN2nn7friends12AsyncContextD1Ev", "async context has no session to close (cut)", void, h_fr_AcDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", "completion event fires immediately (cut)", Result, h_fr_AcGetEv, void *self, void *ev) { (void)self; hle_signal_system_event(ev); return RES_OK; }
 HLE_FORCE("_ZNK2nn7friends12AsyncContext9GetResultEv", "async result always fails (cut)", Result, h_fr_AcResult, const void *self) { (void)self; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends12AsyncContext6CancelEv", "async context has nothing to cancel (cut)", Result, h_fr_AcCancel, void *self) { (void)self; return RES_OK; }
 // Lists / profiles / play history
 HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendEiiRKNS0_12FriendFilterE", "friend list is empty (cut)", Result, h_fr_GetFriendList, int *count, void *out, int off, int n, const void *filt) {
     (void)out; (void)off; (void)n; (void)filt; if (count) *count = 0; return RES_FAIL;
 }
+HLE_FORCE("_ZN2nn7friends25EnsureFriendListAvailableEPNS0_12AsyncContextE", "friend list (cut): the request fails at once", Result, h_fr_ListEnsureNoUid, void *ctx) { (void)ctx; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends27CheckFriendListAvailabilityEPb", "friend list unavailable (cut)", Result, h_fr_ListAvailNoUid, uint8_t *out) { if (out) *out = 0; return RES_OK; }
 // Blocked users, SDK 4's overload without a Uid: an empty list and success. Dark Souls Remastered asks after the opening movie and turns a failure into an error for the error applet
 // (main+0x8ff9f0). The Uid overload below reports a failure, which DRAGON QUEST XI S takes as it is
 HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAccountIdEii", "blocked user list is empty (cut)", Result, h_fr_GetBlocked4, int *count, void *out, int off, int n) {
     (void)out; (void)off; (void)n; if (count) *count = 0; return RES_OK;
 }
+// Blocked-user list availability (SUPER BOMBERMAN R 2 1.0.0 calls EnsureBlockedUserListAvailable(ctx) at the title screen, aborting 0xe15 when the SDK opens friend:u)
+HLE_FORCE("_ZN2nn7friends30EnsureBlockedUserListAvailableEPNS0_12AsyncContextE", "blocked user list (cut): the request fails at once", Result, h_fr_BlockedEnsureNoUid, void *ctx) { (void)ctx; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends30EnsureBlockedUserListAvailableEPNS0_12AsyncContextERKNS_7account3UidE", "blocked user list (cut): the request fails at once",
+          Result, h_fr_BlockedEnsure, void *ctx, const void *uid) { (void)ctx; (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends32CheckBlockedUserListAvailabilityEPb", "blocked user list unavailable (cut)", Result, h_fr_BlockedAvailNoUid, uint8_t *out) { if (out) *out = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends32CheckBlockedUserListAvailabilityEPbRKNS_7account3UidE", "blocked user list unavailable (cut)", Result, h_fr_BlockedAvail, uint8_t *out, const void *uid) {
+    (void)uid; if (out) *out = 0; return RES_OK;
+}
 HLE_FORCE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileERKNS_7account3UidEPKNS5_23NetworkServiceAccountIdEi", "profile query fails (cut)",
           Result, h_fr_GetProfileList, void *ctx, void *out, const void *uid, const void *ids, int n) { (void)ctx; (void)out; (void)uid; (void)ids; (void)n; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends14GetProfileListEPNS0_12AsyncContextEPNS0_7ProfileEPKNS_7account23NetworkServiceAccountIdEi", "profile query fails (cut)",
+          Result, h_fr_GetProfileListNoUid, void *ctx, void *out, const void *ids, int n) { (void)ctx; (void)out; (void)ids; (void)n; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendERKNS_7account3UidEPKNS3_23NetworkServiceAccountIdEi", "friend info update fails (cut)",
           Result, h_fr_UpdateFriendInfo, void *f, const void *uid, const void *ids, int n) { (void)f; (void)uid; (void)ids; (void)n; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends16UpdateFriendInfoEPNS0_6FriendEPKNS_7account23NetworkServiceAccountIdEi", "friend info update fails (cut)",
+          Result, h_fr_UpdateFriendInfoNoUid, void *f, const void *ids, int n) { (void)f; (void)ids; (void)n; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends6Friend6UpdateEv", "friend info update fails (cut)", Result, h_fr_FriendUpdate, void *self) { (void)self; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameES6_", "play history is not registered (cut)",
           Result, h_fr_AddPlayHistory, const void *k, const void *a, const void *b) { (void)k; (void)a; (void)b; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegistrationKeyERKNS_7account3UidEb", "play history key unavailable (cut)",
@@ -37,9 +53,15 @@ HLE_FORCE("_ZN2nn7friends29GetPlayHistoryRegistrationKeyEPNS0_26PlayHistoryRegis
 // Notification queue
 HLE_FORCE("_ZN2nn7friends17NotificationQueueC1Ev", "notification queue creates no session (cut)", void, h_fr_NqCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueueD1Ev", "notification queue has no session to close (cut)", void, h_fr_NqDtor, void *self) { (void)self; }
-HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeERKNS_7account3UidE", "notification queue init fails (cut)", Result, h_fr_NqInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }
+// Notification queue: a console without a connection opens one too (friend:u's notification service is local; it only queues what the friends daemon receives), and it stays empty.
+// Initialize succeeds, Pop finds nothing, Clear succeeds, the event never fires. Beach Buggy Racing 2 takes a failed Initialize as a failed start-up ("Unable to init game.",
+// then exit(-1): VuGameServices init at main+0x584); see services.md, "The friends notification queue opens offline"
+HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeERKNS_7account3UidE", "notification queue opens, stays empty (cut)", Result, h_fr_NqInit, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends17NotificationQueue10InitializeEv", "notification queue opens, stays empty (cut)", Result, h_fr_NqInitNoUid, void *self) { (void)self; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends17NotificationQueue8FinalizeEv", "notification queue has no session to close (cut)", void, h_fr_NqFini, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7friends17NotificationQueue14GetSystemEventEv", "notification event never fires (cut)", void *, h_fr_NqGetEv, void *self) { (void)self; return quiet_event(g_ev_notify); }
 HLE_FORCE("_ZN2nn7friends17NotificationQueue3PopEPNS0_16NotificationInfoE", "notification queue is always empty (cut)", Result, h_fr_NqPop, void *self, void *info) { (void)self; (void)info; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends17NotificationQueue5ClearEv", "notification queue is already empty (cut)", Result, h_fr_NqClear, void *self) { (void)self; return RES_OK; }
 // Invitations
 HLE_FORCE("_ZN2nn7friends36GetFriendInvitationNotificationEventEv", "invitation notification event never fires (cut)", void *, h_fr_InvEv, void) { return quiet_event(g_ev_invite); }
 HLE_FORCE("_ZN2nn7friends38TryPopFriendInvitationNotificationInfoEPNS_7account3UidEPmPvm", "no invitations (cut)", int, h_fr_InvPop, void *uid, uint64_t *sz, void *buf, size_t n) {
@@ -63,9 +85,12 @@ HLE_FORCE("_ZN2nn7friends18GetBlockedUserListEPiPNS_7account23NetworkServiceAcco
           Result, h_fr_GetBlocked, int *count, void *out, const void *uid, int off, int n) { (void)out; (void)uid; (void)off; (void)n; if (count) *count = 0; return RES_FAIL; }
 // Online play sessions (DRAGON QUEST XI S)
 HLE_FORCE("_ZN2nn7friends28DeclareOpenOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_OpenSession, const void *uid) { (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends28DeclareOpenOnlinePlaySessionEv", "online play session unavailable (cut)", Result, h_fr_OpenSessionNoUid, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends29DeclareCloseOnlinePlaySessionERKNS_7account3UidE", "online play session unavailable (cut)", Result, h_fr_CloseSession, const void *uid) { (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends29DeclareCloseOnlinePlaySessionEv", "online play session unavailable (cut)", Result, h_fr_CloseSessionNoUid, void) { return RES_FAIL; }
 // A user's own presence succeeds offline. The host accepts initialization, description and commit without publishing to the friends service.
 // Returning failure here can stop a game's startup; see services.md, "Friends presence is accepted offline".
 HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "presence accepted, not published (cut)", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
+HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeEv", "presence accepted, not published (cut)", Result, h_fr_UpInitNoUid, void *self) { (void)self; return RES_OK; }
 HLE_FORCE("_ZN2nn7friends12UserPresence14SetDescriptionEPKc", "presence accepted, not published (cut)", Result, h_fr_UpDesc, void *self, const char *s) { (void)self; (void)s; return RES_OK; }
 HLE_FORCE("_ZN2nn7friends12UserPresence6CommitEv", "presence accepted, not published (cut)", Result, h_fr_UpCommit, void *self) { (void)self; return RES_OK; }

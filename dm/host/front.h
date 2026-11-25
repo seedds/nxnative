@@ -15,6 +15,8 @@ void front_run(void (*guest)(void));
 void *front_metal_layer(void);
 // The highest refresh rate of the screen the game is shown on in Hz, 0 = not known (front_mac.m: the window's screen; front_ios.m: the game view's screen, 60 in Low Power Mode). Any thread
 int front_screen_max_fps(void);
+// The screen's native refresh rate before front_screen_match temporarily switched it to a lower fixed rate in fullscreen (front_mac.m; on iOS, same as front_screen_max_fps). Any thread
+int front_screen_capable_fps(void);
 // The pixel size of the display the game is shown on: on the Mac the window's screen in its current mode (the main display before the window is up) (a scaled Retina mode's pixels), an iPhone's or iPad's screen (nativeBounds).
 // Returns 0 and leaves w, h alone when not known (no front end: graphics unit tests). Any thread
 int front_display_pixels(int *w, int *h);
@@ -23,6 +25,10 @@ int front_screen_variable_refresh(void);
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);
+// Whether startup fullscreen or a screen mode switch is still settling, so the display link waits before starting (front_mac.m; none on iOS). Any thread
+int front_screen_settling(void);
+// Whether no part of the window is on screen (other windows over it, another Space; front_mac.m; none on iOS). Any thread
+int front_window_covered(void);
 // The shape of the picture the game presents (nvn_mtl.m present_now, present_shape: the layer's, not the crop's, w x h), called when its width / height changes: the front end
 // lays the picture out in that shape instead of 16:9, so a profile with screen_aspect under DM_SCREEN_ASPECT (1920x1344) fills a 1.43:1 screen and touches map onto the picture
 // as drawn. Before the first call the picture is 16:9. Called from the present thread; the front end switches to its main thread and does not block
@@ -90,7 +96,7 @@ void front_web_show(void);
 void front_web_send(const char *msg, size_t n);
 void front_web_close(void);
 void front_web_shot(const char *path);
-// The front end's reports (any thread): a content message from the page (nx.sendMessage); the page ended (exit reason 0 end, 1 back, 3 callback URL; url NULL = none); it could not be loaded
+// The front end's reports (any thread): a content message from the page (nx.sendMessage); the page ended (exit reason 0 end, 1 back, 3 callback URL, 4 window.close; url NULL = none); it could not be loaded
 void dm_web_message(const char *msg, size_t n);
 void dm_web_ended(uint32_t reason, const char *url);
 void dm_web_failed(const char *why);

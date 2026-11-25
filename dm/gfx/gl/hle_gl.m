@@ -130,7 +130,7 @@ enum {
     GL_SAMPLER_3D, GL_SAMPLER_CUBE, GL_SAMPLER_2D_SHADOW = 0x8b62, GL_TEXTURE_2D_ARRAY = 0x8c1a, GL_TEXTURE_BINDING_2D_ARRAY = 0x8c1d,
     GL_READ_FRAMEBUFFER = 0x8ca8, GL_DRAW_FRAMEBUFFER, GL_READ_FRAMEBUFFER_BINDING, GL_RENDERBUFFER_SAMPLES, GL_FRAMEBUFFER_COMPLETE = 0x8cd5, GL_MAX_COLOR_ATTACHMENTS = 0x8cdf,
     GL_RENDERBUFFER_WIDTH = 0x8d42, GL_RENDERBUFFER_HEIGHT, GL_RENDERBUFFER_INTERNAL_FORMAT, GL_FRAMEBUFFER_SRGB = 0x8db9, GL_SAMPLER_2D_ARRAY = 0x8dc1,
-    GL_UNSIGNED_INT_VEC2 = 0x8dc6, GL_UNSIGNED_INT_VEC3, GL_UNSIGNED_INT_VEC4, GL_TEXTURE_SWIZZLE_R = 0x8e42, GL_TEXTURE_SWIZZLE_A = 0x8e45,
+    GL_UNSIGNED_INT_VEC2 = 0x8dc6, GL_UNSIGNED_INT_VEC3, GL_UNSIGNED_INT_VEC4, GL_TEXTURE_SWIZZLE_R = 0x8e42, GL_TEXTURE_SWIZZLE_A = 0x8e45, GL_TEXTURE_SWIZZLE_RGBA = 0x8e46,
     GL_ALREADY_SIGNALED = 0x911a, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED, GL_CONTEXT_PROFILE_MASK = 0x9126,
 };
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x8
@@ -139,6 +139,7 @@ enum {
 #define GL_DEPTH_BUFFER_BIT 0x100
 #define GL_STENCIL_BUFFER_BIT 0x400
 #define NGL_COLORS 8
+#define NUNITS 96
 
 static uint32_t umin(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static uint32_t umax(uint32_t a, uint32_t b) { return a > b ? a : b; }
@@ -174,7 +175,7 @@ static int is_samp(int t) { return t >= T_SAMP2D && t < T_OTHER; }
 static int is_intt(int t) { return t >= T_INT && t <= T_BOOL; }
 typedef struct { char name[48]; uint8_t slot, type; } shattr;                         // a vertex input
 typedef struct { char name[48]; uint16_t off, count, stride; uint8_t type; } shuni;   // a default block member (count 0 = not an array)
-typedef struct { char name[48]; uint16_t slot; uint8_t type; int sampler; } shsamp;   // a combined sampler: separate texture and sampler argument IDs
+typedef struct { char name[48]; uint16_t slot; uint8_t type; int sampler; uint8_t unit; } shsamp;   // a combined sampler: texture/sampler argument IDs and optional layout(binding) unit
 typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;               // a named uniform block: its argument ID and size
 typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
 static shinfo *g_sh; static int g_nsh;
@@ -205,9 +206,13 @@ static int sh_read_row(char *line, shinfo *s) {
             shattr *x = &s->a[s->na++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->type = tcode(ty);
         } else if (t[0] == 'u' && (unsigned)s->nu < (unsigned)nu && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
             shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
-        } else if (t[0] == 't' && (unsigned)s->nt < (unsigned)nt && sscanf(t, "t:%63[^=]=%u:%d:%31s", nm, &a1, &sa, ty) == 4) {
-            if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs) { bad = 1; continue; }
-            shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty);
+        } else if (t[0] == 't' && (unsigned)s->nt < (unsigned)nt) {
+            unsigned unit = 0; int end4 = 0, end5 = 0;
+            int n = sscanf(t, "t:%63[^=]=%u:%d:%31[^:]%n:%u%n", nm, &a1, &sa, ty, &end4, &unit, &end5);
+            if ((n == 4 && !t[end4]) || (n == 5 && !t[end5])) {
+                if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs || unit >= NUNITS) { bad = 1; continue; }
+                shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty); x->unit = (uint8_t)unit;
+            }
         } else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) {
             if (a1 >= (unsigned)s->nargs) { bad = 1; continue; } s->ub_slot = a1; s->ub_size = a2;
         } else if (t[0] == 'n' && (unsigned)s->nb < (unsigned)nb && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3) {
@@ -466,7 +471,6 @@ static int sp_check(GLuint n, int prog, const char *fn) {
 // ---------- Context state ----------
 // units: as many as GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS says (LÖVE binds a texture of each type to every one at start); fb / read_fb: the draw and read framebuffers;
 // va: each attribute's current value (glVertexAttrib4f), what a vertex input reads when its array is disabled: LÖVE's VertexColor and ConstantColor
-#define NUNITS 96
 // A face's stencil state: GL keeps one for front faces and one for back faces (glStencilFuncSeparate, glStencilOpSeparate, glStencilMaskSeparate); glStencilFunc / Op / Mask set both
 typedef struct { GLenum func, fail, zfail, pass; GLint ref; GLuint mask, wmask; } stface_t;
 #define STFACE0 {0x207 /* ALWAYS */, GL_KEEP, GL_KEEP, GL_KEEP, 0, 0xffffffff, 0xffffffff}
@@ -2076,19 +2080,30 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 // ---------- Sync objects ----------
 // A fence is the serial of the command buffer being recorded when it was made, signalled when that command buffer completes (g_ev). LÖVE fences each third of its stream
 // buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
-// magic: a sync this layer made and has not deleted (glIsSync; DOOM 3 asks before it waits on or deletes one)
-#define SYNC_MAGIC 0x676c7379u
-typedef struct { uint32_t magic; uint64_t serial; } sync_t;
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) { (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->magic = SYNC_MAGIC; s->serial = g_serial; return s; }
-GL(glDeleteSync, void, void *s) { if (s) ((sync_t *)s)->magic = 0; free(s); }
-GL(glIsSync, uint32_t, void *s) { return s && ((sync_t *)s)->magic == SYNC_MAGIC; }
+// A sync is a name, as in GL: a value this layer handed out and has not deleted, which the set of live syncs answers without reading through the value (glIsSync; DOOM 3 asks before it
+// waits on or deletes one). A value that never was a sync, or one deleted already, is GL_INVALID_VALUE and is neither written nor freed (OpenGL 4.6, section 4.1). Read through, a
+// GLsync that NVN's nvnSyncCreateGLSync (not implemented) left unwritten was freed as if it were a block of ours: libmalloc's abort at boot (GitHub issue #2835)
+typedef struct { uint64_t serial; } sync_t;
+static CFMutableSetRef g_syncs;   // the live syncs, by address (no retain callbacks)
+static int sync_live(const void *s) { return s && g_syncs && CFSetContainsValue(g_syncs, s); }
+GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
+    (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial;
+    if (!g_syncs) g_syncs = CFSetCreateMutable(NULL, 0, NULL);
+    CFSetAddValue(g_syncs, s); return s;
+}
+GL(glDeleteSync, void, void *s) {   // frees the set's own entry, a block glFenceSync made, never what the caller passed
+    const void *own = NULL; if (!s) return;
+    if (!g_syncs || !CFSetGetValueIfPresent(g_syncs, s, &own)) { gl_error(GL_INVALID_VALUE); return; }
+    CFSetRemoveValue(g_syncs, own); free((void *)own);
+}
+GL(glIsSync, uint32_t, void *s) { return sync_live(s); }
 GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
 // glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads
 // them next. Nothing here writes from a shader, the buffers are shared memory, and the command buffers run in order: there is nothing to wait for
 GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
-    if (!s) return 0x911d;   // WAIT_FAILED
+    if (!sync_live(s)) { gl_error(GL_INVALID_VALUE); return 0x911d; }   // WAIT_FAILED: no sync object
     if (g_ev.signaledValue >= s->serial) return GL_ALREADY_SIGNALED;
     if (s->serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;
@@ -2293,6 +2308,10 @@ static int samp_param(samp_p *s, GLenum p, const float *v) {
     }
     return 0;
 }
+static void tex_set_swz(tex_t *t, int c, GLint s) {   // fixed once the texture is made (tex_make)
+    if (t->made && t->swz[c] != s) RED1("texture swizzle changed after the texture was made: ignored");
+    t->swz[c] = s;
+}
 // glTexParameter*: v as floats, from an integer or a float call alike (GL converts between them the same way)
 static void tex_param(GLenum target, GLenum p, const float *v) {
     tex_t *t = bound_tex(target);
@@ -2302,16 +2321,19 @@ static void tex_param(GLenum target, GLenum p, const float *v) {
     switch (p) {
         case GL_TEXTURE_MAX_LEVEL: t->maxlv = i; t->smp_dirty = 1; break;
         case 0x813c: break;   // BASE_LEVEL
-        case GL_TEXTURE_SWIZZLE_R: case GL_TEXTURE_SWIZZLE_R + 1: case GL_TEXTURE_SWIZZLE_R + 2: case GL_TEXTURE_SWIZZLE_A:   // fixed once the texture is made (tex_make)
-            if (t->made && t->swz[p - GL_TEXTURE_SWIZZLE_R] != i) RED1("texture swizzle changed after the texture was made: ignored");
-            t->swz[p - GL_TEXTURE_SWIZZLE_R] = i; break;
+        case GL_TEXTURE_SWIZZLE_R: case GL_TEXTURE_SWIZZLE_R + 1: case GL_TEXTURE_SWIZZLE_R + 2: case GL_TEXTURE_SWIZZLE_A:
+            tex_set_swz(t, p - GL_TEXTURE_SWIZZLE_R, i); break;
         default: RED1("glTexParameter(%#x) not implemented", p); break;
     }
 }
 GL(glTexParameteri, void, GLenum target, GLenum p, GLint v) { float f[4] = {(float)v}; tex_param(target, p, f); }
 GL(glTexParameterf, void, GLenum target, GLenum p, GLfloat v) { float f[4] = {v}; tex_param(target, p, f); }
-GL(glTexParameterfv, void, GLenum target, GLenum p, const GLfloat *v) { float f[4] = {v[0]}; if (p == GL_TEXTURE_BORDER_COLOR) memcpy(f, v, sizeof f); tex_param(target, p, f); }
+GL(glTexParameterfv, void, GLenum target, GLenum p, const GLfloat *v) {
+    if (p == GL_TEXTURE_SWIZZLE_RGBA) { tex_t *t = bound_tex(target); if (t) for (int c = 0; c < 4; c++) tex_set_swz(t, c, (GLint)v[c]); return; }
+    float f[4] = {v[0]}; if (p == GL_TEXTURE_BORDER_COLOR) memcpy(f, v, sizeof f); tex_param(target, p, f);
+}
 GL(glTexParameteriv, void, GLenum target, GLenum p, const GLint *v) {   // an integer border colour is normalized as GL does: the full int range to −1..1
+    if (p == GL_TEXTURE_SWIZZLE_RGBA) { tex_t *t = bound_tex(target); if (t) for (int c = 0; c < 4; c++) tex_set_swz(t, c, v[c]); return; }
     float f[4] = {(float)v[0]};
     if (p == GL_TEXTURE_BORDER_COLOR) for (int c = 0; c < 4; c++) f[c] = (float)((double)v[c] / 2147483647.0);
     tex_param(target, p, f);
@@ -3350,7 +3372,7 @@ GLB(glLinkProgram, void, GLuint pr) {
             for (int j = 0; j < p->nu; j++) if (!strcmp(p->u[j].name, nm)) u = &p->u[j];
             if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; u->sampler[0] = u->sampler[1] = -1; }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
-            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; u->sampler[st] = m->sampler; }
+            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; u->sampler[st] = m->sampler; if (m->unit) u->unit = m->unit; }
         }
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)

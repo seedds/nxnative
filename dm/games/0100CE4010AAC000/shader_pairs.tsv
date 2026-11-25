@@ -180,7 +180,6 @@
 353e1702e138d1fa	242a6cda7a94099e
 353e1702e138d1fa	95fca553f48a8620
 357e588633903fb3	39e5b14914874904
-399b22379a2c6dc1	02c8aacea93fe504
 3a81d46683c4347f	41f5b345584b0605
 3a81d46683c4347f	5bab38c0816a542b
 3a81d46683c4347f	887acbd78c97639e
@@ -1156,3 +1155,5 @@ fe37c5e3b1fb11c3	fa5624e9dc0efc13
 fe37c5e3b1fb11c3	fab07c0ee82044f7
 fe37c5e3b1fb11c3	fc477baac946e009
 fe37c5e3b1fb11c3	ffd650a0d8da6ffc
+# cover: single-stage padding pairs (for vertex output padding only; skipped by pso_offline.py and pso_prebuild)
+399b22379a2c6dc1	02c8aacea93fe504

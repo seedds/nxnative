@@ -2,6 +2,7 @@
 // the test a real-time policy: only the thread's CPU clock and the policy calls are replaced. A frame acquired in two calls is measured whole, each acquire thread is measured
 // and declared on itself, an acquire thread that stops acquiring goes back to the standard policy, and DM_RT_COMP / DM_RT=0 keep their meaning. With no argument the test
 // runs itself in its three modes (auto, fixed, off). From PR #2137 (thehobbit85), carried onto the per-thread slots
+#define RT_STALL_NO_TIMER   // the stall timer (t_rt_stall) would change the policy counts here on a loaded machine
 #include <time.h>
 #include <pthread.h>
 #include <spawn.h>
@@ -15,6 +16,7 @@ static _Atomic unsigned test_standard_other;   // standard policies set on anoth
 static uint64_t test_clock_gettime_nsec_np(clockid_t clock) { return clock == CLOCK_THREAD_CPUTIME_ID ? test_cpu : clock_gettime_nsec_np(clock); }
 static kern_return_t test_thread_policy_set(thread_act_t thread, thread_policy_flavor_t flavor, thread_policy_t policy, mach_msg_type_number_t count) {
     if (flavor == THREAD_STANDARD_POLICY && thread != pthread_mach_thread_np(pthread_self())) { test_standard_other++; return KERN_SUCCESS; }
+    if (flavor == THREAD_PRECEDENCE_POLICY && count == THREAD_PRECEDENCE_POLICY_COUNT && thread != pthread_mach_thread_np(pthread_self())) return KERN_SUCCESS;
     if (thread != pthread_mach_thread_np(pthread_self()) || flavor != THREAD_TIME_CONSTRAINT_POLICY || count != THREAD_TIME_CONSTRAINT_POLICY_COUNT) return KERN_INVALID_ARGUMENT;
     test_policy = *(thread_time_constraint_policy_data_t *)policy; test_policy_calls++;
     return KERN_SUCCESS;

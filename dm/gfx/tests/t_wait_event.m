@@ -273,6 +273,32 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// A fence right behind such a wait, with no commands between them, waits for the writer: the wait hands the writer's fence on to its queue
+static void event_queued_write_fence(void) {
+    printf("CASE a fence right behind a wait on an in-flight WRITE waits for the writer\n");
+    *source=before; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    P(nvnQueueFinish)(&queues[0]);   // the consumer queue's last fence is reached: the stale fence would read signalled at once
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    CHECK(pr && receipt_encoded(&produced,1000000000ull),"producer encodes while its GPU work is held by a shared-event gate");
+    begin_cmd(0); P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,1);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int cr=returned(&cj,250000000ull);
+    CHECK(cr && receipt_encoded(&consumed,1000000000ull),"the fence behind the wait publishes while the writer is in flight");
+    CHECK(!landed(&produced,0) && !landed(&consumed,0),"and is not reached before the writer");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    require_returned(&pj,pr); require_returned(&cj,cr);
+    int done=landed(&produced,5000000000ull) && landed(&consumed,5000000000ull);
+    CHECK(done && *source==after,"both are reached after the writer"); if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
 // A signal does not cut its recording (issue #2112): two signals with commands between them are one Metal submission, and a wait on the first of them, which is not the
 // recording's last, is still encoded behind the in-flight write
 static void event_signal_no_cut(void) {
@@ -451,6 +477,7 @@ int main(void) { @autoreleasepool {
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
+    event_queued_write_fence();
     event_signal_no_cut();
     frame_shares_allocator();
     vis_ring_grows();

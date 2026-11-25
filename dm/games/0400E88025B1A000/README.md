@@ -82,6 +82,8 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 - [Ampere BMSK and the read of a covered pixel](../../../docs/reference/shaders.md#ampere-bmsk-and-the-read-of-a-covered-pixel): the last 3 shaders, `58046f286de779e1`, `46040940ce0fd49b` and `826168691af2e211`, none asked for in play so far.
 - [Compute pipelines compiled at first use](../../../docs/reference/shaders.md#compute-pipelines-compiled-at-first-use): 233 compute pipelines in the app's archive, none built at the title.
 - [Compute pipelines outside the bundled archive built at every start](../../../docs/reference/shaders.md#compute-pipelines-outside-the-bundled-archive-built-at-every-start): the second headless start took its 8 from the device's archive.
+- [A frame throttle steered by the layer's flips](../../../docs/reference/frame-rate.md#a-frame-throttle-steered-by-the-layers-flips): the throttle sleeping out its own frame headless: 34.3 → 33.4 ms frames, 27.7 → 28.7 fps in the prologue cinematic.
+- [A covered window's presents follow the host's clock](../../../docs/reference/frame-rate.md#a-covered-windows-presents-follow-the-hosts-clock): 333 ms frames while the player typed in another app.
 
 ## Open
 

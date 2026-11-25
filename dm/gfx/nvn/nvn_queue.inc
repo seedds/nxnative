@@ -223,6 +223,7 @@ static void *nq_worker(void *unused) {
             } else {
                 nvn_cap_present(&n->texture,n->crop);
                 present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                { void dm_vi_frame_ticket(uint64_t,uint64_t); dm_vi_frame_ticket(j->frame+1,present); }
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }

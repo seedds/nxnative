@@ -164,6 +164,7 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 
 ## Found on this game
 
+- [A lone acquire thread kept its time-constraint policy through a long CPU burst](../../../docs/reference/frame-rate.md#a-lone-acquire-thread-kept-its-time-constraint-policy-through-a-long-cpu-burst): the freezes of up to about a minute at the end of a race ([GitHub issue #1859](https://github.com/seedds/nxnative/issues/1859)). Fixed from its logs and a synthetic measurement, not run on the game; the 12 to 16 s burst itself stays open.
 - [A residency commit stays blocked in the iPhone kernel](../../../docs/reference/rendering.md#a-residency-commit-stays-blocked-in-the-iphone-kernel) (open).
 - [A timed archive write stalls active presentation](../../../docs/reference/rendering.md#a-timed-archive-write-stalls-active-presentation).
 - [An unregistered NUP build loses its numeric version label](../../../docs/reference/packing.md#an-unregistered-nup-build-loses-its-numeric-version-label).

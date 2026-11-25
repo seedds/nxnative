@@ -13,8 +13,11 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / 'dm/games'))
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import nacp
+import profile_guess
+import romfs
 import romfs_image
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
@@ -817,7 +820,7 @@ class Programs(Base):
         self.assertEqual(nsp.survey_nup(n, fam['base'], fam['base'], out), 2)
         rows = (out / 'romfs_manifest.tsv').read_text().splitlines()[1:]
         self.assertIn(f'/System/RegionLangMask.txt\t3\t{b"own".hex()}', rows)   # its own file wins over the other program's of that path
-        self.assertTrue(any(r.startswith('/data/s1\t') for r in rows))
+        self.assertIn(f'/data/s1\t400\t{(b"data" * 8).hex()}\tprogram:0', rows)
         self.assertEqual(pack_nup.romfs_bytes(n, fam['base'], fam['base']), 3 + 400 + 2)
         with mock.patch.object(nsp, 'PROG', mock.Mock()):
             d = nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, n)
@@ -826,6 +829,74 @@ class Programs(Base):
             write_nup(self.path, bad); got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
             nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, fam['nup'])
             with mock.patch.object(nsp, 'ALLOW_DAMAGED', False), self.assertRaisesRegex(nsp.BuildError, r'v0 program 0: 1 file'): nsp.check_formats({'v0': d})
+
+    def test_provisional_romfs_marker_stays_in_packed_program(self):   # issue #3289: a sibling program's larger RomFS stays in the combined inventory, never becomes romfs_marker
+        for case, own_romfs, program, want_marker, want_n, want_bytes in (
+            ('small own file vs large sibling', {'dummy.bin': b'12345'}, None, 'dummy.bin', 2, 5 + 800),
+            ('empty own RomFS vs large sibling', {}, None, '', 1, 800),
+            ('path collision keeps own row eligible', {'System/RegionLangMask.txt': b'own'}, None, 'System/RegionLangMask.txt', 2, 3 + 800),
+            ('program 0 selected picks its own largest file', {'dummy.bin': b'12345'}, 0, 'sound/jp.pck', 2, 5 + 800),
+        ):
+            with self.subTest(case=case):
+                s1 = {'exefs': {'main': b'switch 1 code', 'main.npdm': npdm(S1)},
+                      'romfs': {'sound/jp.pck': b'AKPK' + b'x' * 796, **({'System/RegionLangMask.txt': b's1'} if 'System/RegionLangMask.txt' in own_romfs else {})}}
+                s2 = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': own_romfs}
+                write_nup(self.path, [(0, S1, 0, s1, META), (0, S2, 0, s2, program_nacp())])
+                got, fam = nsp.scan_nup(self.path, program=program); self.addCleanup(fam['nup'].close)
+                survey_out = self.dir / f'survey_{case.split()[0]}'
+                self.assertEqual(nsp.survey_nup(fam['nup'], fam['base'], fam['base'], survey_out), want_n)
+                facts = profile_guess.facts_of(survey_out / 'ExeFS', survey_out / 'romfs_manifest.tsv')
+                self.assertEqual((facts['romfs']['n'], facts['romfs']['bytes']), (want_n, want_bytes))
+                self.assertEqual(facts['romfs']['mags']['Wwise pck'], 1)
+                self.assertEqual(facts['romfs']['biggest'][1], want_marker)
+                facts['mods'] = {'main': {'bid': '00' * 16}}
+                pdir = self.dir / f'profile_{case.split()[0]}'
+                with mock.patch.object(nsp, 'pg', profile_guess, create=True), \
+                     mock.patch.object(profile_guess, 'guess', return_value={'modules': ('main', '')}), mock.patch.object(nsp, 'say'):
+                    nsp.write_profile(pdir, got, {'F': facts, 'name': 'Test', 'survey': 'survey.md', 'version': 'v0', 'display': '2.0.0'})
+                marker = next(line.partition('\t')[2] for line in (pdir / 'game.tsv').read_text().splitlines() if line.startswith('romfs_marker\t'))
+                self.assertEqual(marker, want_marker)
+                ex_dir = self.dir / f'ex_{case.split()[0]}'
+                pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
+                self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / marker).exists())
+
+    def test_reused_provisional_profile_reconciles_stale_sibling_marker(self):
+        # Retrying a multi-program NUP with a provisional profile created before 2cc4cda2 must replace
+        # the stale sibling romfs_marker while preserving hand-edited settings and comments.
+        import game as gamemod
+        for case, own_romfs, want_marker in (
+            ('small own file replaces stale sibling marker', {'dummy.bin': b'12345'}, 'dummy.bin'),
+            ('empty own RomFS clears stale sibling marker', {}, ''),
+            ('valid hand-edited marker stays untouched', {'dummy.bin': b'12345', 'keep.dat': b'1'}, 'keep.dat'),
+        ):
+            with self.subTest(case=case):
+                s1 = {'exefs': {'main': b'switch 1 code', 'main.npdm': npdm(S1)}, 'romfs': {'sound/jp.pck': b'AKPK' + b'x' * 796}}
+                s2 = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': own_romfs}
+                write_nup(self.path, [(0, S1, 0, s1, META), (0, S2, 0, s2, program_nacp())])
+                got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
+                ex_dir = self.dir / f'ex_retry_{case.split()[0]}'
+                pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
+                pdir = self.dir / f'prof_retry_{case.split()[0]}' / f'{got:016X}'
+                pdir.mkdir(parents=True)
+                initial_marker = 'keep.dat' if want_marker == 'keep.dat' else 'sound/jp.pck'
+                (pdir / 'game.tsv').write_text(
+                    f'# hand-edited provisional profile\n'
+                    f'title_id\t{got:016X}\n'
+                    f'modules\tmain\n'
+                    f'romfs_marker\t{initial_marker}\n'
+                    f'# user custom tuning\n'
+                    f'mem_reserve\t0x12340000\n',
+                    encoding='utf-8',
+                )
+                g = gamemod.Game(pdir)
+                with mock.patch.object(nsp, 'say'):
+                    g2 = nsp.reconcile_provisional_marker(g, nsp.rfs.source(ex_dir))
+                self.assertEqual(g2.get('romfs_marker'), want_marker)
+                self.assertEqual(g2.get('mem_reserve'), '0x12340000')
+                text = (pdir / 'game.tsv').read_text(encoding='utf-8')
+                self.assertIn('# hand-edited provisional profile', text)
+                self.assertIn('# user custom tuning', text)
+                self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / want_marker).exists())
 
 
 class StandaloneCLI(Base):

@@ -1,5 +1,5 @@
 # kind: evidence  XCOM 2 Collection shaders (BNSH / BAHS in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)
-# column 5 records where each key first appears, a copy in the game before one in an add-on; no PC shader pairing supplied
+# column 5 names the chosen source of each key, a copy in the game before one in an add-on; no PC shader pairing supplied
 package	index	stage	dm_ctl_sha16	source
 vs_main.bin	0	vertex	14f1e1e7fce79e93	main#BNSH@0x2a1000#var0
 ps_main.bin	0	pixel	583caa3f3ca44354	main#BNSH@0x2a1000#var0

@@ -1,7 +1,5 @@
-# XCOM 2 Collection: program 1 (`0100D0B00FB74001`)
+# XCOM 2 (`0100D0B00FB74001`)
 
-Part of [XCOM 2 Collection](../0100D0B00FB74000/README.md). Package `v131072`; this program's own control data reports **1.0.3**. SDK 9.3.1, NVN and Unreal Engine package files.
+Program 1 of [XCOM 2 Collection](../0100D0B00FB74000/README.md). The collection's `v131072` update gives it display version 1.0.3. The updated RomFS has 33,588 files and takes 13.3 GiB.
 
-The build IDs, modules and RomFS marker come from this program's survey. The Mac memory partition allows a 3.25 GiB heap, as the collection launcher does; this program's heap use and gameplay remain unvalidated. iOS is untested.
-
-The complete shader split decoded all packages without unreadable-file reports and produced **33,034 shaders**. This validates the reader and profile tables, not shader translation or rendering.
+The initial Mac probe reached frame 300 and the offline shader reader matched all 10 keys captured during startup. With the compiled library, the Apple M6 rendered the opening sequence, the main menu and the campaign setup through the optional narrative content screen. The collection note has the build, memory and play instructions.

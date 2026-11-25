@@ -85,6 +85,10 @@ class Pairing(unittest.TestCase):
 
     def test_split_fallback_union_and_defaults(self):
         self.assertEqual(self.ns['PAIRS'], {'v': {'f0', 'f1', 'f6'}})
+        # Padding readers must still include # cover rows even though pso_offline/pso_prebuild skip them.
+        self.g.table('shader_pairs.tsv').write_text('# kind: evidence\nv\tf0\n# cover: single-stage padding pairs\nv\tf6\n')
+        self.assertEqual(self.ns['load_pairs'](self.g, self.package), {'v': {'f0', 'f1', 'f6'}})
+        self.assertEqual(pso_offline.read_pairs(self.g.table('shader_pairs.tsv').read_bytes()), [('v', 'f0')])
         src, pad = self.ns['vs_pad']('v', VS)
         self.assertEqual(pad, [1, 6])
         for loc in pad:

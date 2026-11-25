@@ -897,25 +897,6 @@ def modules_for(tree, g, rewrite, jobs):
 
 # ---------------------------------------------------------------- the measuring lock and the Mac's load
 
-def pid_alive(pid):
-    try: os.kill(pid, 0); return True
-    except ProcessLookupError: return False
-    except PermissionError: return True
-
-
-def own_tree():
-    me, kids = os.getpid(), set()
-    r = sh(['ps', '-axo', 'pid=,ppid='])
-    par = collections.defaultdict(list)
-    for ln in r.stdout.splitlines():
-        a = ln.split()
-        if len(a) == 2: par[int(a[1])].append(int(a[0]))
-    todo = [me]
-    while todo:
-        p = todo.pop(); kids.add(p); todo += par.get(p, [])
-    return kids
-
-
 def heavy_jobs():   # other builds now running: not this process's, not stopped, not another regress.py's (whose builds pause while the measuring lock is held)
     r = sh(['ps', '-axo', 'pid=,ppid=,stat=,%cpu=,command=']); out = []; rows = {}
     for ln in r.stdout.splitlines():

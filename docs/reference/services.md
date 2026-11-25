@@ -425,7 +425,8 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** some owned DLC is missing, and `aoc: reporting` stops at 64 add-on contents.
 - **Cause:** `hle_misc.c` stored only 64 indices and stopped reading `DM_AOC_DIR` when that array filled, before sorting. The omitted indices depended on directory order; its 256-byte log buffer also truncated longer lists.
 - **Fix:** the shared array holds 2000 indices, covering the scanner's existing accepted range (1..2000), and a static buffer holds the complete index log without increasing guest-stack use. Folder and `.img` discovery, sorting, deduplication, pagination and `DM_AOC_OWNED=0` retain their behavior. This applies to every game using the add-on content hooks.
-- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range. More than 2000 accepted folder/image entries can still fill the array before deduplication, even when their unique indices fit.
+- **Resolved:** more than 2000 accepted folder/image entries no longer fill the array before deduplication: `aoc_load` marks a seen-set over 1..2000 as `readdir` returns entries and emits the sorted list from it (checked in `t_pctl`).
+- **Open:** the existing 1..2000 acceptance range is retained; it is not established here as Horizon's full legal range.
 - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, 99 DLC licences; PR #441).
 
 ### Cache storage limits and the cache storage list

@@ -352,8 +352,16 @@ static _Atomic double g_brightness = -1;
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
 double dm_brightness_now(void) { return g_brightness; }
+// Battery for the power row (hle_nvn.c power_line): percent 0..100 (-1 unknown) and state (UIDeviceBatteryState: 0 unknown, 1 unplugged, 2 charging, 3 full). Monitoring is turned on in
+// front_ios_power_watch; every state change is logged with the time since launch, so a log's unplugged stretches can be told apart and the drain per hour computed from the rows between.
+double dm_battery_now(void) { float l = UIDevice.currentDevice.batteryLevel; return l < 0 ? -1 : l * 100.0; }
+int dm_battery_state_now(void) { return (int)UIDevice.currentDevice.batteryState; }
 static void front_ios_power_watch(void) {
     g_brightness = UIScreen.mainScreen.brightness;
+    UIDevice.currentDevice.batteryMonitoringEnabled = YES;
+    static const char *const k_bat[] = {"unknown", "unplugged", "charging", "full"};
+    [NSNotificationCenter.defaultCenter addObserverForName:UIDeviceBatteryStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; int st = dm_battery_state_now(); LOG("front end: battery %s at %.0f%% (%.0f s after launch)", k_bat[st >= 0 && st <= 3 ? st : 0], dm_battery_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];

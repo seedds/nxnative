@@ -20,6 +20,12 @@ The shipped Maxwell LUT generator (`1336ea8a75a3b653`) compared its nonnegative 
 
 The offline translation restores the upstream low range only when the Maxwell shader payload matches byte for byte. The repaired shader gave zero at both dark LUT entries and RGB `(0, 0, 0)` at the same sky pixel. The brightest captured red channel measured 206 in both renders. The patched bytecode and a separate test that restored the upstream formula in Metal produced identical LUT bytes. The LUT is generated at scene load.
 
+## Frame rate
+
+The title switches to two vsyncs per present and the game runs at 30 fps. The profile defaults to 60 fps through Unity's existing limiter. The rewriter finds `QualitySettings.vSyncCount` and `Application.targetFrameRate` through Unity's internal-call registration, and the host sets the active quality level's count to one and paces presents at the target. This works on builds recognized by the same Unity discovery. [Unity's frame-rate discovery](../../../docs/reference/frame-rate.md#unitys-vsynccount-and-targetframerate-found-through-the-internal-call-table)
+
+On the M6 Mac at 1920 × 1080, the last 300-frame window at the opening campfire measured 33.33 ms median and 33.60 ms p95 with the game's pacing, and 16.67 ms median and 16.78 ms p95 at the 60 fps target. The launcher offers a 30 fps option.
+
 ## Mac controls
 
 Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac-app`. Open the app, use J (A) to dismiss notices and start New Expedition, then I (Y) to wake up. To see the Metal HUD, launch with `DM_METAL_HUD=1`.
@@ -27,6 +33,6 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 ## Testing
 
 - 2026-11-25, Apple M6, macOS 27.2.1, Xcode 27.2. All 20,355 shaders built for Mac and iOS. The signed Mac app and unsigned IPA passed their package checks.
-- The Mac app reached the title, opened a new expedition and passed Wake Up into stationary gameplay. With `DM_ALIAS_SIZE=0x138000000`, the final campfire run's live regions reached +4.51 GiB with 2.14 GiB of guest memory mapped. At 1920 × 1080 output the campfire ran at 30 fps (33.34 ms median and 34.23 ms p95 in the last 300-frame window).
+- The Mac app reached the title, opened a new expedition and passed Wake Up into stationary gameplay. With `DM_ALIAS_SIZE=0x138000000`, the campfire's live regions reached +4.51 GiB with 2.14 GiB of guest memory mapped.
 - Stereo CoreAudio logged underruns during startup and zero underruns in the next 16,000 callbacks through the campfire.
 - Later areas, ship flight, save/reload, and on-device iOS gameplay remain untested.

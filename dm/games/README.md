@@ -180,7 +180,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 | — |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN | — |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN | — |
-| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | — |
+| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | [60 fps target](01003DC0144B6000/README.md#frame-rate) |
 | [Overcooked! All You Can Eat](0100F28011892000/README.md) | `0100F28011892000` | 1.0.12 | 10.4.1 | Unity 2019.4.11f1 IL2CPP, FMOD | NVN | 60 fps target |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN | — |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN | 60 fps target |

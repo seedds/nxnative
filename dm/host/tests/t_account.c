@@ -25,11 +25,22 @@ static void *session_thread(void *unused) {
     }
     return NULL;
 }
-static void child(const char *exe, const char *mode, const char *save) {
+struct pop_race_arg { UserHandle users[8]; int n; };
+static void *pop_race_thread(void *p) {
+    struct pop_race_arg *a = p;
+    h_acc_PopOpen(&a->n, a->users, 8);
+    h_acc_PushOpen();
+    return NULL;
+}
+static void child_env(const char *exe, const char *mode, const char *save, const char *open_users) {
     pid_t pid = fork(); assert(pid >= 0);
-    if (!pid) { execl(exe, exe, mode, save, NULL); _exit(127); }
+    if (!pid) {
+        if (open_users) setenv("DM_OPEN_USERS", open_users, 1); else unsetenv("DM_OPEN_USERS");
+        execl(exe, exe, mode, save, NULL); _exit(127);
+    }
     int status; assert(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
+static void child(const char *exe, const char *mode, const char *save) { child_env(exe, mode, save, NULL); }
 int main(int argc, char **argv) {
     if (argc == 3) {
         setenv("DM_SAVE", argv[2], 1);
@@ -40,6 +51,42 @@ int main(int argc, char **argv) {
             assert(h_acc_Exists(&exists, &u2) == RES_OK && exists);
             assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
             assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &k_uid, 16));
+        } else if (!strcmp(argv[1], "--handoff")) {
+            UserHandle users[8];
+            h_acc_PopOpen(&n, users, 8);
+            assert(n == 2 && getenv("DM_OPEN_USERS") && !strcmp(getenv("DM_OPEN_USERS"), "5"));
+            assert(dm_uid_user(&users[0]) == 0 && dm_uid_user(&users[1]) == 2 && users[0].v[2] != users[1].v[2]);
+            Uid u3 = user_uid(2);
+            assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &u3, 16));
+            h_acc_PopOpen(&n, users + 2, 6); assert(n == 0);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 2);
+            h_acc_CloseUser(&users[0]); h_acc_CloseUser(&users[1]);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+        } else if (!strcmp(argv[1], "--handoff-race")) {
+            struct pop_race_arg args[4] = {0}; pthread_t threads[4];
+            for (int i = 0; i < 4; i++) assert(!pthread_create(&threads[i], NULL, pop_race_thread, &args[i]));
+            for (int i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));
+            int total = 0, winners = 0;
+            for (int i = 0; i < 4; i++) {
+                total += args[i].n;
+                if (args[i].n) {
+                    winners++;
+                    for (int j = 0; j < args[i].n; j++) h_acc_CloseUser(&args[i].users[j]);
+                }
+            }
+            assert(winners == 1 && total == 2);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+        } else if (!strcmp(argv[1], "--handoff-bounded")) {
+            UserHandle users[2];
+            h_acc_PopOpen(&n, users, 1); assert(n == 1 && dm_uid_user(&users[0]) == 0);
+            h_acc_PopOpen(&n, users + 1, 1); assert(n == 0);
+            h_acc_CloseUser(&users[0]);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
+        } else if (!strcmp(argv[1], "--handoff-unreg")) {
+            UserHandle users[8];
+            h_acc_PopOpen(&n, users, 8); assert(n == 1 && dm_uid_user(&users[0]) == 2);
+            h_acc_CloseUser(&users[0]);
+            assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0);
         } else if (!strcmp(argv[1], "--corrupt")) {
             assert(h_acc_ListAll(&n, list, 8) == RES_FAIL && n == 0);
             choice = FRONT_USER_CREATE; assert(h_acc_ShowCreator() == RES_FAIL && calls == 0);
@@ -118,6 +165,29 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; i++) assert(!pthread_join(threads[i], NULL));
     assert(h_acc_ListOpen(&n, list, 8) == RES_OK && n == 0 && waiting == 0);
     child(argv[0], "--restart", save);
+    // Strict parsing of DM_OPEN_USERS hex masks.
+    assert(parse_open_users(NULL) == 0 && parse_open_users("") == 0 && parse_open_users("broken") == 0);
+    assert(parse_open_users(" 1") == 0 && parse_open_users("+1") == 0 && parse_open_users("-1") == 0 && parse_open_users("-0") == 0);
+    assert(parse_open_users("0x1") == 0 && parse_open_users("100") == 0 && parse_open_users("ffffffffffffffff") == 0);
+    assert(parse_open_users("0") == 0 && parse_open_users("5") == 5 && parse_open_users("ff") == 0xff && parse_open_users("FF") == 0xff && parse_open_users("0005") == 5);
+    // PushOpenUsers snapshots in memory without mutating environ or feeding same-process PopOpenUsers;
+    // duplicate sessions deduplicate and the snapshot survives closing handles before ExecuteProgram.
+    unsetenv("DM_OPEN_USERS");
+    assert(dm_account_pushed_users() == 0);
+    assert(h_acc_OpenUser(&h, &k_uid) == RES_OK && h_acc_OpenUser(&other, &u3) == RES_OK);
+    UserHandle duplicate; assert(h_acc_OpenUser(&duplicate, &u3) == RES_OK);
+    h_acc_PushOpen();
+    assert(dm_account_pushed_users() == 0x5 && !getenv("DM_OPEN_USERS"));
+    h_acc_CloseUser(&h); h_acc_CloseUser(&other); h_acc_CloseUser(&duplicate);
+    assert(dm_account_pushed_users() == 0x5);
+    UserHandle popped[2]; h_acc_PopOpen(&n, popped, 2); assert(n == 0);
+    h_acc_PopOpen(NULL, NULL, 0);
+    char mask_text[16]; snprintf(mask_text, sizeof mask_text, "%x", dm_account_pushed_users());
+    child_env(argv[0], "--handoff", save, mask_text);
+    child_env(argv[0], "--handoff-race", save, mask_text);
+    child_env(argv[0], "--handoff-bounded", save, "ff");
+    child_env(argv[0], "--handoff-unreg", save, "84");
+    h_acc_PushOpen(); assert(dm_account_pushed_users() == 0);
     snprintf(path, sizeof path, "%s.users", save); FILE *f = fopen(path, "w"); assert(f); fputs("broken registry\n", f); fclose(f);
     child(argv[0], "--corrupt", save);
     unlink(path);

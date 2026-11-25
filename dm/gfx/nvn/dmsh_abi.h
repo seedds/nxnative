@@ -201,6 +201,9 @@
 // rop_word_for: no zero-weight NaN rule and no NVIDIA rounding for any of its targets), so the fix-up and the read of its words go. False or undefined, the words are read at
 // DMSH_BLEND_BUFFER as before (pair archives keep false so one pulling base serves every draw of a shader pair)
 #define DMSH_BLEND_OFF_FC 217
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): bool, KosmicKrisp's KK_WORKAROUND_3 ballot rewrite is used (default true). The host sets it false on macOS 27 and later
+// (whose GPU compiler is fixed; nvn_mtl.m mwa_on, DM_NVN_METALWA) and true on macOS < 27 and iOS, matching pso_offline.py's per-target specialization so KK3 shaders stay in offline archives
+#define DMSH_MWA_FC 220
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the _l entry points of the <key>_bx libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)

@@ -97,6 +97,7 @@ static void dispatch_rays(const p_rt_dispatch *dp) {
     cbs_note(shader); za_shader((__bridge const void *)shader, shader->key);
     // Preparing descriptors can upload a sampled view. Finish that before the
     // query barrier; bind the completed argument block after opening the encoder.
+    ua_prepare_shader(shader, NVN_RT_RESOURCE_STAGE);
     encode_args_full(nil, shader, NVN_RT_RESOURCE_STAGE, 0, &values);
     id<MTL4ComputeCommandEncoder> encoder = dispatch_enc(); as_barrier();
     bind_args((id)encoder, NVN_RT_RESOURCE_STAGE, 0, shader->ab_buf, shader->ab_gpu, shader->ab_off, shader->rf.abi);
@@ -108,6 +109,7 @@ static void dispatch_rays(const p_rt_dispatch *dp) {
     g_wr_epoch++; g_mdx_epoch++; g_vbuf_write_epoch++; g_dsp_game_bar=0;
     bufsnap_after(shader, encoder);
     if (g_nbcp) bcp_flush();   // image stores reach their compressed aliases before the next command
+    if (g_nua_pend) ua_flush(0);
     uint64_t tag = rt->tag;
     [g_commit_blocks addObject:^{
         const uint32_t *fault = (const void *)((const uint8_t *)errors.contents + eo);

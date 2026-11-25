@@ -50,6 +50,7 @@ typedef struct {
                              // TEX / TEXU / TEXD / TEXA with f1d: row-fetch leads, followed by the logical widths (one of each per element)
                              // (nvn_mtl.m tbuf_lead); TEXD / TEXA of buffer textures: element 0's, element k's at tbx - 1 + k; 0 = none
     uint8_t sbx;             // SBUFU / SBUFQ: the binding's slot in the shader's length table (SBLEN, dmsh_abi.h DMSH_SBLEN_BANK) + 1, whose words bound its accesses (nvn_mtl.m sblen_put); 0 = unbounded
+    uint8_t img_rd;          // IMG / IMGU / IMGP: 1 when the shader reads as well as writes the image (access::read_write)
 } nvn_rbind;
 typedef struct {
     int nb, abi, nv;         // Binding count, argument buffer slot, vertex input count

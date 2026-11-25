@@ -3724,11 +3724,109 @@ def ue3_body(d, label):
         i = o
     return b''.join(out)
 
+# Batman: Arkham Asylum (0100E870163CA000) stores no control section: the engine builds it from a fixed 0x880-byte template and eight fields of each record's 0x50-byte tail, and builds the code
+# area around the record's headerless bytes. A record is {u8 GUID 16, u32 v1, u16 v2 (5 or 0x105), u32 v3, u32 v4 (the stored bytes' length), u32 0x28, u32 0, u8 code[v4], tail} — the two words
+# 0x28 and 0 end its descriptor and find it, 38 bytes before the code area's first stored byte (aa_records), and the tail proves it. A record may carry a second module too — a shared vertex-fetch
+# program's instructions behind the first module's data bytes, its length at +0x1c of the tail and its x at +0x20 — and the control section then runs to that module's end and lists both at +0x748.
+AA_CTL_LEN, AA_CTL_HDR, AA_CODE_HEADER, AA_DATA = 0x880, 0x878, 0x30, 0x100   # the control section's length (its own +0x20, +0x6f0, +0x7c8, +0x7e8), the template's +0x14 (u16, 8 less),
+                                                                                    # the code area's header (the NVN graphics magic, then zeros), the data section's size
+AA_TAIL = 0x30   # the tail's fields the control section needs, of the 0x50 bytes each record is followed by
+AA_PAIR = 0x748   # a two-module control section's table of modules: the first module's (offset, instruction bytes, x), then the second's
+AA_DESC = struct.pack('<II', 0x28, 0)   # a record's last two descriptor words, 38 bytes before its code area
+
+def aa_data_off(ins):
+    """The code area's data section offset: 0x30 (its header) + the instruction bytes, up to a 0x100-byte boundary"""
+    return (AA_CODE_HEADER + ins + AA_DATA - 1) // AA_DATA * AA_DATA
+
+def aa_pair_off(ins, extra):
+    """Where a two-module program's second module starts in its code area: behind the first module's data section (aa_data_off, plus the 0x100-byte one when it has it) and the second module's own
+    0x30-byte header, which is zeros — the second program carries no NVN graphics magic of its own"""
+    return aa_data_off(ins) + (AA_DATA if extra else 0) + AA_CODE_HEADER
+
+def aa_ctl_template():
+    """The control section Batman: Arkham Asylum does not store, before a record's fields go in: magic 34127698, +0x04 1, +0x08 0x10, +0x0c 0x120, +0x10 0xb, +0x14 (u16) 0x878, +0x20 its own length,
+    +0x6f0 (u16) its own length, +0x708 the code area's header 0x30, +0x790 0x35 and +0x792 0x2a (the code area's SPH words), +0x7c8 and +0x7e8 its own length, +0x7f4 0x0c"""
+    c = bytearray(AA_CTL_LEN)
+    c[:4] = CTL_MAGIC
+    struct.pack_into('<4I', c, 0x04, 1, 0x10, 0x120, 0xb)
+    struct.pack_into('<H', c, 0x14, AA_CTL_HDR)
+    struct.pack_into('<I', c, 0x20, AA_CTL_LEN)
+    struct.pack_into('<H', c, 0x6f0, AA_CTL_LEN)
+    struct.pack_into('<I', c, 0x708, AA_CODE_HEADER)
+    c[0x790], c[0x792] = 0x35, 0x2a
+    struct.pack_into('<I', c, 0x7c8, AA_CTL_LEN)
+    struct.pack_into('<I', c, 0x7e8, AA_CTL_LEN)
+    struct.pack_into('<I', c, 0x7f4, 0x0c)
+    return bytes(c)
+
+AA_CTL_BASE = aa_ctl_template()
+
+def aa_ctl(ins, extra, x, a, b, y, ins1=0, x1=0):
+    """The control section of one Batman: Arkham Asylum record: the template, then the record's eight tail fields — +0x6f8 the instruction bytes, +0x6fc the data bytes, +0x700 the code area's data
+    section offset (aa_data_off), +0x704 the code area's length (that offset, plus the 0x100-byte data section when the record has one), +0x70c, +0x714, +0x734, +0x794. A two-module program (ins1, x1:
+    the second module's instruction bytes and its x) has its code area run to that module's end instead, and lists both modules' (offset, instruction bytes, x) at +0x748 — the scalars at +0x6f8..+0x70c
+    repeat the first triple (aa_pair_off)"""
+    off = aa_data_off(ins)
+    c = bytearray(AA_CTL_BASE)
+    struct.pack_into('<4I', c, 0x6f8, ins, extra, off, off + (AA_DATA if extra else 0))
+    if ins1:
+        pair = aa_pair_off(ins, extra)
+        struct.pack_into('<I', c, 0x704, (pair + ins1 + AA_DATA - 1) // AA_DATA * AA_DATA)
+        struct.pack_into('<6I', c, AA_PAIR, AA_CODE_HEADER, ins, x, pair, ins1, x1)
+    struct.pack_into('<I', c, 0x70c, x)
+    struct.pack_into('<I', c, 0x714, a)
+    struct.pack_into('<I', c, 0x734, b)
+    struct.pack_into('<I', c, 0x794, y)
+    return bytes(c)
+
+def aa_code(stored, ins, extra, ins1=0):
+    """The code area of one Batman: Arkham Asylum record, from its headerless v4 bytes: 78 56 34 12 and zeros (0x30 bytes), the instruction bytes, zeros to the data section's offset (aa_data_off), the
+    data bytes there, and zeros to the 0x100-byte data section's end when the record has one. A two-module program's second module (ins1 bytes) is stored behind the first module's data bytes, at
+    aa_pair_off: a 0x30-byte header of zeros, then them, and zeros to the 0x100-byte boundary behind them"""
+    off = aa_data_off(ins)
+    pair = aa_pair_off(ins, extra) if ins1 else 0
+    end = (pair + ins1 + AA_DATA - 1) // AA_DATA * AA_DATA if ins1 else off + (AA_DATA if extra else 0)
+    code = bytearray(end)
+    code[:4] = GFX_MAGIC
+    code[AA_CODE_HEADER:AA_CODE_HEADER + ins] = stored[:ins]
+    code[off:off + extra] = stored[ins:ins + extra]
+    if ins1:
+        code[pair:pair + ins1] = stored[ins + extra:ins + extra + ins1]
+    return bytes(code)
+
+def aa_records(d):
+    """Every shader record Batman: Arkham Asylum stores in a decoded package body or GlobalShaderCache-Switch.bin ('BMSG'), found by AA_DESC and proved by the tail: u32 1 at +0, the instruction bytes
+    at +4 and the data bytes at +8, u16 a and b at +0x14 and +0x16 that are 0 or 1, u32 y at +0x24 up to 0x100, and the second module's instruction bytes at +0x1c, which with the first module's and
+    the data bytes add up to v4 (the data bytes a multiple of 4, at most 0x100).
+    → (offset of the record's GUID, the v4 stored bytes, v4, the instruction bytes, the data bytes, the second module's instruction bytes, x, its x, a, b, y)"""
+    n = len(d)
+    i = d.find(AA_DESC)
+    while i >= 0:
+        cs = i + 8   # the code area's first stored byte: 16 (GUID) + 4 + 2 + 4 + 4 + 8 before it
+        if cs >= 38:
+            v2 = struct.unpack_from('<H', d, i - 10)[0]
+            v4 = struct.unpack_from('<I', d, i - 4)[0]
+            if v2 in (5, 0x105) and 0x40 <= v4 <= 0x200000 and cs + v4 + AA_TAIL <= n:
+                t = d[cs + v4:cs + v4 + AA_TAIL]
+                tv4, extra, x = struct.unpack_from('<III', t, 4)
+                ins1, x1 = struct.unpack_from('<II', t, 0x1c)
+                a, b = struct.unpack_from('<HH', t, 0x14)
+                y = struct.unpack_from('<I', t, 0x24)[0]
+                if struct.unpack_from('<I', t, 0)[0] == 1 and tv4 + extra + ins1 == v4 and extra <= AA_DATA and not extra % 4 and not ins1 % 4 and a < 2 and b < 2 and y <= AA_DATA:
+                    yield i - 30, d[cs:cs + v4], v4, tv4, extra, ins1, x, x1, a, b, y
+                    i = d.find(AA_DESC, cs + v4)   # the code area behind it is not part of another record
+                    continue
+        i = d.find(AA_DESC, i + 1)
+
 def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
     Mortal Kombat 11 stores control-first records: {u32 control size, u32 code size, u32 0, u32 control size}, then the control (with trailing compiler text/reflection) and the code area.
+    Batman: Arkham Asylum (0100E870163CA000) stores the headerless code area alone, in a body with no control section at all: its 2,674 packages and GlobalShaderCache-Switch.bin hold
+    {u8 GUID 16, u32 v1, u16 v2 (5 or 0x105), u32 v3, u32 v4, u32 0x28, u32 0, v4 bytes, 0x50-byte tail} and the control section is synthesised from the tail's eight fields (aa_records, aa_ctl). A
+    record whose tail names a second module's instruction bytes at +0x1c holds a two-module program (the first module's instructions and data, then the second's), which this branch emits as one program
+    with both stages listed at control +0x748 (aa_pair_off).
     The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
@@ -3756,6 +3854,16 @@ def ue3_shaders(d, label):
         why = check(label, st, ctl, code) if st else 'no stage in the code area header'
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
+    # Batman: Arkham Asylum (0100E870163CA000), the third form: no control section is stored anywhere in its files, so the loop above finds nothing in them and the records are the only form.
+    # Its 2,674 packages (bodies decoded from Oodle Leviathan chunks, ue3_body) and GlobalShaderCache-Switch.bin ('BMSG') hold the same records, each synthesised into its pair here. The gate is
+    # the absence of a stored control section, so a cache of either form above keeps exactly the records it had.
+    if CTL_MAGIC not in d:
+        for q, stored, v4, ins, extra, ins1, x, x1, a, b, y in aa_records(d):
+            ctl, code = aa_ctl(ins, extra, x, a, b, y, ins1, x1), aa_code(stored, ins, extra, ins1)
+            st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+            why = check(label, st, ctl, code) if st else 'no stage in the code area header'
+            if why: red(f'{label}: shader record at {q:#x} ({st}): {why}')
+            out.append((f'{label}#UE3@{q:x}', st, ctl, code))
     return out
 
 

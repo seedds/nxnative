@@ -59,6 +59,8 @@ jobs:
           cd dm/gfx/tests
           make GAME="$GAME" -j3 t_perf_order
           ./t_perf_order --cpu 2>&1 | tee ../../../logs/t_perf_order.log
+          make GAME="$GAME" -j3 t_pso_archive
+          ./t_pso_archive --cache-only 2>&1 | tee ../../../logs/t_pso_archive-cache.log
           make GAME="$GAME" -j3 perf-order-tsan 2>&1 | tee ../../../logs/t_perf_order-tsan.log
           make GAME="$GAME" -j3 tsan-dirty-init tsan-dirty-reuse 2>&1 | tee ../../../logs/t_dirty-tsan.log
           make GAME="$GAME" -j3 present-history-tsan 2>&1 | tee ../../../logs/t_present_history-tsan.log

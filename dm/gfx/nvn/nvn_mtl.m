@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/sysctl.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/file.h>   // flock: the lock beside Metal's build folders (ga_claim)
 #include <TargetConditionals.h>
 #if TARGET_OS_OSX
@@ -11795,19 +11796,99 @@ static NSString *ga_dir(void) {
     return dir;
 }
 static int ga_own(void) { return NSBundle.mainBundle.bundleIdentifier.length > 0 && ga_dir() != nil; }   // the folder is this game's app's, not every program's
-static NSSet<NSString *> *ga_list(NSString *dir) {
-    NSArray<NSString *> *a = dir ? [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil] : nil;
-    return [NSSet setWithArray:[a filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self BEGINSWITH 'gpuarchiver-'"]] ?: @[]];
+// Each snapshotted gpuarchiver-* directory carries its (dev, ino) identity so background removal never deletes a file, symlink, or replacement directory with the same name.
+@interface GaDir : NSObject { @public NSString *name; dev_t dev; ino_t ino; } @end
+@implementation GaDir @end
+static NSArray<GaDir *> *ga_list(NSString *dir) {
+    if (!dir) return @[];
+    int dfd = open(dir.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return @[];
+    DIR *dp = fdopendir(dfd);
+    if (!dp) { close(dfd); return @[]; }
+    int rfd = dirfd(dp);
+    NSMutableArray<GaDir *> *out = [NSMutableArray array];
+    struct dirent *de;
+    while ((de = readdir(dp))) {
+        if (strncmp(de->d_name, "gpuarchiver-", 12)) continue;
+        struct stat st;
+        if (fstatat(rfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode)) continue;   // skip files and symlinks; Metal's state is a directory
+        NSString *name = [NSFileManager.defaultManager stringWithFileSystemRepresentation:de->d_name length:strlen(de->d_name)];
+        if (!name) continue;
+        GaDir *g = [GaDir new]; g->name = name; g->dev = st.st_dev; g->ino = st.st_ino;
+        [out addObject:g];
+    }
+    closedir(dp);
+    return out;
+}
+// Recursively empty an already-opened directory fd without following symlinks; always consumes fd. Returns 1 when every entry was removed (or already gone).
+static int ga_rmtree_fd(int fd, int depth) {
+    if (depth > 64) { close(fd); return 0; }
+    DIR *dp = fdopendir(fd);
+    if (!dp) { close(fd); return 0; }
+    int dfd = dirfd(dp), ok = 1;
+    for (;;) {
+        int saw = 0, unlinked = 0;
+        struct dirent *de;
+        while ((de = readdir(dp))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            saw = 1;
+            struct stat st;
+            if (fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW)) {
+                if (errno != ENOENT) ok = 0;
+                continue;
+            }
+            if (S_ISDIR(st.st_mode)) {
+                int sub = openat(dfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (sub < 0) {
+                    if (errno != ENOENT) ok = 0;
+                    continue;
+                }
+                if (!ga_rmtree_fd(sub, depth + 1)) ok = 0;
+                if (!unlinkat(dfd, de->d_name, AT_REMOVEDIR)) unlinked = 1;
+                else if (errno != ENOENT) ok = 0;
+            } else {
+                if (!unlinkat(dfd, de->d_name, 0)) unlinked = 1;
+                else if (errno != ENOENT) ok = 0;
+            }
+        }
+        if (!saw || !unlinked) break;
+        rewinddir(dp);
+    }
+    closedir(dp);
+    return ok;
+}
+static int ga_remove(NSString *dir, NSArray<GaDir *> *old) {
+    if (!dir || !old.count) return 0;
+    int dfd = open(dir.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dfd < 0) return 0;
+    int removed = 0;
+    for (GaDir *g in old) {
+        const char *name = g->name.fileSystemRepresentation;
+        if (!name || strncmp(name, "gpuarchiver-", 12) || strchr(name, '/')) continue;
+        int cfd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (cfd < 0) continue;   // gone, or replaced by a file or symlink
+        struct stat st;
+        if (fstat(cfd, &st) || !S_ISDIR(st.st_mode) || st.st_dev != g->dev || st.st_ino != g->ino) {
+            close(cfd);   // replaced by a different directory with the same name
+            continue;
+        }
+        if (!ga_rmtree_fd(cfd, 0)) continue;   // consumes cfd
+        // Recheck (dev, ino) before removing the directory entry itself; AT_REMOVEDIR also refuses non-empty dirs, files, and symlinks.
+        if (fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW) || !S_ISDIR(st.st_mode) || st.st_dev != g->dev || st.st_ino != g->ino) continue;
+        if (!unlinkat(dfd, name, AT_REMOVEDIR)) removed++;
+    }
+    close(dfd);
+    return removed;
 }
 // The lock beside dir, held shared from here on through *fd (left open for the run: the lock ends with the process, a forked child sharing it). → the folders of earlier runs
 // to remove, when no other copy holds the lock; nil otherwise. Listed under the exclusive lock, before this process makes a serializer: a copy starting meanwhile waits for the
 // listing at its shared lock, so no folder of a running copy is ever among them. A copy that cannot take the lock at all removes nothing and goes on unprotected
-static NSSet<NSString *> *ga_claim(NSString *dir, int *fd) {
+static NSArray<GaDir *> *ga_claim(NSString *dir, int *fd) {
     *fd = -1;
     if (!dir || ![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
     int f = open([dir.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"gpuarchiver.lock"].fileSystemRepresentation, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (f < 0) return nil;
-    NSSet<NSString *> *old = flock(f, LOCK_EX | LOCK_NB) ? nil : ga_list(dir);
+    NSArray<GaDir *> *old = flock(f, LOCK_EX | LOCK_NB) ? nil : ga_list(dir);
     int r; while ((r = flock(f, LOCK_SH)) && errno == EINTR) {}   // from the exclusive lock, or after a starting copy's listing
     if (r) { close(f); return nil; }
     *fd = f;
@@ -12201,11 +12282,11 @@ static void pso4_init_once(void) {
             g_arch_q = dispatch_queue_create("dm.nvn.pso-archive", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
             g_arch_pending = dispatch_group_create();
             if (ga_own()) {   // before the first serializer (ep_new below): this run's folder is never among them
-                static int lock_fd; NSString *gd = ga_dir(); NSSet<NSString *> *old = ga_claim(gd, &lock_fd);
+                static int lock_fd; NSString *gd = ga_dir(); NSArray<GaDir *> *old = ga_claim(gd, &lock_fd);
                 if (lock_fd < 0) MLOG("[RED] pipeline archive: no lock beside %s: Metal's build folders there are left alone this run, and this run's may go with another copy's start", gd.UTF8String);
                 else if (!old) MLOG("pipeline archive: another copy of this app is running: Metal's build folders in %s are left alone", gd.UTF8String);
                 if (old.count) dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    uint64_t t0 = bp_now(); int n = 0; for (NSString *name in old) n += [NSFileManager.defaultManager removeItemAtPath:[gd stringByAppendingPathComponent:name] error:nil];
+                    uint64_t t0 = bp_now(); int n = ga_remove(gd, old);
                     MLOG("pipeline archive: %d of %lu of Metal's build folders left by earlier runs removed from %s in %.1f s", n, (unsigned long)old.count, gd.UTF8String, (bp_now() - t0) / 1e9);
                 });
             }

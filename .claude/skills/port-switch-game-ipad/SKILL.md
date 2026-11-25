@@ -104,6 +104,10 @@ It streams the RomFS image (about 3.6 GB for Wonder) to the app's `Documents/rom
 
 After a `git pull` (new host or shader chain), run the step 3 command again (it rebuilds only what changed and asks for a new preparation when the shader chain changed), then step 4. Keep the same bundle ID. The game files on the iPad stay valid unless the game version changed.
 
+## Sharing a change
+
+Only the repository's owner can push to `seedds/nxnative`, and the network at hand may block SSH to GitHub. Keep the HTTPS clone, sign `gh` in with your own GitHub account (`gh auth login -h github.com -p https -w`, then `gh auth setup-git`), fork the repository once (`gh repo fork seedds/nxnative --clone=false`, then `git remote add fork https://github.com/<you>/nxnative.git`), and for each change start a branch from `origin/main`, commit as [06-dev-loop.md](../../../docs/agents/06-dev-loop.md#8-commit-messages) says, push it to the fork and open the pull request against `seedds/nxnative:main` (`gh pr create --repo seedds/nxnative --head <you>:<branch>`). A branch that carries older unmerged work stays separate: cherry-pick the one change onto a fresh branch and regenerate `dm/gfx/nvn/dmsh_chain.h` there when the change touches the shader chain, since the chain hash depends on main's current tools. [PR #3348](https://github.com/seedds/nxnative/pull/3348) was made this way, and this skill arrives with it.
+
 ## Another game
 
 Run step 3 on the other game's folder. A game with a profile in `dm/games/` builds as above (the games table says which were tested on an iPad or iPhone). A game without one gets a survey and a provisional profile, and its build may not boot: see [Port another game](../../../docs/development.md#port-another-game).

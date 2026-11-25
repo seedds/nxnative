@@ -93,6 +93,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN | [60 fps mode](01004AB00A260000/README.md#frame-rate) |
 | [DAVE THE DIVER](010097F018538000/README.md) | `010097F018538000` | 1.0.6.1267 | 20.5.29 | Unity 6000.0.52f1 IL2CPP, FMOD | NVN | — |
 | [Dead Cells](0100646009FBE000/README.md) | `0100646009FBE000` | 1.25.0 | 13.3.5 | Heaps / HashLink (HL/C) | NVN | — |
+| [Devil May Cry 3 Special Edition](01007B600D5BC000/README.md) | `01007B600D5BC000` | 1.0.1 | 8.2.0 | Capcom's DMC3 engine, FMOD | NVN | — |
 | [Diablo II: Resurrected](0100726014352000/README.md) | `0100726014352000` | 1.0.34.0 | 11.4.3 | Blizzard's D2R engine, FMOD | NVN | [60 fps mode](0100726014352000/README.md#what-it-needs) |
 | [Diablo III: Eternal Collection](01001B300B9BE000/README.md) | `01001B300B9BE000` | 2.7.7.92380 | 8.2.0 | Blizzard's engine, FMOD | NVN | — |
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL | — |

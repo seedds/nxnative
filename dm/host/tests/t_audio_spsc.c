@@ -117,8 +117,33 @@ static int stop_pending(void) {
     printf("Stop releases partial/pending buffers in order, signals and preserves pre-start buffers: %s\n",failed?"FAIL":"PASS");
     atomic_store(&g_sig,0); return failed;
 }
+
+static int flush_pending(void) {
+    char out[64], ev[64]; uint8_t prm[16], bytes[3][16] = {{0}}, played[8];
+    aout_buf buffers[3] = {0};
+    h_au_InitParam(prm);
+    if (h_au_Open(out, ev, NULL, prm)) return 1;
+    for (int i = 0; i < 3; i++) {
+        buffers[i].ptr = bytes[i]; buffers[i].size = buffers[i].cap = sizeof bytes[i];
+    }
+    aout *a = ao(out);
+    int failed = !h_au_Append(out, &buffers[0]) || h_au_Flush(out) || h_au_BufCount(out) != 1;
+    atomic_store(&a->state, STATE_STARTED);   // drive the first callback explicitly
+    pull_pcm(a, played, sizeof played, 1);   // release buffer 0, keeping its unplayed tail in the host
+    a->rel_sem = dispatch_semaphore_create(0);
+    failed |= !h_au_Append(out, &buffers[1]) || !h_au_Append(out, &buffers[2]);
+    failed |= !h_au_Flush(out) || h_au_State(out) != STATE_STARTED || h_au_BufCount(out) != 0 || h_au_Flush(out);
+    failed |= dispatch_semaphore_wait(a->rel_sem, dispatch_time(DISPATCH_TIME_NOW, 100000000)) != 0;
+    for (int i = 0; i < 3; i++) failed |= h_au_Released(out) != &buffers[i];
+    failed |= h_au_Released(out) != NULL;
+    h_au_Close(out);
+    printf("Flush keeps playback started, signals releases and preserves stopped output: %s\n", failed ? "FAIL" : "PASS");
+    atomic_store(&g_sig, 0);
+    return failed;
+}
+
 int main(void) {
-    if (stop_pending()) return 1;
+    if (stop_pending() || flush_pending()) return 1;
     char out[64], ev[64]; uint8_t prm[16];
     test_ctx t = {0};
     t.bufs = calloc(NBUF, sizeof *t.bufs); t.data = calloc(NBUF, sizeof *t.data); t.sizes = calloc(NBUF, sizeof *t.sizes); t.scratch = malloc(512);

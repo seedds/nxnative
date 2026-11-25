@@ -441,6 +441,23 @@ static void test_doom3(void) {
     h_glPolygonMode(GL_FRONT_AND_BACK, 0x1b02); h_glDisable(0x2a02); assert(!S.lines && !S.poffset_line);
 }
 
+// GL names a sync object by value. glIsSync answers for any value; glDeleteSync ignores 0 and, for a value that is no sync object, sets GL_INVALID_VALUE and touches nothing
+// (OpenGL 4.6, section 4.1); glClientWaitSync on one returns WAIT_FAILED with that error (GitHub issue #2835)
+static void test_sync_names(void) {
+    static uint64_t not_a_sync[4] = {0x1111111111111111ull, 0x2222, 0x3333, 0x4444};   // static storage: no malloc block
+    (void)h_glGetError();
+    assert(!h_glIsSync(NULL) && !h_glIsSync(not_a_sync) && h_glGetError() == GL_NO_ERROR);
+    h_glDeleteSync(NULL); assert(h_glGetError() == GL_NO_ERROR);
+    h_glDeleteSync(not_a_sync);
+    assert(not_a_sync[0] == 0x1111111111111111ull && h_glGetError() == GL_INVALID_VALUE);
+    assert(h_glClientWaitSync((void *)(uintptr_t)0x10, 0, 0) == 0x911d && h_glGetError() == GL_INVALID_VALUE);
+    assert(h_glClientWaitSync(NULL, 0, 0) == 0x911d && h_glGetError() == GL_INVALID_VALUE);
+    void *sy = h_glFenceSync(0x9117, 0); assert(sy && h_glIsSync(sy));   // a live one, and a deleted one: its name answers false and a second delete is an error, not a second free
+    h_glDeleteSync(sy); assert(h_glGetError() == GL_NO_ERROR && !h_glIsSync(sy));
+    h_glDeleteSync(sy); assert(h_glGetError() == GL_INVALID_VALUE);
+    printf("GL sync names: OK\n");
+}
+
 // GL_TEXTURE_LOD_BIAS goes to the texture's sampler: a 4x4 texture drawn 1:1 into a 4x4 target samples level 0 (red), and with a bias of 1 level 1 (green).
 // Hardware check: sampler LOD-bias readback fails on CI's virtual Metal device.
 static void test_lod_bias(void) {
@@ -1349,6 +1366,7 @@ int main(int argc, char **argv) {
     setenv("DM_GL_STUBS", stubs ? "1" : "0", 1);
     test_fixed_function_caps();
     test_rg_texture_uploads();
+    test_sync_names();
     // The calls from the issue must bind without using a GL loader first.
     GLuint (*create)(GLenum) = import("glCreateShader");
     assert((void *)create == (void *)h_glCreateShader);

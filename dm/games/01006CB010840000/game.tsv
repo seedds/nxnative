@@ -1,0 +1,41 @@
+# Oceanhorn 2: Knights of the Lost Realm 1.1 (v65536), Unreal Engine 4.24, Nintendo SDK 10.4.1.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01006CB010840000
+program_id	01006CB010840000
+
+# ---- App ----
+name	Oceanhorn 2: Knights of the Lost Realm
+ipa	Oceanhorn2KnightsOfTheLostRealm.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.1	main=53ce4dc2fb6423a2014f76b5d912ce0e	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	OH2/Content/Paks/OH2-Switch.pak
+zip_store	.pak:.ttf:.metallib
+
+# ---- Memory ----
+# The NPDM declares 80 MiB of system resource. The shared Unreal region gate and Binned3 replacement fit this layout.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x5000000
+
+# ---- Graphics ----
+# The game sets NVN depth mode to near = 0.
+depth_mode	zero
+
+# ---- Frame rate ----
+# The shared Unreal timing code sets rhi.SyncInterval, found by its registered name, to one vsync.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	Oceanhorn 2: Knights of the Lost Realm shaders

@@ -45,6 +45,7 @@ uint64_t now_ns(void);
 // A blocking native HLE wait releases the guest core. With the condition mutex
 // held, enter with 1 before waiting and balance with 0 after reacquiring it.
 void dm_thread_native_wait(int entering);
+int dm_native_window_offscreen(const void *native);   // hle_misc.c: a native window no display shows (GameChat's virtual camera); hle_nvn.c drops the frames of its NVN windows
 void dm_host_lock(pthread_mutex_t *m);  // contention on a host mutex releases the guest core
 void dm_thread_service_connect(void);   // an HLE call that stands for connecting to a service on Horizon: threads started so far get to run (hle_thread.c)
 void dm_thread_service_request(void);   // an HLE call that is a blocking service request on Horizon: the caller gives up its core (hle_thread.c)
@@ -153,7 +154,7 @@ typedef struct { void *next; void *ptr; uint64_t cap, size, offset; } aout_buf; 
 _Static_assert(sizeof(aout_buf) == 40 && offsetof(aout_buf, ptr) == 0x08 && offsetof(aout_buf, cap) == 0x10 && offsetof(aout_buf, size) == 0x18 && offsetof(aout_buf, offset) == 0x20,
                "nn::audio::AudioOutBuffer layout");
 void dm_audio_route_changed(void);   // the output route changed: update channel layout and watch for stalled callbacks (hle_audio.c)
-int dm_audio_output_channels(void);   // the output route: 6 when the device takes six channels, else 2 (hle_audio.c); reads the device on a host stack
+int dm_audio_output_channels(void);   // the output route: 6 on a Mac device whose preferred speaker layout maps surround (5.0 / 5.1+) onto its outputs (iOS: six session channels), else 2 (hle_audio.c); reads the device on a host stack
 int dm_audio_route(void);             // cached route, initialized on the calling host stack (hle_audio.c)
 // In-process DeviceSink PCM: L R C LFE Ls Rs, followed by the stereo fold made before clamping/resampling.
 // Both representations stay queued together; a device route change selects one without losing the original mix.

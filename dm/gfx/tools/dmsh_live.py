@@ -49,7 +49,7 @@ def compile_stage(profile, cache, chain, request, key):
         profile_dir = work / profile.id
         profile_dir.mkdir()
         shutil.copyfile(profile.table('game.tsv'), profile_dir / 'game.tsv')
-        for name in ('shader_facts.tsv', 'bf_want.tsv', 'dual_want.tsv'):
+        for name in ('shader_facts.tsv', 'bf_want.tsv'):
             source = profile.table(name)
             if source.is_file():
                 shutil.copyfile(source, profile_dir / name)

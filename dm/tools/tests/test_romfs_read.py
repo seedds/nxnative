@@ -226,17 +226,23 @@ class ExtractImage(unittest.TestCase):
             root = Path(temporary); src = root / 'files'; (src / 'data/empty').mkdir(parents=True)
             data = b'\x00\x01\x02\xff' * (2 << 20)
             (src / 'data/large').write_bytes(data); (src / 'zero').touch()
+            (src / 'sample').write_bytes(b'archived DLC')
             project = root / 'fixture.csproj'
             project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
-            (root / 'Fixture.cs').write_text('using System.Reflection; using LibHac.FsSystem; class Fixture { static void Main(string[] a) {'
+            (root / 'Fixture.cs').write_text('using System; using System.Reflection; using LibHac.Common; using LibHac.Fs; using LibHac.Fs.Fsa; '
+                'using LibHac.FsSystem; using LibHac.Tools.Fs; using LibHac.Tools.FsSystem.RomFs; class Fixture { static void Main(string[] a) {'
                 'var write = typeof(P).GetMethod("WriteImage", BindingFlags.NonPublic | BindingFlags.Static);'
-                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{(System.Func<LibHac.Fs.Fsa.IFileSystem>)(() => fs), a[1]});'
-                'write.Invoke(null, new object[]{null, a[2]}); }}')
-            image, empty = root / 'RomFS.img', root / 'empty.img'
-            result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(image), str(empty)], capture_output=True, text=True, timeout=120)
+                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{(Func<IFileSystem>)(() => fs), a[1]});'
+                'write.Invoke(null, new object[]{null, a[2]});'
+                'using var file = new UniqueRef<IFile>(); fs.OpenFile(ref file.Ref, "/sample".ToU8Span(), OpenMode.Read).ThrowIfFailure();'
+                'var builder = new RomFsBuilder(); builder.AddFile("/D:/sample", file.Get);'
+                'using var archive = new RomFsFileSystem(builder.Build());'
+                'write.Invoke(null, new object[]{(Func<IFileSystem>)(() => archive), a[3]}); }}')
+            image, empty, dlc = root / 'RomFS.img', root / 'empty.img', root / 'dlc.img'
+            result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(image), str(empty), str(dlc)], capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             shutil.rmtree(src)
             virtual = romfs.Path(image)
@@ -244,6 +250,7 @@ class ExtractImage(unittest.TestCase):
             self.assertEqual((virtual / 'data/large').read_bytes(), data)
             self.assertTrue((virtual / 'data/empty').is_dir()); self.assertEqual((virtual / 'zero').read_bytes(), b'')
             self.assertEqual(list(romfs.Path(empty).iterdir()), [])
+            self.assertEqual((romfs.Path(dlc) / 'D:/sample').read_bytes(), b'archived DLC')
             self.assertFalse((root / 'RomFS').exists()); self.assertFalse(Path(str(image) + '.part').exists())
 
 

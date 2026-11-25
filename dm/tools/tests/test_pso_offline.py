@@ -52,6 +52,15 @@ class Pairs(unittest.TestCase):
         text = b'# header\nv1\tf1\n\nv2\tf2\nv1\tf1\nv3\n v4\tf4\nv1\tf1\textra\n'
         self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v2', 'f2'), (' v4', 'f4'), ('v1', 'f1')])   # the last: another line, the same pair (plan drops the base twice)
 
+    def test_read_pairs_skips_cover_sections_and_resets_across_files(self):
+        text = b'# kind: evidence\nv1\tf1\n# cover: single-stage padding pairs\nv2\tf2\n# kind: evidence\nv3\tf3\n# cover\nv4\tf4\n'
+        self.assertEqual(po.read_pairs(text), [('v1', 'f1'), ('v3', 'f3')])
+        with tempfile.TemporaryDirectory() as t:
+            a, b = Path(t, 'shader_pairs.tsv'), Path(t, 'pso_pairs.tsv')
+            a.write_bytes(b'# kind: evidence\nv1\tf1\n# cover: padding\nv2\tf2\n')
+            b.write_bytes(b'v3\tf3\n')   # headerless second file must not be hidden by first file's # cover
+            self.assertEqual(po.read_pairs_files([a, b]), [('v1', 'f1'), ('v3', 'f3')])
+
     def test_stamp_matches_the_hosts_format(self):
         text = b'a\tb\n' + b'c\td\n'
         self.assertEqual(po.stamp(CHAIN, False, text), f'chain\t{CHAIN}\ndepth\tnear=-w\npairs\t8\t{hashlib.sha256(text).hexdigest()[:16]}\n')
@@ -82,6 +91,7 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.constants(p), {'main0': ('dm_border_off',), 'main0_u': ('dm_border_off', 'spvLinearTextureAlignmentOverride'), 'vs': ()})
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
+            self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -523,7 +533,8 @@ class Build(BuildCase):
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
                     '01006A800016E000',  # Super Smash Bros. Ultimate: a player's start log (its note)
                     '0400E88025B1A000',  # Star Fox: a Mac app's start log (its note)
-                    '01005CA01580E000')  # Persona 5 Royal: an iPhone app's start log (its note)
+                    '01005CA01580E000',  # Persona 5 Royal: an iPhone app's start log (its note)
+                    '0100606026F12000')  # FINAL FANTASY RESONANCE: PR #1344 Mac app log (its note)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')
@@ -569,6 +580,17 @@ class Build(BuildCase):
         self.assertEqual(list(self.out.glob('*.mtl4a')), [])   # the old archive goes: mac_pso() then packs the app without one
         self.assertFalse((self.out / 'rest_pairs.tsv').exists())
         self.assertIn('bases\t0\n', (self.out / 'archive.tsv').read_text())
+
+    def test_cover_only_pairs_skip_bases_and_keep_compute(self):
+        (self.prof / 'shader_pairs.tsv').write_text('# kind: evidence\n# cover: single-stage padding pairs\nv\tf\n')
+        (self.prof / 'shader_map.tsv').write_text('# map\npkg\t0\tcompute\tc\tsrc\n')
+        (self.lib / 'c_b.metallib').write_bytes(metallib([('main0', False)]))
+        self.assertEqual(self.main('--gpu', 'g18p'), 0)
+        self.assertEqual(len(self.calls), 1)
+        script = json.loads(next(self.work.glob('*.mtl4-json')).read_text())
+        self.assertEqual(script['pipeline_descriptors'].get('render_pipeline_descriptors', []), [])
+        self.assertEqual(len(script['pipeline_descriptors']['compute_pipeline_descriptors']), 1)
+        self.assertIn('bases\t0\nrest\t0\ncompute\t1\n', (self.out / 'archive.tsv').read_text())
 
     def test_pairs_all_left_out_is_an_error(self):   # pairs whose libraries the host would not take: still a failure
         (self.prof / 'shader_pairs.tsv').write_text('x\ty\n')
@@ -995,7 +1017,7 @@ class Prewarm(BuildCase):
 class IpaFallback(unittest.TestCase):
     """build_ipa.sh's own archive step with a pso_offline.py that fails: a [RED] line, no archive folder, and the build goes on (an optimization: the device builds the bases)"""
 
-    def step(self, python, host_game=None, make_exit=0, **extra):
+    def step(self, python, host_game=None, make_exit=0, selected_python=None, **extra):
         lines = (REPO / 'dm/ios/tools/build_ipa.sh').read_text().splitlines()
         i = next(n for n, ln in enumerate(lines) if ln.startswith('if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ]'))
         j = next(n for n, ln in enumerate(lines) if n > i and ln.startswith('else [ "$GFXAPI" != nvn ]'))
@@ -1005,7 +1027,12 @@ class IpaFallback(unittest.TestCase):
             if host_game:
                 host = Path(d) / f'dm/host/gen/{host_game}/dmhost'; host.parent.mkdir(parents=True); host.write_text('#!/bin/sh\nexit 0\n'); host.chmod(0o755)
                 make = Path(d) / 'bin/make'; make.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$W/make.args"\nexit ' + str(make_exit) + '\n'); make.chmod(0o755)
-            env = dict({k: v for k, v in os.environ.items() if k != 'DM_PSO_HOST'}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            env = dict({k: v for k, v in os.environ.items() if k not in ('DM_PSO_HOST', 'DM_PYTHON')}, PATH=f'{d}/bin:{os.environ["PATH"]}', W=d, GD=d, GAME='G', DM='dm', MSL_IOS='m', V='0', GPUS='g18p', GFXAPI='nvn', **extra)
+            if selected_python is not None:
+                selected = Path(d) / 'selected python'
+                selected.write_text('#!/bin/sh\n' + selected_python)
+                selected.chmod(0o755)
+                env['DM_PYTHON'] = str(selected)
             if host_game: env['DM'] = str(Path(d) / 'dm')
             script = 'die() { echo "FAIL: $*"; exit 1; }\nt() { echo "$*"; }\nDM_PSO_IOS_MIN=\n' + '\n'.join(lines[i:j]) + '\nfi\necho "PSO=[$PSO]"\n[ -d "$W/build/ios/pso/bundle" ] && echo folder\n[ ! -f "$W/make.args" ] || cat "$W/make.args"\necho went on\n'
             return subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True, text=True).stdout
@@ -1014,6 +1041,13 @@ class IpaFallback(unittest.TestCase):
         out = self.step('mkdir -p "$W/build/ios/pso/bundle"; echo half; exit 1\n')
         self.assertIn('[RED] pipeline archive: pso_offline.py failed', out); self.assertIn('PSO=[]', out); self.assertNotIn('folder', out); self.assertIn('went on', out)
         self.assertNotIn('FAIL', out)
+
+    def test_archive_uses_the_packagers_python(self):
+        out = self.step('echo system Python; exit 1\n',
+                        selected_python='echo selected Python; mkdir -p "$W/build/ios/pso/bundle"\n')
+        self.assertIn('selected Python', out)
+        self.assertIn('folder', out)
+        self.assertNotIn('system Python', out)
 
     def test_prewarm_host(self):   # DM_PSO_HOST names the Mac host the prewarm files are made with; none, or no host of this game in the tree: none, with a line saying how
         out = self.step('echo "ARGS $*"; exit 0\n', DM_PSO_HOST='/x/dmhost')

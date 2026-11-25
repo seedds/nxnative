@@ -108,11 +108,82 @@ def find(img, text_end, ro_off, data_off):
     st = stores[(g, f)]
     return g, f, f'target frame rate at [{g:#x}]+{f:#x}: {len(readers[(g, f)])} readers of 60 / target, set to ' + ', '.join(f'{v} at {a:#x}' for a, v in st)
 
+
+def find_re_engine(img, text_end, data_off):
+    """Find the float MaxFps of via.Application through its timing loop and native accessors."""
+    if not all(name in img for name in (b'via.Application\0', b'get_MaxFps\0', b'set_MaxFps\0')):
+        return None, None, ''
+    # The reviewed GameThread loop compares elapsed frame units with base / MaxFps.
+    # Its fixed-step branch divides the same fields. The two paths supply the
+    # step without changing the base rate, which the game uses as a time unit.
+    wait = struct.pack('<3I', 0x1e2119af, 0xbd041e60, 0x1e2021e0)  # fdiv s15,s13,s1; str s0,[x19,#0x41c]; fcmp s15,s0
+    fixed = struct.pack('<2I', 0xf9000bf9, 0x1e2019a1)              # str x25,[sp,#0x10]; fdiv s1,s13,s0
+    from nso_code import fde_ranges
+    import bisect
+    ranges = fde_ranges(img)
+    starts = [start for start, _ in ranges]
+    words = struct.Struct('<I')
+    fields = set()
+    for at in _sites(img, wait, text_end):
+        i = bisect.bisect_right(starts, at) - 1
+        if i < 0: continue
+        start, end = ranges[i]
+        if at - 4 < start or at + len(wait) > end: continue
+        cap = words.unpack_from(img, at - 4)[0]
+        if cap & 0xffc003ff != 0xbd400261: continue   # ldr s1,[x19,#MaxFps]
+        limit = (cap >> 10 & 0xfff) * 4
+        if limit < 4: continue
+        base = struct.pack('<I', (cap & 0x003ffc00) - 0x400 | 0xbd40026d)  # ldr s13,[x19,#BaseFps]
+        same_limit = struct.pack('<I', cap - 1) + fixed                    # ldr s0,[x19,#MaxFps]
+        if img.rfind(base, start, at - 4) != -1 and img.find(same_limit, at + len(wait), end) != -1:
+            fields.add(limit)
+    if not fields: return None, None, ''
+
+    # Four neighboring accessors get/set the base and get/set MaxFps through
+    # the same singleton. Their GOT relocations yield the pointer slot.
+    rel = relocated(img)
+    candidates = set()
+    for limit in fields:
+        base = limit - 4
+        getter = struct.pack('<3I', 0xf9400108, 0xbd400100 | base << 8, 0xd65f03c0)
+        for at in _sites(img, getter, text_end):
+            first = at - 8
+            if first < 0 or first + 80 > text_end: continue
+            slots = set()
+            for j, field in enumerate((base, base, limit, limit)):
+                pc = first + j * 20
+                page, got, obj, access, ret = struct.unpack_from('<5I', img, pc)
+                op = 0xbd400100 if j % 2 == 0 else 0xbd000100
+                if (page & 0x9f00001f != 0x90000008 or got & 0xffc003ff != 0xf9400108
+                        or obj != 0xf9400108 or access != op | field << 8 or ret != 0xd65f03c0):
+                    break
+                slots.add(rel.get(adrp_page(page, pc) + (got >> 10 & 0xfff) * 8))
+            else:
+                if len(slots) != 1: continue
+                ptr = slots.pop()
+                if ptr is not None and data_off <= ptr and ptr % 8 == 0:
+                    candidates.add((ptr, limit))
+    if len(candidates) > 1:
+        return None, None, '[RED] multiple via.Application MaxFps candidates'
+    if not candidates: return None, None, ''
+    ptr, field = candidates.pop()
+    return ptr, field, f'RE Engine MaxFps at [{ptr:#x}]+{field:#x}'
+
+
+def _sites(img, pattern, end):
+    at = img.find(pattern, 0, end)
+    while at >= 0:
+        if at % 4 == 0: yield at
+        at = img.find(pattern, at + 1, end)
+
+
 if __name__ == '__main__':
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import nso
     for path in sys.argv[1:]:
         try: m = nso.read(path)
         except nso.Error as e: print(f'{path}\t-\t{e}'); continue
-        g, f, why = find(bytes(m.image), m.text_end, m.segments[1][0], m.segments[2][0])
+        img = bytes(m.image)
+        g, f, why = find_re_engine(img, m.text_end, m.segments[2][0])
+        if not why: g, f, why = find(img, m.text_end, m.segments[1][0], m.segments[2][0])
         print(f'{path}\t{m.build_id[:16].hex()}\t{why}')

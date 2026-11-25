@@ -182,6 +182,26 @@ int main(void) {
         const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
         f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
         CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        {   // one mount name for the cache storages in turn, unmounted in between (Taiko no Tatsujin: Rhythm Festival mounts index 1, unmounts, mounts index 2, all as "MyIndexCache")
+            char got[16], f1[1300], f2[1300]; int before = g_nmnt;
+            snprintf(c, sizeof c, "%s_cache11", temp); mkdir(c, 0755); snprintf(f1, sizeof f1, "%s/song", c); put(f1, "one");
+            snprintf(c, sizeof c, "%s_cache12", temp); mkdir(c, 0755); snprintf(f2, sizeof f2, "%s/song", c); put(f2, "two");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: the first index under a name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_PATH_EXISTS && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: another index under a name still in use is refused, as on Horizon");
+            h_fs_Unmount("MyCache"); CHECK(!h_fs_IsMounted("MyCache"), "cache storage mount: Unmount releases the name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: the next index under that name shows its own files (got %s)", got);
+            h_fs_Unmount("MyCache");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one") && g_nmnt == before + 2,
+                  "cache storage mount: the first index again takes its entry back (%d entries for two storages)", g_nmnt - before);
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK, "cache storage mount: the same index again under a name in use is harmless");
+            h_fs_Unmount("MyCache"); h_fs_Unmount("MyCache");   // an unmount of a name not mounted is a no-op
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: and the second");
+            h_fs_Unmount("MyCache");
+            snprintf(c, sizeof c, "%s_cache13", temp); mkdir(c, 0755);
+            CHECK(mount("PermCache", c, 0) == RES_OK && h_fs_MountCache("PermCache", 13) == RES_OK, "cache storage mount: repeating a permanent mount of the same folder succeeds");
+            h_fs_Unmount("PermCache");
+            CHECK(h_fs_IsMounted("PermCache"), "cache storage mount: repeating a permanent mount does not make it releasable");
+        }
         unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
     }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
@@ -239,6 +259,26 @@ int main(void) {
         CHECK(h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 3 && !strcmp(de[0].name, "a") && de[0].size == 5 && de[1].type == ENT_DIR && !strcmp(de[2].name, "c"), "lists a, b, c"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "the file filter hides directories"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/data/b", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0, "an empty directory"); h_fs_CloseDirectory(h);
+        {   // image directory handle streams via cursor without a snapshot: batched filtered reads, zeroed padding, and DirCount leaves cursor untouched
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && !((dirh_t *)h)->snap && ((dirh_t *)h)->img, "image directory opens with a cursor and no snapshot");
+            memset(de, 0xaa, sizeof de);
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 0) == RES_OK && cnt == 0, "a 0-entry read returns 0 and leaves the cursor at the start");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "a") && de[0].type == ENT_FILE && de[0].size == 5, "first filtered 1-entry batch returns a");
+            int zero = 1; for (size_t i = 2; i < sizeof de[0].name; i++) zero &= !de[0].name[i];
+            for (size_t i = 0; i < sizeof de[0].pad0; i++) zero &= !de[0].pad0[i];
+            for (size_t i = 0; i < sizeof de[0].pad1; i++) zero &= !de[0].pad1[i];
+            CHECK(zero, "DirectoryEntry padding and name tail are zeroed");
+            CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 2, "DirCount counts filtered files (2) mid-read");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "c") && de[0].type == ENT_FILE && de[0].size == 2, "second batch skips directory b and returns c (cursor untouched by DirCount)");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "third batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1, "dir-only filter counts 1");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "b") && de[0].type == ENT_DIR && de[0].size == 0, "dir-only batch returns b with size 0");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "dir-only second batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", 0) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "mode 0 counts and lists nothing");
+            h_fs_CloseDirectory(h);
+        }
         g_nmnt = 0;
         char ov[1100], ovd[1200]; snprintf(ov, sizeof ov, "%s/imgov", root); snprintf(ovd, sizeof ovd, "%s/data", ov); mkdir(ov, 0755); mkdir(ovd, 0755);
         snprintf(fn, sizeof fn, "%s/a", ovd); put(fn, "mod"); snprintf(fn, sizeof fn, "%s/new", ovd); put(fn, "added");
@@ -274,9 +314,10 @@ int main(void) {
             h_fs_Unmount("AVC");
             CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_nmnt == before + 2,
                   "the first add-on again takes its entry back (%d entries for two add-ons)", g_nmnt - before);
-            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "a name still in use keeps its target, as before");
+            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_PATH_EXISTS && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "another add-on under a name still in use is refused, as on Horizon");
+            CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "the same add-on again under a name in use is harmless");
             CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the RomFS"); h_fs_Unmount("rom");
-            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every mount but an add-on's");
+            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every non-releasable mount");
         }
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
         {   // a file written as read from a damaged NSP (nx_extract --allow-damaged) still reads, and the mount counts it and the first open names it once

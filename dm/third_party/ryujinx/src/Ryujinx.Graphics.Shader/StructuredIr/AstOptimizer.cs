@@ -8,7 +8,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 {
     static class AstOptimizer
     {
-        public static void Optimize(StructuredProgramContext context)
+        public static void Optimize(StructuredProgramContext context, bool flattenElseIf = true)
         {
             AstBlock mainBlock = context.CurrentFunction.MainBlock;
 
@@ -39,7 +39,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                 }
             }
 
-            RemoveEmptyBlocks(mainBlock);
+            RemoveEmptyBlocks(mainBlock, flattenElseIf);
         }
 
         // Propagation changes evaluation time. Restrict it to value-only trees
@@ -216,7 +216,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
             }
         }
 
-        private static void RemoveEmptyBlocks(AstBlock mainBlock)
+        private static void RemoveEmptyBlocks(AstBlock mainBlock, bool flattenElseIf)
         {
             Queue<AstBlock> pending = new();
 
@@ -261,7 +261,7 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
                         parent.Remove(block);
                     }
                 }
-                else if (isIf && parent.Type == AstBlockType.Else && parent.Count == (hasElse ? 2 : 1))
+                else if (flattenElseIf && isIf && parent.Type == AstBlockType.Else && parent.Count == (hasElse ? 2 : 1))
                 {
                     AstBlock parentOfParent = parent.Parent;
 

@@ -112,6 +112,12 @@ class BlendZero(unittest.TestCase):
         self.assertLess(out.index('struct main0_out'), out.index('void dm_blend0(thread main0_out& dm_o'))   # the helper takes main0's local output: after its struct, before main0
         self.assertLess(out.index('void dm_blend0('), out.index('fragment main0_out main0('))
 
+    def test_blend_off_constant_returns_before_the_words(self):   # a pipeline specialized dm_blend_off = true reads no word and changes nothing
+        out, _ = blend_zero(PLAIN)
+        self.assertIn(f'constant bool dm_blend_off [[function_constant({dmsh_abi.BLEND_OFF_FC})]];', out)
+        h = out[out.index('void dm_blend0('):]; h = h[:h.index('\n}\n')]
+        self.assertLess(h.index('if (is_function_constant_defined(dm_blend_off) && dm_blend_off) return;'), h.index('dm_s.zero'))
+
     def test_each_float4_colour_by_its_index(self):
         out, _ = blend_zero(PLAIN)
         bits = dmsh_abi.BLEND_ZERO_BITS

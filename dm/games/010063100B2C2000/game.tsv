@@ -1,0 +1,45 @@
+# Game profile of Cytus α (Switch, base game v0 + update 1.0.6 = v393216). Plays on the Mac and on the iPhone
+# Format: see dm/games/README.md
+# Unity 2018.2.18f1 (IL2CPP) with FMOD, SDK 6.4.2; subsdk0 is the movie module. Its sdk and subsdk0 are AI: THE SOMNIUM FILES' builds (010089B00D09C000), so no rewriter cut or host change was needed.
+# A touch game: it reads the touch screen in handheld mode only, so the profile starts handheld (Normal, 1280x720) with the Tap layout.
+# It presents at interval 1 (60 fps). The profile started as the provisional one of scripts/build_ipa_from_nsp.py; every guessed key was kept as the boot measured it
+
+# ---- Identity ----
+title_id	010063100B2C2000
+program_id	010063100B2C2000
+
+# ---- App ----
+name	Cytus α
+ipa	Cytus.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v393216	1.0.6	main=b5e9568304d84440a267725f5f6a946e	subsdk0=16577266bb9797abf6029f85025f6d35	sdk=184751379007f9c50fc96ba4d26a5dca
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Ingame/Atlas/MillionMaster.unity3d
+zip_store	.dat:.mp4:.resource:.ress:.unity3d:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region (it asks for 3.14 GB, which fits with the default 64 MB of used memory)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Cytus α shaders
+
+# ---- Mode ----
+# Cytus α takes the touchscreen only in handheld mode (docked, a click on the Mac and a touch on the iPhone do nothing), so it starts handheld with the Tap layout.
+# It stays in handheld Normal (1280x720) rather than perf_mode boost: both its custom touch plugin (main+0xc4bb90) and Unity's SwitchInput (main+0x1000270) take raw 1280x720
+# panel coordinates without scaling (and Unity's Input.GetTouch hardcodes 720 - y)
+op_mode	handheld
+pad_layout	touch

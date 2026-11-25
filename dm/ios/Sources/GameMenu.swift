@@ -6,19 +6,42 @@ import UIKit
 
 var gameMenuModel: LauncherModel?   // the settings screen's model (Launcher.swift); nil in an app without one: the menu has the layout only
 
+// Front ends supply DM_GAME_MENU_TEXT in this order. Keep each position stable for older front ends.
+enum GameMenuText: Int, CaseIterable {
+    case moreSettings, controllerLayout, tap, fixedSetting
+
+    var english: String {
+        switch self {
+        case .moreSettings: return "More settings on the start screen"
+        case .controllerLayout: return "Controller layout"
+        case .tap: return "Tap"
+        case .fixedSetting: return "Set in env.txt"
+        }
+    }
+
+    static func line(_ label: GameMenuText, in payload: String?) -> String {
+        let lines = (payload ?? "").replacingOccurrences(of: "\\n", with: "\n").components(separatedBy: "\n")
+        guard label.rawValue < lines.count else { return label.english }
+        let text = lines[label.rawValue].trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? label.english : text
+    }
+
+    var text: String { Self.line(self, in: getenv("DM_GAME_MENU_TEXT").flatMap { String(validatingCString: $0) }) }
+}
+
 @_cdecl("dm_game_menu")
 public func dmGameMenu() -> UnsafeMutableRawPointer {
-    let title = gameMenuModel != nil ? "More settings on the start screen" : ""
+    let title = gameMenuModel != nil ? GameMenuText.moreSettings.text : ""
     let menu = UIMenu(title: title, children: [UIDeferredMenuElement.uncached { done in done(gameMenuItems()) }])   // built each time it opens, so it shows the current choices
     return Unmanaged.passRetained(menu).toOpaque()
 }
 
 private func gameMenuItems() -> [UIMenuElement] {
-    let names = ["2D", "3D", "Tap"]
+    let names = ["2D", "3D", GameMenuText.tap.text]
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
     }
-    let layout = UIMenu(title: "Controller layout", options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let layout = UIMenu(title: GameMenuText.controllerLayout.text, options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
     var items: [UIMenuElement] = []
     var placed = false
     if let m = gameMenuModel {
@@ -39,11 +62,11 @@ private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
     func pick(_ v: String) { m.choose(s, v); _ = dm_setting_live(s.env, v) }
     if s.kind == "toggle" {
         let a = UIAction(title: s.label, attributes: attributes, state: now == s.onValue ? .on : .off) { _ in pick(now == s.onValue ? s.offValue : s.onValue) }
-        if fixed { a.subtitle = "Set in env.txt" }
+        if fixed { a.subtitle = GameMenuText.fixedSetting.text }
         return a
     }
     let options = offeredOptions(s, current: now)
     let current = options.first { $0[0] == now }?[1] ?? now
     let actions = options.map { o in UIAction(title: o[1], attributes: attributes, state: o[0] == now ? .on : .off) { _ in pick(o[0]) } }
-    return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : nil, options: .singleSelection, children: actions)
+    return UIMenu(title: s.label, subtitle: fixed ? "\(current) · \(GameMenuText.fixedSetting.text)" : nil, options: .singleSelection, children: actions)
 }

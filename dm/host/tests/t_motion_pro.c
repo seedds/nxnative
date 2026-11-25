@@ -49,5 +49,25 @@ int main(void) {
     assert(ds4_motion_decode(&d, q, 78, t + 8000000, out) == 1);   // real free fall after live data
     assert(!ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 1, out));   // stale stream must become live again
     q[17] = 0x01; assert(ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 4000001, out) == 1);
+    // 8BitDo Ultimate 2 Wireless (2DC8:6012, Bluetooth): 34-byte report 0x01 (firmware 1.03+), 12-byte report (firmware 1.02) carries no sensor
+    pro_motion eb = {0}; uint8_t e[34] = {0x01};
+    assert(!abitdo_motion_decode(&eb, e, 12, t, out) && !abitdo_motion_decode(&eb, e, 33, t, out) && !abitdo_motion_decode(&eb, e, 34, t, out));
+    // Real report captured from an Ultimate 2 Wireless (firmware 1.03+) lying face up on a desk over Bluetooth on macOS 26.7 (PR #1934)
+    const uint8_t flat[34] = {0x01, 0x0f, 0x7f, 0x7f, 0x7f, 0x7f, 0, 0, 0, 0, 0, 0, 0x12, 0x60, 0x49,
+                              0x6b, 0x01, 0x63, 0x03, 0x37, 0x10, 0xf8, 0xff, 0x18, 0x00, 0xf4, 0xff};
+    assert(abitdo_motion_decode(&eb, flat, sizeof flat, t, out) == 1 && out[0].ns == t);
+    assert(fabsf(out[0].acc[0] - 0.21167f) < 1e-4f && fabsf(out[0].acc[1] + 0.08862f) < 1e-4f && fabsf(out[0].acc[2] + 1.01343f) < 1e-4f);
+    assert(fabsf(out[0].rot[0] + 0.025566f) < 1e-4f && fabsf(out[0].rot[1] + 0.008522f) < 1e-4f && fabsf(out[0].rot[2] + 0.012783f) < 1e-4f);
+    e[0] = 0x03; assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 16000000, out)); e[0] = 0x01;
+    int16_t ev[6] = {-4096, 2048, 4096, 1000, -500, 250};   // same raw axes as Switch Pro (pro_motion_decode)
+    for (int i = 0; i < 6; i++) { e[15 + 2 * i] = (uint8_t)ev[i]; e[16 + 2 * i] = (uint8_t)((uint16_t)ev[i] >> 8); }
+    assert(abitdo_motion_decode(&eb, e, sizeof e, t + 16000000, out) == 1 && out[0].ns == t + 16000000);
+    assert(out[0].acc[0] == .5f && out[0].acc[1] == 1 && out[0].acc[2] == -1);
+    assert(fabsf(out[0].rot[0] - 500 * rd) < 1e-6f && fabsf(out[0].rot[1] - 1000 * rd) < 1e-6f && fabsf(out[0].rot[2] - 250 * rd) < 1e-6f);
+    memset(e + 15, 0, 12);
+    assert(abitdo_motion_decode(&eb, e, sizeof e, t + 32000000, out) == 1 && out[0].acc[2] == 0 && out[0].rot[2] == 0);   // real free fall after live data
+    assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 1, out));   // stale stream must become live again
+    e[19] = 0x00; e[20] = 0x80; e[25] = 0x00; e[26] = 0x80;   // INT16_MIN on accel z and gyro z
+    assert(abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 16000001, out) == 1 && out[0].acc[2] == 8 && out[0].rot[2] < 0);
     puts("t_motion_pro: passed");
 }

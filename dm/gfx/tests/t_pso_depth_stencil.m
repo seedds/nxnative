@@ -106,7 +106,7 @@ static void draws(NvProg *p) {
         CHECK(e != nil, "production pass opens");
         CHECK(g_pass.dfmt == cases[i].df && g_pass.sfmt == cases[i].sf, "physical formats match literal expected pipeline formats");
         uint64_t before = g_pb_legacy + g_pb_spec;
-        id<MTLRenderPipelineState> ps = pso_get_(p, nil); seen[i] = ps;
+        id<MTLRenderPipelineState> ps = pso_get(p, nil); seen[i] = ps;
         CHECK(ps != nil, "production pipeline lookup succeeds");
         for (unsigned j = 0; j < i; j++) if (cases[i].color == cases[j].color && cases[i].df == cases[j].df && cases[i].sf == cases[j].sf) {
             CHECK(ps == seen[j], "returning to an effective format pair reuses its pipeline");

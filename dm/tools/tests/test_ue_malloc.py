@@ -53,6 +53,19 @@ class FindTest(unittest.TestCase):
         call, vt, slot, why = find(image(slot=26, relocated=True))
         self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 26), why)
 
+    def test_rtti_must_name_the_binned_allocator(self):
+        img = image(slot=26, relocated=True)
+        typeinfo, type_name = 0xa500, 0x8180
+        struct.pack_into('<Q', img, VT - 8, typeinfo)
+        struct.pack_into('<Q', img, typeinfo + 8, type_name)
+        img[type_name:type_name + len(ue_malloc.TYPE_NAME)] = ue_malloc.TYPE_NAME
+        call, vt, slot, why = find(img)
+        self.assertEqual((call, vt, slot), ((CALLER + 4,), VT, 26), why)
+        img[type_name] = ord('2')
+        call, _, _, why = find(img)
+        self.assertIsNone(call)
+        self.assertIn('RTTI does not name FMallocBinned3', why)
+
     def test_no_name_is_not_red(self):
         call, _, _, why = find(image(name=False))
         self.assertIsNone(call)

@@ -28,17 +28,31 @@ static void adrp_add(uint32_t *t, uint32_t i, int r, uint64_t target) {
     t[i] = 0x90000000u | (uint32_t)(imm & 3) << 29 | (uint32_t)((imm >> 2) & 0x7ffff) << 5 | (uint32_t)r;
     t[i + 1] = 0x91000000u | (uint32_t)(target & 0xfff) << 10 | (uint32_t)r << 5 | (uint32_t)r;
 }
+static void frostbite_reg(uint8_t *base, uint32_t at, uint64_t ptr_off, int with_enable) {
+    uint32_t *t = (uint32_t *)base;
+    int64_t imm = (int64_t)((ptr_off & ~0xfffull) - (((at + 1) * 4ull) & ~0xfffull)) >> 12;
+    t[at] = with_enable ? (0x39400000u | (0x1f5u << 10) | 8u) : 0xD503201Fu;   // ldrb w8, [x0, #0x1f5] or nop
+    t[at + 1] = 0x90000000u | (uint32_t)(imm & 3) << 29 | (uint32_t)((imm >> 2) & 0x7ffff) << 5 | 9u;   // adrp x9, page
+    t[at + 2] = 0x6F01F7C1u;   // fmov v1.2d, #30.0
+    t[at + 3] = 0xF9400000u | (uint32_t)((ptr_off & 0xfff) >> 3) << 10 | 9u << 5 | 9u;   // ldr x9, [x9, #lo]
+    t[at + 4] = 0x3C808000u | 9u << 5 | 1u;   // stur q1, [x9, #8]
+}
 // A Frostbite main in miniature: the class name and field names in read-only data, the class record and its field list, the static constructor's registration of the
 // type info and a reader's settings lookup in the text, the instance cache word and the instance
 static uint8_t *frostbite(uint8_t *base, uint8_t *inst) {
     g_mod[0].text_end = 0x1000; g_mod[0].ro_off = 0x2000; g_mod[0].size = 0x13000000;
-    uint64_t b = (uint64_t)(uintptr_t)base, rec = 0x3008, fields = 0x3100, ti = 0x40000, cache = 0x41000;
-    static const char names[] = "\0SimulationTimeSettingsX\0SimulationTimeSettings\0ForceSimRate\0MaxSimFps";
+    uint64_t b = (uint64_t)(uintptr_t)base, rec = 0x3008, fields = 0x3100, rec2 = 0x3058, fields2 = 0x3160, ti = 0x40000, cache = 0x41000;
+    static const char names[] = "\0SimulationTimeSettingsX\0SimulationTimeSettings\0ForceSimRate\0MaxSimFps\0GameRenderSettings\0Enable";
     memcpy(base + 0x2000, names, sizeof names);
-    *(uint64_t *)(base + 0x3000) = b + 0x2001;   // a record of another class whose name starts the same
-    *(uint64_t *)(base + rec) = b + 0x2019; *(uint64_t *)(base + rec + 0x40) = b + fields;
-    *(uint64_t *)(base + fields) = b + 0x203d; *(uint32_t *)(base + fields + 0x10) = 0x34;
-    *(uint64_t *)(base + fields + 0x20) = b + 0x2030; *(uint32_t *)(base + fields + 0x30) = 0x38;
+    uint64_t o_simx = 1, o_sim = o_simx + strlen(names + o_simx) + 1;
+    uint64_t o_rate = o_sim + strlen(names + o_sim) + 1, o_max = o_rate + strlen(names + o_rate) + 1;
+    uint64_t o_grs = o_max + strlen(names + o_max) + 1, o_en = o_grs + strlen(names + o_grs) + 1;
+    *(uint64_t *)(base + 0x3000) = b + 0x2000 + o_simx;   // a record of another class whose name starts the same
+    *(uint64_t *)(base + rec) = b + 0x2000 + o_sim; *(uint64_t *)(base + rec + 0x40) = b + fields;
+    *(uint64_t *)(base + fields) = b + 0x2000 + o_max; *(uint32_t *)(base + fields + 0x10) = 0x34;
+    *(uint64_t *)(base + fields + 0x20) = b + 0x2000 + o_rate; *(uint32_t *)(base + fields + 0x30) = 0x38;
+    *(uint64_t *)(base + rec2) = b + 0x2000 + o_grs; *(uint64_t *)(base + rec2 + 0x40) = b + fields2;
+    *(uint64_t *)(base + fields2) = b + 0x2000 + o_en; *(uint32_t *)(base + fields2 + 0x10) = 0x1f5;
     uint32_t *t = (uint32_t *)base;
     adrp_add(t, 100, 19, ti); adrp_add(t, 102, 8, rec); t[104] = 0xF9000000u | 19 << 5 | 8;   // str x8, [x19]
     adrp_add(t, 200, 2, 0x42000);   // another word in x2 well before the lookup
@@ -61,12 +75,20 @@ static void check(int which) {
     uint8_t object[0x500] = {0};
     float *f = NULL; int32_t *sync = NULL;
     if (which <= 5 && which != 3) g_mod[0].unity_target_fps = 0x4afc868;   // 0 to 5: Unity's targetFrameRate where the rewriter found it (Pokémon Brilliant Diamond 1.3.0); 3: nothing found
-    if (which >= 30) {   // any build with the engine-derived interval: its adjacent previous value belongs to the engine
+    if (which >= 30 && which <= 37) {   // any build with the engine-derived interval: its adjacent previous value belongs to the engine
         g_mod[0].monolith_interval = 0x6000;
         sync = (int32_t *)(base + 0x6000);
         sync[0] = which == 31 ? 1 : which == 33 || which == 34 ? 0 : which == 35 ? -1 : which == 36 ? 5 : 2;
         sync[1] = 17;
         if (which == 37) g_mod[0].native_fps_blocked = 1;
+    } else if (which == 38 || which == 39) {   // Frostbite regulator negative cases: ambiguous (38) and missing GameRenderSettings.Enable guard (39)
+        strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        frostbite(base, object + 0x100);
+        *(float *)(object + 0x134) = 30; *(int32_t *)(object + 0x138) = 30;
+        frostbite_reg(base, 300, 0xda5d0f8, which == 38);
+        if (which == 38) frostbite_reg(base, 320, 0xda5d100, 1);
+        *(uintptr_t *)(base + 0xda5d0f8) = (uintptr_t)object;
+        double *d = (double *)(object + 8); d[0] = d[1] = 30;
     } else if (which == 6) {
         strcpy(g_mod[0].build_id, "c9a3dd7702075ecd90101f4555389582");
         *(uintptr_t *)(base + 0x1295b3f0) = (uintptr_t)object;
@@ -81,9 +103,12 @@ static void check(int which) {
         *(uintptr_t *)(base + 0x7b32690 + 0x10) = (uintptr_t)(object + 16);
         f = (float *)object; f[0] = f[1] = 30;
         sync = (int32_t *)(object + 16); sync[0] = sync[1] = 2;
-    } else if (which == 14) {
-        strcpy(g_mod[0].build_id, "a48c0de3bc353efa0e4d359bde05ef24");
-        *(uintptr_t *)(base + 0xda20e38) = (uintptr_t)object;
+    } else if (which == 14) {   // Frostbite frame regulator found dynamically on any build alongside SimulationTimeSettings
+        strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
+        frostbite(base, object + 0x100);
+        *(float *)(object + 0x134) = 30; *(int32_t *)(object + 0x138) = 30;
+        frostbite_reg(base, 300, 0xda5d0f8, 1);
+        *(uintptr_t *)(base + 0xda5d0f8) = (uintptr_t)object;
         double *d = (double *)(object + 8); d[0] = d[1] = 30;
     } else if (which == 15 || which == 16) {
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
@@ -124,6 +149,10 @@ static void check(int which) {
         g_mod[0].fps_target_ptr = 0x21e60d8; g_mod[0].fps_target_field = 0x1dc;
         *(uintptr_t *)(base + 0x21e60d8) = (uintptr_t)object;
         *(int32_t *)(object + 0x1dc) = which == 17 ? 30 : 60;
+    } else if (which == 40) {
+        g_mod[0].fps_target_ptr = 0x6000; g_mod[0].fps_target_field = 0x43c; g_mod[0].fps_target_f32 = 1;
+        *(uintptr_t *)(base + 0x6000) = (uintptr_t)object;
+        f = (float *)(object + 0x438); f[0] = f[1] = 30;
     } else if (which >= 9) {   // the present interval alone (UE 4.18's nvn.SyncInterval); 12: a main the rewriter found no variable in
         strcpy(g_mod[0].build_id, "0123456789abcdef0123456789abcdef");
         if (which != 12) cvar("nvn.SyncInterval", 0x8adca10);
@@ -134,7 +163,13 @@ static void check(int which) {
     if (which & 1) assert(dm_fps_lock_engine() == engine);   // the graphics layer's present cap may ask before the first present (the acquire)
     dm_fps_lock_tick();
     assert(dm_fps_lock_engine() == engine);
-    if (which >= 30) {
+    if (which == 40) {
+        assert(f[0] == 30 && f[1] == 60 && writes == 1);   // MaxFps changes, BaseFps remains the engine's time unit.
+        dm_fps_lock_tick(); assert(writes == 1);
+        f[1] = 30; dm_fps_lock_tick(); assert(f[0] == 30 && f[1] == 60 && writes == 2);
+        munmap(base, len); return;
+    }
+    if (which >= 30 && which <= 37) {
         assert(sync[1] == 17);   // no fabricated previous-frame state
         if (which == 30 || which == 33) {
             assert(sync[0] == 1 && writes == 1);
@@ -208,8 +243,15 @@ static void check(int which) {
         sync[0] = sync[1] = 2; dm_fps_lock_tick();
         assert(sync[0] == 1 && sync[1] == 1 && writes == 4);
     } else if (which == 10) assert(sync[0] == 2 && sync[1] == 2 && writes == 2);
-    else if (which == 14) { double *d = (double *)(object + 8); assert(d[0] == 60 && d[1] == 60 && writes == 2); }
-    else if (which == 15) {
+    else if (which == 14) {
+        double *d = (double *)(object + 8);
+        assert(d[0] == 60 && d[1] == 60 && *(float *)(object + 0x134) == 60 && *(int32_t *)(object + 0x138) == 60 && writes == 4);
+        d[0] = d[1] = 30; dm_fps_lock_tick();
+        assert(d[0] == 60 && d[1] == 60 && writes == 6);
+    } else if (which == 38 || which == 39) {
+        double *d = (double *)(object + 8);
+        assert(d[0] == 30 && d[1] == 30 && *(float *)(object + 0x134) == 60 && *(int32_t *)(object + 0x138) == 60 && writes == 2);
+    } else if (which == 15) {
         assert(*(float *)(object + 0x34) == 60 && *(int32_t *)(object + 0x38) == 60 && writes == 2);
         dm_fps_lock_tick(); assert(writes == 2);
         *(int32_t *)(object + 0x38) = 30; dm_fps_lock_tick(); assert(*(int32_t *)(object + 0x38) == 60 && writes == 3);
@@ -232,7 +274,7 @@ static void check(int which) {
 
 int main(void) {
     // Each process starts the production one-time initialization with a fresh build and target.
-    for (int i = 0; i < 38; i++) {
+    for (int i = 0; i < 41; i++) {
         pid_t p = fork(); assert(p >= 0);
         if (!p) { check(i); _exit(0); }
         int status; assert(waitpid(p, &status, 0) == p); assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);

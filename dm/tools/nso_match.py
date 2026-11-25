@@ -364,15 +364,18 @@ class Function:
 
 def validate(rule):
     """Reject malformed rules and replacements whose meaning depends on an address."""
+    if 'alias_only' in rule and not isinstance(rule['alias_only'], bool):
+        raise ValueError('alias_only must be a bool')
     if 'functions' in rule:
-        if set(rule) != {'name', 'functions'}: raise ValueError('a patch of several functions needs only name and functions')
+        if not {'name', 'functions'} <= set(rule) <= {'name', 'functions', 'alias_only'}:
+            raise ValueError('a patch of several functions needs only name, functions and optional alias_only')
         if not isinstance(rule['functions'], (list, tuple)) or len(rule['functions']) < 2: raise ValueError('a patch of several functions needs at least two')
         for fn in rule['functions']:
-            if 'name' in fn or 'functions' in fn: raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by')
+            if 'name' in fn or 'functions' in fn or 'alias_only' in fn: raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by')
             validate(dict(fn, name=rule['name']))
         return
     required = {'name', 'size', 'fingerprints', 'cuts'}
-    if not required <= set(rule) <= required | {'called_by'}:
+    if not required <= set(rule) <= required | {'called_by', 'alias_only'}:
         raise ValueError('function patch needs name, size, fingerprints and cuts')
     validate_function(rule)
     if 'called_by' in rule:
@@ -393,9 +396,9 @@ def validate(rule):
                 raise ValueError('replacement must not contain PC-relative instructions, except branches inside the matched function')
 
 
-def resolve(image, text_end, rules, report=print, outcomes=None, red=True):
+def resolve(image, text_end, rules, report=print, outcomes=None, red=True, alias_only=None):
     """Return verified cuts without mutating the image; refuse missing/ambiguous rules. outcomes, a list, gets (patch name, cut offsets or None, why) for each patch.
-    red=False logs a patch that does not apply as a plain line (SDK-wide patches, which a module may not need)"""
+    red=False logs a patch that does not apply as a plain line (SDK-wide patches, which a module may not need). alias_only, a set, receives the offsets of matched rules with alias_only=True."""
     if not rules: return []
     groups = {}
     # Rules with the same name are one patch's reviewed implementations (code another build changed, with its own size or cut offsets): exactly one of them must match
@@ -411,13 +414,14 @@ def resolve(image, text_end, rules, report=print, outcomes=None, red=True):
     for name, alternatives in groups.items():
         found, misses = [], []
         for i, rule in enumerate(alternatives, 1):
-            try: found.append((i, module.match_patch(rule)))
+            try: found.append((i, rule, module.match_patch(rule)))
             except MatchError as e: misses.append(str(e))
         if len(found) != 1:
             missed(name, f'{len(found)} implementations match (need exactly one)' if found else '; '.join(misses))
             continue
-        (i, got), = found
+        (i, matched_rule, got), = found
         cuts.extend(got)
+        if alias_only is not None and matched_rule.get('alias_only'): alias_only.update(c[0] for c in got)
         report(f'function patch {name!r}: matched at {", ".join(f"{c[0]:#x}" for c in got)}' + (f' (implementation {i} of {len(alternatives)})' if len(alternatives) > 1 else ''))
         if outcomes is not None: outcomes.append((name, [c[0] for c in got], f'implementation {i} of {len(alternatives)}'))
     occupied = set()

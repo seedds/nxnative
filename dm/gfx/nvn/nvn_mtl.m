@@ -13290,8 +13290,9 @@ static int pre_stamp_done(NSString *have, NSString *want) {
     if ([name rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"/\t\n"]].location != NSNotFound) return 0;
     return !msl_has([g_msl_dir stringByAppendingPathComponent:name]);   // still absent: the same app, nothing more to build
 }
-static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex key, pixel key) per line, without empty lines, comments, # cover padding sections and repeated lines
-    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set]; int cover = 0;
+static NSString *pre_pair_key(NSString *vk, NSString *fk) { return [NSString stringWithFormat:@"%@\t%@", vk, fk]; }
+static void pre_parse_into(NSString *txt, NSMutableArray<NSArray<NSString *> *> *pairs, NSMutableSet<NSString *> *seen) {   // (vertex key, pixel key) per line, without empty lines, comments, # cover padding sections and repeated lines
+    int cover = 0;
     for (NSString *l in [txt componentsSeparatedByString:@"\n"]) {
         if (!l.length) continue;
         if ([l hasPrefix:@"#"]) {
@@ -13299,14 +13300,23 @@ static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {   // (vertex k
             else if ([l hasPrefix:@"# kind:"]) cover = 0;
             continue;
         }
-        if (cover || [seen containsObject:l]) continue;
-        [seen addObject:l]; NSArray *c = [l componentsSeparatedByString:@"\t"]; if (c.count >= 2) [pairs addObject:c];
+        if (cover) continue;
+        NSArray<NSString *> *c = [l componentsSeparatedByString:@"\t"];
+        if (c.count < 2) continue;
+        NSString *key = c.count == 2 ? l : pre_pair_key(c[0], c[1]);
+        if ([seen containsObject:key]) continue;
+        [seen addObject:key];
+        if (pairs) [pairs addObject:c];
     }
+}
+static NSArray<NSArray<NSString *> *> *pre_parse(NSString *txt) {
+    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    pre_parse_into(txt, pairs, seen);
     return pairs;
 }
 static NSArray<NSArray<NSString *> *> *pre_parse_files(NSArray<NSString *> *texts) {   // parse each file independently so a # cover section never hides a headerless later file
-    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSArray<NSString *> *> *seen = [NSMutableSet set];
-    for (NSString *t in texts) for (NSArray<NSString *> *p in pre_parse(t)) if (![seen containsObject:p]) { [seen addObject:p]; [pairs addObject:p]; }
+    NSMutableArray<NSArray<NSString *> *> *pairs = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *t in texts) pre_parse_into(t, pairs, seen);
     return pairs;
 }
 // Whether the archive bundled with the app (pso_bundle_open) holds this run's prebuild: its prebuilt.tsv is the stamp the device would write for these pairs and this depth mode,
@@ -13323,9 +13333,10 @@ static int pso_bundle_covers(NSArray<NSArray<NSString *> *> *pairs, NSString *wa
              have && [have rangeOfString:zero ? @"depth\tnear=-w" : @"depth\tnear=0"].location != NSNotFound ? " (the game's depth mode is not the one built for: the profile key depth_mode)" : "");
         return 0;
     }
-    NSMutableSet<NSArray<NSString *> *> *left = [NSMutableSet setWithArray:pre_parse(rest ?: @"")];
+    NSMutableSet<NSString *> *left = [NSMutableSet set];
+    if (rest.length) pre_parse_into(rest, nil, left);
     NSMutableArray<NSArray<NSString *> *> *cand = [NSMutableArray array];
-    for (NSArray<NSString *> *p in pairs) if (![left containsObject:@[p[0], p[1]]]) [cand addObject:p];
+    for (NSArray<NSString *> *p in pairs) if (!left.count || ![left containsObject:pre_pair_key(p[0], p[1])]) [cand addObject:p];
     uint64_t t0 = bp_now(); int probed = 0, found = 0; NSUInteger n = cand.count;
     for (NSUInteger k = 0; k < PRE_PROBE && k < n; k++) @autoreleasepool {
         NSArray<NSString *> *p = cand[k * n / MIN(n, (NSUInteger)PRE_PROBE)];
@@ -13643,7 +13654,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
     NSMutableSet<NSString *> *seen = [NSMutableSet set], *stale = [NSMutableSet set]; long n = 0;
     NSMutableSet<NSData *> *seen_k = [NSMutableSet set];   // rows recorded before pso_key_norm that are one pipeline now
     NSMutableSet<NSString *> *seen_shader = [NSMutableSet set];
-    NSMutableSet<NSArray *> *seen_mesh = [NSMutableSet set];
+    NSMutableDictionary<NSString *, NSMutableSet<NSData *> *> *seen_mesh = [NSMutableDictionary dictionary];
     for (NSString *path in paths) {
         NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
         if (!txt) { MLOG("[RED] cannot read prewarm list: %s", path.UTF8String); continue; }
@@ -13682,9 +13693,10 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                     (fkey.length && ![warm_map_stage(fkey) isEqualToString:@"pixel"]) ||
                     (tkey && ![warm_map_stage(tkey) isEqualToString:@"task"])) continue;
                 NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk];
-                NSArray *identity = @[c[1], kd];   // The same mesh state with a different task shader is a different pipeline.
-                if ([seen_mesh containsObject:identity]) continue;
-                [seen_mesh addObject:identity];
+                NSMutableSet<NSData *> *seen_for_task = seen_mesh[c[1]];   // The same mesh state with a different task shader is a different pipeline.
+                if (!seen_for_task) { seen_for_task = [NSMutableSet set]; seen_mesh[c[1]] = seen_for_task; }
+                if ([seen_for_task containsObject:kd]) continue;
+                [seen_for_task addObject:kd];
                 t = [WarmTask new]; t->kind = 3; t->vkey = vkey; t->fkey = fkey; t->tkey = tkey;
                 t->rs = [NSMutableArray arrayWithObject:kd];
                 [tasks addObject:t];

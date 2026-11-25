@@ -179,15 +179,20 @@ OTHER_BASE = 0x8000000   # where the dry run puts a MATCH_FRAME_STEP rule's othe
                           # within a b's reach (128 MB) of a main's sites below it and of up to forty-eight other functions above
 
 
-def frame_step_sites(fn, base=0, others=(), found=None):   # (offset, reason) of each site a FRAME_STEP function (or a MATCH_FRAME_STEP stub, its function at base) writes, whether it marks a
-    pos, puts = [0x6000000], []                    # render-scale stub, the sites in each of the rule's other functions ({label: [(offset, reason)]}) and the capabilities it declares
+def _record_stub(fn, base=0, others=(), found=None):   # sites as (offset, reason) in the module and the rule's other functions, with the recording context's metadata
+    pos, puts = [0x6000000], []
     def emit(w): pos[0] += 4
     at = {label: OTHER_BASE + i * OTHER_STEP for i, label in enumerate(others)}
     ctx = types.SimpleNamespace(here=lambda: pos[0], emit=emit, site=lambda off, orig: None, put=lambda off, words, why: puts.append((off, why)), state=0x9000000, render_scale=0, step_max=0, base=base,
-                                others=at, found=found, capabilities=set(), fps_ready=False, address=lambda off, lo_off=None: 0)
+                                others=at, found=found, capabilities=set(), fps_ready=False, render_only=False, address=lambda off, lo_off=None: 0)
     fn(ctx)
     in_others = {label: sorted((off - a, why) for off, why in puts if a <= off < a + OTHER_STEP) for label, a in at.items()}
-    return sorted((off, why) for off, why in puts if off < OTHER_BASE), ctx.render_scale, in_others, sorted(ctx.capabilities)
+    return sorted((off, why) for off, why in puts if off < OTHER_BASE), in_others, ctx
+
+
+def frame_step_sites(fn, base=0, others=(), found=None):
+    sites, in_others, ctx = _record_stub(fn, base, others, found)
+    return sites, ctx.render_scale, in_others, sorted(ctx.capabilities)
 
 
 def host_files():   # the host's tracked sources without its tests: what the build-ID scan below and the title-ID check (test_architecture.py) read
@@ -302,12 +307,13 @@ def page():
             for off, ob, nb, why in cuts.get(bid, []): lines.append(f'  - cut `+{off:#x}`: {why}')
             for off, gate, word, why in obs.get(bid, []): lines.append(f'  - gate {gate} at `+{off:#x}`: {why}')
             if bid in fs:
-                sites, scale, _, fs_caps = frame_step_sites(fs[bid]); n_fs += len(sites)
+                sites, _, ctx = _record_stub(fs[bid]); n_fs += len(sites); fs_caps = ctx.capabilities
                 fold = len(sites) > 12   # a long list (ASTRAL CHAIN's) folds
-                if fold: lines += [f'  <details><summary>{len(sites)} frame-step sites</summary>', '']
-                for off, why in sites: lines.append(f'  - frame step `+{off:#x}`: {why}')
+                label = 'render-only stub' if ctx.render_only else 'frame step'
+                if fold: lines += [f'  <details><summary>{len(sites)} {"render-only stub" if ctx.render_only else "frame-step"} sites</summary>', '']
+                for off, why in sites: lines.append(f'  - {label} `+{off:#x}`: {why}')
                 if fold: lines += ['', '  </details>', '']
-                if scale: lines.append('  - render scale stub (the launcher offers DM_RENDER_SCALE)')
+                if ctx.render_scale: lines.append('  - render scale stub (the launcher offers DM_RENDER_SCALE)')
             if bid in st:
                 st_sites = frame_step_sites(st[bid])[0]; n_fs += len(st_sites)
                 for off, why in st_sites: lines.append(f'  - stub `+{off:#x}`: {why}')

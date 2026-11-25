@@ -35,5 +35,9 @@ sys_resource	0x2000000
 shader_groups	/movie/=movie /sound/=sound
 shader_note	Xenoblade Chronicles 3 shaders
 
+# The ordinary non-checkerboard world layout is 1280x720. These choices
+# size the world, not the UI, swapchain or stock checkerboard view.
+render_presets	1.0=720p
+
 # The allocator probes the physical-memory budget by mapping until failure.
 mem_map_limit	on

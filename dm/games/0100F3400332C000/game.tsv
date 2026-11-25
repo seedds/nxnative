@@ -1,0 +1,39 @@
+# Xenoblade Chronicles 2 3.0.0 (Japanese/Asian title ID; SDK 3.5.0, Monolith engine, NVN).
+# See README.md for opening-battle measurements and the main-build render gate.
+
+# ---- Identity ----
+title_id	0100F3400332C000
+program_id	0100F3400332C000
+
+# ---- App ----
+name	ゼノブレイド２
+ipa	0100F3400332C000.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v983040	3.0.0	main=feee7afa8a1541bd67aed1a0061fbb57	subsdk0=2201bb705408ef610e9aac23195011d1	sdk=867b345248124ef3d70e3202e221e978
+package	v983040
+shader_versions	v983040
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	bf2.ard
+zip_store	.ard:.arh:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares no system resource; virtual address memory is disabled
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/stream/=stream
+shader_note	ゼノブレイド２ shaders
+
+# ---- Native world render controls ----
+# The 1280x720 world backing is the target; the presented surface is unchanged.
+render_presets	1.0=720p

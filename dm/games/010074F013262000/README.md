@@ -12,9 +12,10 @@ opening movies, the first enemy defeat, destination tutorials, walking and the
 engagement-area collision boundary work. All 27,055 base/update shaders compile
 for Mac and iOS. The unsigned IPA is built and its archive checks pass.
 
-iOS runtime testing, DLC gameplay and later-game allocation peaks remain open.
-The supplied four DLC packs are included; their additional shaders have not been
-integrated into the base/update shader census, so DLC rendering is unvalidated.
+An iPhone 15 Pro also reaches the real-time opening and completes the
+first battle at fixed 720p. DLC gameplay and later-game allocation peaks
+remain open. The supplied four DLC packs are included; their additional
+shaders have not been integrated into the base/update shader census.
 
 ## Profile and memory
 
@@ -159,7 +160,7 @@ engagement boundary.
 these milestones. Alias mappings settle near 2,653–2,655 MB during this sequence.
 Later areas, saves/reloads and DLC have not been exercised.
 
-The unsigned iOS app compiles with signing disabled. The IPA is 20,629,976,490
+The earlier unsigned iOS app compiles with signing disabled. That IPA is 20,629,976,490
 bytes (19.21 GiB), contains all 27,055 base/update shader libraries and four
 mounted DLC directories, and passes every ZIP CRC. It has no code signature or
 provisioning profile. No device installation or runtime test was performed.
@@ -188,6 +189,53 @@ press of A, spark pixels counted against the frame before it:
   (1,358 to 81 pixels).
 
 The issue also names a 10x10x10 RGBA16F field; it did not appear in this scene.
+
+## Native 720p world resolution
+
+**Game's own** preserves the game's render and DRS settings, including a
+substitute `lib_nx.bin`. **720p** selects the normal non-checkerboard world
+layout (1280x720). Leave **Dynamic resolution** off to hold that size, or
+turn it on to keep the game's controller within the chosen limits. At 80–100%,
+the 720p target spans 1024x576 to 1280x720. The lower edge rounds up and the
+upper edge rounds down to the game's 8-pixel grid; if an axis has no aligned
+size in the interval, use its first aligned size at or above the lower edge.
+
+The preset sizes the 3D world, not the UI, swapchain or screen. **Upscaling**
+still selects Standard or MetalFX independently and works on the presented
+rectangle. No DLC is needed. A Wave 4 INIB can still supply other quality
+settings: the native preset substitutes the checkerboard flag and DRS
+parameters where the game applies them, without writing back to the INIB.
+
+**Mac (M4, macOS 27.2, 2.2.1 with four DLC):** fixed 720p used 1280x720
+for the world viewport, scissor, color and depth attachments. At 80–85%,
+the capped world reached 1088x608. Without a resolution patch, a docked
+Colony 9 sample measured 672x384 for those same 3D dimensions. A fixed-720p
+run loaded an existing Colony 9 save and drew the terrain, characters and HUD. During the same
+movement sequence from that save, the world briefly appeared streaked in
+both fixed 720p and a run with no resolution patches; the HUD stayed intact.
+Both runs used Standard presentation. The unpatched guest also showed
+world-only corruption through both Standard and MetalFX in an offscreen A/B
+at 2560x1440 ([#3296](https://github.com/seedds/nxnative/issues/3296)).
+
+**iPhone 15 Pro (iOS 27.0.1, 2.2.1 with four DLC):** fixed 720p was
+measured at the title with Standard. With MetalFX it completed the first
+battle, scaling the presented 1280x720 crop into a 2096x1179 drawable.
+One battle capture showed dark patches in the world; their cause remains
+open. In handheld mode at 80–85% of 720p, the world went from 1088x608 at
+the title to 1024x576 in the real-time opening while MetalFX kept the same
+input crop.
+
+In handheld mode with a modified Wave 4 image, the host logged an open of
+`aoc4:/monolib/shader/lib_nx.bin`. With identical 80% bounds, the title
+draw used 776x440 under **Game's own**, and 1024x576 under **720p**.
+The latter holds the selected endpoint even though the INIB disables DRS.
+
+The sites in `patches.py` are gated by main Build ID
+`82d187fe9ef9be921b8e1b1cddf7bd28` and checked against the original 2.2.1
+instructions. The controller reads upper X/Y from `+0x1c/+0x20` and lower
+X/Y from `+0x24/+0x28`; the enable byte is at `+0x00`. The signed step
+at `+0x40` and hysteresis at `+0x44` remain engine-owned. The two limit
+hooks supply the selected bounds after the original mode factors.
 
 ## Mac development files
 

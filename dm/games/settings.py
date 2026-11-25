@@ -42,6 +42,24 @@ def render_base(g):
     return {'docked': [int(m[1]), int(m[2])], 'handheld': [int(m[3]), int(m[4])]}
 
 
+def render_presets(g, keys):
+    """Verified choices for a render-only stub, bounded by the rewriter's cap."""
+    raw = g.get('render_presets', '').strip()
+    if not raw: return []
+    cap = int(keys['RENDER_SCALE'], 16)
+    opts, seen = [], set()
+    for pair in raw.split(','):
+        value, eq, label = (p.strip() for p in pair.partition('='))
+        if not eq or not label or not re.fullmatch(r'(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)', value):
+            sys.exit(f'{g.id}: render_presets is "scale=label,...": {pair!r}')
+        scale = float(value)
+        if not 0.5 <= scale <= cap: sys.exit(f'{g.id}: render_presets scale {value} is outside 0.5 to {cap:g}')
+        if scale in seen: sys.exit(f'{g.id}: render_presets repeats scale {value}')
+        seen.add(scale)
+        opts.append([value, label])
+    return [['game', "Game's own"], *opts]
+
+
 def rows():
     for n, line in enumerate((HERE / 'settings.tsv').read_text(encoding='utf-8').splitlines(), 1):
         if not line.strip() or line.startswith('#'): continue
@@ -65,6 +83,9 @@ def build(gid, patched, control, other_programs=()):
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header_one(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
+    render_only = 'RENDER_STATE_OFF' in keys
+    presets = render_presets(g, keys) if render_only and 'RENDER_SCALE' in keys else []
+    bounded_drs = bool(presets) and 'DRS_BOUNDS' in keys and 'DYNAMIC_RESOLUTION' in keys
     mac_mic = platform == 'mac' and nso_syms.audio_input_capable(
         p for folder in (patched, *other_programs) for p in Path(folder).glob('*.patched.bin'))
     have = nacp.languages(control)
@@ -115,9 +136,15 @@ def build(gid, patched, control, other_programs=()):
             can = table[need]
             if can is not None and want not in can: sys.exit(f'settings.tsv:{n}: needs a value {need} never takes: {want} (it takes {", ".join(sorted(can))})')
         if not shown(cond, n): continue
+        if not bounded_drs and (cond == 'fixups:DRS_BOUNDS' or (render_only and var == 'DM_DYNAMIC_RESOLUTION')): continue
         s = {'env': var, 'kind': kind, 'section': section, 'label': label, 'note': note, 'default': value(default, n), **m}
-        if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
-        if kind == 'choice':
+        if bounded_drs and var == 'DM_DYNAMIC_RESOLUTION':
+            s['note'] = 'Off keeps the selected preset fixed. On lets the game adjust within the limits below, as percentages of that preset.'
+        if var == 'DM_RENDER_SCALE' and render_only:
+            if not presets: continue
+            s.update(kind='choice', default='game', options=presets)
+            if bounded_drs: s['note'] = "Game's own ignores Dynamic resolution and its limits."
+        elif kind == 'choice':
             opts = [list(l) for l in langs] if values == 'languages' else [v.split('?', 1)[0].split('=', 1) for v in values.split(',') if offered(v, n)]
             if any(len(o) != 2 for o in opts): sys.exit(f'settings.tsv:{n}: choice values are value=label,...')
             if s['default'] not in [o[0] for o in opts]: s['default'] = opts[0][0]   # a default the game does not offer (a language it lacks): its first
@@ -125,6 +152,7 @@ def build(gid, patched, control, other_programs=()):
             if values == 'languages' and not have: s['note'] = UNKNOWN_LANGUAGES
         elif kind == 'range':
             lo, hi, st = (float(x) for x in values.split(':'))
+            if var == 'DM_RENDER_SCALE' and base: s['base'] = base   # the render scale in pixels, for the console mode chosen
             if var == 'DM_RENDER_SCALE' and keys.get('RENDER_SCALE', '1') != '1':   # a stub that also raises the size: up to its largest scale (the rewriter's RENDER_SCALE, hex as every header value)
                 hi = float(int(keys['RENDER_SCALE'], 16))
             s.update(min=lo, max=hi, step=st)

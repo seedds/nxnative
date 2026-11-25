@@ -41,11 +41,13 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
 | `build` → `game` | interval controller: the lower bound and the GPU-time path | frame rate | gap | judgement | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code |
 | `build` → `game` | malloc region 60 GB → 4 GB and its first arena | address space | gap | judgement | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit |
+| `build` → `game` | native world render scale and DRS limits | rendering | gap | checked: 2.2.1 original main: exact words and the surrounding register use checked | 1 | [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md) | Monolith's world-view layout and dynamic resolution controller are specific to this build |
 | `build` → `game` | PhysX completion task release | race | gap | judgement | 1 | [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md) | a lifetime race in the game's own completion task (its release slot serves this one vtable) |
 | `build` → `game` | render intervals, the forced-interval flag and the render-wait timeout | frame rate | gap | judgement | 1 | [Fire Emblem: Three Houses](../../dm/games/010055D009F78000/README.md) | the game's own tables, flag and timeout |
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
+| `build` → `game` | XC2 world render scale and DRS limits | rendering | gap | checked: 3.0.0 original words checked at all four sites; opening battle measured in all three modes on Mac and iPhone 15 Pro | 1 | [ゼノブレイド２](../../dm/games/0100F3400332C000/README.md) | the route, controller and resize checks use Monolith's own world-view layout at this main build's addresses |
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: Rise has not been verified with the engine matcher that finds Apollo Justice | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
@@ -101,8 +103,9 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [The Legend of Zelda: Link's Awakening](#the-legend-of-zelda-links-awakening) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [The Legend of Zelda: Ocarina of Time](#the-legend-of-zelda-ocarina-of-time) | 0 | 0 | 23 | 3 | 0 | `game` ×7 |
 | [The Legend of Zelda: Tears of the Kingdom](#the-legend-of-zelda-tears-of-the-kingdom) | 0 | 0 | 9 | 0 | 0 | `game` |
-| [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [Xenoblade Chronicles 3](#xenoblade-chronicles-3) | 6 | 0 | 6 | 0 | 0 | `build` → `game` ×2 |
 | [Xenoblade Chronicles X: Definitive Edition](#xenoblade-chronicles-x-definitive-edition) | 6 | 0 | 1 | 1 | 0 | `game` ×2 |
+| [ゼノブレイド２](#ゼノブレイド２) | 0 | 0 | 4 | 0 | 0 | `build` → `game` |
 
 ## Games
 
@@ -697,14 +700,23 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), `010074F013262000`, [patches.py](../../dm/games/010074F013262000/patches.py).
 
 - **`build` → `game`**, address space, gap, judgement: malloc region 60 GB → 4 GB and its first arena. Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit
+- **`build` → `game`**, rendering, gap, checked: 2.2.1 original main: exact words and the surrounding register use checked: native world render scale and DRS limits. Monolith's world-view layout and dynamic resolution controller are specific to this build
 
-- **2.2.1 `main`** `82d187fe…` ([patches.py:16](../../dm/games/010074F013262000/patches.py#L16))
+- **2.2.1 `main`** `82d187fe…` ([patches.py:19](../../dm/games/010074F013262000/patches.py#L19))
   - cut `+0x128e58c`: malloc address region: 60 GB to 4 GB
   - cut `+0x1241870`: first arena bump size, low part: mov x9,#0xffff
   - cut `+0x1241880`: first arena bump size: 512 MB + 128 KB + 64 KB - 1
   - cut `+0x12418d8`: first arena subtraction, sign extension
   - cut `+0x12418dc`: first arena subtraction: -(512 MB + 128 KB)
   - cut `+0x12418e8`: first arena stored capacity: 512 MB + 128 KB
+  - render-only stub `+0xe98eb4`: graphics configuration: use the non-checkerboard path for a selected native render scale
+  - render-only stub `+0xeb6e40`: DRS controller: take the selected dynamic resolution mode
+  - render-only stub `+0xeb6ed4`: DRS controller: use the selected target-relative limits
+  - render-only stub `+0xeb6f98`: DRS controller: use the selected limits after mode scaling
+  - render-only stub `+0xf54b6c`: world view: take the selected dynamic resolution mode
+  - render-only stub `+0xf54cc8`: world view: apply the aligned render limits before the resize check
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: DRS_BOUNDS, DYNAMIC_RESOLUTION
 
 ### Xenoblade Chronicles X: Definitive Edition
 
@@ -722,6 +734,20 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0xbabf1c`: first arena stored capacity: 512 MB + 128 KB
 - **function-matched** (`main` of builds without CUTS): Monolith malloc region and first arena: 2 functions, 6 cuts
 - **function-matched stub** (`main` of builds without STUBS): camera angular integration uses elapsed time: a function of 0xadc bytes, `+0x1ec` in it; native frame targets require the complete correction
+
+### ゼノブレイド２
+
+[ゼノブレイド２](../../dm/games/0100F3400332C000/README.md), `0100F3400332C000`, [patches.py](../../dm/games/0100F3400332C000/patches.py).
+
+- **`build` → `game`**, rendering, gap, checked: 3.0.0 original words checked at all four sites; opening battle measured in all three modes on Mac and iPhone 15 Pro: XC2 world render scale and DRS limits. The route, controller and resize checks use Monolith's own world-view layout at this main build's addresses
+
+- **3.0.0 `main`** `feee7afa…` ([patches.py:135](../../dm/games/0100F3400332C000/patches.py#L135))
+  - render-only stub `+0x7a1484`: World view: select fixed or native dynamic render size
+  - render-only stub `+0x7a1588`: World view: enforce aligned pixel limits at the native resize check
+  - render-only stub `+0x7e3510`: DRS controller: apply target-relative bounds after mode scaling
+  - render-only stub `+0x7e35ac`: DRS controller: apply target-relative bounds after mode scaling
+  - render scale stub (the launcher offers DM_RENDER_SCALE)
+  - launcher capabilities: DRS_BOUNDS, DYNAMIC_RESOLUTION
 
 ## SDK cuts
 

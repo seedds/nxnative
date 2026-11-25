@@ -3,7 +3,7 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Game language](#game-language), [Picture](#picture), [Rotation](#rotation), [Frame-rate counter](#frame-rate-counter)
+- [Game](#game): [Frame rate](#frame-rate), [Dynamic resolution](#dynamic-resolution), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Game language](#game-language), [Picture](#picture), [Rotation](#rotation), [Frame-rate counter](#frame-rate-counter)
 - [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
@@ -31,11 +31,15 @@ Ocarina of Time also offers **40 fps**, on the iPhone and the Mac. Each frame st
 
 ### Dynamic resolution
 
-Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture. Only games whose resolution control the app can hold offer it (NieR:Automata, Ocarina of Time).
+Off, the default, keeps the 3D picture at full size. On lets the game lower its resolution when frames run heavy and raise it again when they fit, as on the Switch: steadier frame rate, at times a softer picture.
+
+If the game offers **Minimum resolution** and **Maximum resolution**, both are percentages of the selected render preset. With Dynamic resolution off, that preset stays fixed. With it on, the game adjusts within the two limits (80–100 % by default). Set the minimum at or below the maximum. **Game's own** ignores the switch and both limits.
 
 ### Render scale
 
-The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
+The slider sets the 3D picture from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness.
+
+Some games offer presets instead of a slider. **Game's own** leaves sizing to the game. A preset sets a fixed size unless you turn on [Dynamic resolution](#dynamic-resolution) for a game that offers bounds.
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
@@ -279,7 +283,9 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Setting | Variable | Values |
 |---|---|---|
 | Frame rate | `DM_FPS_TARGET` | `30`, `40` (Ocarina of Time, a 120 Hz screen), `60`, `120` (games with `fps_max 120`) |
-| Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
+| Render scale | `DM_RENDER_SCALE` | `0.5` to the build's cap (usually `1.0`, Hades II: `3.0`); `game` on render-only builds leaves sizing to the game |
+| Dynamic resolution | `DM_DYNAMIC_RESOLUTION` | `0` off, `1` on; on builds with bounds, only applies with a numeric render scale |
+| Minimum / maximum resolution | `DM_DRS_MIN` / `DM_DRS_MAX` | On builds with bounds and Dynamic resolution on: `0.5` to `1.0` of the selected size, minimum no greater than maximum. An invalid pair uses the defaults `0.8` / `1.0`. |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |

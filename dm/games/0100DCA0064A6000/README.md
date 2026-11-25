@@ -13,7 +13,7 @@ Update 1.4.0 (v327680) over the base game, SDK 7.3.2 (NVN 53). Next Level Games'
 | `pad_layout full` | `game.tsv` | Luigi moves with the left stick and aims with the right; the D-pad calls up the Virtual Boo: the iPhone pad starts in the 3D layout, which has both |
 | Node area cut and 2 MB alignment of large regions (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `fcf93a41…` | DRAGON QUEST XI S's build, cut by the SDK-wide rules; this game has no virtual address memory |
 
-No `patches.py`.
+[`patches.py`](patches.py): three cuts in the Ghost Gallery camera's bone lookup ([Ghost Gallery](#ghost-gallery)).
 
 ## Frame rate
 
@@ -60,6 +60,13 @@ A deferred renderer: the scene draws into a G-buffer of two integer targets (R32
 - Update 1.4.0 leaves `.dict` and `.data` as they were and adds `<name>.patch`: u64 a bitmask of the records it patches, u32 offset, stored and inflated length of its body (one zlib stream: 16 u32 section offsets, 16 u16 alignments, then each section's new data), then 0xd0 bytes per patched record {u32 offset, stored length and entry count of its new resource table (one zlib stream), u16 its top-level entry count, u16, u32 the new length of each of 16 sections, 16 u32 end and 16 u32 start of the old data that is overwritten before it is read}. After loading a section the game walks the new table and packs that section's entries from its start at their alignment, each from the old section (an offset below its length) or from the body (the rest, counted from the old length), and writes the new offset into the entry (`main+0x1c8d0`, `main+0x1cbd0`); it does this in place, keeping a copy of the old data in [start, end). `shader_split.py` `nlg_patch_section` does the same ([01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content)).
 - Shaders: 5,317 (5,149 in the base game), all in `init` (`shader_split.py` `nlg_shaders`): control sections back to back in one section, their code areas in the same order in another, one NVN program per stage (paired as single-stage programs). 46 of the 103 the title draws exist only in the patched sections.
 
+## Ghost Gallery
+
+- **Resolved: the Ghost Gallery crashed** ([#672](https://github.com/seedds/nxnative/issues/672): SIGSEGV / SIGBUS at `main+0x4723a0` / `+0x4723c8`, once `+0x47241c`, on opening it or switching its sections with D-pad Up). The function around `main+0x472334` frames the gallery camera on up to 5 bones of the shown ghost. For each bone name hash in its list (`x22`, ended by -1) it takes the model's skeleton handle (the first word of the object from vtable +0x98 of `[x24 + 0xb8]`), looks the handle's slot up in the engine's handle table (`main+0x18868e0`: 0x20000 pointers indexed by handle & 0x1ffff, a u16 generation per slot at table + 0xffff8 + slot × 2, the handle's bits 17–31), binary-searches the skeleton's sorted {hash, index} pairs (count +0x14, offset +0xc) and reads the bone's matrix (+0x30) from the model (`[x0 + 0x10]` + index × 64). Unlike the table's other users (`main+0x7bf3c8`, `main+0x7cba7c`, `main+0x7d58f4`, …) it does not compare the generation, and it uses the index even when the hash is not found (-1). The table's free routine (`main+0x7c23e0`) clears the owner's handle, stores 1 in the slot, links it into the free list (a free slot holds the next free slot's address | 1) and bumps the generation, so a model still holding a copy of a released skeleton handle reads an odd non-pointer from the slot: the changing fault addresses of the reports (`x9 = 0x15a19f949`).
+- **Current:** `patches.py` cuts (main 1.4.0): a slot holding an odd value and a hash that is not found both go to the loop's next bone (`main+0x472670`, as for the list's -1 end); with fewer than 2 bones found the function already leaves the framing out (`cmp w19, #2` at `main+0x472694`). The count load and the odd-value test swap places at `main+0x472368`, so a count of 0 reaches the search's one-entry path, which reads the word before the pairs and finds no match.
+- **Checked:** on an M2 MacBook Air (8 GB), docked, 30 fps, from a completed-game save: opening the Ghost Gallery and switching its sections quickly with D-pad Up, no crash. Built on `b55a3f07` plus the memory fix (`c484b13c`); the cuts only change `main`, so the host version does not matter to them.
+- **Open:** what releases the skeleton while its model is shown is not found.
+
 ## Mac routes
 
 - The work folder's `run/ctl.sh` drives a run started with `DM_CTL`; `DM_KEYS=14:A,18:A,26:A,31:A,41:Right,42:A,54:A` goes from the boot notices through a new game into the opening cutscene.
@@ -79,6 +86,7 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- What releases a gallery ghost's skeleton while its model is still shown ([Ghost Gallery](#ghost-gallery)); the cuts only keep the camera's bone lookup from reading the freed slot.
 - The 10 geometry shaders are not built ([Rendering](#rendering)).
 - [docs/geometry-metal-research.md](../../../docs/geometry-metal-research.md) describes geometry shaders now built as compute kernels, checked on AI: THE SOMNIUM FILES only ("Other games and iOS device execution are unvalidated"); whether this game's 10 build with it is not recorded.
 - The limiter's phase lock has frame-history entries since 51cc8bce; its effect is not measured ([Frame rate](#frame-rate)).

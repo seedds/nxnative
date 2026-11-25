@@ -1222,7 +1222,13 @@ HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftrunc
 }
 HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_DeleteFile, const char *path) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs10DeleteFileEPKc", Result (*)(const char *), path);
-    HP_ACCESS(path, 0, 1); RW(); return unlink(hp) ? save_path_error("unlink", path) : RES_OK; }
+    HP_ACCESS(path, 0, 1); RW();
+    if (!unlink(hp)) return RES_OK;
+    // A directory is not a file to Horizon (save data keeps them in separate tables): DeleteFile finds no file there, answers PathNotFound and changes nothing. Apple's unlink(2)
+    // gives EPERM for a directory (Linux EISDIR), which save_path_error would take for the host's error and so refuse the save's next commit
+    int e = errno; struct stat st;
+    if ((e == EPERM || e == EISDIR) && !lstat(hp, &st) && S_ISDIR(st.st_mode)) { if (g_flag.fs) LOG("fs unlink of a directory, not found as a file: %s", path); return RES_PATH_NOT_FOUND; }
+    errno = e; return save_path_error("unlink", path); }
 HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs15CreateDirectoryEPKc", Result (*)(const char *), path);
     int mi; int64_t k; if (img_path(path, &mi, &k)) return k >= 0 ? RES_PATH_EXISTS : RES_FAIL;

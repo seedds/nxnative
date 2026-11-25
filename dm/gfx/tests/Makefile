@@ -378,9 +378,9 @@ t_dispatch_pipeline: t_dispatch_pipeline.m $(MTL_T_DEP)
 check_t_dispatch_pipeline: RUN_ENV = MTL_DEBUG_LAYER=1 DM_NDVE_ENGINE=1
 .PHONY: check_t_dispatch_own
 check_t_dispatch_own: t_dispatch_own
-	@set -e; for own in "" --own; do for enc in 0 1; do \
-	    DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own $$own; \
-	done; done
+	@set -e; for enc in 0 1; do \
+	    DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_own; \
+	done
 t_dispatch_barrier: t_dispatch_barrier.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_dispatch_barrier.m $(MTL_T_SRC) $(FW)
 t_compute_loops: t_compute_loops.m $(MTL_T_DEP)
@@ -962,7 +962,6 @@ t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
 .PHONY: check_t_tg_spill
 check_t_tg_spill: t_tg_spill
 	MTL_DEBUG_LAYER=1 ./$<
-	MTL_DEBUG_LAYER=1 ./$< --own
 
 # A read ID keeps its read mark when it gets another texture: first-table GPU pixels, finalized IDs, IDs waiting for the read budget.
 t_pool_seen_replace: t_pool_seen_replace.m $(MTL_T_DEP)

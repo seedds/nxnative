@@ -145,7 +145,7 @@ static void gpu_arguments(void) {
     shader->rf.b[0]=(nvn_rbind){.kind=NVN_RB_SBUFP,.rw=1,.reg=0,.aid=0}; shader->rf.b[1]=(nvn_rbind){.kind=NVN_RB_CBUF,.reg=0,.aid=1};
     id<MTLComputePipelineState> pipeline=[g_dev newComputePipelineStateWithFunction:shader->fn error:&error];
     CHECK(pipeline!=nil,"resource ABI pipeline compiles"); if (!pipeline) return;
-    mtl_sub_begin(); id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);
+    mtl_sub_begin(); id<MTL4ComputeCommandEncoder> en=enc_c_begin();
     for (int i=0;i<2;i++) {
         CHECK(encode_args((id<MTLCommandEncoder>)en,shader,i?5:6,0),"RT and compute resource argument blocks encode through production helpers");
         enc_c_pso(en,pipeline); enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));

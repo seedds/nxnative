@@ -2909,12 +2909,20 @@ static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment
 }
 static int seg_ts(void) { return ts_mode() > 0; }
 static void seg_clk_put(seg_clk *c) { if (c && atomic_fetch_sub(&c->refs, 1) == 1) free(c); }
-static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on the mach absolute time base) on the guest clock; 0 when unknown
-    uint64_t now = now_ns();
+// A feedback GPU time (seconds on the mach absolute time base) on the guest clock at host time now; 0 when unknown.
+// The age is taken in integer nanoseconds with up to two double ULPs plus 1 ns of slack ahead of now: `(double)now - s * 1e9`
+// contracted into a fused multiply-subtract (`fmsub`), so the unrounded product exceeded `now` by a fraction of a nanosecond for about
+// half of same-tick timestamps, and `now_ns()` truncates `ticks * 125 / 3` while Metal's CFTimeInterval rounds in floating point (issue #1896).
+static uint64_t gpu_s_guest_ns_at(double s, uint64_t now) {
+    if (!(s > 0) || !(s < 9e9)) return 0;   // NaN, infinity, non-positive, or past int64 ns range (285 years)
     uint64_t g = guest_ns_at_host_time(now);
-    double age = (double)now - s * 1e9;
-    return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
+    uint64_t t = (uint64_t)llround(s * 1e9);
+    uint64_t slack = (uint64_t)((nextafter(s, INFINITY) - s) * 2e9) + 1;
+    if (t > now && t - now > slack) return 0;
+    uint64_t age = t < now ? now - t : 0;
+    return age < g ? g - age : 0;
 }
+static uint64_t gpu_s_guest_ns(double s) { return gpu_s_guest_ns_at(s, now_ns()); }
 // The GPU timeline counter reports read (DM_NVN_GPU_TS=segment, the default): where a Switch GPU would have run each command buffer. A Switch GPU runs a submission's commands back to
 // back, and starts a submission as soon as the one before it ends, or once it is ready if that is later: the game's nvnQueueSubmitCommands, or the passing of a queue wait it was held
 // for (mtl_sub_ready). Here the GPU also waits while the host translates: at each of sub_cut's commits inside a submission (a commit is made only once the GPU has run out of work), and

@@ -28,6 +28,7 @@ class Inputs(unittest.TestCase):
         self.repo = self.tmp / 'repo'; (self.repo / 'dm/tools/nx_extract').mkdir(parents=True)
         (self.repo / 'dm/tools/nx_extract/Program.cs').write_text('// reads a patch alone\n')
         (self.repo / 'dm/tools/nx_extract/nx_extract.csproj').write_text('<Project/>\n')
+        (self.repo / 'dm/tools/nx_extract/NxTree.cs').write_text('// reads NX archives\n')
         self.base, self.upd = self.tmp / 'base.nsp', self.tmp / 'update.nsp'
         self.base.write_bytes(b'b' * 10); self.upd.write_bytes(b'u' * 20)
         self.ex = self.tmp / 'extract'; self.ex.mkdir()

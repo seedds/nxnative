@@ -197,10 +197,10 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: '10.0.x'   # the committed translator and nx_extract are native (no .NET); test_pfs0_storage and test_romfs_read build nx_extract's own code
-      - name: Install spirv-val   # spirv-cross is the in-repo build (dm/gfx/tools/spirv_cross_bin)
+      - name: Install spirv-val and Zstandard   # spirv-cross is in-repo; the NX reader compiles against Zstandard
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
-        run: brew install spirv-tools
+        run: brew install spirv-tools zstd
       - name: Run the test files
         env:
           DM_GAME: ${{ env.GAME }}   # test_tbdr_budget runs a tool that needs a profile

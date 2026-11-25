@@ -394,6 +394,11 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza --platform mac-a
 # A NUP with no base game (an empty base record, or none and standalone_update on every update) packs the selected update, which needs its own ExeFS and RomFS, as the whole game; only its update versions are selectable (no v0)
 python3 scripts/build_ipa_from_nsp.py ~/Games/DonkeyKongBananza.nup --platform mac-app
 
+# NXFormat archives, from NUP/extracted trees or native decrypted DNSP/DXCI content, on Switch 1 and Switch 2: no keys or NXConvert installation.
+# The read-only C++17 helper is built once with the installed compiler and zstd; native NCAs are served to LibHac without an intermediate extraction.
+# Native updates require their exact archived base dependency. --package selects a stored version; --title-id chooses an application when needed.
+python3 scripts/build_ipa_from_nsp.py ~/Games/game.nx --platform mac-app
+
 # play the game in Japanese (a code or a name: ja, fr, de, es, zh-Hans, zh-Hant, ko, en-GB, ..., Japanese; English by default)
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys -l ja
 

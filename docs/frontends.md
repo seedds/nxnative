@@ -16,6 +16,14 @@ A graphical app that packs games, keeps a library of them or starts them is a pr
 
 For a NUP without embedded DLC, pass `--aoc-dir <folder>` on each build to include the player's numbered DLC images. Keep this input folder outside the build directory so cleanup can remove staged copies safely. [Separate DLC for a NUP](reference/packing.md#separate-dlc-for-a-nup)
 
+The input also accepts one `.nx` file or a folder containing one, without keys.
+NX archives may hold materialized trees or native decrypted NCAs, for Switch 1
+and Switch 2. Keep `.nx` in the file-picker filters; use `--title-id` to select
+an application in a multi-application archive and `--package v<N>` for a stored
+version. The first NX read compiles a cached C++17 helper using the existing
+compiler and Zstandard installation. Native reads use the committed
+`nx_extract` executable. No NXConvert installation is required.
+
 With `--progress json` it asks nothing and writes one JSON object per line on stdout. Every object has `ev` (the event) and `t` (Unix time, seconds):
 
 | `ev` | Fields | When |

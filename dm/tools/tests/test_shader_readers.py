@@ -137,6 +137,68 @@ class MgfxV10Readers(unittest.TestCase):
             _, shaders, pairs, extra = ss.scan_file((str(path), 'Content/Plain.zxnb'))
         self.assertEqual((shaders, pairs, extra, log.getvalue()), ({}, set(), {}, ''))
 
+    def test_zxnb_effect_reader_past_512_bytes(self):
+        # Multiple long type readers push .EffectReader well past the old 0x200-byte peek window.
+        effect = mgfx_v10_effect()
+        filler_readers = [
+            f'Example.Game.Content.CustomReader{i}, Example.Game.Content, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.encode()
+            for i in range(6)
+        ]
+        effect_reader = b'Microsoft.Xna.Framework.Content.EffectReader, MonoGame.Framework'
+        readers = filler_readers + [effect_reader]
+        table = bytearray([len(readers)])
+        for name in readers:
+            table += net_str(name) + bytes(4)
+        self.assertGreater(10 + len(table) - len(effect_reader) - 4, 512)
+        body = bytes(table) + b'\x00' + bytes([len(readers)]) + struct.pack('<I', len(effect)) + effect
+        xnb = b'XNBS\x05\x01' + struct.pack('<I', 10 + len(body)) + body
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as log:
+            plain = Path(tmp) / 'Effect.xnb'
+            packed = Path(tmp) / 'Effect.zxnb'
+            plain.write_bytes(xnb)
+            packed.write_bytes(raw_deflate(xnb))
+            _, plain_shaders, _, plain_extra = ss.scan_file((str(plain), 'Content/Shaders/Effect.xnb'))
+            _, zxnb_shaders, _, zxnb_extra = ss.scan_file((str(packed), 'Content/Shaders/Effect.zxnb'))
+        self.assertEqual({row[1] for row in plain_shaders.values()}, {'vs', 'ps'})
+        self.assertEqual({k: v[1:] for k, v in zxnb_shaders.items()}, {k: v[1:] for k, v in plain_shaders.items()})
+        self.assertEqual((plain_extra, zxnb_extra, log.getvalue()), ({}, {}, ''))
+
+    def test_zxnb_many_non_effect_readers_past_512_bytes_skipped(self):
+        filler_readers = [
+            f'Example.Game.Content.TextureReader{i}, Example.Game.Content, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.encode()
+            for i in range(8)
+        ]
+        table = bytearray([len(filler_readers)])
+        for name in filler_readers:
+            table += net_str(name) + bytes(4)
+        body = bytes(table) + b'\x00' + bytes(0x10000)
+        xnb = b'XNBS\x05\x01' + struct.pack('<I', 10 + len(body)) + body
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as log:
+            packed = Path(tmp) / 'Sprite.zxnb'
+            packed.write_bytes(raw_deflate(xnb))
+            _, shaders, pairs, extra = ss.scan_file((str(packed), 'Content/Sprite.zxnb'))
+        self.assertEqual((shaders, pairs, extra, log.getvalue()), ({}, set(), {}, ''))
+
+    def test_zxnb_effect_reader_past_512_bytes_without_mgfx_reports_red(self):
+        filler_readers = [
+            f'Example.Game.Content.CustomReader{i}, Example.Game.Content, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.encode()
+            for i in range(6)
+        ]
+        readers = filler_readers + [b'Microsoft.Xna.Framework.Content.EffectReader, MonoGame.Framework']
+        table = bytearray([len(readers)])
+        for name in readers:
+            table += net_str(name) + bytes(4)
+        body = bytes(table) + b'\x00\x07\x00\x00\x00\x00'
+        xnb = b'XNBS\x05\x01' + struct.pack('<I', 10 + len(body)) + body
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as log:
+            packed = Path(tmp) / 'EmptyEffect.zxnb'
+            packed.write_bytes(raw_deflate(xnb))
+            _, shaders, pairs, extra = ss.scan_file((str(packed), 'Content/Shaders/EmptyEffect.zxnb'))
+        self.assertEqual((shaders, pairs), ({}, set()))
+        self.assertIsInstance(extra, tuple)
+        self.assertEqual(extra[0], 'unreadable')
+        self.assertIn('[RED]', log.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

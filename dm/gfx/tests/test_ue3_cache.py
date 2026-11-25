@@ -132,6 +132,26 @@ class Ue3CacheTests(unittest.TestCase):
         got = shader_split.ue3_shaders(data, 'mk11.xxx')
         self.assertEqual([(st, c, k) for _, st, c, k in got], [('cs', stored, code)])
 
+    def test_unis_resolves_independent_shared_buffer_offsets(self):
+        code1, ctl1 = shader(1)
+        code2, ctl2 = shader(2)
+        header = shader_split.UE3_TAG + struct.pack('<HHI', 846, 108, 32)
+        header += b'\x10\0\0\0UniShaderBuffer\0'
+        blocks = ctl2 + ctl1, code1 + code2, b'reflection'
+        sidecar = header + bytes(0x30) + b''.join(struct.pack('<I', len(b)) + b for b in blocks)
+        buffers = shader_split.ue3_shared_buffers(sidecar, 'UniShaderBuffer-NX64.upk')
+
+        def ref(code_off, ctl_off):
+            return struct.pack('<I4s6I', 0x20, b'UNIS', 1, len(code1), code_off, len(ctl1), ctl_off, 0) + bytes(4)
+
+        cache = b'BMSG' + ref(0, len(ctl2)) + ref(len(code1), 0) + ref(0, len(ctl2))
+        got = shader_split.ue3_shared_shaders(cache, 'cache', *buffers)
+        self.assertEqual([(st, ctl, code) for _, st, ctl, code in got], [('ps', ctl1, code1), ('ps', ctl2, code2)])
+        with self.assertRaisesRegex(SystemExit, 'outside'):
+            shader_split.ue3_shared_shaders(ref(2 * len(code1), 0), 'cache', *buffers)
+        with self.assertRaisesRegex(SystemExit, 'reflection array'):
+            shader_split.ue3_shared_buffers(sidecar[:-1], 'UniShaderBuffer-NX64.upk')
+
     def test_key_skip_masks_the_compile_information(self):
         (c1, k1), (_, k2) = shader(1), shader(2)
         k2 = k1[:0x7d0] + k2[0x7d0:0x7e8] + k1[0x7e8:]   # the same section but its compile information

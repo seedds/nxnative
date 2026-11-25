@@ -2186,6 +2186,7 @@ static _Atomic uint64_t g_screen_at;   // when the screen wait released the acqu
 uint64_t dm_nvn_frame_count(void) { return g_frame; }
 extern uint64_t g_t0_ns;   // Host process start point (main.c; same base as the UIMSG timestamps)
 uint64_t mtl_present_screen_wait(double period);   // nvn_mtl.m
+int mtl_present_screen_wait_timeout(double period, uint64_t timeout_ns, uint64_t *waited_ns);   // nvn_mtl.m
 
 // Deferred acquire wait (NVN semantics): nvnWindowAcquireTexture returns the texture index immediately and binds the display-release pacing wait and previous-present ticket wait
 // to the returned NVNsync (fenced == 4). Games that record draw work between AcquireTexture and nvnSyncWait (Super Mario Bros. Wonder – Nintendo Switch 2 Edition measures its CPU
@@ -2253,6 +2254,12 @@ static int acq_pace_ready(const win_t *o, uint64_t at) {
     }
     return mtl_snap_acquire_ready();
 }
+static inline uint64_t acq_rem_ns(uint64_t timeout_ns, uint64_t deadline) {
+    if (timeout_ns == UINT64_MAX) return UINT64_MAX;
+    if (!timeout_ns) return 0;
+    uint64_t now = now_ns();
+    return now >= deadline ? 0 : deadline - now;
+}
 static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t deadline, int *waited) {
     uint64_t now = dm_detclock_enabled() ? guest_ns() : now_ns(), wait = at > now ? at - now : 0, pace_ns = 0, drain_ns = 0;
     int follow = 1;
@@ -2279,8 +2286,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             follow = 0;
             if (wait) { *waited = 1; if (deadline < at) { sleep_until_ns(deadline); return 0; } sleep_until_ns(at); }
         }
-        if (!present_unpaced(o) && timeout_ns > 0) {
-            uint64_t sw = mtl_present_screen_wait(period / 1e9);   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
+        if (!present_unpaced(o)) {
+            uint64_t sw = 0;
+            if (!mtl_present_screen_wait_timeout(period / 1e9, acq_rem_ns(timeout_ns, deadline), &sw)) return 0;   // without the display link: until the screen has caught up (nvn_mtl.m, DM_PRESENT_DEPTH)
             if (sw) { *waited = 1; atomic_store(&g_screen_at, now_ns()); }
         }
         drain_ns = mtl_link_drain_take_ns();   // with it: the ticks a drain of standing frames added to the link's wait
@@ -2299,8 +2307,9 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
             g_det_last = now_ns();
         }
     }
-    if (timeout_ns > 0) {
-        uint64_t sa = mtl_snap_acquire_wait();   // ring capacity is waited for before drawing, where the game does not hold its present lock
+    {
+        uint64_t sa = 0;
+        if (!mtl_snap_acquire_wait_timeout(acq_rem_ns(timeout_ns, deadline), &sa)) return 0;   // ring capacity is waited for before drawing, where the game does not hold its present lock
         if (sa) *waited = 1;
         pace_ns += sa;
     }
@@ -2698,6 +2707,7 @@ typedef struct {
     nvn_rt r; uint64_t cyc;   // the thread's cycles at its last sample
     _Atomic uint64_t period_ns, comp_us;   // the period and computation declared (0: none), read by the thread policy line
     unsigned ndecl; int retired;   // retired: an acquire thread that stopped acquiring, put back on the standard policy (rt_retire); the slot may go to the next acquire thread
+    _Atomic uint64_t seen_ns;   // an acquire thread's last acquire (now_ns), which rt_stall_check reads: wall time, as the frame count stands still while the only acquire thread is away
     _Atomic int ready, pri, base, pol;   // the thread's priority, base priority and policy at its last sample (thread_info)
     _Atomic uint64_t frames, demoted, cpu_ns, cycles;   // since the last thread policy line: frames sampled, of them declared but below real-time priority (the kernel's fail-safe demotes
                                                         // a real-time thread that runs about 1.5 s without blocking), and the thread's CPU time and cycles
@@ -2708,6 +2718,7 @@ static pthread_mutex_t g_rt_mu = PTHREAD_MUTEX_INITIALIZER;   // the acquire thr
 static void rt_init(rt_thr *t, const char *name, int acq, uint64_t tid) {   // on the thread itself
     t->name = name; t->acq = acq; t->tid = tid; t->port = pthread_mach_thread_np(pthread_self());
     memset(&t->r, 0, sizeof t->r); t->cyc = 0; t->ndecl = 0; t->retired = 0; atomic_store(&t->period_ns, 0); atomic_store(&t->comp_us, 0);
+    atomic_store(&t->seen_ns, 0);
     atomic_store(&t->frames, 0); atomic_store(&t->demoted, 0); atomic_store(&t->cpu_ns, 0); atomic_store(&t->cycles, 0); atomic_store(&t->ready, 1);
 }
 static uint64_t rt_self_tid(void) { uint64_t id = 0; pthread_threadid_np(NULL, &id); return id; }
@@ -2752,19 +2763,67 @@ static void rt_tick(rt_thr *t, uint64_t period_ns) {
         rt_declare(t, period_ns, fx > 0 ? fx : t->r.comp_ms > 0 ? t->r.comp_ms : 2);
     }
 }
+// Back from a time-constraint policy, set from another thread. That policy took the thread's QoS away, which the standard policy does not restore and the thread cannot set again
+// itself (EPERM), so it would run at priority 31 beside guest threads at user-interactive (47). Importance 15 gives it 46; its next time-constraint declaration replaces it
+static void rt_standard(thread_act_t port) {
+    thread_standard_policy_data_t st = {0}; thread_policy_set(port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT);
+    thread_precedence_policy_data_t pr = {15}; thread_policy_set(port, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pr, THREAD_PRECEDENCE_POLICY_COUNT);
+}
 // Under g_rt_mu, on the acquire thread `self`: another acquire thread that has not acquired for a whole window of frames goes back to the standard policy. It no longer carries
 // the frame, and a time-constraint policy left on it would keep the deadline and the computation it declared for whatever it runs now. Its port is used only while it still
 // names that thread (a thread that ended leaves its port name free for reuse). The slot is reused for the next new acquire thread, or by its own thread when it acquires again
 static void rt_retire(const rt_thr *self) {
     uint64_t f = atomic_load_explicit(&g_frame, memory_order_relaxed); int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
     for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
-        if (o == self || !o->acq || o->retired || !atomic_load(&o->ready) || f < o->r.frame + RT_WIN) continue;
+        if (o == self || !atomic_load(&o->ready) || !o->acq || o->retired || f < o->r.frame + RT_WIN) continue;
         thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
-        if (same && atomic_load(&o->period_ns)) { thread_standard_policy_data_t st = {0}; thread_policy_set(o->port, THREAD_STANDARD_POLICY, (thread_policy_t)&st, THREAD_STANDARD_POLICY_COUNT); }
+        if (same && atomic_load(&o->period_ns)) rt_standard(o->port);
         LOG("[nvn] acquire thread %llu stopped acquiring %llu frames ago%s", (unsigned long long)o->tid, (unsigned long long)(f - o->r.frame), same ? (atomic_load(&o->period_ns) ? ": back to the standard policy" : "") : " and has ended");
         o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
     }
 }
+// An acquire thread that stops acquiring for RT_STALL_NS of wall time (and 8 of its periods) goes back to the standard policy, whether or not another thread acquires.
+// rt_retire counts presented frames and runs on another acquire thread, so it never acts for the only acquire thread: when the game's main thread leaves the frame loop
+// for one long piece of CPU work (Mario Kart World at the end of a race, GitHub issue #1859), no frame is presented and the policy stayed. The kernel's fail-safe demotes a
+// time-constraint thread that computes about 0.9 s without blocking to priority 0 until it blocks, which puts the rest of the work on the efficiency cores. Measured on an M2 Max
+// with a fixed burst: 13-18% of it on performance cores and 2.1-2.7 times its wall time on an idle Mac, and 32.7 s against 3.5 s beside 12 busy user-interactive threads; back
+// on the standard policy, also when that comes after the demotion, 100% and its own time. A timer on a host queue looks every 100 ms, as the thread itself runs guest code.
+// Its next acquire declares at once what it had (rt_acquire). The caller holds no lock
+#define RT_STALL_NS 250000000ull
+static uint64_t rt_stall_wait(uint64_t pn) { return pn * 8 > RT_STALL_NS ? pn * 8 : RT_STALL_NS; }
+static int rt_any_stalled(uint64_t now) {   // lock-free fast path so the utility timer does not take g_rt_mu against the RT acquire thread during normal frames
+    int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+    for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
+        if (!atomic_load(&o->ready)) continue;
+        uint64_t pn = atomic_load(&o->period_ns), seen = atomic_load(&o->seen_ns);
+        if (pn && seen && now >= seen + rt_stall_wait(pn)) return 1;
+    }
+    return 0;
+}
+static void rt_stall_check(uint64_t now) {
+    if (!rt_any_stalled(now)) return;
+    pthread_mutex_lock(&g_rt_mu);
+    int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
+    for (int i = 0; i < nt; i++) { rt_thr *o = &g_rtt[i];
+        if (!atomic_load(&o->ready) || !o->acq || o->retired) continue;
+        uint64_t pn = atomic_load(&o->period_ns), seen = atomic_load(&o->seen_ns);
+        if (!pn || !seen || now < seen + rt_stall_wait(pn)) continue;
+        thread_identifier_info_data_t ii; mach_msg_type_number_t ic = THREAD_IDENTIFIER_INFO_COUNT; int same = thread_info(o->port, THREAD_IDENTIFIER_INFO, (thread_info_t)&ii, &ic) == KERN_SUCCESS && ii.thread_id == o->tid;
+        if (same) rt_standard(o->port);
+        static int nl; if (nl++ < 8) LOG("[nvn] acquire thread %llu has not acquired for %.0f ms%s", (unsigned long long)o->tid, (now - seen) / 1e6, same ? ": back to the standard policy until it acquires again" : " and has ended");
+        o->retired = 1; atomic_store(&o->period_ns, 0); atomic_store(&o->comp_us, 0);
+    }
+    pthread_mutex_unlock(&g_rt_mu);
+}
+#ifndef RT_STALL_NO_TIMER   // t_rt_comp and t_rt_stall drive rt_stall_check themselves: a late timer on a loaded machine would change the policy counts they check
+static void rt_stall_tick(void *unused) { (void)unused; rt_stall_check(now_ns()); }
+static dispatch_source_t g_rt_stall_timer;   // held for good: this file is also built under ARC by tests that include it, where a local would end the timer
+static void rt_stall_init(void *unused) {
+    (void)unused; g_rt_stall_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(g_rt_stall_timer, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 100 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler_f(g_rt_stall_timer, rt_stall_tick); dispatch_resume(g_rt_stall_timer);
+}
+#endif
 // The acquire threads, every acquire. Each thread that acquires has its own slot: a thread's CPU clock and its policy are its own, so a game that acquires from a new thread
 // (or from two in turn) gets each thread's computation measured on that thread and declared on it, not one thread's clock subtracted from another's and the policy left on the
 // first (PR #2137). Sampling once per presented frame (rt_tick) covers a frame acquired in several calls with its whole work
@@ -2776,11 +2835,14 @@ static void rt_acquire(uint64_t period_ns) {
     if (t && t->tid != tid) t = NULL;   // its slot went to another acquire thread after it stopped acquiring
     if (!t) {   // this thread's first acquire, or its first since its slot was reused: a retired slot, else a new one
         int nt = atomic_load(&g_rtt_n); if (nt > RT_THREADS) nt = RT_THREADS;
-        for (int i = 0; i < nt && !t; i++) if (g_rtt[i].acq && g_rtt[i].retired) { t = &g_rtt[i]; rt_init(t, "acquire thread", 1, tid); }
+        for (int i = 0; i < nt && !t; i++) if (atomic_load(&g_rtt[i].ready) && g_rtt[i].acq && g_rtt[i].retired) { t = &g_rtt[i]; rt_init(t, "acquire thread", 1, tid); }
         if (!t && !(t = rt_register("acquire thread", 1)) && !full) { full = 1; LOG("[nvn] [RED] no time-constraint slot is left for another acquire thread (%d slots)", RT_THREADS); }
-    } else if (t->retired) { double c = t->r.comp_ms; memset(&t->r, 0, sizeof t->r); t->r.comp_ms = c; t->retired = 0; }   // acquiring again: a new window, and the computation it had, declared at once
-    if (t) { rt_tick(t, period_ns); rt_retire(t); }
+    } else if (t->retired) { t->r.frame = 0; t->retired = 0; }   // acquiring again: the computation it had, declared at once, and a new baseline, so the time away is no sample. The window stays: a thread away once in every 120 frames would never finish one
+    if (t) { atomic_store(&t->seen_ns, now_ns()); rt_tick(t, period_ns); rt_retire(t); }
     pthread_mutex_unlock(&g_rt_mu);
+#ifndef RT_STALL_NO_TIMER
+    if (rt_on()) { static dispatch_once_t once; dispatch_once_f(&once, NULL, rt_stall_init); }
+#endif
 }
 void *nvn_rt_join(const char *name) { return rt_register(name, 0); }
 void nvn_rt_tick(void *h) { if (h) rt_tick(h, atomic_load_explicit(&g_rt_frame_ns, memory_order_relaxed)); }
@@ -3228,7 +3290,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     }
     gfx_enter();
     uint64_t t0 = now_ns();
+    int presented = 0;
     if (idx >= 0 && idx < o->ntex && idx < 4) {   // enqueue only, return immediately
+        presented = 1;
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         uint64_t new_tk = nvn_queue_present((queue_t *)q, t, present_period(o) / 1e9, crop);
         pthread_mutex_lock(&acq_mu);
@@ -3317,7 +3381,6 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
-    { void dm_vi_frame_queued(uint64_t); dm_vi_frame_queued(g_frame); }   // the layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber
     if (g_frame % TWIN == 0) tsummary(g_frame);
     // GPU replay carries the submitted frame, even when a later CPU frame is already queued.
     // Real-device semantics: present only enqueues and returns immediately; this frame's display time is scheduled by the pacer, and the texture can be acquired again only at "display time + one period" (blocking in AcquireTexture)
@@ -3334,6 +3397,13 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     uint64_t slot = now;   // a frame the display link paced (or nothing did) is shown from its present on, and the beat follows it (nvn_pace_follow)
     if (follow) nvn_pace_follow(&pc, now); else slot += nvn_pace(&pc, now, period);
     o->pace = pc.target;
+    // The layer's frame history (hle_vi.c), numbered as GetLatestFrameNumber: when the host pacer drives a vsync grid (!DM_DETCLOCK, !follow, period > 0, g_hz > 0), pass the
+    // present time, the pacer's vsync target and one vsync tick so frames with no Metal presentedTime (headless) flip on that grid instead of at first read. Under DM_DETCLOCK,
+    // display-link pacing (nvn_pace_follow: pc.target is just `now`), or unpaced presents (period 0), there is no pacer grid (pass 0) and the first-seen fallback stays.
+    { void dm_vi_frame_queued(uint64_t, uint64_t, uint64_t, uint64_t); void dm_vi_frame_ticket(uint64_t, uint64_t);
+      int paced = !dm_detclock_enabled() && !follow && period > 0 && g_hz > 0;
+      dm_vi_frame_queued(g_frame, paced ? now : 0, paced ? pc.target : 0, paced ? 1000000000ull / (uint64_t)g_hz : 0);
+      if (!presented) dm_vi_frame_ticket(g_frame, 0); }
     if (idx >= 0 && idx < 4) { pthread_mutex_lock(&acq_mu); o->avail[idx] = period ? slot + period : 0; pthread_mutex_unlock(&acq_mu); }
     static uint64_t prev_slot; if (prev_slot && period) trow(f, "@display_ms", (slot - prev_slot) / 1e6); prev_slot = slot;   // display interval between two adjacent frames on screen (this is the one to look at for dropped frames)
     // Actual presentation interval (windowed mode): taken 8 presents late (the presented callback has arrived by then), as the difference between the n-th and the (n−1)-th; −1 = discarded
@@ -4698,11 +4768,30 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
                                               t->d.width, t->d.height, t->d.format, t->d.target, srow, r->xoffset, r->yoffset, r->zoffset, r->width, r->height, nz);
             return;
         }
+        int whole_l0 = !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
         dm_guest_write_prepare(t->mem, t->L.size);
+        if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+            NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+            mtl_read_texels(t, 0, 0, &full, t->mem, srow, srow * (size_t)t->d.height);
+        }
+        mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
         for (size_t y = 0; y < hb; y++) memcpy(t->mem + (y0 + y) * srow + x0, src + y * row0, wb);
         mtl_tex_linear_cpu_written(t);
         return;
     }
+    int whole_l0 = !level && !layer0 && !r->zoffset && !r->xoffset && !r->yoffset && (uint32_t)r->width == t->d.width && (uint32_t)r->height == t->d.height;
+    if (!whole_l0 && mtl_tex_movie_active(t)) {   // preserve untouched decoded movie pixels before guest storage takes over
+        size_t l0_row = (size_t)t->d.width * (size_t)bpb;
+        uint8_t *tmp = malloc(l0_row * (size_t)t->d.height);
+        if (!tmp) die("WriteTexels movie readback allocation failed");
+        NVNcopyRegion full = {0, 0, 0, (int)t->d.width, (int)t->d.height, 1};
+        mtl_read_texels(t, 0, 0, &full, tmp, l0_row, l0_row * (size_t)t->d.height);
+        dm_guest_write_prepare(t->mem, t->L.size);
+        if (nvn_swizzle(&t->d, 0, 0, tmp, l0_row, t->mem))
+            ONCE_LOG("[RED] WriteTexels movie materialize swizzle failed (format %#x target %d)", t->d.format, t->d.target);
+        free(tmp);
+    }
+    mtl_tex_movie_drop(t);   // guest WriteTexels owns the storage again if a movie previously wrote directly to it
     {
         size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
         dm_guest_write_prepare(t->mem, t->L.size);
@@ -4743,7 +4832,8 @@ int nvn_tex_level_range(const tex_t *t, unsigned level, unsigned layer, uint64_t
     *lo = (uint64_t)layer * t->L.layer_size + a; *hi = (uint64_t)layer * t->L.layer_size + b;
     return 0;
 }
-// The movie decoder's native-texture output (DecoderMode 2, hle_movie.c): a whole frame into level 0 of the client texture, as WriteTexels does; returns the texture format, or −1 when the object is not a texture
+// The movie decoder's native-texture output (DecoderMode 2, hle_movie.c): a whole frame into level 0 of the client texture, staged directly into a resident shared buffer for a single GPU blit
+// (or through WriteTexels as a fallback); returns the texture format, or −1 when the object is not a texture
 int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, size_t row, int *tw, int *th) {
     const tex_t *t = nvntex;
     uint32_t mg = 0; vm_size_t got = 0;   // the value the client gives is not necessarily a pointer: test-read first
@@ -4751,7 +4841,10 @@ int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, si
     if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
     if (tw) *tw = (int)t->d.width;
     if (th) *th = (int)t->d.height;
-    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
+    if (src) {
+        if (mtl_tex_movie_write(t, src, w, h, row)) return (int)t->d.format;
+        NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0);
+    }
     return (int)t->d.format;
 }
 // work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)

@@ -19,6 +19,10 @@ The values are in [`game.tsv`](game.tsv). The shader split found 213 distinct sh
 
 Open the bundled app after building with `--platform mac-app`, or use the run command printed by `--platform mac`. Press A when the title logo is visible, select New Game, and fill in the character name, birthday and difficulty. Confirm the settings, dismiss the DLC notice if present, and press A through Thomas's dialogue to the farm-naming prompt.
 
+## Found on this game
+
+- **Registered texture at NVN texture pool slot 0** (depth-of-field composite sampling `tid=0` instead of the zero dummy, [#420](https://github.com/seedds/nxnative/issues/420)): [Registered textures at pool slot zero](../../../docs/reference/nvn-objects.md#registered-textures-at-pool-slot-zero).
+
 ## Open
 
 - The Mac playtest stopped at the farm-naming prompt. Free movement, save and reload, later areas, and iPhone gameplay still need testing. Only update 1.0.5 is registered.

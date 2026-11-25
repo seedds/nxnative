@@ -10,10 +10,11 @@
 #        profile_guess.py --check [<NSP root>]                        every profile in dm/games against its extraction under <NSP root> (default /Volumes/T7/nsp): where the guess differs
 import collections, re, struct, sys
 from pathlib import Path
+from typing import TypedDict
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools')); import nso_syms   # dynamic symbols, the host's hooks
-from romfs import Path, os, open, is_image, source
+from romfs import Path, os, open, is_image, source, reuse_descriptors
 from romfs_image import ARTIFACTS   # a dump tool's files in a RomFS folder, not game files
 
 MAGICS = [(b'UnityFS\0', 'UnityFS'), (b'UnityWeb', 'UnityWeb'), (b'UnityRaw', 'UnityRaw'), (b'BNSH', 'BNSH'), (b'BAHS', 'BAHS'), (b'SARC', 'SARC'), (b'Yaz0', 'Yaz0'),
@@ -93,19 +94,24 @@ def kind(m):   # a short name for what a module is: its NintendoSDK component, G
     return areas.most_common(1)[0][0] if areas else '?'
 
 
-def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: from nx_extract's manifest, or read from a RomFS folder
+def _romfs_entries(romfs):   # (path, size, first 32 bytes, own) of every RomFS file: from a manifest or RomFS folder; own is False on sibling-program rows of a multi-program NUP manifest
     romfs = Path(romfs)
     if romfs.is_file() and not is_image(romfs):
         for line in romfs.read_text(errors='replace').splitlines():
             if line.startswith('#'): continue
-            path, size, head = line.split('\t'); yield path, int(size), bytes.fromhex(head)
+            path, size, head, *scope = line.split('\t')
+            yield path, int(size), bytes.fromhex(head), not (scope and scope[0])
         return
     for d, _, names in os.walk(romfs):
         for n in names:
             if os.fsencode(n) in ARTIFACTS: continue
             p = Path(d) / n
             with open(p, 'rb') as f: head = f.read(32)
-            yield '/' + str(p.relative_to(romfs)), p.stat().st_size, head
+            yield '/' + str(p.relative_to(romfs)), p.stat().st_size, head, True
+
+
+def romfs_files(romfs):   # (path, size, first 32 bytes) of every RomFS file: from nx_extract's manifest, or read from a RomFS folder
+    for path, size, head, _ in _romfs_entries(romfs): yield path, size, head
 
 
 def npdm(path):   # (system resource size, program ID) from main.npdm; a non-zero system resource means virtual address memory (Engage 16 MB); (0, None) without the file
@@ -153,7 +159,7 @@ def facts_of(exefs, romfs):
     # RomFS: counts by top level (two levels: Unity keeps everything under Data/), extension and header magic
     R = F['romfs'] = {'n': 0, 'bytes': 0, 'tops': collections.Counter(), 'topb': collections.Counter(), 'exts': collections.Counter(), 'extb': collections.Counter(), 'extc': collections.Counter(),
                       'mags': collections.Counter(), 'magb': collections.Counter(), 'dirs': collections.Counter(), 'biggest': (0, ''), 'root': set()}
-    for path, size, h in romfs_files(romfs):
+    for path, size, h, own in _romfs_entries(romfs):
         R['n'] += 1; R['bytes'] += size
         parts = path.strip('/').split('/')
         top = '/'.join(parts[:2]) if len(parts) > 2 else parts[0] if len(parts) > 1 else '(root)'
@@ -162,7 +168,7 @@ def facts_of(exefs, romfs):
         R['exts'][ext or '(none)'] += 1; R['extb'][ext] += size
         if len(parts) > 1: R['dirs'][parts[0]] += 1
         else: R['root'].add(parts[0])
-        R['biggest'] = max(R['biggest'], (size, path.strip('/')))
+        if own: R['biggest'] = max(R['biggest'], (size, path.strip('/')))
         mag = next((n for m, n in MAGICS if h.startswith(m)), None)
         if mag: R['mags'][mag] += 1; R['magb'][mag] += size
         if mag in PACKED: R['extc'][ext] += 1
@@ -371,6 +377,67 @@ def romfs_glsl_files(romfs):
     return n
 
 
+class DecoderArchives(TypedDict):
+    trinity_packs: int
+    legacy_paks: int
+    oodle_pkz: int
+    oodle_gfpak: int
+    oodle_ue3: int
+    frostbite: bool
+    oodle_ttdat: int
+    anvil_forges: int
+
+
+def decoder_archives(roots, mains=()) -> DecoderArchives:
+    """Count decoder-backed NVN archives across one or more RomFS roots (directories or .img images), in one walk per root."""
+    gfx_tools = str(HERE.parent / 'gfx/tools')
+    if gfx_tools not in sys.path: sys.path.insert(0, gfx_tools)
+    import forge, frostbite, ttdat, uepak
+    trinity = oodle_pkz = oodle_gfpak = oodle_ue3 = oodle_ttdat = anvil_forges = legacy_paks = 0
+    is_frostbite = False
+    for root in roots:
+        has_pak = False
+        with reuse_descriptors([str(root)]):
+            for d, _, names in os.walk(root):
+                for n in names:
+                    path = os.path.join(d, n)
+                    with open(path, 'rb') as f:
+                        head = f.read(0x20)
+                        if n.endswith('.trpfs'):
+                            trinity += head[:8] == b'ONEPACK\0'
+                        elif n.endswith('.pkz') and head[:4] == b'pkzl' and len(head) >= 0x1c:
+                            cnt, eo, nl = struct.unpack_from('<III', head, 0x10)
+                            f.seek(eo + 0x20 * cnt)
+                            oodle_pkz += b'OodleKraken\0' in f.read(nl)
+                        elif n.endswith('.gfpak') and head[:8] == b'GFLXPACK' and len(head) >= 0x20:
+                            cnt, _, tab = struct.unpack_from('<IIQ', head, 0x10)
+                            f.seek(tab)
+                            t = f.read(0x18 * cnt)   # the file table: 0x18 bytes per file, u16 compression at +2 (shader_split.py gfpak_members)
+                            oodle_gfpak += any(struct.unpack_from('<H', t, 0x18 * i + 2)[0] == 3 for i in range(len(t) // 0x18))
+                        elif n.endswith('.forge') and len(head) >= 13 and forge.is_forge(head):
+                            version = forge.version(head)
+                            anvil_forges += version in forge.KNOWN_VERSIONS and version != forge.SCIMITAR_LZO_VERSION   # v27 decodes LZO1X directly
+                        elif n.endswith('.pak'):
+                            has_pak = True
+                        if head[:4] == UE3_TAG:
+                            if len(head) == 0x20: head += f.read(0x1000 - len(head))
+                            oodle_ue3 += ue3_oodle_package(head)
+                    if n.lower().endswith('.dat'):
+                        oodle_ttdat += ttdat.needs_oodle(path)
+            if has_pak:
+                legacy_paks += len(uepak.unreal_paks(str(root), inline=True, mains=mains))
+            if not is_frostbite and frostbite.is_frostbite(str(root)):
+                is_frostbite = True
+    return {'trinity_packs': trinity, 'legacy_paks': legacy_paks, 'oodle_pkz': oodle_pkz, 'oodle_gfpak': oodle_gfpak,
+            'oodle_ue3': oodle_ue3, 'frostbite': is_frostbite, 'oodle_ttdat': oodle_ttdat, 'anvil_forges': anvil_forges}
+
+
+def decoder_sources(roots, mains=()):
+    """Decoder-backed NVN archive sources across one or more RomFS roots (directories or .img images): {'oodle_packs': (bool, reason), 'ue_legacy': (bool, reason)}."""
+    sources = shader_sources((), 0, (), 0, 0, **decoder_archives(roots, mains=mains))
+    return {'oodle_packs': sources['oodle_packs'], 'ue_legacy': sources['ue_legacy']}
+
+
 def build_sources(exefs, romfs, modules):
     """shader_sources from an extraction (its ExeFS and RomFS folders) and the modules the profile loads"""
     exefs = Path(exefs); main = nso(exefs / 'main')[0]
@@ -384,16 +451,13 @@ def build_sources(exefs, romfs, modules):
     if 'glslcCompile' in nro_imp:   # an NRO compiles (Portal's materialsystem.nro): the GLSLC module is one nro_modules adds to a provisional profile, so any of the ExeFS's counts
         glslc_mods = sorted({*glslc_mods, *(p.name for p in exefs.iterdir() if p.name.startswith('subsdk') and defines(p.name))}, key=load_order)
     spirv, vk_named = 0, named_vulkan(main, imports)
-    sys.path.insert(0, str(HERE.parent / 'gfx/tools')); import uepak
+    gfx_tools = str(HERE.parent / 'gfx/tools')
+    if gfx_tools not in sys.path: sys.path.insert(0, gfx_tools)
+    import uepak
     if vk_named or any(re.match(r'vk[A-Z]', s) for s in imports):
         import vk_shaders
         spirv = sum(1 for _ in vk_shaders.spirv_files(str(romfs)))
         if not spirv and vk_named: spirv = int(next(vk_shaders.bgfx_modules(main), None) is not None)
-    trinity = 0
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.trpfs'):
-                with open(os.path.join(d, n), 'rb') as f: trinity += f.read(8) == b'ONEPACK\0'
     gl_files = 0
     if gl_names or fixed_calls:
         from gl_shaders import is_standalone_glsl, paired_sources, text_of
@@ -404,41 +468,10 @@ def build_sources(exefs, romfs, modules):
                 elif low.endswith('.glsl'):
                     with open(os.path.join(d, n), 'rb') as f: gl_files += is_standalone_glsl(text_of(f.read()))
             gl_files += len(paired_sources(d, names))
-    oodle_pkz = 0   # PlatinumGames PKZ archives whose name table (after the 0x20-byte entries) names Oodle Kraken: their entries are decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.pkz'):
-                with open(os.path.join(d, n), 'rb') as f:
-                    h = f.read(0x20)
-                    if h[:4] == b'pkzl':
-                        cnt, eo, nl = struct.unpack_from('<III', h, 0x10); f.seek(eo + 0x20 * cnt); oodle_pkz += b'OodleKraken\0' in f.read(nl)
-    oodle_gfpak = 0   # Game Freak GFPAK archives with an Oodle Kraken entry (compression 3: Pokémon Legends: Arceus; Pokémon Sword's are LZ4): decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.gfpak'):
-                with open(os.path.join(d, n), 'rb') as f:
-                    h = f.read(0x20)
-                    if h[:8] == b'GFLXPACK':
-                        cnt, _, tab = struct.unpack_from('<IIQ', h, 0x10); f.seek(tab); t = f.read(0x18 * cnt)   # the file table: 0x18 bytes per file, u16 compression at +2 (shader_split.py gfpak_members)
-                        oodle_gfpak += any(struct.unpack_from('<H', t, 0x18 * i + 2)[0] == 3 for i in range(len(t) // 0x18))
-    oodle_ue3 = 0   # Unreal Engine 3 packages (shader_split.py ue3_package) whose first compressed block, found within the first 4 KB, is an Oodle one (8C; Batman: Arkham Knight): decoded with the game's own decoder
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            with open(os.path.join(d, n), 'rb') as f: oodle_ue3 += ue3_oodle_package(f.read(0x1000))
-    import ttdat
-    oodle_ttdat = sum(ttdat.needs_oodle(os.path.join(d, n)) for d, _, names in os.walk(romfs) for n in names if n.lower().endswith('.dat'))
-    import forge
-    anvil_forges = 0   # The Oodle versions use the game's decoder. The v27 reader decodes LZO1X directly.
-    for d, _, names in os.walk(romfs):
-        for n in names:
-            if n.endswith('.forge'):
-                with open(os.path.join(d, n), 'rb') as f: head = f.read(13)
-                if len(head) == 13 and forge.is_forge(head):
-                    version = forge.version(head)
-                    anvil_forges += version in forge.KNOWN_VERSIONS and version != forge.SCIMITAR_LZO_VERSION
-    import frostbite   # Frostbite's superbundles (EA SPORTS FC 27): every item of the cas files is Oodle Leviathan, decoded with the game's own decoder
-    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])), trinity, len(uepak.unreal_paks(str(romfs), inline=True, mains=[exefs / 'main'])), gl_names, gl_src, gl_files, oodle_pkz, nro_imp,
-                          oodle_gfpak=oodle_gfpak, oodle_ue3=oodle_ue3, frostbite=frostbite.is_frostbite(str(romfs)), romfs_glsl=romfs_glsl, oodle_ttdat=oodle_ttdat, gl_fixed_calls=fixed_calls, vk_named=vk_named, anvil_forges=anvil_forges)
+    dec = decoder_archives([romfs], mains=[exefs / 'main'])
+    return shader_sources(imports, glsl_src, glslc_mods, spirv, len(uepak.unreal_paks(str(romfs), inline=False, mains=[exefs / 'main'])),
+                          gl_names=gl_names, gl_src=gl_src, gl_files=gl_files, nro_imports=nro_imp,
+                          romfs_glsl=romfs_glsl, gl_fixed_calls=fixed_calls, vk_named=vk_named, **dec)
 
 
 def va_heap(sysres, imports):   # virtual address memory (an NPDM system resource) and a heap: the alias / heap split is a starting point the heap check corrects (Wonder, Tears of the Kingdom; Engage's pool is its own measurement)
@@ -491,17 +524,27 @@ def stdalloc_cap_needed(rows, alias):   # the stdalloc_cap the regions need (the
     return min(caps) if caps else None
 
 
-def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
-    """[(red, text)] from the host's address region table (DM_REGIONS, hle_svc.c "Address regions") of a run with a Switch-sized alias region, against the profile's alias
+def table_alias(table):   # the alias region the run had, from the first line of its table (hle_svc.c "# alias region <size>; ..."); 0 when it does not say
+    m = re.match(r'# alias region (0x[0-9a-fA-F]+);', table)
+    return int(m.group(1), 16) if m else 0
+
+
+def region_verdict(table, alias, sdk_syms=None, secs=15, cap=0, mac_only=False, stopped=None):
+    """([(red, text)], mac_verdict) from the host's address region table (DM_REGIONS, hle_svc.c "Address regions") of a run with a Switch-sized alias region, against the profile's alias
     region (the layout an iPhone runs): where the regions reach, and for each of 256 MB or more where the request returns to in the game (the first return address outside the
     sdk: the function that asked, or its caller when it tail-called the SDK API), through which SDK API (sdk_syms: the sdk's nso_syms.defined) and how much of it the game used.
     The run covers the game's first secs seconds in nnMain: what it takes later in play is not in the table, so a reach within the alias region is a lower bound. Where a region stands depends on who lays it out, not on where it is used (Pokémon Legends: Z-A's StandardAllocator puts its 3.15 GB
     startup block at the top of its region). One the SDK's StandardAllocator lays out the host makes fit at run time (hle_svc.c "StandardAllocator's address space": what the alias
     region has room for, less 256 MB for the regions made after it); when those need more, the profile key stdalloc_cap (cap: the profile's, 0 when it sets none) sets the size,
     which this computes from them (stdalloc_room; Absolum: its .NET garbage collector's region). One the game's own allocator takes with nn::os::AllocateAddressRegion works
-    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook)"""
+    smaller only if that allocator places nothing by fixed offsets (memory.md, A 62 GB page allocator behind nu::VirtualAllocHook).
+    mac_only (a build that makes no iPhone app): when the regions pass the iPhone layout, judge them directly against the alias region the Mac run actually had (table_alias:
+    64 GB for Switch 1, 128 GB for Switch 2; Minecraft Dungeons: 37 GB through nn::os::AllocateAddressRegion, GitHub issue #2860). A boot that stopped early or never reached
+    nnMain (stopped: reason string) stays red with that reason, because a refused request leaves no row in the table; a reach past the run's alias region or a table that does
+    not name its size stays red too. mac_verdict is True whenever the verdict depended on mac_only (so an iPhone build must check again); a clean check that fits the iPhone
+    layout too returns mac_verdict=False so its stamp answers for both"""
     rows = region_rows(table, sdk_syms)
-    if not rows: return []
+    if not rows: return [], False
     gb = lambda n: f'{n / 2**30:.2f} GB'
     out, red, own = [], [], []
     for r in sorted((r for r in rows if r['size'] >= 0x10000000), key=lambda r: r['off']):
@@ -526,10 +569,26 @@ def region_findings(table, alias, sdk_syms=None, secs=15, cap=0):
     where = f'in its first {secs} s in nnMain the game\'s regions reach alias +{gb(reach)}'
     capped = any(r['api'] and 'StandardAllocator' in r['api'] and r['off'] + r['size'] > alias for r in rows)
     if not red and reach > alias and not capped: red.append('no single region is too big, but together they need more room than the alias region has')
+    if red and mac_only:
+        run_alias = table_alias(table)
+        if not run_alias:
+            out.append((True, f'{where}, past the profile\'s {gb(alias)} alias region, the iPhone layout (the region table did not name this Mac-only build\'s alias region): ' + '; '.join(red) + ' (docs/reference/memory.md, Virtual address memory and the alias region)'))
+        elif reach > run_alias:
+            what = f'the game\'s regions reach alias +{gb(reach)}, past this Mac-only build\'s {gb(run_alias)} alias region, and {stopped}' if stopped else f'{where}, past this Mac-only build\'s {gb(run_alias)} alias region'
+            out.append((True, f'{what} (docs/reference/memory.md, The Mac\'s alias region is the Switch\'s 64 GB)'))
+        elif stopped:
+            out.append((True, f'the game\'s regions reach alias +{gb(reach)}, within this Mac-only build\'s {gb(run_alias)} alias region, but {stopped}: a refused request leaves no row in the table (past the profile\'s {gb(alias)} iPhone layout; a build for an iPhone checks again)'))
+        else:
+            out.append((False, f'{where}, within this Mac-only build\'s {gb(run_alias)} alias region (what it takes later in play is not measured here; past the profile\'s {gb(alias)} iPhone layout; a build for an iPhone checks again)'))
+        return out, True
     if red: out.append((True, f'{where}, past the profile\'s {gb(alias)} alias region, the iPhone layout: ' + '; '.join(red) + ' (docs/reference/memory.md, Virtual address memory and the alias region)'))
     elif reach > alias: out.append((False, f'{where}, past the profile\'s {gb(alias)} alias region only by StandardAllocator regions, which the host makes fit (what it takes later in play is not measured here)'))
     else: out.append((False, f'{where}, within the profile\'s {gb(alias)} alias region (what it takes later in play is not measured here)'))
-    return out
+    return out, False
+
+
+def region_findings(table, alias, sdk_syms=None, secs=15, cap=0, mac_only=False, stopped=None):
+    return region_verdict(table, alias, sdk_syms, secs, cap, mac_only=mac_only, stopped=stopped)[0]
 
 
 STDALLOC_LATER = 0x10000000   # the room the host leaves after a StandardAllocator region (hle_svc.c STDALLOC_LATER)

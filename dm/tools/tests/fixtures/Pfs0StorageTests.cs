@@ -11,6 +11,7 @@ using LibHac.Fs.Fsa;
 using LibHac.FsSystem;
 using LibHac.Tools.Fs;
 using LibHac.Tools.FsSystem;
+using LibHac.Tools.FsSystem.RomFs;
 
 class Pfs0StorageTests {
     static void Check(bool ok) { if (!ok) throw new Exception("PFS0 storage check failed"); }
@@ -42,6 +43,63 @@ class Pfs0StorageTests {
         storage.GetSize(out long size).ThrowIfFailure();
         byte[] all = new byte[(int)size]; storage.Read(0, all).ThrowIfFailure();
         Check(all.AsSpan(all.Length - 6).SequenceEqual(new byte[] {1, 2, 3, 4, 5, 6}));
+    }
+    static byte[] LiteralColonRomFs(byte[] payload) {
+        // Minimal Switch RomFS with root "", child directory "D:", and file "/D:/sample" (1 hash bucket each).
+        byte[] rom = new byte[0x200 + payload.Length];
+        int dh = 0x50, dm = 0x60, fh = 0xA0, fm = 0xB0, fd = 0x200;
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x00), 0x50);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x08), dh);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x10), 4);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x18), dm);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x20), 52);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x28), fh);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x30), 4);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x38), fm);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x40), 40);
+        BinaryPrimitives.WriteInt64LittleEndian(rom.AsSpan(0x48), fd);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dh), 0);
+        // Dir 0 (root): parent=0, sibling=none, firstDir=24, firstFile=none, hashSibling=24, nameLen=0
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 0), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 4), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 8), 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 12), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 16), 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 20), 0);
+        // Dir 1 ("D:" at offset 24): parent=0, sibling=none, firstDir=none, firstFile=0, hashSibling=none, nameLen=2
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 24), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 28), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 32), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 36), 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 40), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(dm + 44), 2);
+        Encoding.UTF8.GetBytes("D:").CopyTo(rom, dm + 48);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(fh), 0);
+        // File 0 ("sample" in "D:"): parent=24, sibling=none, off=0, size=payload.Length, hashSibling=none, nameLen=6
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(fm + 0), 24);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(fm + 4), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt64LittleEndian(rom.AsSpan(fm + 8), 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(rom.AsSpan(fm + 16), (ulong)payload.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(fm + 24), 0xFFFFFFFFu);
+        BinaryPrimitives.WriteUInt32LittleEndian(rom.AsSpan(fm + 28), 6);
+        Encoding.UTF8.GetBytes("sample").CopyTo(rom, fm + 32);
+        payload.CopyTo(rom, fd);
+        return rom;
+    }
+    static void CheckLiteralRomFsModes(string tmp) {
+        byte[] payload = Encoding.UTF8.GetBytes("hello-colon");
+        byte[] rom = LiteralColonRomFs(payload);
+        Func<IFileSystem> open = () => new RomFsFileSystem(new MemoryStorage(rom));
+        string img = Path.Combine(tmp, "RomFS.img");
+        P.WriteImage(open, img);
+        Check(File.Exists(img) && File.ReadAllBytes(img).AsSpan().IndexOf(payload) >= 0);
+        string folder = Path.Combine(tmp, "RomFS");
+        P.Copy(open, folder, null);
+        Check(File.ReadAllBytes(Path.Combine(folder, "D:", "sample")).SequenceEqual(payload));
+        string manifest = Path.Combine(tmp, "romfs_manifest.tsv");
+        P.Manifest(open, manifest);
+        string expectedHex = Convert.ToHexString(payload).ToLowerInvariant();
+        Check(File.ReadAllText(manifest).Contains($"/D:/sample\t{payload.Length}\t{expectedHex}"));
     }
     static void Main() {
         ReadPackage(true); ReadPackage(false);
@@ -90,6 +148,7 @@ class Pfs0StorageTests {
                     Check(!Directory.Exists(Path.Combine(tmp, "out")));
                 }
             }
+            CheckLiteralRomFsModes(tmp);
         } finally { Console.SetOut(saved); Directory.Delete(tmp, true); }
         Console.WriteLine("PFS0 storage checks passed");
     }

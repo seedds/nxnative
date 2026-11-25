@@ -234,6 +234,7 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
+    snprintf(p, sizeof p, "%s/shader_missing.txt", sup); setenv("DM_NVN_MISSING_KEYS", p, 0);   // the shaders this app's library lacked, for the next --seen-shaders build: a log is gone after two more starts (nvn_mtl.m shader_missing_note)
     snprintf(p, sizeof p, "%s/nvn-compiler/python/bin/python3", res);
     if (!access(p, X_OK)) {
         setenv("DM_NVN_RUNTIME_PYTHON", p, 0);

@@ -1036,3 +1036,11 @@ t_pool_cow_residency: t_pool_cow_residency.m $(MTL_T_DEP)
 check_t_pool_cow_residency: t_pool_cow_residency
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_pool_cow_residency
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_pool_cow_residency
+
+# CPU phase profiler (DM_NVN_CPUPROF=1): reports from the replay thread at mtl_sub_commit, not from mtl_stats on the presenting thread (PR #1999)
+t_cpuprof: t_cpuprof.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_cpuprof.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_cpuprof
+check_t_cpuprof: t_cpuprof
+	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=0 ./t_cpuprof
+	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=1 ./t_cpuprof

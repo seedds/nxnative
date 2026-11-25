@@ -259,6 +259,11 @@ static uint64_t g_cm_op[64], g_cm_opn[64], g_cm_sub_n, g_cm_sub_sum, g_cm_sub_ma
 static int allocprof_level(void) { if (g_allocprof < 0) { const char *e = getenv("DM_NVN_ALLOCPROF"); g_allocprof = e ? (atoi(e) > 1 ? 2 : 1) : 0; } return g_allocprof; }
 // Diagnostic only: inclusive wall/CPU time on the replay thread. No GPU waits
 // are added, and no clocks are read when DM_NVN_CPUPROF is absent or zero.
+// Counters stay thread-local on the replay thread and cp_report runs at the end
+// of mtl_sub_commit (when no phase is open), so each 5 s window has one exact
+// publish/reset boundary with no cross-thread synchronization or split samples.
+// With DM_NVN_ENC_THREAD=1, phases measure replay/recording on the replay thread
+// (dm-encode does not record into these counters).
 typedef struct { uint64_t wall, cpu; } cp_stamp;
 static _Thread_local uint64_t g_cp_wall[8], g_cp_cpu[8], g_cp_calls[8], g_cp_last;
 static _Thread_local uint64_t g_cp_geo_waited, g_cp_geo_safe;
@@ -280,8 +285,10 @@ static void cp_report(void) {
     if (now - g_cp_last < 5000000000ull) return;
     static const char *names[] = {"pass_end", "pass_begin", "pipeline", "arguments", "texture", "draw", "geometry", "index"};
     char line[1000] = {0}; size_t at = 0;
-    for (int i = 0; i < 8; i++) if (g_cp_calls[i])
-        at += snprintf(line + at, sizeof line - at, " %s %llu calls %.2f/%.2f ms CPU/wall;", names[i], (unsigned long long)g_cp_calls[i], g_cp_cpu[i] / 1e6, g_cp_wall[i] / 1e6);
+    for (int i = 0; i < 8; i++) if (g_cp_calls[i]) {
+        int n = snprintf(line + at, sizeof line - at, " %s %llu calls %.2f/%.2f ms CPU/wall;", names[i], (unsigned long long)g_cp_calls[i], g_cp_cpu[i] / 1e6, g_cp_wall[i] / 1e6);
+        if (n > 0) at += (size_t)n < sizeof line - at ? (size_t)n : sizeof line - at - 1;
+    }
     MLOG("[cpuprof] inclusive phases over %.2f s (nested phases overlap):%s", (now - g_cp_last) / 1e9, line);
     if (g_cp_geo_waited || g_cp_geo_safe) MLOG("[cpuprof] geometry CPU reads: waited %llu / proven safe %llu", (unsigned long long)g_cp_geo_waited, (unsigned long long)g_cp_geo_safe);
     memset(g_cp_wall, 0, sizeof g_cp_wall); memset(g_cp_cpu, 0, sizeof g_cp_cpu); memset(g_cp_calls, 0, sizeof g_cp_calls); g_cp_last = now;
@@ -3303,6 +3310,7 @@ uint64_t mtl_sub_commit(void) {
     defer_idle_commit();   // a feedback handler that drained since this submission's own commit saw it open
     g_commit_blocks = nil;
     objc_autoreleasePoolPop(g_sub_pool); g_sub_pool = NULL;
+    cp_report();
     return fence;
 }
 
@@ -22713,7 +22721,7 @@ void mtl_present_wait(uint64_t tk) { mtl_present_wait_timeout(tk, UINT64_MAX); }
 // Wait until all queued presents have been processed (used by mtl_finish = nvnQueueFinish etc.): goes through mtl_present_wait, so there is still a fallback when the display link stops (real device: the game called QueueFinish once while the display link was stopped,
 // and this used to wait here without a timeout; nobody took the 3 queued frames and the game stalled; those two runs on Mac did not hit this call)
 void mtl_present_flush(void) { pthread_mutex_lock(&g_pq_mu); uint64_t h = g_pq_in; pthread_mutex_unlock(&g_pq_mu); mtl_present_wait(h); }
-void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; cp_report(); }
+void mtl_stats(uint64_t *passes, uint64_t *draws) { *passes = g_stat_pass; *draws = g_stat_draw; }
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch) { *enc = g_stat_args_enc; *reuse = g_stat_args_reuse; *patch = g_stat_args_patch; }
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes) {
     *resolve = g_vbuf_resolve; *reuse = g_vbuf_reuse; *set = g_vbuf_set; *skip = g_vbuf_skip; *copies = g_vbuf_copies; *copy_bytes = g_vbuf_copy_bytes;

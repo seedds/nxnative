@@ -43,8 +43,6 @@ At the reported 60 FPS, 16,844 frames represent approximately 4 minutes 41 secon
 
 In this earlier Hard-mode session, the recorded spikes coincided with character-death events and were not noticeable during play. This is an observed correlation, not proof of the underlying technical cause.
 
-The two captures are reported independently; their dropped-frame counts are not combined. The earlier 23,006-frame capture, which reported 3,697 dropped frames while the user switched tabs away from the game, is excluded from the performance results because its conditions make it unsuitable as a representative gameplay reference.
-
 ## Profile notes
 
 The profile uses the default pipeline. No game-specific shader-chain changes or patches are required. Game-derived per-title shader records and generated local-only tables are intentionally not committed, so this profile does not ship a precomputed per-game shader table.

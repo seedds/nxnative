@@ -14,6 +14,12 @@ On an Apple M6 (macOS 27.2.1, Xcode 27.2), the collection created a save, accept
 
 Build the base NSP and update together with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform mac-app`. On first boot, dismiss the autosave notice and choose a language. Choose **Game Selection & Museum** at the title, use L and R to select a game, and choose **New Game**. The Mac keyboard's A button is J.
 
+## Frame rate
+
+The profile targets 60 fps. `DM_FPS_TARGET=0` keeps the original 30 fps. The game's startup code sets both base rate and maximum to 30. The [RE Engine matcher](../../../docs/reference/frame-rate.md#re-engines-maxfps-in-the-application-loop) found the maximum at `[main+0xa430e40]+0x43c` on 1.0.1 and `[main+0xa42fe40]+0x43c` on 1.0.0. Only 1.0.1 was run.
+
+In the Apollo Justice selection menu on an Apple M6, median frame time went from 33.33 ms to 16.69 ms in windowless runs from the same save. The engine's measured step went from 0.03333 to 0.01667 seconds per frame. Turnabout Trump's opening sequence also ran at about 60 fps, with no `[RED]` lines in the test.
+
 ## Open
 
 Only 1.0.1 was tested. Dual Destinies and Spirit of Justice were checked at their menus. Later gameplay, other Museum screens and iPhone gameplay remain unverified.

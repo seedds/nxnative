@@ -273,6 +273,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Check:** `dm/tools/tests/test_fps_target.py` (synthetic code: the global and its GOT slot, too few readers, no store of 30, another dividend, two fields); `fps_target.py <main>...` prints what it finds in each. Before giving a game `fps_target` on this field, check that its readers step the game by it: a target the game only presents by, with logic that counts frames, would run the game fast.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md) v131072 (its gxc graphics object, +0x1dc): gameplay at 60 fps, frame time p50 16.7 ms on an M4 Pro. Checked offline on 100 mains on the drives (2026-11-03), both Paper Marios on Intelligent Systems' older engine among them: the search finds this field (55 of its 59 readers have the form it matches) and, in every other main, not a single reader.
 
+### RE Engine's MaxFps in the application loop
+
+- **Symptom:** a game holds 30 fps while asking NVN for present interval 1 on a 60 Hz display. Display pacing at 60 still gives 30 fps.
+- **Cause:** RE Engine's game thread reads the base rate and `MaxFps` from the application singleton. It waits until elapsed time in base-rate units reaches `BaseFps / MaxFps`. Its fixed-step path uses the same quotient. The application converts the step back to seconds using the base rate.
+- **Fix:** `fps_target.py` requires the RE Engine application names, both timing paths, and the neighboring native getters and setters for the two rates. Relative relocations resolve the singleton pointer. The rewriter records the discovered field as a float in the existing frame-rate fixups. The host applies the profile target to `MaxFps` and leaves the base rate as the game's time unit.
+- **Binding:** engine. The search matches the reviewed instruction sequence without a build ID or fixed address. A missing or ambiguous match leaves the engine rate alone. The desired rate remains a profile choice.
+- **Check:** the recognizer found both supplied Apollo Justice builds at different singleton addresses and declined the tested PRAGMATA and Resident Evil 4 builds. Synthetic checks cover mismatched accessor slots, mismatched step fields and repeated runtime writes that preserve the adjacent base rate.
+- **Found on:** [Apollo Justice: Ace Attorney Trilogy](../../dm/games/010020D01B890000/README.md#frame-rate).
+
 ### 120 fps follows the frame step
 
 - **Symptom:** with a game's target frame rate written to 120 and a 120 Hz display link, the game holds 120 where frames fit, but a scene whose frames take 14 ms runs in slow motion at 72 fps, and on a 60 Hz screen the whole game runs at half speed.

@@ -112,7 +112,8 @@ def sources(roots):
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
 #   · a redeclaration of gl_Position as a plain output (the built-in sprite shader of main declares `out float4 vPosition;` with vPosition defined as gl_Position);
-#   · textureOffset with an offset that is not a constant (the built-in FXAA shader): Metal's sample offsets are constants too, so it becomes texture at P + offset / level 0 size;
+#   · a texel offset that is not a constant (the built-in FXAA shader's textureOffset): Metal's sample offsets are constants too, so the call becomes the one without the offset at
+#     P + offset / the level's size (variable_offsets);
 #   · built-ins redeclared as plain inputs and outputs, which DOOM 3's renderer writes into every GLSL 1.50 shader it generates (`out vec4 gl_Position;`, `in vec4 gl_FragCoord;`,
 #     `out float gl_FragDepth;`): the declarations go, the built-ins stay; `out vec4 gl_FragColor;` becomes a plain output of the shader's own (Vulkan GLSL has no gl_FragColor);
 #   · the compatibility colour declared as a plain varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader (DOOM 3): NVIDIA links the two
@@ -180,13 +181,58 @@ def fixups(t, stage, renamed=None):
     else:
         t = own_name(t, r'^[ \t]*in\s+vec4\s+gl_Color\s*;', 'gl_Color', 'dm_Color', 'in vec4 dm_Color;')
         t = own_name(t, r'^[ \t]*out\s+vec4\s+gl_FragColor\s*;', 'gl_FragColor', 'dm_FragColor', 'out vec4 dm_FragColor;')
+    return variable_offsets(t)
+
+# The texture functions with a texel offset: for each, the numbers of its arguments, where its offset and its level of detail are, and the call without the offset it becomes.
+# The projective forms (textureProjOffset and its Lod and Grad forms) are left alone: whether P is a vec3 or a vec4 is not in the text
+OFFSET_CALLS = {'textureOffset': ((3, 4), 2, None, 'texture'), 'textureLodOffset': ((4,), 3, 2, 'textureLod'), 'textureGradOffset': ((5,), 4, None, 'textureGrad'),
+                'texelFetchOffset': ((4,), 3, 2, 'texelFetch')}
+
+def sampler_kind(t, s, at):
+    """The declared type of the sampler a call at t[at] names (2D, 2DArray, 2DShadow, 2DArrayShadow, 3D, or another, such as 1D or 2DRect, which is left alone), from its last
+    declaration before the call (a function's parameter or a uniform), or None when there is none"""
+    name = re.match(r'\s*([A-Za-z_]\w*)', s)
+    if not name: return None
+    m = None
+    for m in re.finditer(r'\b[iu]?sampler(\w+)\s+' + re.escape(name[1]) + r'\b', t[:at]): pass
+    return m[1] if m else None
+
+def const_offset(o, consts):
+    """Whether a texel offset is a constant expression: no name in it but a vector constructor or a name declared const (a literal's suffix, as in 1u, is no name)"""
+    return not any(n not in consts for n in re.findall(r'\b[A-Za-z_]\w*', re.sub(r'\b[iu]?vec[234]\b', '', o)))
+
+def variable_offsets(t, decls=None, base_at=0):
+    """A texel offset that is not a constant expression, which NVIDIA's compiler takes and GLSL and glslang do not ("'texel offset' : argument must be compile-time
+    constant"), becomes part of the coordinate. The call without its offset reads at P + offset / the size of the level the offset is in texels of: the whole part of its level
+    of detail for textureLodOffset (exact at a whole level the texture has), level 0 for the others, which is exact for a texture of one level and off by the level's scale for
+    a mipmapped one read at another level. texelFetchOffset reads at P + offset, which is exact. The offset moves x and y only (z too for a 3D sampler), not an array layer or a
+    shadow reference. A constant offset stays: the sampler applies it at each level it reads. A call inside another's arguments is lowered too. decls: the whole shader, for the
+    declarations a call's arguments (lowered on their own) do not hold; base_at: where t starts in it"""
+    if decls is None: decls = t
+    consts = set(re.findall(r'\bconst\s+(?:(?:highp|mediump|lowp)\s+)?\w+\s+([A-Za-z_]\w*)', decls))
     out, i = [], 0
-    for m in re.finditer(r'\btextureOffset\s*\(', t):
+    for m in re.finditer(r'\b(' + '|'.join(OFFSET_CALLS) + r')\s*\(', t):
         if m.start() < i: continue
         args, end = call_args(t, m.end() - 1)
-        if len(args) == 3 and re.search(r'[A-Za-z_]\w*', re.sub(r'\b[iu]?vec[234]\b', '', args[2])):   # an offset with a variable in it
-            s_, p_, o_ = (x.strip() for x in args)
-            out.append(t[i:m.start()] + f'texture({s_}, ({p_}) + vec2({o_}) / vec2(textureSize({s_}, 0)))'); i = end
+        n, at, lod, base = OFFSET_CALLS[m[1]]
+        if len(args) not in n or const_offset(args[at], consts): continue
+        kind = sampler_kind(decls, args[0], base_at + m.start())
+        if kind is None and (m[1], len(args)) == ('textureOffset', 3): kind = '2D'   # an undeclared sampler: the 2D form, as before for the FXAA shader's call
+        if kind not in ('2D', '2DArray', '2DShadow', '2DArrayShadow', '3D'): continue   # 1D, 2DRect or not found: left to glslang
+        inner = base_at + m.end()
+        a = []
+        for x in args:
+            a.append(variable_offsets(x, decls, inner).strip()); inner += len(x) + 1
+        s_, p_, o_ = a[0], a[1], a.pop(at)
+        if base == 'texelFetch':
+            a[1] = f'({p_}) + ivec3({o_}, 0)' if kind == '2DArray' else f'({p_}) + {o_}'
+        else:
+            size = f'textureSize({s_}, {f"int({a[lod]})" if lod is not None else 0})'
+            if kind == '3D': a[1] = f'({p_}) + vec3({o_}) / vec3({size})'
+            elif kind in ('2DArray', '2DShadow'): a[1] = f'vec3(({p_}).xy + vec2({o_}) / vec2({size}.xy), ({p_}).z)'
+            elif kind == '2DArrayShadow': a[1] = f'vec4(({p_}).xy + vec2({o_}) / vec2({size}.xy), ({p_}).zw)'
+            else: a[1] = f'({p_}) + vec2({o_}) / vec2({size})'
+        out.append(t[i:m.start()] + f'{base}({", ".join(a)})'); i = end
     return ''.join(out) + t[i:]
 
 def glsl_type(t, refl):

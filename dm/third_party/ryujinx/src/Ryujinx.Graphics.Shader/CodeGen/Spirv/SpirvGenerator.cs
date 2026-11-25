@@ -365,6 +365,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                     context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
                 }
+                else if (e.Block.Type == AstBlockType.ElseIf)
+                {
+                    throw new InvalidOperationException("SPIR-V code generation expects nested Else/If blocks, not ElseIf.");
+                }
                 else if (e.Block.Type == AstBlockType.DoWhile)
                 {
                     SpvInstruction continueTarget = context.Label();
@@ -413,9 +417,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         }
                     }
 
-                    bool hasElse = AstHelper.Next(e.Block) is AstBlock nextBlock &&
-                        (nextBlock.Type == AstBlockType.Else ||
-                         nextBlock.Type == AstBlockType.ElseIf);
+                    bool hasElse = AstHelper.Next(e.Block) is AstBlock nextBlock && nextBlock.Type == AstBlockType.Else;
 
                     // Re-enter the parent block.
                     if (e.Block.Parent != null && !hasElse)

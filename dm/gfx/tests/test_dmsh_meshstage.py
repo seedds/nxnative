@@ -342,14 +342,16 @@ class Stage(unittest.TestCase):
         self.assertIn(f'dm_grid.set_threadgroups_per_grid(uint3(min(dm_draw[0] - b, {ms.METAL_MAX_GRID}u), 1u, 1u));', src)
 
     def test_per_primitive_outputs(self):   # four blocks of 6 vertex components (36 + 4 * 192 = 804 words), then the per-primitive blocks of 1 component (stride 32)
-        src = self.mesh(primitive=True)[0]
+        src, i = self.mesh(primitive=True)
+        self.assertEqual(i.get('prim'), 1)
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t,', src)
         self.assertIn('uint b = 36u + (n / 32u) * 192u + n % 32u;', src)
         self.assertIn('uint b = 804u + (n / 32u) * 32u + n % 32u;', src)
         self.assertRegex(src, r'p\.p0 = float4\(as_type<float>\(_23\[b \+ 0u\]\), 0\.0, 0\.0, 1\.0\);')
 
     def test_point_mesh(self):   # Ocarina of Time's 2582bd7ea6490d33 / 28f82c129deea140: point size at +0 ahead of position, topology point (control +0x5f = 1)
-        src = self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)[0]
+        src, i = self.mesh(vertices=32, primitives=32, pos=0xf8, verts=1)
+        self.assertNotIn('prim', i)
         self.assertIn('float point_size [[point_size]];', src)
         self.assertIn('metal::mesh<dm_vertex_t, void, 32, 32, metal::topology::point>', src)
         self.assertIn('v.point_size = as_type<float>(_23[b + 0u]);', src)
@@ -406,6 +408,7 @@ class Stage(unittest.TestCase):
         i = ms.info(control(7, payload=128, max_v=128, max_p=126, prim_at=0x80), area)
         self.assertEqual(i['primitive_builtins'], [8])
         src = ms.to_stage(KERNEL % (ms.memory(i)[1] // 4, ms.memory(i)[0][3] // 4), i)
+        self.assertEqual(i.get('prim'), 1)
         self.assertIn('struct dm_prim_t {\n    uint dm_pid [[primitive_id]];\n};', src)
         self.assertIn('metal::mesh<dm_vertex_t, dm_prim_t, 128, 126,', src)
         self.assertEqual(src.count('uint b = 548u + (n / 32u) * 32u + n % 32u;'), 2)   # both depth conventions
@@ -676,7 +679,9 @@ fragment main0_out main0(main0_in in [[stage_in]])
         src = self.fs_uint(self.GBUFFER % '8.96831e-44')
         for n, nm in enumerate(('m_48', 'm_50', 'm_52', 'm_54')):
             self.assertIn(f'    float4 {nm} [[color({n}), function_constant(dm_uf{n})]];\n    uint4 {nm}_ui [[color({n}), function_constant(dm_ui{n})]];\n', src)
-            self.assertIn(f'    if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else if (dm_si{n}) r.{nm}_si = as_type<int4>(out.{nm}); else r.{nm} = out.{nm};\n', src)
+            body = f'if (dm_ui{n}) r.{nm}_ui = as_type<uint4>(out.{nm}); else if (dm_si{n}) r.{nm}_si = as_type<int4>(out.{nm}); else r.{nm} = out.{nm};'
+            line = f'    if (dm_du) r.{nm}_du = out.{nm}; else {body}\n' if n == 1 else f'    if (!dm_du) {{ {body} }}\n' if n >= 2 else f'    {body}\n'
+            self.assertIn(line, src)
 
     def test_smooth_or_computed_inputs_too(self):   # the code no longer decides: an R8Uint target beside them would have been refused (Kirby and the Forgotten Land, #2760)
         self.assertIsNotNone(self.fs_uint(self.SRC % ('', '_26')))

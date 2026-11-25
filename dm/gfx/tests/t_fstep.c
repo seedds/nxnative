@@ -660,6 +660,105 @@ int main(void) {
         nvn_fstep_next(&er.s, 1, 0.5, 1, 3, 0, 0);
         check(clr1 && clr2 && er.s.stalls == 0, "  settle is cleared on first-frame and fixed-step early returns");
     }
+    {   // Ticks of 1/120 s (nvn_fstep.t120: a page whose unit at +0x38 is 120, a FRAME_STEP_120 stub): 2 / 3 / 4 ticks are 60 / 40 / 30 fps
+        _Alignas(8) uint8_t page[64] = {0}; nvn_fstep_target_put(page, 60);
+        check(!nvn_fstep_t120(page) && !nvn_fstep_t120(NULL), "a page in vsyncs (+0x38 0) is not in 1/120 s ticks");
+        uint32_t unit = 120; memcpy(page + FSTEP_UNIT_OFF, &unit, 4);
+        check(nvn_fstep_t120(page), "  a page whose unit is 120 counts in ticks of 1/120 s");
+        check(nvn_fstep_cap(40, 0, 0) == 40 && nvn_fstep_cap(40, 30, 0) == 30 && nvn_fstep_cap(40, 0, 1) == 30 && nvn_fstep_cap(40, 60, 0) == 60,
+              "  cap at 40: 40 normally, 30 for a 30 fps movie or thermal cap, 60 for a 60 fps movie");
+        check(nvn_fstep_cap(0, 0, 0) == 0 && nvn_fstep_cap(30, 60, 0) == 60 && nvn_fstep_cap(30, 60, 1) == 30,
+              "  cap at 0 / 30: target 0 stays off; 60 fps movie overrides 30 unless thermally capped");
+    }
+    {   // 40 fps: kmin 3, kmax 4 (hle_nvn.c fstep_tick). Frames that fit hold 3 ticks (25 ms) and step 3: game time = real time
+        sim m = {0}; m.s.t120 = 1; m.s.per_vsync = 2;
+        run(&m, 600, 2.0, 3, 4, 0);
+        snprintf(b, sizeof b, "40 fps: 16.7 ms frames hold 3 ticks and step 3, game time %.0f = real time %.0f ticks (k %d, ups %llu)", m.game, m.real, m.s.k, (unsigned long long)m.s.ups);
+        check(m.s.k == 3 && m.next == 3 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, b);
+        int seen[8] = {0}; double real0 = m.real, game0 = m.game;
+        for (int i = 0; i < 600; i++) { run(&m, 1, 3.6, 3, 4, 0); seen[m.s.k]++; }   // 30 ms frames: 40 does not hold
+        snprintf(b, sizeof b, "  30 ms frames: back to 30 (4 ticks) once the rate falls short over the window, never 5 or 6 (k %d: 3 %d / 4 %d / 5 %d / 6 %d frames)", m.s.k, seen[3], seen[4], seen[5], seen[6]);
+        check(m.s.k == 4 && !seen[5] && !seen[6] && seen[3] == 11 && seen[4] == 589, b);
+        snprintf(b, sizeof b, "  game time %.1f against real time %.1f ticks (debt %.2f)", m.game - game0, m.real - real0, m.s.debt);
+        check(fabs((m.real - real0) - (m.game - game0) - m.s.debt) < 2.01 && m.s.debt < 2.01, b);
+        run(&m, 1200, 2.0, 3, 4, 0);
+        snprintf(b, sizeof b, "  frames that fit 3 ticks again: a trial back to 40 holds (k %d, downs %llu)", m.s.k, (unsigned long long)m.s.downs);
+        check(m.s.k == 3 && m.s.downs >= 1, b);
+        uint64_t paid = m.s.paid; real0 = m.real; game0 = m.game;
+        m.real += 12; m.game += m.next; m.next = nvn_fstep_next(&m.s, 12, 12, 3, 4, 0, 0);   // one 100 ms hitch
+        run(&m, 60, 2.0, 3, 4, 0);
+        snprintf(b, sizeof b, "  a 100 ms hitch: %llu ticks paid back one a frame (steps of 4), hold stays 3; game time %.0f = real time %.0f", (unsigned long long)(m.s.paid - paid), m.game - game0, m.real - real0);
+        check(m.s.k == 3 && m.s.paid - paid == 9 && m.game - game0 == m.real - real0, b);
+    }
+    {   // 60 and 30 in ticks: holds stay whole vsyncs (even ticks), margins and limits stay the same real time as in vsyncs (including idle-GPU, unpaced probes and fine mode)
+        sim m = {0}; m.s.t120 = 1; m.s.per_vsync = 2; int odd = 0;
+        for (int i = 0; i < 600; i++) { run(&m, 1, i < 120 ? 1.0 : 2.6, 2, 6, 0); odd += m.s.k % 2; }   // 21.7 ms frames at a 60 cap
+        snprintf(b, sizeof b, "ticks at 60: 21.7 ms frames step to 4 ticks (30 fps), not 3 (k %d, odd holds %d)", m.s.k, odd);
+        check(m.s.k == 4 && !odd, b);
+        for (int i = 0; i < 300; i++) { run(&m, 1, 4.6, 2, 6, 0); odd += m.s.k % 2; }
+        snprintf(b, sizeof b, "  38 ms frames: 6 ticks (20 fps), not 5 (k %d, odd holds %d)", m.s.k, odd);
+        check(m.s.k == 6 && !odd, b);
+        for (int i = 0; i < 2400; i++) { run(&m, 1, 1.0, 2, 6, 0); odd += m.s.k % 2; }
+        snprintf(b, sizeof b, "  cheap frames again: trials back down by whole vsyncs to 2 ticks (k %d, odd holds %d)", m.s.k, odd);
+        check(m.s.k == 2 && !odd, b);
+        sim s = {0}; s.s.t120 = 1; s.s.per_vsync = 2; run(&s, 60, 1.0, 2, 6, 0);
+        s.real += 60; s.game += s.next; s.next = nvn_fstep_next(&s.s, 60, 60, 2, 6, 0, 0);   // a 0.5 s stall (not settle: debt capped at 30 ticks = 0.25 s)
+        run(&s, 60, 1.0, 2, 6, 0);
+        snprintf(b, sizeof b, "  0.5 s stall: 30 ticks (0.25 s) paid back, %.0f dropped, as 15 / 14 vsyncs in vsyncs (paid %llu)", s.s.dropped, (unsigned long long)s.s.paid);
+        check(s.s.dropped == 28 && s.s.paid == 30 && s.real - s.game == 28 && s.s.k == 2, b);
+        sim t = {0}; t.s.t120 = 1; t.s.per_vsync = 2; run(&t, 600, 1.0, 2, 6, 0);
+        run(&t, 20, 2.15, 2, 6, 0);   // 17.9 ms: late by 0.15 ticks, within the 0.2-tick (1.7 ms) margin of a vsync
+        check(t.s.k == 2 && t.s.ups == 0, "  17.9 ms frames at 60 are on time: the late margin is 1.7 ms, as in vsyncs");
+        // Idle GPU scaled to ticks: 0.08 ticks (0.67 ms < 0.1 ticks = 0.83 ms) counts as idle and does not step up in 10 frames
+        sim ig = {0}; ig.s.t120 = 1; run(&ig, 60, 1.0, 2, 6, 0);
+        for (int i = 0; i < 10; i++) { ig.s.gpu_on = 1; ig.s.gpu = 0.08; run(&ig, 1, 5.0, 2, 6, 0); }
+        check(ig.s.k == 2 && ig.s.ups == 0, "  idle GPU in ticks (0.08 ticks < 0.1): 10 late frames keep hold 2");
+        // Unpaced hold probe in ticks: at hold 4 (kmin 2, q 2), GPU 1.5 ticks (< 0.95 * 2) triggers probe back to hold 2
+        sim up = {0}; up.s.t120 = 1; run(&up, 60, 1.0, 2, 6, 0);
+        for (int i = 0; i < 12; i++) { up.s.gpu_on = 1; up.s.gpu = 3.5; run(&up, 1, 3.5, 2, 6, 0); }
+        int at4 = up.s.k == 4;
+        for (int i = 0; i < 300; i++) {
+            double k = up.s.k, w = k == 2 ? 1.5 : k;
+            up.s.gpu_on = 1; up.s.gpu = 1.5; run(&up, 1, w, 2, 6, 0);
+        }
+        check(at4 && up.s.k == 2 && up.s.probes >= 1 && up.s.failed == 0, "  unpaced hold at 4 ticks with GPU 1.5 ticks: probe returns to 2 ticks");
+        // 30 fps cap in ticks (kmin 4, kmax 4): 3 late frames turn fine on; 8 s (960 ticks = 240 frames) on time clears it
+        sim fn = {0}; fn.s.t120 = 1; run(&fn, 60, 3.0, 4, 4, 0);
+        for (int i = 0; i < 3; i++) { fn.s.gpu_on = 1; fn.s.gpu = 4.0; run(&fn, 1, 4.4, 4, 4, 0); }
+        int fine_on = fn.s.fine == 1 && fn.s.fines == 1;
+        for (int i = 0; i < 250; i++) { fn.s.gpu_on = 1; fn.s.gpu = 3.0; run(&fn, 1, 3.0, 4, 4, 0); }
+        check(fine_on && fn.s.fine == 0, "  30 fps cap in ticks (hold 4): 3 late frames set fine, 8 s on time clears it");
+    }
+    {   // Movie / thermal cap transitions in ticks: 40 → 30 (movie) → 40 (cap_probe), 40 → 60 (60 fps movie) → 40
+        sim m = {0}; m.s.t120 = 1; m.s.per_vsync = 2;
+        run(&m, 300, 1.5, 3, 4, 0); int k40 = m.s.k;
+        run(&m, 1, 1.5, 4, 4, 0); int k30 = m.s.k;
+        run(&m, 300, 1.5, 4, 4, 0);
+        run(&m, 1, 1.5, 3, 4, 0); int k40b = m.s.k, probe = m.s.probe;
+        run(&m, 300, 1.5, 3, 4, 0);
+        run(&m, 1, 1.5, 2, 6, 0); int k60 = m.s.k;
+        run(&m, 300, 1.5, 2, 6, 0);
+        run(&m, 1, 1.5, 3, 4, 0); int k40c = m.s.k;
+        snprintf(b, sizeof b, "cap transitions in ticks (40 → 30 → 40 → 60 → 40): holds %d → %d → %d (probe %d) → %d → %d", k40, k30, k40b, probe, k60, k40c);
+        check(k40 == 3 && k30 == 4 && k40b == 3 && probe == 1 && k60 == 2 && k40c == 3 && m.s.ups == 0, b);
+    }
+    {   // The GPU reference keeps a slot for each kmin up to 4 ticks (30 fps in ticks), and its ratios one for each hold up to 6 ticks (20 fps); a hold compares against kmin
+        nvn_fgpu g = {0}; nvn_fstep at = {0}; at.t120 = 1; at.k = 4;
+        for (int i = 0; i < 40; i++) nvn_fstep_gpu_slowed(&g, 1.0, &at, 4);
+        check(g.ref_at[4] > 0.99 && g.ref_at[4] < 1.01, "GPU reference at kmin 4 ticks is kept (30 fps in ticks)");
+        nvn_fgpu h = {0}; nvn_fstep s = {0}; s.t120 = 1; s.k = 2;
+        for (int i = 0; i < 40; i++) nvn_fstep_gpu_slowed(&h, 1.0, &s, 2);
+        s.k = 4; int sl = 0; for (int i = 0; i < 40; i++) sl = nvn_fstep_gpu_slowed(&h, 2.2, &s, 2);
+        check(sl, "  60 in ticks, hold 4: a GPU 2.2× its hold-2 time that does not fit 2 ticks counts as slowed");
+        nvn_fgpu r = {0}; nvn_fstep p = {0}; p.t120 = 1;
+        for (int n = 0; n < 2; n++) {
+            p.k = 6; p.probe = 0; for (int i = 0; i < 40; i++) nvn_fstep_gpu_slowed(&r, 4.0, &p, 2);
+            p.k = 2; p.probe = 1; p.grace = FSTEP_GRACE / 2; for (int i = 0; i < 10; i++) nvn_fstep_gpu_slowed(&r, 2.0, &p, 2);
+            p.k = 6; p.probe = 0; for (int i = 0; i < 40; i++) nvn_fstep_gpu_slowed(&r, 4.0, &p, 2);
+        }
+        snprintf(b, sizeof b, "  two failed probes from 6 ticks give the hold-6 ratio %.2f (%d probes) and it decides (%.2f)", r.ratio_at[2][6], r.ratio_n[2][6], nvn_fgpu_ratio(&r));
+        check(r.ratio_n[2][6] >= FSTEP_GPU_FAILS && r.ratio_at[2][6] > 1.9 && r.ratio_at[2][6] < 2.1 && nvn_fgpu_ratio(&r) > 1.9, b);
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -96,9 +96,21 @@ static void pacing_case(void) {
     uint64_t start = now_ns(); int idx; h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
     double ms = (now_ns() - start) / 1e6; printf("acquire: %.3f ms\n", ms);
     CHECK("acquire waits for snapshot capacity", ms >= 50);
+    // Finite nvnSyncWait on a busy snapshot ring must expire near its deadline rather than blocking for the full stall.
+    NVNsync snap_sync; h_nvnSyncInitialize(&snap_sync, &fixture_device);
+    h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx); queue_encoded();
+    h_nvnWindowAcquireTexture((NVNwindow *)&win, &snap_sync, &idx);
+    uint64_t st0 = now_ns();
+    NVNsyncWaitResult sr = h_nvnSyncWait(&snap_sync, 1000000ull);
+    uint64_t sdt = now_ns() - st0;
+    CHECK("snap finite nvnSyncWait expires near deadline while ring is busy", sr == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED && sdt < 40000000ull);
+    mtl_present_flush(); mtl_present_test_stall(0);
+    sr = h_nvnSyncWait(&snap_sync, 2000000000ull);
+    CHECK("snap nvnSyncWait succeeds after ring frees", sr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || sr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+    h_nvnSyncFinalize(&snap_sync);
     copies = g_snap_v; h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx); queue_encoded();
     CHECK("snapshot resumes after acquire frees capacity", g_snap_v == copies + 1);
-    mtl_present_flush(); mtl_present_test_stall(0);
+    mtl_present_flush();
     for (int i = 0; i < 4; i++) {
         h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
         h_nvnQueuePresentTexture(&fixture_queue, (NVNwindow *)&win, idx); queue_encoded();
@@ -289,6 +301,32 @@ static void screen_case(void) {
     t0 = now_ns(); w = mtl_present_screen_wait(per);
     CHECK("screen: frame 1001 shown, frame 1002 recorded: no wait at depth 1", w == 0 && now_ns() - t0 < 5000000ull);
     atomic_store(&g_rec_frame, 0);
+    // Finite nvnSyncWait on a deferred acquire sync must honor its deadline when screen feedback is stalled (and must not latch g_sdw_silent).
+    {
+        tex_t stex[2] = {source(0), source(1)};
+        win_t swin = {.ntex = 2, .interval = 1};
+        swin.tex[0] = (NVNtexture *)&stex[0]; swin.tex[1] = (NVNtexture *)&stex[1];
+        NVNsync ssync; h_nvnSyncInitialize(&ssync, &fixture_device);
+        uint64_t seen_now = atomic_load(&g_pres_seen);
+        pthread_mutex_lock(&g_pq_mu); g_pq_in = seen_now + 3; pthread_mutex_unlock(&g_pq_mu);
+        int saved_hz = g_hz; g_hz = 60;
+        int sidx = 0; h_nvnWindowAcquireTexture((NVNwindow *)&swin, &ssync, &sidx);
+        int all_timed_out = 1; uint64_t max_dt = 0;
+        for (int i = 0; i < 5; i++) {
+            uint64_t wt0 = now_ns();
+            NVNsyncWaitResult r = h_nvnSyncWait(&ssync, 1000000ull);
+            uint64_t wdt = now_ns() - wt0;
+            if (wdt > max_dt) max_dt = wdt;
+            all_timed_out &= (r == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        }
+        CHECK("screen: finite 1 ms nvnSyncWait expires all five times without waiting two periods", all_timed_out && max_dt < 15000000ull && !g_sdw_silent);
+        pres_seen(seen_now + 3, -1);
+        NVNsyncWaitResult okr = h_nvnSyncWait(&ssync, 50000000ull);
+        CHECK("screen: deferred acquire sync satisfies once screen catches up", okr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED || okr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+        g_hz = saved_hz;
+        h_nvnSyncFinalize(&ssync);
+        h_nvnWindowFinalize((NVNwindow *)&swin);
+    }
     pthread_mutex_lock(&g_pq_mu); g_pq_in = base; pthread_mutex_unlock(&g_pq_mu);
 }
 // With present snapshots the game runs a frame ahead of the screen on purpose and their ring paces it: the screen wait stays off, as the display link's drain does

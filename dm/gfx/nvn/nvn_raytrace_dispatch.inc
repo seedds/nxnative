@@ -19,8 +19,8 @@ static void rtd_table(const nvn_rt_table *table, const char *name) {
     rtd_range(table->address, table->size, name);
 }
 static uint8_t rtd_image_class(unsigned slot) { // registration lock held
-    int tid = (int)(bound_img(NVN_RT_RESOURCE_STAGE, (int)slot) & 0xfffff);
-    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) return 3;
+    int tid = bound_tex_id(bound_img(NVN_RT_RESOURCE_STAGE, (int)slot));
+    if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) return 3;
     void *view = NULL; if (!tex_fast_rid(tid, &view) || !view) return 3;
     id<MTLTexture> texture = (__bridge id<MTLTexture>)view;
     int dpf = mtl_pf_dpf(texture.pixelFormat);
@@ -97,6 +97,7 @@ static void dispatch_rays(const p_rt_dispatch *dp) {
     cbs_note(shader); za_shader((__bridge const void *)shader, shader->key);
     // Preparing descriptors can upload a sampled view. Finish that before the
     // query barrier; bind the completed argument block after opening the encoder.
+    ua_prepare_shader(shader, NVN_RT_RESOURCE_STAGE);
     encode_args_full(nil, shader, NVN_RT_RESOURCE_STAGE, 0, &values);
     id<MTL4ComputeCommandEncoder> encoder = dispatch_enc(); as_barrier();
     bind_args((id)encoder, NVN_RT_RESOURCE_STAGE, 0, shader->ab_buf, shader->ab_gpu, shader->ab_off, shader->rf.abi);
@@ -108,6 +109,7 @@ static void dispatch_rays(const p_rt_dispatch *dp) {
     g_wr_epoch++; g_mdx_epoch++; g_vbuf_write_epoch++; g_dsp_game_bar=0;
     bufsnap_after(shader, encoder);
     if (g_nbcp) bcp_flush();   // image stores reach their compressed aliases before the next command
+    if (g_nua_pend) ua_flush(0);
     uint64_t tag = rt->tag;
     [g_commit_blocks addObject:^{
         const uint32_t *fault = (const void *)((const uint8_t *)errors.contents + eo);

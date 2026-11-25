@@ -97,6 +97,8 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertIn('DM_ENV_FILE', environment)   # --no-motion bakes DM_MOTION=0 into the app's dm/env.txt
             self.assertEqual(Path(environment['DM_ENV_FILE']).read_text(), 'DM_MOTION=0\n')
             self.assertEqual(environment['GFXAPI'], graphics)
+            self.assertEqual(environment['DM_PYTHON'], sys.executable)
+            self.assertNotIn('FONT_PY', environment)
             self.assertEqual(environment['DM_BUNDLE_ID'], 'com.example.saved')
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
             self.assertEqual(Path(environment['DM_XCODE_PROJECT_DIR']), root / f'{registered.id}_build/xcode')

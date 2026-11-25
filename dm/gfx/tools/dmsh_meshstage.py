@@ -305,6 +305,8 @@ def to_stage(msl, i, reads=None):
     word = lambda comps: [f'{mem}[b + {comps[k] * BLOCK}u]' if comps[k] is not None else None for k in range(4)]
     vm, pm = _members(vertex), {n: [c + nsys if c is not None else None for c in v] for n, v in _members(primitive).items()}
     pb = primitive_builtins(i)
+    if pm or pb:
+        i['prim'] = 1   # the build writes mesh_stage.prim from it: Metal 4 specialization zeros per-primitive outputs, so the host builds this mesh shader's pipelines whole
     # Each output as wide as its pixel shaders can see (_width): what Metal counts against a mesh's 32 KB is the declared outputs, and the float4 of every attribute the SPH names
     # put Ocarina of Time's foliage mesh 626fbf48041cb82b (160 vertices, 26 components written) at 35,840 bytes. A location they read that no SPH enables is padded (0,0,0,1)
     read = (lambda n: reads.get(n, 0)) if reads is not None else (lambda n: None)

@@ -28,7 +28,7 @@ MSL_FILES = ('*.metallib', '*.json', '*.tsv')   # what the host reads from msl/ 
 # read beside DM_NVN_SHMAP; any of them may be absent (a Vulkan or GL game has no c1_full.tsv). The shader pairs are the pipeline prebuild's (nvn_mtl.m pso_prebuild): without them the
 # app makes no pulling bases, a hybrid draw has no stand-in and a new pipeline compiles on the submit thread (build_ipa.sh copies them into the IPA the same way)
 TABLES = ('shader_map.tsv', 'pso_manifest.tsv', 'c1_full.tsv', 'cb_extent.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv')
-RUNTIME_TABLES = ('game.tsv', 'shader_facts.tsv', 'bf_want.tsv', 'dual_want.tsv')
+RUNTIME_TABLES = ('game.tsv', 'shader_facts.tsv', 'bf_want.tsv')
 PSO_FILES = ('*.mtl4a', '*-prewarm-*.keys', 'prebuilt.tsv', 'rest_pairs.tsv', 'archive.tsv', 'prewarm.tsv')   # what the app takes of pso_offline.py's output folder
 EXE = 'nxnative'   # the launcher's file name (Contents/MacOS/nxnative)
 ICON_SIZES = (16, 32, 128, 256, 512)
@@ -98,11 +98,12 @@ def swift_sources():   # the settings window, with the iOS launcher's model, row
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
-        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
-        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
-            run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
+        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o', Path(t) / 'save_sync_apple.o']
+        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync_apple.m')):
+            extra = ['-fobjc-arc'] if src.suffix == '.m' else []
+            run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', *extra, '-I', HERE.parent / 'host', '-c', '-o', obj, src])
         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
-             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio'])
+             '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'SwiftUI', '-framework', 'AVFAudio', '-framework', 'CoreAudio'])
 
 
 def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .icns holds
@@ -464,7 +465,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'host/save_sync_apple.m', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
         large = {*msls, *pso, *(p for x in programs for p in x[5])}   # the shader libraries and pipeline archives (13.5 GB for Ocarina of Time): by stat, as the RomFS trees below
         def tree(p):   # a folder's entries; a RomFS image's one row as a large file's (as_packed)
             rows = inventory(Path(p))

@@ -15,6 +15,7 @@
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "front_role.h"
+#include "front_mac_present.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -25,6 +26,7 @@
 #include "pad_jc1_mac.h"
 #include "pad_apple.h"
 #include "pad_hid_mac.h"
+#include "pad_gip_mac.h"
 #include "pad_switch2_apple.h"
 static int s2pad_player(s2_pad *d);   // the Switch 2 pads' player slots (below, beside the raw HID pads')
 static void s2pad_read(s2_pad *d);
@@ -46,7 +48,9 @@ static int g_input_on = 1;   // main thread: the game window is key, so its keyb
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 static _Atomic int g_screen_fps;   // the window's screen's maximumFramesPerSecond, kept up to date when the window moves to another screen
+static _Atomic int g_screen_native_fps;   // the screen's own rate before front_screen_match temporarily switched it in fullscreen
 int front_screen_max_fps(void) { return g_screen_fps; }
+int front_screen_capable_fps(void) { int hz = g_screen_native_fps; return hz > 0 ? hz : g_screen_fps; }
 static _Atomic CGDirectDisplayID g_screen_id;   // the window's screen (screen_refresh); 0 until the window is up, then the main display stands in
 int front_display_pixels(int *w, int *h) {
     CGDirectDisplayID id = g_screen_id; CGDisplayModeRef m = CGDisplayCopyDisplayMode(id ? id : CGMainDisplayID()); if (!m) return 0;
@@ -72,13 +76,42 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
             double hz = CGDisplayModeGetRefreshRate(cur); if (hz > 0) g_screen_fps = (int)round(hz);
         }
         if (cur) CGDisplayModeRelease(cur);
+    } else {
+        g_screen_native_fps = g_screen_fps;
     }
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
+// Workaround for a macOS Direct-to-Display scanout artifact (GitHub issue #1821: a flickering purple/pink horizontal
+// band across the top of the picture in native fullscreen on mirrored HDMI displays on M4 Pro / M5 Pro). Setting
+// g_layer.opaque = NO opts the layer into WindowServer compositing while keeping native fullscreen. Scoped to
+// fullscreen on a mirrored display by default; DM_MAC_COMPOSITED=1 / 0 overrides both. Main thread only
+static void layer_opaque_sync(NSScreen *screen, int fullscreen) {
+    if (!g_layer) return;
+    static int mode = -2, applied = -1;
+    if (mode == -2) {
+        const char *e = getenv("DM_MAC_COMPOSITED");
+        mode = front_mac_composited_mode(e);
+        if (e && *e && mode == FRONT_MAC_COMP_AUTO && strcmp(e, "auto"))
+            LOG("[RED] DM_MAC_COMPOSITED=%s: 1, 0 or auto; using auto", e);
+    }
+    CGDirectDisplayID id = screen ? [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : (g_screen_id ? g_screen_id : CGMainDisplayID());
+    int mirrored = id != kCGNullDirectDisplay && CGDisplayIsInMirrorSet(id) != 0;
+    int op = front_mac_layer_opaque(mode, fullscreen, mirrored);
+    int first = applied < 0;
+    if (op == applied) return;
+    applied = op;
+    g_layer.opaque = op ? YES : NO;
+    const char *why = front_mac_layer_opaque_why(mode, fullscreen, mirrored);
+    if (!op) LOG("front end: Metal layer non-opaque (%s%s)", why, mode == FRONT_MAC_COMP_AUTO ? "; DM_MAC_COMPOSITED=0 keeps opaque" : "");
+    else if (!first || mode == FRONT_MAC_COMP_OFF) LOG("front end: Metal layer opaque (%s)", why);
+}
+static int win_fullscreen(NSWindow *win) { return g_fullscreen || ((win.styleMask & NSWindowStyleMaskFullScreen) != 0); }
 // The software keyboard input box is up (front_text_input). The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside
 // the game, which keeps its focus, and ShowKeyboard's applet sends its own out-of-focus / in-focus pair (DM_APPLET). Monster Hunter Rise dropped the hunter's name after the round trip and asked again. Main thread only
 static int g_text_box;
 int front_fullscreen(void) { return g_fullscreen; }   // nvn_mtl.m link_latency: frame latency 2 in variable-refresh fullscreen
+static _Atomic int g_window_covered;   // no part of the window is on screen (other windows over it, another Space): from its occlusion state, on the main thread
+int front_window_covered(void) { return g_window_covered; }   // nvn_mtl.m link_sync: presents follow the host's clock while it is
 // Whether the screen is still settling at start, so the display link waits before starting (nvn_mtl.m link_sync): fullscreen was asked for at launch (DM_FULLSCREEN) and has not been
 // entered yet (at most 5 s), a fullscreen match request is still queued on the main thread, or this host switched a screen's mode under 1 s ago. Started before, the link ran into
 // the mode switch fullscreen brings (silences up to 500 ms, a rescue, and a minute at 20-30 fps on a ROG XG27AQNGV). The present thread shows frames meanwhile
@@ -125,7 +158,7 @@ static void screen_match_restore(int on_it, int undone) {   // main thread: the 
     // fullscreen window left that screen (the screens took the switch back), not the player leaving fullscreen
     double hz = mode_hz(g_match_orig); CGError r = screen_set_mode(g_match_id, g_match_orig);
     LOG("front end: screen %s %.0f Hz", r == kCGErrorSuccess ? "back at" : "could not be switched back to", hz);
-    if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
+    if (r == kCGErrorSuccess && on_it) { if (hz > 0) g_screen_fps = g_screen_native_fps = (int)round(hz); g_screen_variable_refresh = g_match_orig_vrr; }   // the screen observer may not show the mode yet
     CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
     if (undone) g_match_undone = CACurrentMediaTime();
 }
@@ -147,7 +180,7 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
     // must not be misread from a leftover variable-refresh flag
     if (!g_match_orig) screen_refresh(scr);
     int32_t cur_id = CGDisplayModeGetIODisplayModeID(cur);
-    if (g_match_orig && cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig)) {
+    if (g_match_orig && cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig) && cur_id != g_match_pick) {
         double since = CACurrentMediaTime() - g_match_switched;
         if (since < MATCH_SETTLE_S) {   // this host's switch has not shown yet: look again once it should have, in case no notification comes
             CGDisplayModeRelease(cur);
@@ -160,7 +193,7 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
         // the screen is at its own mode again with no switch back from this host (macOS or the screen took the switch back): its rate as that mode has it, and the switch is undone
         double own = mode_hz(cur);
         LOG("front end: screen at its own %.0f Hz again %.1f s after this host switched it", own, since);
-        if (own > 0) g_screen_fps = (int)round(own);
+        if (own > 0) g_screen_fps = g_screen_native_fps = (int)round(own);
         g_screen_variable_refresh = g_match_orig_vrr;
         CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
         g_match_undone = CACurrentMediaTime();
@@ -291,6 +324,15 @@ static const char *pad_name(GCController *c);
 static void pads_motion_changed(GCController *gone);
 // GameController's controllers that the host reads from their HID reports instead, so they stay unread here: identical pads (pad_hid_mac.h) and original Joy-Cons (pad_jc1_mac.h)
 static int pad_gc_unread(GCController *c) { return hidpad_gc_unread(c) || jc1_gc_unread(c); }
+// Passive Switch Pro HID stick fallback (motion_pro_mac.h): check both mapped and unmapped GameController sticks so a system-remapped axis still counts as live
+static GCController *g_pro_gc, *g_pro_gc_prev, *g_pro_gc_gone;
+static int pro_gc_stick_nonzero(GCController *c, int right) {
+    GCExtendedGamepad *g = c.extendedGamepad;
+    GCControllerDirectionPad *d = right ? g.rightThumbstick : g.leftThumbstick;
+    if (d.xAxis.value != 0.f || d.yAxis.value != 0.f) return 1;
+    id<GCDirectionPadElement> u = c.input.unmappedInput.dpads[right ? GCInputRightThumbstick : GCInputLeftThumbstick];
+    return u && (u.xAxis.value != 0.f || u.yAxis.value != 0.f);
+}
 static void pad_read(GCExtendedGamepad *g) {
     if (!g_input_on) return;
     hq_poll(); if (hq_blocks_input(g_hq.phase)) return;
@@ -312,7 +354,12 @@ static void pad_read(GCExtendedGamepad *g) {
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (m) merge_rumble_to(NULL);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad or Joy-Cons read from HID
     dm_haptics_apple_controller(p, g.controller);
-    pad_set(p, m, pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value));
+    int32_t st[4] = {pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value)};
+    if ([g.controller.productCategory isEqualToString:@"Switch Pro Controller"] && !pad_gc_unread(g.controller)) {
+        int nz[2] = {pro_gc_stick_nonzero(g.controller, 0), pro_gc_stick_nonzero(g.controller, 1)};
+        dm_pro_sticks(p, nz, st);
+    }
+    pad_set(p, m, st[0], st[1], st[2], st[3]);
 }
 // Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
@@ -322,16 +369,32 @@ static void pad_keep_system_buttons(GCController *c) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
-// The players' raw HID motion source follows the controllers (gone: one just removed, still listed): a Pro Controller's or a DualShock 4's, each model counted on its own
-// (motion_pro_mac.h)
+// The players' raw HID motion and Pro stick fallback follow the controllers (gone: one just removed, still listed): each model in motion_pro_mac.h counted on its own
+static int pro_gc_player(GCController *c) { return g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
+static int pro_gc_sticks(int player, int nz[2]) {
+    GCController *c = g_pro_gc;
+    if (!c || !c.extendedGamepad || pad_gc_unread(c) || pro_gc_player(c) != player) return 0;
+    nz[0] = pro_gc_stick_nonzero(c, 0); nz[1] = pro_gc_stick_nonzero(c, 1);
+    return 1;
+}
+static void pro_stick_changed(int player) {
+    GCController *c = g_pro_gc;
+    if (!c || pro_gc_player(c) != player) c = g_pro_gc_prev;
+    if (!c || c == g_pro_gc_gone || !c.extendedGamepad || pad_gc_unread(c) || pro_gc_player(c) != player) return;
+    if (![GCController.controllers containsObject:c]) return;
+    pad_read(c.extendedGamepad);
+}
 static void pads_motion_changed(GCController *gone) {
     int count[PRO_MODELS] = {0}, player[PRO_MODELS];
     for (int m = 0; m < PRO_MODELS; m++) player[m] = -1;
+    GCController *pro = nil;
     for (GCController *c in GCController.controllers) {
-        int m = c != gone && c.extendedGamepad ? pro_model_of_category(c.productCategory.UTF8String) : -1;
-        if (m >= 0) { count[m]++; player[m] = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
+        int m = c != gone && c.extendedGamepad && !pad_gc_unread(c) ? pro_model_of_controller(c.productCategory.UTF8String, c.vendorName.UTF8String) : -1;
+        if (m >= 0) { count[m]++; player[m] = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (m == PRO_MODEL_PRO) pro = c; }
     }
+    g_pro_gc_prev = g_pro_gc; g_pro_gc = count[PRO_MODEL_PRO] == 1 ? pro : nil; g_pro_gc_gone = gone;
     dm_motion_pro_players(count, player);
+    g_pro_gc_prev = nil; g_pro_gc_gone = nil;
 }
 static void pro_devices_changed(void) { pads_motion_changed(nil); }
 // DM_PAD_PRESS_TO_JOIN=1: a controller is no player until one of its buttons is pressed, then it is the lowest player free, as a console's "press a button" screen.
@@ -346,7 +409,7 @@ static int pad_join(const void *owner, const char *name) {
 }
 // DM_PAD_MERGE: whether a controller still plays player 1 (gone: one just removed, not counted), a GameController one or a raw HID pad (pad_hid_mac.h)
 static int merge_pads_left(GCController *gone) {
-    if (g_hidpads || g_jc1_pads || dm_switch2_pads()) return 1;
+    if (g_hidpads || g_gippads || g_jc1_pads || dm_switch2_pads()) return 1;
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) return 1;
     return 0;
 }
@@ -362,7 +425,7 @@ static void pads_changed(GCController *gone) {
             pad_read(c.extendedGamepad);
         }
         if (gone) dm_motion_detach(gone, 0);
-        if (!any) { if (!g_hidpads && !g_jc1_pads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
+        if (!any) { if (!g_hidpads && !g_gippads && !g_jc1_pads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
         pads_motion_changed(gone);
         return;
     }
@@ -416,6 +479,7 @@ static void pads_release(void) {
     if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
     for (hid_pad *d = g_hidpads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
+    for (gip_pad *d = g_gippads; d; d = d->next) { int p = pad_slot_of(&g_slots, d); if (p >= 0) dm_pad_set_player(p, 0, 0, 0, 0, 0); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) { int p = jc1pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
 }
@@ -427,6 +491,7 @@ static void pads_reread(void) {
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) pad_read(c.extendedGamepad); }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p].extendedGamepad) pad_read(g_held[p].extendedGamepad);
     for (hid_pad *d = g_hidpads; d; d = d->next) hidpad_read(d);
+    for (gip_pad *d = g_gippads; d; d = d->next) gippad_read(d);
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d);
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) jc1pad_read(d);
 }
@@ -503,6 +568,37 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
     dm_pad_players(pad_slot_mask(&g_slots));
     cp_poll();   // one controller fewer to wait for, or one player fewer
+}
+// Xbox One pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP device is a pad, unlike a
+// raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. Its Xbox button is Home (hq_buttons)
+static void gippad_read(gip_pad *d) {
+    if (!g_input_on) return;
+    hq_poll();   // Home and the prompt's A and B come from these pads too
+    if (hq_blocks_input(g_hq.phase)) return;
+    int p = g_merge ? 0 : pad_slot_of(&g_slots, d);
+    if (p < 0 && (!g_press_to_join || !d->st.buttons || (p = pad_join(d, d->name)) < 0)) return;   // DM_PAD_PRESS_TO_JOIN=1: joins at its first button
+    if (cp_poll()) return;   // the controller applet's prompt has the controllers
+    pad_set(p, d->st.buttons, d->st.s[0], d->st.s[1], d->st.s[2], d->st.s[3]);
+}
+static void gippad_attach(gip_pad *d) {
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (USB) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); cp_poll(); return; }
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
+    if (p < 0) { LOG("controller '%s' (USB) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (USB) connected: player %d (npad %s)", d->name, p + 1, nb);
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+    cp_poll();   // one controller fewer to wait for
+}
+static void gippad_detach(gip_pad *d) {   // d is already off g_gippads
+    if (g_merge) {
+        LOG("controller '%s' (USB) disconnected", d->name);
+        if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
+        return;
+    }
+    int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) { cp_poll(); return; }   // one that had not joined: one fewer waiting
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (USB) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);   // nothing stays pressed
+    dm_pad_players(pad_slot_mask(&g_slots));
+    cp_poll();   // one player fewer
 }
 // Switch 2 controllers over Bluetooth LE (pad_switch2_apple.h): a pad is a player's controller, as a GameController one or a raw HID pad
 static int s2pad_player(s2_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
@@ -625,6 +721,7 @@ static void hq_buttons(int *home, int *a, int *b, GCController **holder) {
     }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { if (s2_pad_home(&d->st)) *home = 1; s2_pad_ab(&d->st, a, b); }   // Switch 2 controllers: no GCController, so no holder (the prompt shows the default A / B symbols)
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) { if (jc1_pad_home(d)) *home = 1; jc1_pad_ab(d, a, b); }   // original Joy-Cons read from HID (pad_jc1_mac.h)
+    for (gip_pad *d = g_gippads; d; d = d->next) { *home |= d->st.guide; *a |= !!(d->st.buttons & DM_BTN_A); *b |= !!(d->st.buttons & DM_BTN_B); }   // Xbox One pads over USB (pad_gip_mac.h)
 }
 static void hq_fade(NSView *v, int in) {
     if (!v) return;
@@ -696,6 +793,7 @@ static void cp_buttons(int *a, int *b) {
     for (hid_pad *d = g_hidpads; d; d = d->next) { uint64_t m = d->twin && hidpad_is_pro(d) ? d->pro_m : pad_hid_buttons(&d->st); *a |= !!(m & DM_BTN_A); *b |= !!(m & DM_BTN_B); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2_pad_ab(&d->st, a, b);   // Switch 2 controllers (pad_switch2_apple.h)
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) jc1_pad_ab(d, a, b);             // original Joy-Cons read from HID (pad_jc1_mac.h)
+    for (gip_pad *d = g_gippads; d; d = d->next) { *a |= !!(d->st.buttons & DM_BTN_A); *b |= !!(d->st.buttons & DM_BTN_B); }   // Xbox One pads over USB (pad_gip_mac.h)
 }
 static int cp_waiting(void) {   // connected controllers that are no player yet
     if (g_merge) return 0;
@@ -703,6 +801,7 @@ static int cp_waiting(void) {   // connected controllers that are no player yet
     for (GCController *c in GCController.controllers) if (c.extendedGamepad && !pad_gc_unread(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     for (hid_pad *d = g_hidpads; d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
+    for (gip_pad *d = g_gippads; d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     return n;
 }
@@ -761,9 +860,10 @@ static void pads_start(void) {
     hq_start();
     pads_changed(nil);
     hq_log_setting();
-    dm_motion_pro_start(pro_devices_changed);
+    dm_motion_pro_start(pro_devices_changed, pro_gc_sticks, pro_stick_changed);
     dm_jc1_start(g_merge);
     hidpad_start();
+    gippad_start();
     static const dm_switch2_front s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player, s2pad_blocked};
     dm_switch2_start(&s2front);
 }
@@ -781,7 +881,9 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double a = g_picture_aspect; if (w / h > a) w = h * a; else h = w / a;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT)
+    static int fill = -1; if (fill < 0) { const char *e = getenv("DM_PICTURE_FIT"); fill = e && !strcmp(e, "fill"); }
+    double a = g_picture_aspect;   // the centered picture the present fits into the view (16:9, or a taller one under DM_SCREEN_ASPECT); with Fill it covers the view, edges cropped
+    if ((w / h > a) == !fill) w = h * a; else h = w / a;
     double x0 = (b.width - w) / 2, y0 = (b.height - h) / 2;
     dm_touch t = {0, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax(1 - (p.y - y0) / h, 0), 0.999)};   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch_set(&t, 1); g_mouse_down = 1;
@@ -1683,6 +1785,7 @@ void front_run(void (*guest)(void)) {
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
+        win.backgroundColor = NSColor.blackColor;   // black backing behind the Metal layer (matches iOS; prevents window-background bleed when non-opaque)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -1692,6 +1795,9 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
+        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
+        int want_fs = fs && strcmp(fs, "0");
+        layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
@@ -1699,15 +1805,20 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
+        layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
         // another app's window macOS fires its display link about once a second: Breath of the Wild stepped up to 3 vsyncs at boot and never came back (20 fps runs).
         // DM_WINDOW_TOP=1 orders it in front without activation and keeps it above other apps' windows; the log names every change of the window's visibility either way
         if (getenv("DM_WINDOW_TOP") && atoi(getenv("DM_WINDOW_TOP"))) { win.level = NSFloatingWindowLevel; [win orderFrontRegardless]; LOG("front end: window kept in front (DM_WINDOW_TOP)"); }
-        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidChangeOcclusionStateNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
-            (void)n; static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v;
-            if (v) { dm_fstep_settle(); LOG("front end: window visible"); } else LOG("front end: window covered (its display link fires about once a second: frame times measure nothing)"); }];
+        // Covered, the display link would pace the game at that rate (Star Fox: 333 ms frames while the player typed in another app), so the present thread paces presents by the
+        // host's clock until the window is visible again (nvn_mtl.m link_sync). The state is read once more a second after opening: a window that opens behind another and stays
+        // there may send no change (a second, not at once, to leave the window server time to place it)
+        void (^occl)(void) = ^{ static int vis = -1; int v = (win.occlusionState & NSWindowOcclusionStateVisible) != 0; if (v == vis) return; vis = v; g_window_covered = !v;
+            if (v) { dm_fstep_settle(); LOG("front end: window visible"); } else LOG("front end: window covered (its display link fires about once a second: presents follow the host's clock until it is visible)"); };
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSWindowDidChangeOcclusionStateNotification object:win queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; occl(); }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), occl);
         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
@@ -1727,8 +1838,7 @@ void front_run(void (*guest)(void)) {
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
         NSApp.mainMenu = bar;
-        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
-        if (fs && strcmp(fs, "0")) {
+        if (want_fs) {
             g_fs_asked = CACurrentMediaTime(); g_fs_starting = 1;   // front_screen_settling: the display link waits for fullscreen
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
@@ -1741,7 +1851,7 @@ void front_run(void (*guest)(void)) {
                 if (!entering) return;
                 entering = 0;
                 LOG("front end: fullscreen was refused (app active %d, window on the active Space %d)%s", NSApp.isActive, win.isOnActiveSpace, retried ? "" : ", asking once more");
-                if (retried) { g_fs_starting = 0; return; }
+                if (retried) { g_fs_starting = 0; layer_opaque_sync(win.screen, 0); return; }
                 retried = 1; want = 1; dispatch_async(dispatch_get_main_queue(), enter); };
             [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
             [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
@@ -1774,14 +1884,14 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); screen_match_apply(); dm_fstep_settle(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        for (NSNotificationName nm in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
-            [nc addObserverForName:nm object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_fstep_settle(); }];
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowWillEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; layer_opaque_sync(win.screen, 1); dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowWillExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, 1); screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, 0); screen_match_apply(); dm_fstep_settle(); }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));

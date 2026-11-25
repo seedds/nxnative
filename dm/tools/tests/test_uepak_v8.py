@@ -107,18 +107,22 @@ class Version8(unittest.TestCase):
         self.assertEqual(k.read('AT/Content/M_Test.uexp'), self.shader)
         self.assertEqual(k.read('Engine/Config/a.ini'), b'[x]\n')
 
-    def test_ordinary_v8_shortened_fifth_slot_and_inline_archive(self):
-        name = 'Content/Test.ushaderbytecode'
-        pak(self.p, [(name, self.shader, True)], fifth_slot=True)
+    def test_ordinary_v8_shortened_fifth_slot_and_shared_archive(self):
+        name, inline = 'Content/Test.ushaderbytecode', 'Content/Test.uexp'
+        archive = v1_archive([(bytes(20), zlib.compress(self.shader), len(self.shader), 0)])
+        pak(self.p, [(name, archive, True), (inline, self.shader, True)], fifth_slot=True)
         with self.p.open('rb') as f:
             self.assertEqual(uepak.magic_back(f), (0xc8, 8))
             self.assertEqual(uepak.footer(f)[3], ['', '', '', '', 'Zlib'])
         path = str(self.p)
         k = uepak.Pak(path)
-        with k.f: self.assertEqual(k.read(name), self.shader)
-        self.assertEqual(uepak.pak_shader_sources(path), (True, False))
+        with k.f: self.assertEqual(k.read(name), archive)
+        self.assertEqual(uepak.pak_shader_sources(path), (True, True))
         jobs, _ = ss.ue_legacy_jobs([(path, self.p.name)])
-        self.assertEqual(jobs, [(path, self.p.name, (ss.UE_LEGACY, (name,)))])
+        self.assertEqual(jobs, [(path, self.p.name, (ss.UE_LEGACY, (inline,)))])
+        listing, need_oodle = uepak.job(self.tmp.name, 'unused-main', str(self.p.parent / 'work'))
+        self.assertEqual([(item['name'], item['shaders']) for item in listing], [('Test.ushaderbytecode', 1)])
+        self.assertEqual(need_oodle, 0)
 
     def test_short_v8_mixed_pak_job_and_finish(self):
         name, inline = 'Content/Test.ushaderbytecode', 'Content/Test.uexp'

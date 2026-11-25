@@ -7,9 +7,8 @@ dm/gfx/gl/hle_gl.m	bugprone-suspicious-memory-comparison	2
 dm/gfx/gl/hle_gl.m	bugprone-suspicious-realloc-usage	2
 dm/gfx/gl/hle_gl.m	misc-redundant-expression	1
 dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-memory-comparison	1
-dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-realloc-usage	6
+dm/gfx/nvn/hle_nvn.c	bugprone-suspicious-realloc-usage	5
 dm/gfx/nvn/hle_nvn.c	clang-analyzer-core.uninitialized.Assign	1
-dm/gfx/nvn/hle_nvn.c	clang-analyzer-security.ArrayBound	1
 dm/gfx/nvn/nvn_border.h	bugprone-suspicious-memory-comparison	1
 dm/gfx/nvn/nvn_capture.c	bugprone-suspicious-realloc-usage	1
 dm/gfx/nvn/nvn_capture.c	clang-analyzer-unix.StdCLibraryFunctions	1
@@ -25,7 +24,6 @@ dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.NullDereference	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-core.uninitialized.Assign	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullableDereferenced	4
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-nullability.NullablePassedToNonnull	14
-dm/gfx/nvn/nvn_mtl.m	clang-analyzer-security.ArrayBound	1
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.NullArg	2
 dm/gfx/nvn/nvn_mtl.m	clang-analyzer-unix.cstring.UninitializedRead	3
 dm/gfx/nvn/nvn_rec.h	clang-analyzer-nullability.NullablePassedToNonnull	1

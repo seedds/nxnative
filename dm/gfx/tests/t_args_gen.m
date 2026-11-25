@@ -61,7 +61,7 @@ int main(void) { @autoreleasepool {
     id<MTLComputePipelineState> pa = [g_dev newComputePipelineStateWithFunction:a->fn error:&e], pb = [g_dev newComputePipelineStateWithFunction:b->fn error:&e];
     CHECK(pa && pb, "pipelines");
     mtl_sub_begin(); state_reset();
-    id<MTL4ComputeCommandEncoder> en = enc_c_begin(NULL); args_dirty_all();
+    id<MTL4ComputeCommandEncoder> en = enc_c_begin(); args_dirty_all();
     #define RUN(sh, ps) do { CHECK(encode_args((id<MTLCommandEncoder>)en, sh, 2, 0), #sh " encoded"); enc_c_pso(en, ps); enc_c_dispatch(en, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1)); \
                              [en barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice]; } while (0)
     bind_ssbo(x); bind_ubo(u1);
@@ -112,7 +112,7 @@ int main(void) { @autoreleasepool {
 
         x[0] = 0;
         mtl_sub_begin(); state_reset();
-        id<MTL4ComputeCommandEncoder> en2 = enc_c_begin(NULL); args_dirty_all();
+        id<MTL4ComputeCommandEncoder> en2 = enc_c_begin(); args_dirty_all();
         bind_ssbo(x); bind_ubo(u1);
         #define RUN2(sh, ps) do { CHECK(encode_args((id<MTLCommandEncoder>)en2, sh, 2, 0), #sh " encoded"); enc_c_pso(en2, ps); enc_c_dispatch(en2, MTLSizeMake(1,1,1), MTLSizeMake(1,1,1)); \
                                   [en2 barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice]; } while (0)
@@ -155,7 +155,7 @@ int main(void) { @autoreleasepool {
 
         x[0] = 0; u3[0] = 7; u3[1] = 0;
         mtl_sub_begin(); state_reset();
-        id<MTL4ComputeCommandEncoder> en3 = enc_c_begin(NULL); args_dirty_all();
+        id<MTL4ComputeCommandEncoder> en3 = enc_c_begin(); args_dirty_all();
         bind_ssbo(x);
         p_bind_buf b3 = {.stage = 2, .index = 0, .addr = (uint64_t)u3, .size = 16};
         state_op(OP_BIND_UBO, &b3);

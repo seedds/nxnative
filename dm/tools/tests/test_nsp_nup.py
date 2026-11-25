@@ -474,6 +474,17 @@ class Pack(Base):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
         with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())
 
+    def test_npdm_bounds_and_header_aci0_text(self):
+        d = bytearray(npdm(TID)); d[0x20:0x24] = b'ACI0'; d[0x30:0x38] = b'1.0.0\0\0\0'
+        self.assertEqual(pack_nup.program_id(bytes(d), 'test'), TID)
+        for raw, msg in ((b'META', 'not an NPDM'),
+                         (b'META' + bytes(0x70), 'not an NPDM'),
+                         (d[:0x90], 'no ACI0 section')):
+            with self.assertRaisesRegex(pack_nup.Error, msg): pack_nup.program_id(bytes(raw), 'test')
+        for off, size in ((0x20, 0x20), (0x80, 0x17), (0x80, 0x200)):
+            bad = bytearray(d); struct.pack_into('<II', bad, 0x70, off, size)
+            with self.assertRaisesRegex(pack_nup.Error, 'no ACI0 section'): pack_nup.program_id(bytes(bad), 'test')
+
     def test_update_packed_on_its_own_with_control_data(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         pack_nup.pack_version(n, vers[VER], base, app, self.out() / 'u', say=lambda s: None)

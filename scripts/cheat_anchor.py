@@ -29,6 +29,7 @@ sys.path.insert(0, str(TOOLS))
 import nso                           # Switch module loader: text + ro + data image, segments, bss size and build ID
 import nso_match                     # function boundaries and fingerprints: the rewriter's cross-build matcher
 import nacp                          # the display version of a build, from the control.nacp beside its ExeFS
+import npdm                          # the program ID of a build, from the main.npdm beside its ExeFS
 
 FORMAT = 1                           # the source format version this tool reads and writes
 MAX_FIELD = 0x10000                  # a data target may lie this far past the address the code references (a field of a large object)
@@ -207,11 +208,8 @@ class Build:
 
     def _title(self):
         """The program ID from main.npdm beside the NSO (its ACI0 section), '' when it cannot be read."""
-        try:
-            d = (self.path.parent / 'main.npdm').read_bytes()
-            aci = struct.unpack_from('<I', d, 0x70)[0]
-            return f'{struct.unpack_from("<Q", d, aci + 0x10)[0]:016X}' if d[aci:aci + 4] == b'ACI0' else ''
-        except (OSError, struct.error): return ''
+        try: return f'{npdm.program_id((self.path.parent / "main.npdm").read_bytes()):016X}'
+        except (OSError, npdm.Error): return ''
 
     def word(self, off):
         """The little-endian word at image offset off."""

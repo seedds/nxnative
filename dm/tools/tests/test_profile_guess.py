@@ -197,7 +197,37 @@ class Npdm(unittest.TestCase):
         self.assertFalse(pg.aarch64(self.npdm(0x04)))   # Pikmin 3 Deluxe: 32-bit, no reserved region
 
     def test_no_npdm(self):
-        self.assertTrue(pg.aarch64(Path(self.tmp.name) / 'missing.npdm'))
+        missing = Path(self.tmp.name) / 'missing.npdm'
+        self.assertTrue(pg.aarch64(missing))
+        self.assertEqual(pg.npdm(missing), (0, None))
+
+    def test_program_id_follows_header_offset_past_earlier_aci0_text(self):
+        d = bytearray(0xa0); d[:4] = b'META'; d[0xc] = 1
+        struct.pack_into('<I', d, 0x14, 0x1000000)
+        d[0x20:0x24] = b'ACI0'; d[0x30:0x38] = b'1.0.0\0\0\0'   # header text containing ACI0 before the real section
+        struct.pack_into('<II', d, 0x70, 0x80, 0x20)
+        d[0x80:0x84] = b'ACI0'; struct.pack_into('<Q', d, 0x90, 0x0100a6301214e000)
+        p = Path(self.tmp.name) / 'main.npdm'; p.write_bytes(d)
+        self.assertEqual(pg.npdm(p), (0x1000000, 0x0100a6301214e000))
+
+    def test_bounds_checked_malformed_npdm(self):
+        p = Path(self.tmp.name) / 'bad.npdm'
+        # Truncated META header: never raises struct.error / IndexError
+        p.write_bytes(b'META')
+        self.assertEqual(pg.npdm(p), (0, None))
+        self.assertTrue(pg.aarch64(p))
+        # Non-META file containing ACI0 is ignored
+        p.write_bytes(b'NOPE' + bytes(0x7c) + b'ACI0' + bytes(0xc) + struct.pack('<Q', 0x0100a6301214e000))
+        self.assertEqual(pg.npdm(p), (0, None))
+        # Invalid ACI0 offsets/sizes keep sys_resource and return program_id=None
+        for off, size, magic in ((0x20, 0x20, b'ACI0'), (0x80, 0x17, b'ACI0'), (0x80, 0x40, b'ACI0'), (0x80, 0x20, b'XXXX')):
+            with self.subTest(off=off, size=size, magic=magic):
+                d = bytearray(0xa0); d[:4] = b'META'; struct.pack_into('<I', d, 0x14, 0x2000000)
+                d[0x20:0x24] = b'ACI0'; struct.pack_into('<Q', d, 0x30, 0xdeadbeef)
+                struct.pack_into('<II', d, 0x70, off, size)
+                d[0x80:0x84] = magic; struct.pack_into('<Q', d, 0x90, 0x0100a6301214e000)
+                p.write_bytes(d)
+                self.assertEqual(pg.npdm(p), (0x2000000, None))
 
 
 class UnrealMemory(unittest.TestCase):

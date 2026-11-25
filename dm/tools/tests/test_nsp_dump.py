@@ -97,6 +97,26 @@ class Scan(Base):
         with self.assertRaisesRegex(pack_dump.Error, 'not a base title ID'): pack_dump.scan(d)
         with self.assertRaisesRegex(pack_dump.Error, 'no base/exefs'): pack_dump.scan(self.dump.parent)
 
+    def test_npdm_bounds_and_header_aci0_text(self):
+        p = self.dump / 'test.npdm'
+        with self.assertRaises(FileNotFoundError): pack_dump.program_id(p)
+        # Earlier ACI0 in header text is ignored in favor of the header-declared ACI0 section
+        d = bytearray(npdm(TID)); d[0x20:0x24] = b'ACI0'; d[0x30:0x38] = b'1.0.0\0\0\0'
+        p.write_bytes(bytes(d))
+        self.assertEqual(pack_dump.program_id(p), TID)
+        # Truncated META header and out-of-bounds ACI0 raise pack_dump.Error, never struct.error
+        for raw, msg in ((b'META', 'not an NPDM'),
+                         (b'META' + bytes(0x70), 'not an NPDM'),
+                         (d[:0x90], 'no ACI0 section')):
+            p.write_bytes(bytes(raw))
+            with self.assertRaisesRegex(pack_dump.Error, msg): pack_dump.program_id(p)
+        bad = bytearray(d); struct.pack_into('<II', bad, 0x70, 0x20, 0x20)
+        p.write_bytes(bytes(bad))
+        with self.assertRaisesRegex(pack_dump.Error, 'no ACI0 section'): pack_dump.program_id(p)
+        bad = bytearray(d); struct.pack_into('<II', bad, 0x70, 0x80, 0x200)
+        p.write_bytes(bytes(bad))
+        with self.assertRaisesRegex(pack_dump.Error, 'no ACI0 section'): pack_dump.program_id(p)
+
     def test_packages_win_over_the_layout(self):
         self.assertTrue(nsp.dump_folder(self.dump))
         (self.dump / 'game.nsp').write_bytes(b'x')

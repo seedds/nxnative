@@ -179,6 +179,84 @@ static void poll_asks_again(void) {
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
     defer_drain(); munmap(mem, len);
 }
+// A copy's Finalize ends only the copy (own_tex_end_locked): the texture the object it was initialized in still holds stays registered for the CPU's writes, and the CPU's next
+// rewrite is still uploaded. A copy initialized again as another texture leaves it registered too. The texture's own Finalize, or its own object initialized again, ends the
+// registration (GitHub issue #2975)
+static void copy_finalize_keeps_registration(void) {
+    const size_t len = 1 << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    pool_t pool = {0}; pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&pool, (const NVNmemoryPoolBuilder *)&pb), "CPU-cached pool initialized");
+    NVNtextureBuilder tb; NVNtexture tex = {0}; h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 65536);
+    CHECK(h_nvnTextureInitialize(&tex, &tb), "texture initialized");
+    tex_t *t = (tex_t *)&tex; uint64_t serial = t->serial;
+    NVNtexture copy = tex; h_nvnTextureFinalize(&copy);
+    CHECK(nvn_ft_tracked(serial), "a copy's Finalize leaves the texture registered");
+    NVNtexture again = tex; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 4 * 65536);
+    CHECK(h_nvnTextureInitialize(&again, &tb), "a copy initialized again as another texture");
+    uint64_t other = ((tex_t *)&again)->serial;
+    CHECK(nvn_ft_tracked(serial) && nvn_ft_tracked(other), "the texture stays registered, beside the new one");
+    h_nvnTextureFinalize(&again);
+    CHECK(!nvn_ft_tracked(other), "the new one's own Finalize ends its registration");
+    dm_guest_write_prepare(t->mem, t->L.size); memset(t->mem, 0x66, t->L.size);
+    nvn_ft_poll();
+    CHECK(tex_cpu_written(t), "the CPU's rewrite after the copies' Finalize is uploaded");
+    NVNtexture own = {0}; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&pool, 8 * 65536);
+    CHECK(h_nvnTextureInitialize(&own, &tb), "a third texture initialized");
+    uint64_t third = ((tex_t *)&own)->serial;
+    CHECK(h_nvnTextureInitialize(&own, &tb) && nvn_ft_tracked(((tex_t *)&own)->serial) && !nvn_ft_tracked(third), "its own object initialized again ends its old registration");
+    uint64_t fourth = ((tex_t *)&own)->serial;
+    h_nvnTextureFinalize(&own);
+    CHECK(!nvn_ft_tracked(fourth), "its own Finalize ends the registration");
+    h_nvnTextureFinalize(&tex);
+    CHECK(!nvn_ft_tracked(serial), "the uploaded texture stays unregistered after Finalize");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&pool);
+    defer_drain(); munmap(mem, len);
+}
+// Finalizing a memory pool before its texture objects drops those textures from g_ft (ft_drop_pool), so a later nvn_ft_poll neither hashes unmapped edge pages (small texture,
+// ie <= ia) nor dereferences a freed NVNmemoryPool / resurrects g_cpu_pools (large texture, ie > ia), while another pool's tracked textures keep working.
+static void pool_finalize_drops_registration(void) {
+    const size_t len = 1 << 20;
+    uint8_t *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    uint8_t *other_mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED || other_mem == MAP_FAILED) abort();
+    pool_t *pool = calloc(1, sizeof *pool), other = {0};
+    pool_builder_t pb = {.mem=mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    pool_builder_t ob = {.mem=other_mem, .size=len, .flags=NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)pool, (const NVNmemoryPoolBuilder *)&pb), "pool to finalize initialized");
+    CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&other, (const NVNmemoryPoolBuilder *)&ob), "surviving pool initialized");
+    NVNtextureBuilder tb; NVNtexture small = {0}, large = {0}, keep = {0};
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetWidth(&tb, 16); h_nvnTextureBuilderSetHeight(&tb, 16);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)pool, 0x200);
+    CHECK(h_nvnTextureInitialize(&small, &tb), "small texture on finalized pool initialized");
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)pool, 65536);
+    CHECK(h_nvnTextureInitialize(&large, &tb), "large texture on finalized pool initialized");
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&other, 65536);
+    CHECK(h_nvnTextureInitialize(&keep, &tb), "texture on surviving pool initialized");
+    uint64_t s_small = ((tex_t *)&small)->serial, s_large = ((tex_t *)&large)->serial, s_keep = ((tex_t *)&keep)->serial;
+    CHECK(nvn_ft_tracked(s_small) && nvn_ft_tracked(s_large) && nvn_ft_tracked(s_keep), "all three textures registered before pool Finalize");
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)pool);
+    CHECK(!nvn_ft_tracked(s_small) && !nvn_ft_tracked(s_large) && nvn_ft_tracked(s_keep), "pool Finalize drops its textures from g_ft and keeps the other pool's");
+    // Unmap the backing memory and poison + free the pool object before polling, as a game may do before finalizing its texture objects.
+    munmap(mem, len);
+    void *dead_pool = pool;
+    memset(pool, 0xa5, sizeof *pool);
+    free(pool);
+    tex_t *tk = (tex_t *)&keep;
+    dm_guest_write_prepare(tk->mem, tk->L.size); memset(tk->mem, 0x77, tk->L.size);
+    nvn_ft_poll();
+    CHECK(tex_cpu_written(tk) && !nvn_ft_tracked(s_keep), "surviving pool's texture is still uploaded by nvn_ft_poll");
+    CHECK(!cpu_pool_present(dead_pool), "poll does not resurrect cpu_pool for the finalized pool");
+    h_nvnTextureFinalize(&small); h_nvnTextureFinalize(&large); h_nvnTextureFinalize(&keep);
+    h_nvnMemoryPoolFinalize((NVNmemoryPool *)&other);
+    defer_drain(); munmap(other_mem, len);
+}
 // Writes beside a registered texture (ft_written): storage 0x200 past a host page shares its first and last pages with other data. A write there leaves the texture registered and
 // not CPU-written, at the poll and at first use (nvn_ft_written); a write of the texture's own bytes in those pages, or of a page wholly inside it, is still taken as written.
 // The Great Ace Attorney Chronicles' window textures and render targets lie so beside textures it fills from the CPU, and were all made CPU-written
@@ -235,6 +313,8 @@ static void poll_beside(void) {
 #else
 static void poll_asks_again(void) { printf("poll_asks_again: skipped, the profile has no tex_dirty_upload\n"); }
 static void poll_beside(void) { printf("poll_beside: skipped, the profile has no tex_dirty_upload\n"); }
+static void copy_finalize_keeps_registration(void) { printf("copy_finalize_keeps_registration: skipped, the profile has no tex_dirty_upload\n"); }
+static void pool_finalize_drops_registration(void) { printf("pool_finalize_drops_registration: skipped, the profile has no tex_dirty_upload\n"); }
 #endif
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static void settle(void) { for (int i = 0; i < 2; i++) { g_fence++; pthread_mutex_lock(&g_mu); g_done = g_fence; pthread_mutex_unlock(&g_mu); defer_drain(); } }   // the GPU passed every fence
@@ -730,7 +810,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
         mtl_init(); write_texels_bounds(); finalized_upload(0); finalized_upload(1);
         queued_movie_snapshot(0); queued_movie_snapshot(1); movie_alias_and_lifecycle();
         upload_tear_stress(stress_n, 0); upload_tear_stress(stress_n, 1);
-        for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads();
+        for (int i=0;i<3;i++) flushed_buffer_upload(i); finalize_during_walk(); poll_asks_again(); copy_finalize_keeps_registration(); pool_finalize_drops_registration(); poll_beside(); handover_holders(); retire_after_completion(); retire_across_threads();
     }
     printf("t_cpu_tex: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

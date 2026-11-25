@@ -135,6 +135,7 @@ void dm_focus_set(int st);
 // report the applet could not start (RES_FAIL cuts): those never had an applet open
 void dm_applet_enter(const char *name);
 void dm_applet_leave(void);
+unsigned dm_account_pushed_users(void);   // hle_account.c: bitmask snapshotted by account::PushOpenUsers for oe::ExecuteProgram
 static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_applet_leave(); }
 #define DM_APPLET(name) const char *const dm_applet_ __attribute__((cleanup(dm_applet_leave_))) = (name); dm_applet_enter(dm_applet_)
 // Audio pause / resume following the lifecycle (called by the front end on going to background / returning to foreground)

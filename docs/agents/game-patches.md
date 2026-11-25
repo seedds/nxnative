@@ -69,7 +69,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [ASTRAL CHAIN](#astral-chain) | 0 | 0 | 112 | 0 | 0 | `build` → `game` |
 | [Batman: Arkham Knight](#batman-arkham-knight) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Catherine: Full Body](#catherine-full-body) | 0 | 0 | 0 | 1 | 0 | `game` |
-| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
+| [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 4 | 0 | 0 | `build` → `game`, `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [Digimon Story Time Stranger](#digimon-story-time-stranger) | 0 | 0 | 0 | 2 | 0 | `game` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 0 | 0 | 1 | 0 | 0 | `game` |
@@ -290,10 +290,12 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md), `01004AB00A260000`, [patches.py](../../dm/games/01004AB00A260000/patches.py).
 
 - **`build` → `game`**, frame rate, gap, judgement: frame limiter 30 → 60 fps and the 1/60 update step. The game's own limiter constant and fixed step
+- **`game`**, frame rate, at goal, checked: 1.0.0 (v0) and 1.0.3 (v196608) mains plus all 3,134 FXR files in dvdbnd0.bdt: emitter state machine, capacity calculator, cluster updater and all 1,278 model-cluster emitters verified by disassembly, archive scan, full rewrite and instruction replay (2026-11-25): FXR 60 fps repeating-emitter interval floor (1/32 s / 32 ms). The game's own FXR repeating-emitter state machine assumes 30 fps (2,765 emitters author interval = 1/60 s as half a 30 fps frame, so our 60 fps patch doubles their emission rate); function-matched (MATCH_STUBS) across 1.0.0 and 1.0.3
 
-- **1.0.3 `main`** `df3766a2…` ([patches.py:10](../../dm/games/01004AB00A260000/patches.py#L10))
+- **1.0.3 `main`** `df3766a2…` ([patches.py:12](../../dm/games/01004AB00A260000/patches.py#L12))
   - cut `+0x706fa4`: frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)
   - cut `+0x667904`: frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c
+- **function-matched stub** (`main` of builds without STUBS): FXR 60 fps emitter rate: a function of 0x4e0 bytes, `+0xfc`, `+0x284`, `+0x324`, `+0x480` in it
 
 ### Diablo II: Resurrected
 

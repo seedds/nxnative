@@ -524,7 +524,8 @@ class Build(BuildCase):
                     '0100ACD0163D0000', '010040801A4C8000', '0100C49025D3E000', '0100A3900C3E2000',
                     '01006A800016E000',  # Super Smash Bros. Ultimate: a player's start log (its note)
                     '0400E88025B1A000',  # Star Fox: a Mac app's start log (its note)
-                    '01005CA01580E000')  # Persona 5 Royal: an iPhone app's start log (its note)
+                    '01005CA01580E000',  # Persona 5 Royal: an iPhone app's start log (its note)
+                    '0100606026F12000')  # FINAL FANTASY RESONANCE: PR #1344 Mac app log (its note)
         for gid in profiles:
             with self.subTest(game=gid):
                 self.main('--game', gid, '--pairs', str(self.prof / 'shader_pairs.tsv'), '--script-only')

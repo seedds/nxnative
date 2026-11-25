@@ -6,22 +6,31 @@
 // the next one finishes it. A recovery that fails refuses the mount and keeps the journal, and the start after it recovers; an unreadable journal refuses the mount; a
 // second mount gets the first's answer. Older backups are pruned only when a pull completes, and nothing is sent after the host while a journal is pending
 #include <errno.h>
+#include <pthread.h>
 #include <setjmp.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
-static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno;
-static int closes, renames, unlinks, metadata_fd;
+static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno, track_metadata;
+static int closes, metadata_fd;
+static _Atomic int renames, unlinks;
 static FILE *metadata;
 static char diagnostic[2048];
+static pthread_mutex_t race_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t race_cv = PTHREAD_COND_INITIALIZER;
+static int race_need, race_arrived, race_hold_ms;
+static void (*race_before_store)(void);
+static _Atomic int rename_in_flight, rename_overlap;
 
 static FILE *test_fopen(const char *path, const char *mode) {
-    if (!strcmp(mode, "w")) {
+    if (track_metadata && !strcmp(mode, "w")) {
         if (fail_open) { errno = EACCES; return NULL; }
         metadata = fopen(path, mode);
         if (metadata) metadata_fd = fileno(metadata);
@@ -30,13 +39,13 @@ static FILE *test_fopen(const char *path, const char *mode) {
     return fopen(path, mode);
 }
 static int test_fprintf(FILE *f, const char *fmt, ...) {
-    if (f == metadata && fail_write) { errno = ENOSPC; return -1; }
+    if (track_metadata && f == metadata && fail_write) { errno = ENOSPC; return -1; }
     va_list ap; va_start(ap, fmt);
-    int r = f == stderr ? vsnprintf(diagnostic, sizeof diagnostic, fmt, ap) : vfprintf(f, fmt, ap);
+    int r = (track_metadata && f == stderr) ? vsnprintf(diagnostic, sizeof diagnostic, fmt, ap) : vfprintf(f, fmt, ap);
     va_end(ap); return r;
 }
 static int test_fclose(FILE *f) {
-    int tracked = f == metadata;
+    int tracked = track_metadata && f == metadata;
     if (tracked) { closes++; metadata = NULL; }
     int r = fclose(f);
     if (tracked && fail_close) { errno = EIO; return EOF; }
@@ -60,10 +69,28 @@ static int holds(const char *dir, const char *text);
 // The app killed: after `crash_after` more renames and swaps succeed, the next one's caller never comes back (crash_jmp)
 static int crash_after = -1; static jmp_buf crash_jmp;
 static void crash_point(void) { if (crash_after > 0 && !--crash_after) { crash_after = -1; longjmp(crash_jmp, 1); } }
+static int test_flock(int fd, int op) {
+    if (op == LOCK_EX) {
+        if (race_before_store) { void (*fn)(void) = race_before_store; race_before_store = NULL; fn(); }
+        if (race_need > 0) {
+            pthread_mutex_lock(&race_mu);
+            race_arrived++;
+            if (race_arrived >= race_need) pthread_cond_broadcast(&race_cv);
+            while (race_arrived < race_need) pthread_cond_wait(&race_cv, &race_mu);
+            pthread_mutex_unlock(&race_mu);
+        }
+    }
+    return flock(fd, op);
+}
 static int test_rename(const char *from, const char *to) {
     renames++;
     if (fail_rename) { errno = EROFS; return -1; }
     if (faulted(1, from, to)) return -1;
+    if (race_hold_ms > 0 && ends(to, "/save.dmsync")) {
+        if (atomic_fetch_add(&rename_in_flight, 1) > 0) rename_overlap = 1;
+        usleep((useconds_t)race_hold_ms * 1000);
+        atomic_fetch_sub(&rename_in_flight, 1);
+    }
     int r = rename(from, to);
     if (*staging && holds(staging, "original")) staging_held = 1;
     if (!r) crash_point();
@@ -71,6 +98,11 @@ static int test_rename(const char *from, const char *to) {
 }
 static int test_renamex_np(const char *from, const char *to, unsigned flags) {
     if (faulted(2, from, to)) return -1;
+    if (race_hold_ms > 0 && ends(to, "/save.dmsync")) {
+        if (atomic_fetch_add(&rename_in_flight, 1) > 0) rename_overlap = 1;
+        usleep((useconds_t)race_hold_ms * 1000);
+        atomic_fetch_sub(&rename_in_flight, 1);
+    }
     int r = renamex_np(from, to, flags);
     if (*staging && holds(staging, "original")) staging_held = 1;
     if (!r) crash_point();
@@ -85,6 +117,7 @@ static int test_unlink(const char *path) {
 #define fopen test_fopen
 #define fprintf test_fprintf
 #define fclose test_fclose
+#define flock test_flock
 #define rename test_rename
 #define unlink test_unlink
 #define renamex_np test_renamex_np
@@ -92,6 +125,7 @@ static int test_unlink(const char *path) {
 #undef fopen
 #undef fprintf
 #undef fclose
+#undef flock
 #undef rename
 #undef unlink
 #undef renamex_np
@@ -111,7 +145,9 @@ static void run_case(const char *save, const char *name, int open_error, int wri
     fail_open = open_error; fail_write = write_error; fail_close = close_error; fail_rename = rename_error;
     cleanup_errno = EBUSY; // Cleanup must not replace the original diagnostic.
     closes = renames = unlinks = 0; metadata_fd = -1; metadata = NULL; diagnostic[0] = 0;
+    track_metadata = 1;
     write_base(save, new_hash);
+    track_metadata = 0;
     CHECK(closes == !open_error, "every opened stream is closed exactly once");
     if (!open_error) CHECK(fcntl(metadata_fd, F_GETFD) == -1 && errno == EBADF, "file descriptor is closed");
     CHECK(renames == !(open_error || write_error || close_error), "rename only follows successful write and close");
@@ -292,17 +328,161 @@ static void fetch_cases(const char *folder) {
     snprintf(fifo, sizeof fifo, "%s/cloud.fifo", folder); snprintf(src, sizeof src, "%s/cloud.dmsync", folder); snprintf(none, sizeof none, "%s/none.dmsync", folder);
     snprintf(dst, sizeof dst, "%s/cloud.dmsync", dir);
     put(src, "newer");
-    CHECK(fetch_timed(none, dst, 2000) == 0 && holds_only(dir, NULL), "no cloud file: 0, nothing left");
-    CHECK(fetch_timed(src, dst, 2000) == 1 && file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "a fetch in time: the file at its place, nothing else");
+    CHECK(fetch_timed(none, dst, 2000, NULL) == 0 && holds_only(dir, NULL), "no cloud file: 0, nothing left");
+    CHECK(fetch_timed(src, dst, 2000, NULL) == 1 && file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "a fetch in time: the file at its place, nothing else");
     test_unlink(dst);
     if (mkfifo(fifo, 0644)) abort();
-    CHECK(fetch_timed(fifo, dst, 100) == -1 && holds_only(dir, NULL), "a fetch that does not come in time: -1");
-    CHECK(fetch_timed(src, dst, 2000) == 1 && file_is(dst, "newer"), "the next attempt's fetch");
+    CHECK(fetch_timed(fifo, dst, 100, NULL) == -1 && holds_only(dir, NULL), "a fetch that does not come in time: -1");
+    CHECK(fetch_timed(src, dst, 2000, NULL) == 1 && file_is(dst, "newer"), "the next attempt's fetch");
     int w = open(fifo, O_WRONLY); if (w < 0 || write(w, "older", 5) != 5) abort();
     close(w);   // the first fetch goes on now: it copies "older", finds itself dropped and removes its file
     usleep(300 * 1000);
     CHECK(file_is(dst, "newer") && holds_only(dir, "cloud.dmsync"), "the late fetch leaves the later attempt's file as it was and removes only its own");
     test_unlink(dst); test_unlink(src); test_unlink(fifo); rmdir(dir);
+}
+
+typedef struct { const char *save, *title, *cloud; int ok; } send_args;
+static void *send_worker(void *p) {
+    send_args *a = p;
+    a->ok = send_save(a->save, a->title, a->cloud);
+    return NULL;
+}
+static int cloud_file_is(const char *cloud, const char *root, const char *text) {
+    static int seq; char into[PATH_MAX], p[PATH_MAX]; ss_meta m;
+    snprintf(into, sizeof into, "%s/peek-race-%d", root, seq++);
+    rm_tree(into); mkdirs(into);
+    int ok = !ss_read(cloud, into, &m) && (snprintf(p, sizeof p, "%s/save/a", into), is(p, text));
+    rm_tree(into);
+    return ok;
+}
+static char race_target[PATH_MAX], race_replacement[PATH_MAX], race_placeholder[PATH_MAX];
+static void mutate_replace_cloud(void) { if (rename(race_replacement, race_target)) abort(); }
+static void mutate_create_placeholder(void) { put(race_placeholder, "icloud placeholder"); }
+static void mutate_unlink_cloud(void) { if (unlink(race_target)) abort(); }
+static void mutate_inplace_cloud(void) {
+    int fd = open(race_target, O_WRONLY | O_TRUNC);
+    if (fd < 0) abort();
+    int src = open(race_replacement, O_RDONLY);
+    if (src < 0 || copy_fd(src, fd)) abort();
+    close(src); close(fd);
+    unlink(race_replacement);
+}
+static int count_cloud_backups(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int k = 0; snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) k += is_backup(v[i], "cloud");
+    free_names(v, n); return k;
+}
+
+static void concurrent_send_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    char root[PATH_MAX], cloud_dir[PATH_MAX], title_dir[PATH_MAX], cf[PATH_MAX];
+    char sa[PATH_MAX], sb[PATH_MAX], so[PATH_MAX], p[PATH_MAX], base_a[SS_HASH + 1], base_b[SS_HASH + 1], report[2048];
+    ss_meta mo, ma, mb;
+    snprintf(root, sizeof root, "%s/race", folder);
+    snprintf(cloud_dir, sizeof cloud_dir, "%s/cloud", root);
+    snprintf(title_dir, sizeof title_dir, "%s/%s", cloud_dir, TID);
+    snprintf(cf, sizeof cf, "%s/save.dmsync", title_dir);
+    snprintf(so, sizeof so, "%s/orig/save", root);
+    snprintf(sa, sizeof sa, "%s/a/save", root);
+    snprintf(sb, sizeof sb, "%s/b/save", root);
+    rm_tree(root); mkdirs(title_dir); mkdirs(so); mkdirs(sa); mkdirs(sb);
+
+    // 1. Two senders read the same original cloud save, pass hash checks, and race into replacement under per-title coordination.
+    const char *name = "two senders racing over original cloud save";
+    snprintf(p, sizeof p, "%s/a", so); put(p, "original");
+    CHECK(!ss_pack(so, TID, cf, &mo), "pack original cloud save");
+    snprintf(p, sizeof p, "%s/a", sa); put(p, "save-from-A"); write_base(sa, mo.hash); CHECK(!ss_scan(sa, &ma), "scan A");
+    snprintf(p, sizeof p, "%s/a", sb); put(p, "save-from-B"); write_base(sb, mo.hash); CHECK(!ss_scan(sb, &mb), "scan B");
+
+    race_need = 2; race_arrived = 0; race_hold_ms = 25; rename_in_flight = 0; rename_overlap = 0;
+    send_args wa = {sa, TID, cf, -1}, wb = {sb, TID, cf, -1};
+    pthread_t ta, tb;
+    if (pthread_create(&ta, NULL, send_worker, &wa) || pthread_create(&tb, NULL, send_worker, &wb)) abort();
+    pthread_join(ta, NULL); pthread_join(tb, NULL);
+    race_need = 0; race_hold_ms = 0;
+
+    CHECK(wa.ok + wb.ok == 1, "exactly one competing sender succeeds");
+    CHECK(!rename_overlap, "per-title write coordination serializes the replacement");
+    CHECK(holds_only(title_dir, "save.dmsync"), "no temporary .nosync files remain in the cloud title directory");
+    const char *win_save = wa.ok ? sa : sb, *lose_save = wa.ok ? sb : sa;
+    const char *win_txt = wa.ok ? "save-from-A" : "save-from-B", *lose_txt = wa.ok ? "save-from-B" : "save-from-A";
+    const char *win_hash = wa.ok ? ma.hash : mb.hash;
+    CHECK(cloud_file_is(cf, root, win_txt), "cloud keeps the winning sender's save");
+    snprintf(p, sizeof p, "%s/a", win_save); CHECK(is(p, win_txt), "winner's local save intact");
+    snprintf(p, sizeof p, "%s/a", lose_save); CHECK(is(p, lose_txt), "stale sender retains its local save");
+    read_base(win_save, base_a); read_base(lose_save, base_b);
+    CHECK(!strcmp(base_a, win_hash), "winner advances its sync base");
+    CHECK(!strcmp(base_b, mo.hash), "stale sender retains its previous sync base");
+    CHECK(send_save(lose_save, TID, cf) == 0 && cloud_file_is(cf, root, win_txt), "a retry by the stale sender still refuses to overwrite the winner");
+    CHECK(!save_sync_report(lose_save, TID, cloud_dir, 2000, report, sizeof report) && strstr(report, "conflict=1"), "next start sees a conflict for the stale sender");
+
+    // 2. Two senders racing when no cloud save exists yet (both have empty base; kernel-atomic RENAME_EXCL).
+    name = "two senders racing over absent cloud save";
+    unlink(cf);
+    snprintf(p, sizeof p, "%s.sync", sa); unlink(p);
+    snprintf(p, sizeof p, "%s.sync", sb); unlink(p);
+    race_need = 2; race_arrived = 0; race_hold_ms = 25; rename_in_flight = 0; rename_overlap = 0;
+    wa = (send_args){sa, TID, cf, -1}; wb = (send_args){sb, TID, cf, -1};
+    if (pthread_create(&ta, NULL, send_worker, &wa) || pthread_create(&tb, NULL, send_worker, &wb)) abort();
+    pthread_join(ta, NULL); pthread_join(tb, NULL);
+    race_need = 0; race_hold_ms = 0;
+
+    CHECK(wa.ok + wb.ok == 1, "exactly one sender creates the initial cloud save");
+    CHECK(!rename_overlap, "per-title write coordination serializes initial creation");
+    CHECK(holds_only(title_dir, "save.dmsync"), "no leftover staging files after absent-cloud race");
+    win_save = wa.ok ? sa : sb; lose_save = wa.ok ? sb : sa;
+    win_txt = wa.ok ? "save-from-A" : "save-from-B"; lose_txt = wa.ok ? "save-from-B" : "save-from-A";
+    win_hash = wa.ok ? ma.hash : mb.hash;
+    CHECK(cloud_file_is(cf, root, win_txt), "cloud holds the winner's initial save");
+    snprintf(p, sizeof p, "%s/a", lose_save); CHECK(is(p, lose_txt), "stale sender retains its local save");
+    read_base(win_save, base_a); read_base(lose_save, base_b);
+    CHECK(!strcmp(base_a, win_hash) && !base_b[0], "winner advances base; stale sender keeps empty base");
+    CHECK(!save_sync_report(lose_save, TID, cloud_dir, 2000, report, sizeof report) && strstr(report, "conflict=1"), "next start reports conflict for the stale sender");
+
+    // 3. An iCloud placeholder appearing after an absent fetch blocks replacement.
+    name = "placeholder appearing before absent-cloud store";
+    unlink(cf);
+    snprintf(p, sizeof p, "%s.sync", sb); unlink(p);
+    snprintf(race_placeholder, sizeof race_placeholder, "%s/.save.dmsync.icloud", title_dir);
+    race_before_store = mutate_create_placeholder;
+    CHECK(send_save(sb, TID, cf) == 0, "sender refuses to create save.dmsync once .icloud placeholder appears");
+    CHECK(access(cf, F_OK) == -1 && !access(race_placeholder, F_OK), "cloud file not created and placeholder untouched");
+    read_base(sb, base_b); CHECK(!base_b[0], "stale sender keeps empty base");
+    unlink(race_placeholder);
+
+    // 4. A damaged cloud file replaced by a valid competing save before store: stale sender must not overwrite or prune backups.
+    name = "damaged cloud file replaced by valid save before store";
+    put(cf, "DMSYNC1\ndamaged");
+    snprintf(race_target, sizeof race_target, "%s", cf);
+    snprintf(race_replacement, sizeof race_replacement, "%s/valid-A.dmsync", root);
+    CHECK(!ss_pack(sa, TID, race_replacement, &ma), "pack competing valid save A");
+    for (int i = 0; i < KEEP_BACKUPS + 2; i++) { snprintf(p, sizeof p, "%s-backups/2020-01-%02d 00.00.00 cloud", sb, i + 1); mkdirs(p); }
+    write_base(sb, mo.hash);
+    race_before_store = mutate_replace_cloud;
+    CHECK(send_save(sb, TID, cf) == 0, "stale sender does not overwrite valid save that replaced damaged file");
+    CHECK(cloud_file_is(cf, root, "save-from-A"), "competing valid save A survives in cloud");
+    CHECK(count_cloud_backups(sb) == KEEP_BACKUPS + 2, "stale sender did not prune or leave a bogus cloud backup");
+    read_base(sb, base_b); CHECK(!strcmp(base_b, mo.hash), "stale sender retains previous base");
+
+    // 5. Cloud file unlinked between fetch and store: stale sender does not recreate it.
+    name = "cloud file unlinked before store";
+    CHECK(!ss_pack(so, TID, cf, &mo), "re-pack original");
+    write_base(sb, mo.hash);
+    race_before_store = mutate_unlink_cloud;
+    CHECK(send_save(sb, TID, cf) == 0 && access(cf, F_OK) == -1, "stale sender does not write over deleted cloud file");
+    read_base(sb, base_b); CHECK(!strcmp(base_b, mo.hash), "stale sender retains previous base after unlink race");
+
+    // 6. Cloud file overwritten in-place (same inode, new contents/size) between fetch and store.
+    name = "in-place overwrite before store";
+    CHECK(!ss_pack(so, TID, cf, &mo), "re-pack original for in-place test");
+    CHECK(!ss_pack(sa, TID, race_replacement, &ma), "pack replacement A for in-place test");
+    write_base(sb, mo.hash);
+    race_before_store = mutate_inplace_cloud;
+    CHECK(send_save(sb, TID, cf) == 0 && cloud_file_is(cf, root, "save-from-A"), "in-place overwrite detected as stale; competing save survives");
+    read_base(sb, base_b); CHECK(!strcmp(base_b, mo.hash), "stale sender retains previous base after in-place race");
+
+    rm_tree(root);
 }
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
@@ -336,6 +516,7 @@ int main(void) {
         rm_tree(root);
     }
     fetch_cases(folder);
+    concurrent_send_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

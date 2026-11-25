@@ -42,5 +42,10 @@ mem_alias	0x20000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 
+# ---- Threads ----
+# Stopgap, cause open (README, Threads): entering Puzzle Plank Galaxy (World 2-1) crashed in Hagi's thread 0x102c right after its svcSetThreadPriority, 6 times in 6 without
+# preemption and 0 in 2 with it (and a World 1 stage load that had crashed before passed). Hagi's thread 0x102c and its DVD Async Thread are both pinned to core 0; with this, a thread waits for higher-priority runnable peers of its core after every thread SVC
+core_preempt	on
+
 # ---- Shader split ----
 shader_note	Super Mario Galaxy 2 has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)

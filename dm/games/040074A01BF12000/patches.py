@@ -160,4 +160,39 @@ def screen_shape(ctx):
     ui_band(0x857c8c, 0xad000420, 'screen shape: the 2D layer\'s 16:9 ortho matrix copied as a 16:9 band in the middle of the taller picture')
     ui_band(0x88eeb8, 0xf9401069, 'screen shape: the text composites\' 16:9 ortho (before the quad\'s matrix) as a 16:9 band in the middle')
 
+    # The HUD at the taller screen's edges and full-screen backgrounds stretched (duo_anchor.c: Breath of the Wild 1.9.0's general rules for the newer nn::ui2d,
+    # parameters at state +0x80..+0x98 from loader.c), called once a pane's global matrix is stored in the base matrix calculation (main+0x2f8420, Pane slot 26;
+    # TextBox's and Window's call it): with the band stubs the 2D keeps its proportions and its edge widgets reach the screen's edges. The words: `clang -target
+    # arm64-apple-macos -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-jump-tables -fno-asynchronous-unwind-tables -c duo_anchor.c`, its __text as 32-bit
+    # words (no relocations). At the site only w8 (the flags, reloaded) is live of the call-clobbered registers; the frame keeps x30
+    ANCHOR = 'bd4000201e2f10021e2208001e20200854000041d65f03c0bd4070012d4a10031e2108611e20c025bd4084011e2108831e2188841e2020681e234c83bd4010241e2208821e2220a0540002abbd407c021e20c04252a84e081e2701041e242040540001e5bd408c021e20c0441e2701051e2520805290000872a889481e2701041e244468540000cbbd4018241e2f10051e2508841e24206054000889f9400c08b4fffba8bd4008211e2f10021e220823bd408c011e2140221e2020281e214c421e232040540001e552a872c91e2701231e23204054fffa04bd408d031e20c06352a880e91e2701241e24204052a84e091e2701221e22d46054fff8ea1400000552a880e91e2701231e23204054fff84c913e0029528be98a72ac290a528c8e4b72aca96baa0003ec2956398d6b0a01bf7a4b01c054fff700f9400d8cb5ffff6cd280000af86a692beb08017f54fff6409100214af120015f54ffff61f9400d08b5ffff081e2140021e2020281e22cc001e202820bd008c00f868692aeb00015f54fff4a091002108f120011f54ffff61b94f782892401d0af82a792011000508b90f7828d65f03c0f940140891008009eb09011f54fff3011e20202854fff2c052a890e81e2701041e242060540000a51e2010041f040c001e23180014000002bd40042091022008bd4080036e0c04234d4081036e1c04434f8090603d802000d65f03c0'
+    anchor_code = here()
+    for i in range(0, len(ANCHOR), 8): emit(int(ANCHOR[i:i + 8], 16))
+    site = 0x2f8574
+    fs_site(site, '36008052')   # mov w22,#1
+    start = here()
+    emit(0xaa1303e0); emit(ADRP(1, here(), FS_STATE_OFF)); emit(0x91020021)   # mov x0,x19; x1 = state + 0x80
+    emit(B(here(), anchor_code) | 0x80000000)                                  # bl duo_calc
+    emit(0x39416268); emit(0x52800036); emit(B(here(), site + 4))              # ldrb w8,[x19,#0x58]; mov w22,#1; back
+    fs_put(site, [B(site, start)], 'Pane matrix calculation: a HUD widget at the edge moved to the taller screen\'s edge, full-screen backgrounds stretched (duo_anchor.c)')
+    # Most panes have their global matrix computed by main+0x862b5c, called at main+0x2f84d0 before the inline calculation above (skipped then: flags +0x58 bit 1;
+    # Tears of the Kingdom's main+0x10d7538 at +0x59310c, the same library): the same call right after it, where the flags are loaded again
+    site = 0x2f84d4
+    fs_site(site, '68624139')   # ldrb w8,[x19,#0x58]
+    start = here()
+    emit(0xaa1303e0); emit(ADRP(1, here(), FS_STATE_OFF)); emit(0x91020021)   # mov x0,x19; x1 = state + 0x80
+    emit(B(here(), anchor_code) | 0x80000000)                                  # bl duo_calc
+    emit(0x39416268); emit(B(here(), site + 4))                                # ldrb w8,[x19,#0x58]; back
+    fs_put(site, [B(site, start)], 'Pane matrix calculation (the common path): a HUD widget at the edge moved to the taller screen\'s edge (duo_anchor.c)')
+    # Full-screen draws with no pane (an identity model matrix: backdrops, fades): rows 0 and 1 of the model matrix scaled by k as the draw info's model matrix is
+    # copied into the uniform block (main+0x857cb4; Tears of the Kingdom's main+0x10cc970), so with the band's ortho the quad fills the screen's height, its sides cut
+    # evenly (nothing stretched). A leaf: v4..v7, x16 / x17 free
+    FULLQUAD = (2415919120, 3175112196, 505421960, 1409287232, 1384572145, 1923567729, 505872935, 506335238, 1577321477, 505821349, 505462949, 505880736, 1409286954, 1577845797, 505821349, 505462949, 505880736, 1409286794, 1577845765, 505462949, 505880736, 1409286666, 1577321509, 505462949, 505880736, 1409286538, 506204166, 1578894341, 505462949, 505815200, 1409286378, 1578894373, 505462949, 505815200, 1409286250, 1334087680, 1334087713, 2902459424)
+    site = 0x857cb4
+    fs_site(site, '200400ad')   # stp q0,q1,[x1]
+    start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
+    for w in FULLQUAD[1:]: emit(w)
+    emit(B(here(), site + 4))
+    fs_put(site, [B(site, start)], 'screen shape: a full-screen draw with no pane (identity model) scaled up evenly to fill the taller screen, its sides cut')
+
 FRAME_STEP = {'e25c90c1c136638885659fd55bf8a03b': screen_shape}   # v458752 main: the state page for the screen shape (no frame interval stub)

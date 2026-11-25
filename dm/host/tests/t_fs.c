@@ -204,6 +204,58 @@ int main(void) {
         }
         unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
     }
+    {   // fs::GetSaveDataSize, GetDeviceSaveDataSize, GetSaveDataSizeMax, ExtendSaveData, ExtendDeviceSaveData
+        char sroot[1100], sdir[1200], nacp_path[1200], rec[1300];
+        snprintf(sroot, sizeof sroot, "%s/savesize", root); mkdir(sroot, 0755);
+        snprintf(sdir, sizeof sdir, "%s/save", sroot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", sroot);
+        const uint64_t uid1[2] = {DM_UID0, DM_UID1}, uid2[2] = {DM_UID0 + 1, DM_UID1}, bad_uid[2] = {0x1234, 0x5678};
+        int64_t size = -1, journal = -1;
+        setenv("DM_SAVE", sdir, 1); setenv("DM_CONTROL_NACP", nacp_path, 1);
+        // No control.nacp and no record: fallback is 256 MB data + 16 MB journal (size > journal)
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size max: fallback without control.nacp is 256 MB / 16 MB");
+        // Unknown UID is rejected as TargetNotFound without touching outputs
+        size = journal = -1;
+        CHECK(h_fs_SaveSize(&size, &journal, bad_uid) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: unknown UID returns TargetNotFound");
+        CHECK(h_fs_ExtendSave(bad_uid, 64 << 20, 4 << 20) == RES_TARGET_NOT_FOUND, "extend save: unknown UID returns TargetNotFound");
+        // control.nacp with account (62 MB / 1 MB) and device (32 MB / 2 MB), no separate max
+        static uint8_t snacp[0x4000]; memset(snacp, 0, sizeof snacp);
+        const int64_t acc[2] = {62 << 20, 1 << 20}, dev[2] = {32 << 20, 2 << 20};
+        memcpy(snacp + 0x3080, acc, sizeof acc); memcpy(snacp + 0x3090, dev, sizeof dev);
+        FILE *f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: reads UserAccountSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: reads DeviceSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size max: falls back to base NACP account size when max is 0");
+        // control.nacp with explicit max (128 MB / 8 MB)
+        const int64_t mx[2] = {128 << 20, 8 << 20}; memcpy(snacp + 0x3148, mx, sizeof mx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (8 << 20), "save size max: reads UserAccountSaveDataSizeMax/JournalSizeMax from control.nacp");
+        // Invalid extend arguments are rejected and do not write a record
+        CHECK(h_fs_ExtendSave(uid1, 0, 0) == RES_FAIL && h_fs_ExtendSave(uid1, -1, 0) == RES_FAIL && h_fs_ExtendSave(uid1, 64 << 20, -1) == RES_FAIL, "extend save: rejects non-positive size or negative journal");
+        CHECK(h_fs_ExtendDeviceSave(0, 0) == RES_FAIL && h_fs_ExtendDeviceSave(64 << 20, -1) == RES_FAIL, "extend device save: rejects non-positive size or negative journal");
+        // ExtendSaveData persists beside DM_SAVE and overrides control.nacp, including journal == 0
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (96 << 20) && journal == (4 << 20), "extend save: subsequent GetSaveDataSize returns extended size");
+        CHECK(h_fs_ExtendSave(uid1, 112 << 20, 0) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == 0, "extend save: journal 0 is recorded and returned");
+        snprintf(rec, sizeof rec, "%s.size", sdir); CHECK(!access(rec, F_OK), "extend save: record sits beside DM_SAVE");
+        // Device save has its own record, isolated from account save
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: unaffected by account ExtendSaveData");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20), "extend device save: recorded independently");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == 0, "account save size: unaffected by ExtendDeviceSaveData");
+        // Additional account user keeps its own record
+        CHECK(dm_account_create_user(1) == 0, "save size: register user 2");
+        CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: user 2 reads control.nacp before its own extend");
+        CHECK(h_fs_ExtendSave(uid2, 80 << 20, 2 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (80 << 20) && journal == (2 << 20), "extend save: user 2 gets its own record");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == 0, "extend save: user 1 record is untouched by user 2");
+        // NULL output pointers and unset DM_SAVE
+        CHECK(h_fs_SaveSize(&size, NULL, uid1) == RES_OK && h_fs_SaveSize(NULL, &journal, uid1) == RES_OK && h_fs_SaveSizeMax(NULL, NULL) == RES_OK, "save size: NULL output pointers are accepted");
+        unsetenv("DM_SAVE");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20) && h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_OK, "save size: works cleanly when DM_SAVE is unset");
+        unsetenv("DM_CONTROL_NACP");
+    }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);

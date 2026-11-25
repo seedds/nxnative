@@ -64,6 +64,13 @@ void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+void *mtl_nvn_event(void);
+void mtl_wait_gl_event(void *event, uint64_t value);
+void *dm_gl_event(void);
+void *dm_gl_retain_texture_2d(uint32_t name);
+void *dm_gl_sync_publish(uint64_t serial, int from_nvn);
+int dm_gl_sync_serial(const void *sync, uint64_t *serial, int *from_nvn);
+int dm_gl_wait_serial(uint64_t serial, uint64_t timeout_ns);
 int mtl_depth_bounds_hw(void);   // the depth bounds test is enabled (DM_NVN_DEPTH_BOUNDS != 0) and the GPU supports it (Apple10 and later), asked once with one log line
 uint64_t mtl_ext_tex(void *tex);
 // The producer is done with one (a swap chain destroyed, a window surface replaced) and has waited for its presents' tickets (mtl_present_wait): the serial goes now, and the

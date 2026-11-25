@@ -3541,6 +3541,29 @@ void mtl_tex_init(const tex_t *t) {
     if (desc) free(nvn_hm_put(&g_image_desc, &t->serial, desc));
     pthread_mutex_unlock(&g_smu);
 }
+__attribute__((weak)) void *dm_gl_retain_texture_2d(uint32_t name) { (void)name; return NULL; }
+int mtl_tex_init_gl(tex_t *t, uint32_t name) {
+    @autoreleasepool {
+        id<MTLTexture> tex = (__bridge_transfer id<MTLTexture>)dm_gl_retain_texture_2d(name);
+        NVNformat format;
+        switch (tex.pixelFormat) {
+            case MTLPixelFormatRGBA8Unorm: format = NVN_FORMAT_RGBA8; break;
+            case MTLPixelFormatRGBA8Unorm_sRGB: format = NVN_FORMAT_RGBA8_SRGB; break;
+            case MTLPixelFormatR8Unorm: format = NVN_FORMAT_R8; break;
+            case MTLPixelFormatRG8Unorm: format = NVN_FORMAT_RG8; break;
+            default: MLOG("[RED] NVN texture import: unsupported GL texture %u (Metal format %lu)", name, (unsigned long)tex.pixelFormat); return 0;
+        }
+        t->d = (nvn_texdesc){
+            .target = NVN_TEXTURE_TARGET_2D, .format = format,
+            .width = (uint32_t)tex.width, .height = (uint32_t)tex.height,
+            .depth = 1, .levels = (uint32_t)tex.mipmapLevelCount,
+        };
+        mtl_tex_init(t);
+        res_add(tex);
+        tex_put(t->serial, tex);
+        return 1;
+    }
+}
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
@@ -22871,6 +22894,11 @@ void mtl_present_discard(int on) { atomic_store(&g_present_discard, on != 0); if
 static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4], uint64_t ev_val, uint64_t *copy);
 uint64_t mtl_present(const tex_t *t, double period, const int crop[4], uint64_t *copy) { return present_enqueue(t, period, crop, 0, copy); }
 void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
+void *mtl_nvn_event(void) { return (__bridge void *)g_ev; }
+void mtl_wait_gl_event(void *event, uint64_t value) {
+    id<MTLSharedEvent> ev = (__bridge id<MTLSharedEvent>)event;
+    if (value > ev.signaledValue) rec_queue_block(^{ [g_q4 waitForEvent:ev value:value]; });
+}
 // GL and Vulkan also accept a device without Metal 4. The classic fallback drops presents.
 void *mtl_device_classic(void) {
     atomic_store_explicit(&g_classic_ok, 1, memory_order_relaxed);

@@ -11,22 +11,21 @@
 //   DM_AOC_OWNED=0: always none (test switch, for runs without the DLC).
 // Room for every index the scan accepts (1..2000): Super Smash Bros. Ultimate has 99 DLC, and a cap below the folder count dropped whichever readdir returned last (fighters among them).
 static int g_aoc[2000], g_naoc = -1;
-static int aoc_int_cmp(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 static void aoc_load(void) {
     if (g_naoc >= 0) return;
     g_naoc = 0;
     const char *e = getenv("DM_AOC_OWNED"), *dir = getenv("DM_AOC_DIR"); const char *why = "no DM_AOC_DIR";
     if (e && !strcmp(e, "0")) why = "DM_AOC_OWNED=0";
     else if (dir && *dir) {
+        // A legacy directory and its replacement image (N and N.img) report the same DLC once. Mark a seen-set over 1..2000 as readdir returns entries so >2000 combined entries never drop unique indices, then emit g_aoc in ascending order.
+        static unsigned char seen[2001]; memset(seen, 0, sizeof seen);
         why = dir; DIR *d = opendir(dir); struct dirent *ent;
-        while (d && (ent = readdir(d)) && g_naoc < (int)(sizeof g_aoc / sizeof *g_aoc)) {
+        while (d && (ent = readdir(d))) {
             char *end; long i = strtol(ent->d_name, &end, 10);
-            if (ent->d_name[0] >= '1' && ent->d_name[0] <= '9' && (!*end || !strcmp(end, ".img")) && i <= 2000) g_aoc[g_naoc++] = (int)i;
+            if (ent->d_name[0] >= '1' && ent->d_name[0] <= '9' && (!*end || !strcmp(end, ".img")) && i >= 1 && i <= 2000) seen[i] = 1;
         }
         if (d) closedir(d);
-        qsort(g_aoc, g_naoc, sizeof *g_aoc, aoc_int_cmp);
-        int unique = 0; for (int i = 0; i < g_naoc; i++) if (!i || g_aoc[i] != g_aoc[i - 1]) g_aoc[unique++] = g_aoc[i];
-        g_naoc = unique;   // a legacy directory and its replacement image report the same DLC once
+        for (int i = 1; i <= 2000; i++) if (seen[i]) g_aoc[g_naoc++] = i;
     }
     static char list[2000 * 5 + 1]; list[0] = 0; for (int i = 0; i < g_naoc; i++) snprintf(list + strlen(list), sizeof list - strlen(list), "%s%d", i ? "," : "", g_aoc[i]);
     LOG("aoc: reporting %d add-on contents {%s} (%s)", g_naoc, list, why);

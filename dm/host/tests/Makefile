@@ -85,7 +85,9 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
 	$(B)/t_pad_gip
+	$(B)/t_pad_xusb
 	$(B)/t_pad_hid_mac
+	$(B)/t_pad_gip_mac
 	$(B)/t_pad_pro
 	$(B)/t_switch2
 	$(B)/t_haptics
@@ -556,9 +558,13 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	DM_QOS_MAP=1 $(B)/t_notify_sched --all-peers
 $(B)/t_pad_hid: t_pad_hid.c ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid.c
-run: $(B)/t_pad_gip
+run: $(B)/t_pad_gip $(B)/t_pad_xusb $(B)/t_pad_gip_mac
 $(B)/t_pad_gip: t_pad_gip.c ../pad_gip.h ../pad_hid.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_gip.c
+$(B)/t_pad_xusb: t_pad_xusb.c ../pad_xusb.h ../pad_hid.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_xusb.c
+$(B)/t_pad_gip_mac: t_pad_gip_mac.m ../pad_gip_mac.h ../pad_gip.h ../pad_xusb.h ../pad_hid.h ../pad_slots.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_gip_mac.m -framework Foundation -framework IOKit -framework IOUSBHost
 run: $(B)/t_pad_pro
 $(B)/t_pad_pro: t_pad_pro.c ../pad_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_pro.c

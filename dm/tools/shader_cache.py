@@ -209,6 +209,9 @@ class Store(_Files):
             if r is not None: local |= r.names(prefix)
         return local
 
+    def blob_ids(self, prefix):   # {name: blob id} of local entries starting with prefix (dmsh_build.py's staged outputs, which share blobs in this file)
+        return dict(self._run('SELECT name, blob FROM entry WHERE name>=? AND name<?', prefix, prefix + '\U0010ffff'))
+
     def put(self, name, data, when=None):
         """An entry's bytes, replacing what it held. A cache that cannot be written (a full drive) is one [RED] line: the build goes on without it, and the batch this write was part of is rolled back"""
         if self.full: return   # inside a failed batch, a write would land outside it: SQLite may have rolled the transaction back already
@@ -388,7 +391,7 @@ class Served:
     where that worker's thread stood when the build finished its shaders in threads, on the one connection and under its lock. A worker's batch is that thread's batch, so it is whole
     or absent as before, and is rolled back when the worker dies inside it.
     Made before the fork; start() here once every worker is forked (it starts threads); worker() in each worker gives its store (get, has, names, put, put_file, to_file, delete_prefix, batch, full)"""
-    OPS = ('get', 'has', 'names', 'put', 'delete_prefix')
+    OPS = ('get', 'has', 'names', 'blob_ids', 'put', 'delete_prefix')
 
     def __init__(self, store, n):
         ctx = multiprocessing.get_context('fork')
@@ -446,6 +449,7 @@ class Remote(_Files):
     def get(self, name): return self._call('get', name)
     def has(self, name): return self._call('has', name)
     def names(self, prefix): return self._call('names', prefix)
+    def blob_ids(self, prefix): return self._call('blob_ids', prefix)
     def put(self, name, data, when=None): self._call('put', name, data, when)
     def delete_prefix(self, prefix): self._call('delete_prefix', prefix)
 

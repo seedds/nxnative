@@ -2355,10 +2355,10 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 ### A GLsync that is no sync object
 
 - **Symptom:** an abort at boot in `h_glDeleteSync`, from libmalloc: `pointer being freed was not allocated`.
-- **Cause:** `glDeleteSync`, `glIsSync` and `glClientWaitSync` read through the value they were given as if it were a block of the GL layer. GL names a sync by value, and a value that is no sync object is `GL_INVALID_VALUE` (OpenGL 4.6, section 4.1). NVN's `nvnSyncCreateGLSync` is not implemented, so a game that fences through it holds a `GLsync` the host never wrote.
-- **Fix:** the GL layer keeps the set of live syncs (`g_syncs`, `hle_gl.m`). `glIsSync` answers from it; `glDeleteSync` ignores 0 and sets `GL_INVALID_VALUE` for any other value not in it, writing and freeing nothing; `glClientWaitSync` then returns `GL_WAIT_FAILED` with that error. The NVN and OpenGL interop itself is still missing.
+- **Cause:** `glDeleteSync`, `glIsSync` and `glClientWaitSync` read through the value they were given as if it were a block of the GL layer. GL names a sync by value, and a value that names no sync object is `GL_INVALID_VALUE` (OpenGL 4.6, section 4.1). The host originally left the output of `nvnSyncCreateGLSync` unwritten.
+- **Fix:** the GL layer keeps the set of live syncs in each share group. `glIsSync` checks membership. `glDeleteSync` ignores 0 and sets `GL_INVALID_VALUE` for any other value outside the set. `glClientWaitSync` returns `GL_WAIT_FAILED` with that error. See [OpenGL and NVN share textures and fences](#opengl-and-nvn-share-textures-and-fences) for the interop.
 - **Check:** `test_sync_names` in `t_gl_imports` (also in its `--cpu` run): on main it aborts at the first delete.
-- **Found on:** NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS (`01005A20190A6000`, no profile), [GitHub issue #2835](https://github.com/seedds/nxnative/issues/2835). That the game's `glDeleteSync` call is what aborted there is inferred from the report's backtrace and log order; the game was not run. Removing this abort does not make the game start: its movie path still needs the interop.
+- **Found on:** NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS (`01005A20190A6000`, no profile), [GitHub issue #2835](https://github.com/seedds/nxnative/issues/2835). The report's backtrace and log order point to `glDeleteSync`.
 
 ### OpenGL 1.x fixed function
 
@@ -2418,10 +2418,26 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** a jump to address 0 after `eglGetProcAddress("eglGetCurrentDisplay")`, or a loader that takes the context for lost; a second thread's `eglMakeCurrent` returns `EGL_FALSE` with `EGL_BAD_ACCESS` while another thread owns the context.
 - **Cause:** a glad loader asks `eglGetProcAddress` for EGL functions too, and calls `eglGetCurrentDisplay`; the layer answered only `gl` names and had no `eglGetCurrent*`.
-- **Fix:** `eglGetProcAddress` answers `egl` names from the same table. `eglMakeCurrent` records the calling thread's display, context and draw/read surfaces; `eglGetCurrentContext`, `eglGetCurrentDisplay` and `eglGetCurrentSurface` (`EGL_DRAW`, `EGL_READ`) answer that binding. The layer's one context has one owner, protected by a mutex. A conflicting bind returns false with `EGL_BAD_ACCESS` and leaves both threads' bindings unchanged. Making no context current, `eglReleaseThread`, or the owning thread's exit releases it for another thread. `eglGetError` returns and clears only the calling thread's error.
-- **Current limit:** multiple and shared contexts are unsupported. Every `eglCreateContext` returns the same handle (`0x2`), and GL state and command encoding are global, so a second creation does not give another thread an independent context. Keep the ownership check unchanged; revisit multiple contexts only when a real game needs them.
+- **Fix:** `eglGetProcAddress` answers `egl` names from the same table. `eglMakeCurrent` records the calling thread's display, context and draw/read surfaces. `eglGetCurrentContext`, `eglGetCurrentDisplay` and `eglGetCurrentSurface` (`EGL_DRAW`, `EGL_READ`) answer that binding. Each context has one owner. A conflicting bind returns false with `EGL_BAD_ACCESS` and preserves both bindings. Making no context current, calling `eglReleaseThread`, or the owning thread's exit releases it for another thread. `eglGetError` returns and clears the calling thread's error.
 - **Check:** `t_gl_imports` (`test_extension_names_and_egl`).
 - **Found on:** [Fate/hollow ataraxia REMASTERED](../../dm/games/010070E022546000/README.md), [issue #2818](https://github.com/seedds/nxnative/issues/2818).
+
+### OpenGL and NVN share textures and fences
+
+- **Symptom:** a game opens a second EGL context on a different thread, then logs unimplemented calls to `nvnTextureBuilderSetGLTextureName`, `nvnSyncCreateGLSync` and `nvnSyncInitializeFromFencedGLSync`. NVN reports texture format 0 when it tries to draw with the shared GL texture.
+- **Cause:** EGL returned one handle and rejected a second thread's make-current. NVN discarded the GL texture name and had no way to order work against the GL command queue.
+- **Fix:** EGL keeps bindings, container objects and fixed-function state per context. Buffers, textures, renderbuffers, samplers, shaders, programs and sync names belong to the share group. The GL entry points select that state under the encoder mutex and submit pending work on a switch. NVN imports supported 2D GL formats over the same Metal allocation. Converted fences keep the originating queue's shared event value, so each API can wait for the other on the GPU. An NVN queue wait also publishes a fence on the NVN timeline for later NVN waits.
+- **Current limit:** shared buffer, texture, renderbuffer and sampler bindings are stored as GL names. Deletion in one context can invalidate a binding or attachment in another context. NVN retains its own reference to an imported texture's Metal storage.
+- **Check:** `t_gl_imports` exercises two live contexts on different threads, share-group names, independent bindings, texture import and a GPU-gated GL → NVN → GL fence.
+- **Found on:** [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS 1.7.1](../../dm/games/0100D2D0190A4000/README.md). [Related report for another regional build](https://github.com/seedds/nxnative/issues/2835).
+
+### An ES context reported as desktop OpenGL
+
+- **Symptom:** a crash in the guest allocator while following a link containing compressed texture bytes (`main+0xd472f4` on Naruto 1.7.1). An earlier row copy writes 2,048 bytes into a 32-byte allocation.
+- **Cause:** EGL created the requested ES 3.0 context but `glGetString(GL_VERSION)` reported desktop OpenGL. The game's ES loader failed to parse the string and left its `glGetIntegerv` slot empty. The texture staging code clamped a 512 × 256 DDS image to a zero texture limit and allocated a single block, then copied the full source rows. The adjacent allocator link was 32 bytes from the start of the destination.
+- **Fix:** EGL records the API and version on the context and GL reports them when that context is current. The loader installs its dispatch slot and reads the host's texture limit. The GLSL path preprocesses ES 3.00 at its original version, then raises the compiler input to ES 3.10 for SPIR-V. Sampler arrays use contiguous Metal texture and sampler arguments with one texture unit per element.
+- **Check:** `test_egl_client_api` in `t_gl_imports` exercises the ES version parser, the texture limit and rebinding across GL and GLES. The same test binary's capture run compiles an ES 3.00 sampler array and reads back pixels from both texture units.
+- **Found on:** [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS 1.7.1](../../dm/games/0100D2D0190A4000/README.md).
 
 ### `glGetShaderSource` returns the stored shader text
 

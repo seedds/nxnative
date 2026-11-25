@@ -284,6 +284,92 @@ int main(void) {
     g_bo_cap = 250000;
     puts("PASS: with the back-off off, zero-timeout waits never back off");
 
+    // No clock_wait bleed: a zero-timeout wait or short sleep followed by SleepThread(0) after a clock read must not enter clock_wait
+    thr_t *me = pthread_getspecific(g_keythr); assert(me);
+    {
+        uint64_t yr[32] = {0};
+        svc_thread(0x0B, yr);   // prime yrun_clk
+        dm_clock_reads++;
+        atomic_fetch_add(&poll_clock, 30000);
+        uint64_t ck0 = me->nclkyield; z0 = backoffs();
+        assert(addr_poll(1) == R_TIMEOUT);
+        svc_thread(0x0B, yr);
+        assert(me->nclkyield == ck0 && backoffs() == z0);
+
+        atomic_fetch_add(&poll_clock, 30000);
+        uint64_t pr0 = me->ncwpred; z0 = backoffs(); ck0 = me->nclkyield;
+        for (int i = 0; i < 200; i++) {   // 0 through 1.99 ms: neither clock_wait nor backoff yet
+            assert(addr_poll(1) == R_TIMEOUT);
+            dm_clock_reads++;
+            svc_thread(0x0B, yr);
+            assert(me->nclkyield == ck0 && me->ncwpred == pr0 && backoffs() == z0);
+            atomic_fetch_add(&poll_clock, 10000);
+        }
+        // Continuing past 2 ms enters normal poll backoff without entering clock_wait
+        assert(addr_poll(1) == R_TIMEOUT);
+        assert(me->nclkyield == ck0 && me->ncwpred == pr0 && backoffs() == z0 + 1);
+
+        atomic_fetch_add(&poll_clock, 30000);
+        ck0 = me->nclkyield;
+        uint64_t sr[32] = {25000}; svc_thread(0x0B, sr);   // poll_sleep
+        dm_clock_reads++;
+        svc_thread(0x0B, yr);
+        assert(me->nclkyield == ck0);
+    }
+    puts("PASS: zero-timeout waits and short sleeps never bleed into clock_wait");
+
+    // Target-aware zero-timeout signature: cycling distinct handles, addresses, or caller lr with identical x19-x28 must not back off
+    {
+        uint64_t er2[32] = {0}, er3[32] = {0};
+        svc_thread(0x45, er2); assert(er2[0] == 0); uint32_t ev2_w = (uint32_t)er2[1], ev2_r = (uint32_t)er2[2];
+        svc_thread(0x45, er3); assert(er3[0] == 0); uint32_t ev3_w = (uint32_t)er3[1], ev3_r = (uint32_t)er3[2];
+        uint32_t evs[3] = {ev_r, ev2_r, ev3_r};
+        uint32_t h = 0;
+        atomic_fetch_add(&poll_clock, 30000); z0 = backoffs();
+        for (int i = 0; i < 300; i++) {
+            h = evs[i % 3];
+            uint64_t wr[32] = {0, (uint64_t)&h, 1, 0};
+            svc_thread(0x18, wr); assert(wr[0] == R_TIMEOUT);
+            atomic_fetch_add(&poll_clock, 10000);
+        }
+        assert(backoffs() == z0);
+        uint64_t cr[32] = {ev2_w}; svc_thread(0x16, cr); cr[0] = ev2_r; svc_thread(0x16, cr);
+        cr[0] = ev3_w; svc_thread(0x16, cr); cr[0] = ev3_r; svc_thread(0x16, cr);
+    }
+    {
+        _Atomic uint32_t words[3] = {1, 1, 1};
+        atomic_fetch_add(&poll_clock, 30000); z0 = backoffs();
+        for (int i = 0; i < 300; i++) {
+            uint64_t ar[32] = {(uint64_t)&words[i % 3], 2, 1, 0};
+            svc_thread(0x34, ar); assert(ar[0] == R_TIMEOUT);
+            atomic_fetch_add(&poll_clock, 10000);
+        }
+        assert(backoffs() == z0);
+    }
+    {
+        atomic_store(&addr_word, 1);
+        atomic_fetch_add(&poll_clock, 30000); z0 = backoffs();
+        for (int i = 0; i < 300; i++) {
+            uint64_t ar[32] = {(uint64_t)&addr_word, 2, 1, 0};
+            ar[30] = 0x100000ull + (uint64_t)(i % 3) * 0x100ull;
+            svc_thread(0x34, ar); assert(ar[0] == R_TIMEOUT);
+            atomic_fetch_add(&poll_clock, 10000);
+        }
+        assert(backoffs() == z0);
+    }
+    {
+        // Alternating addr_poll(1) and SleepThread(0) with identical x19-x28 still backs off via the two-slot history
+        atomic_store(&addr_word, 1);
+        atomic_fetch_add(&poll_clock, 30000); z0 = backoffs();
+        for (int i = 0; i < 202; i++) {
+            assert(addr_poll(1) == R_TIMEOUT);
+            uint64_t yr[32] = {0}; svc_thread(0x0B, yr);
+            atomic_fetch_add(&poll_clock, 10000);
+        }
+        assert(backoffs() > z0);
+    }
+    puts("PASS: zero-timeout tries across distinct targets or call sites never back off, while alternating wait+yield with identical registers still does");
+
     r[0] = ev_w; svc_thread(0x16, r); r[0] = ev_r; svc_thread(0x16, r);
     return 0;
 }

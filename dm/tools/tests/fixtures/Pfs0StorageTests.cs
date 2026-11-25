@@ -4,14 +4,18 @@ using System.Linq;
 using System.Text;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 using Path = System.IO.Path;
 using LibHac.Common;
+using LibHac.Common.Keys;
 using LibHac.Fs;
 using LibHac.Fs.Fsa;
 using LibHac.FsSystem;
 using LibHac.Tools.Fs;
 using LibHac.Tools.FsSystem;
+using LibHac.Tools.FsSystem.NcaUtils;
 using LibHac.Tools.FsSystem.RomFs;
+using NcaFsHeader = LibHac.Tools.FsSystem.NcaUtils.NcaFsHeader;
 
 class Pfs0StorageTests {
     static void Check(bool ok) { if (!ok) throw new Exception("PFS0 storage check failed"); }
@@ -101,6 +105,121 @@ class Pfs0StorageTests {
         string expectedHex = Convert.ToHexString(payload).ToLowerInvariant();
         Check(File.ReadAllText(manifest).Contains($"/D:/sample\t{payload.Length}\t{expectedHex}"));
     }
+    static byte[] SyntheticRomFsHeader(bool patch, int encEntries = 0, byte[] ivfc = null) {
+        byte[] h = new byte[0x200];
+        BinaryPrimitives.WriteInt16LittleEndian(h.AsSpan(0x00), 2);
+        h[0x02] = (byte)NcaFormatType.Romfs;
+        h[0x03] = (byte)NcaHashType.Ivfc;
+        h[0x04] = (byte)(patch ? NcaEncryptionType.AesCtrEx : NcaEncryptionType.AesCtr);
+        if (ivfc != null) ivfc.CopyTo(h, 0x08);
+        else {
+            "IVFC"u8.CopyTo(h.AsSpan(0x08));
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x0C), 0x20000);
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x10), 0x20);
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x14), 7);
+            for (int i = 0x18; i < 0x100; i++) h[i] = (byte)(i ^ 0x5A);
+        }
+        if (patch) {
+            BinaryPrimitives.WriteInt64LittleEndian(h.AsSpan(0x100), 0x4000);   // RelocationTreeOffset
+            BinaryPrimitives.WriteInt64LittleEndian(h.AsSpan(0x108), 0x4000);   // RelocationTreeSize (> 0 => IsPatchSection)
+            "BKTR"u8.CopyTo(h.AsSpan(0x110));
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x114), 1);
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x118), 1);
+            BinaryPrimitives.WriteInt64LittleEndian(h.AsSpan(0x120), 0x8000);   // EncryptionTreeOffset
+            BinaryPrimitives.WriteInt64LittleEndian(h.AsSpan(0x128), 0);        // EncryptionTreeSize
+            "BKTR"u8.CopyTo(h.AsSpan(0x130));
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x134), 1);
+            BinaryPrimitives.WriteInt32LittleEndian(h.AsSpan(0x138), encEntries);
+        }
+        return h;
+    }
+    static Nca SyntheticProgramNca(KeySet ks, byte[] dataFsHeader, bool includeData = true, bool tamperFsHash = false) {
+        const int bodySize = 0xC000;
+        byte[] nca = new byte[0xC00 + bodySize];
+        "NCA3"u8.CopyTo(nca.AsSpan(0x200));
+        nca[0x205] = (byte)NcaContentType.Program;
+        BinaryPrimitives.WriteInt64LittleEndian(nca.AsSpan(0x208), nca.Length);
+        BinaryPrimitives.WriteUInt64LittleEndian(nca.AsSpan(0x210), 0x0100000000001000UL);
+        if (includeData) {
+            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x10), 0xC00 / 0x200);
+            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x14), nca.Length / 0x200);
+            byte[] hash = SHA256.HashData(dataFsHeader);
+            if (tamperFsHash) hash[0] ^= 0xFF;
+            hash.CopyTo(nca, 0x280 + 0x20);
+            dataFsHeader.CopyTo(nca, 0x400 + 0x200);
+        }
+        byte[] plainHeader = nca[..0xC00];
+        using (var xts = new Aes128XtsStorage(new SubStorage(new MemoryStorage(nca), 0, 0xC00), ks.HeaderKey, 0x200, true, decryptRead: true))
+            for (int off = 0; off < 0xC00; off += 0x200) xts.Write(off, plainHeader.AsSpan(off, 0x200)).ThrowIfFailure();
+        return new Nca(ks, new MemoryStorage(nca));
+    }
+    static void CheckPatchKeepsData() {
+        // Synthetic dummy keys only (no game keys or data). Encrypting the NCA3 header exercises
+        // LibHac's real OpenStorageWithPatch -> OpenAesCtrExStorage -> Aes128CtrExStorage path.
+        var ks = new KeySet();
+        ks.HeaderKey.Data[0] = 1;
+        ks.KeyAreaKeys[0][0].Data[0] = 1;
+        byte[] baseFs = SyntheticRomFsHeader(patch: false);
+        byte[] ivfc = baseFs[0x08..0x100];
+        byte[] updFs = SyntheticRomFsHeader(patch: true, encEntries: 0, ivfc: ivfc);
+        Nca baseNca = SyntheticProgramNca(ks, baseFs);
+        Nca updNca = SyntheticProgramNca(ks, updFs);
+
+        // Reproduce LibHac 0.19's ResultFsInvalidArgument (2002-6001) on an empty AES-CTR-Ex table.
+        bool sawInvalidArg = false;
+        try { baseNca.OpenStorageWithPatch(updNca, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid); }
+        catch (LibHac.Common.HorizonResultException e) { sawInvalidArg = ResultFs.InvalidArgument.Includes(e.ResultValue); }
+        Check(sawInvalidArg);
+
+        // Matching IVFC + empty AES-CTR-Ex RomFS patch is accepted.
+        Check(P.PatchKeepsData(baseNca, updNca));
+
+        // Non-empty or negative AES-CTR-Ex entry count must stay on the normal patch path.
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, SyntheticRomFsHeader(patch: true, encEntries: 1, ivfc: ivfc))));
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, SyntheticRomFsHeader(patch: true, encEntries: -1, ivfc: ivfc))));
+
+        // Invalid encryption tree header magic is rejected.
+        byte[] badMagic = (byte[])updFs.Clone(); badMagic[0x130] = (byte)'X';
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, badMagic)));
+
+        // Any 1-byte difference in IVFC levels, salt, or master hash is rejected.
+        foreach (int pos in new[] { 0x20, 0xA0, 0xF0 }) {
+            byte[] diffIvfc = (byte[])updFs.Clone(); diffIvfc[pos] ^= 1;
+            Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, diffIvfc)));
+        }
+
+        // Non-patch update, non-AesCtrEx update, wrong format/hash type, or bad IVFC magic are rejected.
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, SyntheticRomFsHeader(patch: false, ivfc: ivfc))));
+        byte[] nonCtrEx = (byte[])updFs.Clone(); nonCtrEx[0x04] = (byte)NcaEncryptionType.AesCtr;
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, nonCtrEx)));
+        byte[] pfs0Upd = (byte[])updFs.Clone(); pfs0Upd[0x02] = (byte)NcaFormatType.Pfs0;
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, pfs0Upd)));
+        byte[] shaUpd = (byte[])updFs.Clone(); shaUpd[0x03] = (byte)NcaHashType.Sha256;
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, shaUpd)));
+        byte[] badIvfcBase = (byte[])baseFs.Clone(), badIvfcUpd = (byte[])updFs.Clone();
+        badIvfcBase[0x08] = (byte)'X'; badIvfcUpd[0x08] = (byte)'X';
+        Check(!P.PatchKeepsData(SyntheticProgramNca(ks, badIvfcBase), SyntheticProgramNca(ks, badIvfcUpd)));
+
+        // Sparse or compressed layers on either NCA are rejected.
+        byte[] sparseBase = (byte[])baseFs.Clone(); new NcaFsHeader(sparseBase).GetSparseInfo().Generation = 1;
+        Check(!P.PatchKeepsData(SyntheticProgramNca(ks, sparseBase), updNca));
+        byte[] sparseUpd = (byte[])updFs.Clone(); new NcaFsHeader(sparseUpd).GetSparseInfo().Generation = 1;
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, sparseUpd)));
+        byte[] compBase = (byte[])baseFs.Clone();
+        ref var cbi = ref new NcaFsHeader(compBase).GetCompressionInfo(); cbi.TableOffset = 0x1000; cbi.TableSize = 0x4000;
+        Check(!P.PatchKeepsData(SyntheticProgramNca(ks, compBase), updNca));
+        byte[] compUpd = (byte[])updFs.Clone();
+        ref var ci = ref new NcaFsHeader(compUpd).GetCompressionInfo(); ci.TableOffset = 0x1000; ci.TableSize = 0x4000;
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, compUpd)));
+
+        // Missing data sections are rejected; tampered FS header hash fails closed.
+        Check(!P.PatchKeepsData(SyntheticProgramNca(ks, baseFs, includeData: false), updNca));
+        Check(!P.PatchKeepsData(baseNca, SyntheticProgramNca(ks, updFs, includeData: false)));
+        bool sawTamper = false;
+        try { P.PatchKeepsData(SyntheticProgramNca(ks, baseFs, tamperFsHash: true), updNca); }
+        catch (InvalidDataException) { sawTamper = true; }
+        Check(sawTamper);
+    }
     static void Main() {
         ReadPackage(true); ReadPackage(false);
         byte[] empty = new byte[16]; "PFS0"u8.CopyTo(empty);
@@ -149,6 +268,7 @@ class Pfs0StorageTests {
                 }
             }
             CheckLiteralRomFsModes(tmp);
+            CheckPatchKeepsData();
         } finally { Console.SetOut(saved); Directory.Delete(tmp, true); }
         Console.WriteLine("PFS0 storage checks passed");
     }

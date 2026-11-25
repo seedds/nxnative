@@ -4,8 +4,11 @@ Exercise the builder's real key/restore functions without game files or Xcode.
 import ast
 import collections
 import concurrent.futures as cf
+import contextlib
+import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import Any
 import unittest
@@ -41,12 +45,12 @@ class ShaderCache(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        self.ns: dict[str, Any] = dict(hashlib=hashlib, os=os, json=json, re=re, threading=threading,
+        self.ns: dict[str, Any] = dict(hashlib=hashlib, os=os, errno=errno, sys=sys, json=json, re=re, threading=threading,
                        subprocess=subprocess, dmsh_chain=dmsh_chain, SPIRV_CROSS='converter',
                        XC=['--msl'], MAC_RECORD='mac flags', IOSOUT=None, TARGETS={'mac'},
                        ios_metal=types.SimpleNamespace(RECORD='ios flags'), METAL_FP='tested Metal and SDK',
                        FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, CODE_FP='source', PROFILE_ROWS=b'', PAIRS={},
-                       DUAL_WANT=set(), BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
+                       BF_WANT=set(), STORE=shader_cache.Store(root / 'cas.db'), out=str(root / 'out'),
                        CHAIN='test-chain', clone=shutil.copyfile, shader_rule_source=lambda name: b'',
                        STAGE='stage/test', want=set(), OUT_KEY=re.compile(r'([0-9a-f]{16})_b'), OLD_IMAGE={}, shader_lib=shader_lib, romfs=romfs, shutil=shutil,
                        STAMP_BEFORE=None, INPUTS='inputs', dmsh_rt_compile=dmsh_rt_compile, RT_KEYS=set())
@@ -81,42 +85,6 @@ class ShaderCache(unittest.TestCase):
                 self.assertTrue(self.ns['restore_cache']('key', old))
                 self.ns['METAL_FP'] = 'tested Metal and SDK'
                 self.assertFalse(self.ns['restore_cache']('key', self.digest()))
-
-    def test_dual_source_membership_change_rejects_cached_library(self):
-        for ios in (False, True):
-            for listed in (False, True):
-                with self.subTest(ios=ios, listed=listed):
-                    self.ns['STORE'] = shader_cache.Store(Path(self.tmp.name) / f'cas-{ios}-{listed}.db')
-                    self.ns['IOSOUT'] = str(Path(self.tmp.name) / 'ios') if ios else None
-                    self.ns['TARGETS'] = {'mac', 'ios'} if ios else {'mac'}
-                    self.ns['DUAL_WANT'] = {'key'} if listed else set()
-                    old = self.digest()
-                    reflection = {'stage': 'ps', 'entry_d': 'main0_d' if listed else None}
-                    for directory in (self.ns['out'], self.ns['IOSOUT']) if ios else (self.ns['out'],):
-                        assert directory is not None
-                        output = Path(directory); output.mkdir(exist_ok=True)
-                        (output / 'key_b.metal').write_text('synthetic MSL')
-                        (output / 'key_b.metallib').write_bytes(b'dual' if listed else b'ordinary')
-                        (output / 'key_b.json').write_text(json.dumps(reflection))
-                    self.ns['publish_cache']('key', old, 'rule', 'source')
-                    self.assertTrue(self.ns['restore_cache']('key', old))
-                    self.assertEqual(json.loads((Path(self.ns['out']) / 'key_b.json').read_text())['entry_d'],
-                                     reflection['entry_d'])
-                    self.ns['DUAL_WANT'] = set() if listed else {'key'}
-                    self.assertFalse(self.ns['restore_cache']('key', self.digest()),
-                                     'a membership change must not restore the opposite entry-point variant')
-
-    def test_unrelated_dual_source_changes_preserve_shader_key(self):
-        original = self.digest()
-        self.ns['DUAL_WANT'] = {'another-pixel'}
-        self.assertEqual(self.digest(), original)
-        self.ns['DUAL_WANT'] = {'key'}
-        listed = self.digest()
-        self.assertNotEqual(listed, original)
-        self.ns['DUAL_WANT'] = {'another-pixel', 'key'}
-        self.assertEqual(self.digest(), listed)
-        self.ns['DUAL_WANT'] = set()
-        self.assertEqual(self.digest(), original)
 
     def test_unchanged_compiler_reuses_key(self):
         self.assertEqual(self.digest(), self.digest())
@@ -301,6 +269,75 @@ class ShaderCache(unittest.TestCase):
         self.assertEqual((out / (key + '_b.metal')).read_text(), 'source')
         self.assertFalse(os.path.exists(shader_lib.image_of(str(out))))
 
+    def test_full_disk_during_full_publish_skips_folder_unpack_unlinks_stamp_and_exits_once(self):
+        out, key = Path(self.ns['out']), '1' * 16
+        (out / (key + '_b.metal')).write_text('source')
+        self.ns['commit'](key)
+        (out / dmsh_chain.STAMP).write_text('game\tid\ninputs\tinputs\n')
+        store = self.ns['STORE']
+        for name, data in ((key + '_b.metal', b'source'), (key + '_b.json', b'{"chain":"old"}'), (key + '_b.metallib', b'compiled')):
+            store.put(f'shader/d/mac/{name}', data)
+        self.ns['shader_lib'] = types.SimpleNamespace(image_of=shader_lib.image_of, write=mock.Mock(side_effect=OSError(errno.ENOSPC, 'No space left on device')))
+        output = io.StringIO()
+        with mock.patch.object(store, 'to_file') as to_file, contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised: self.ns['publish_library']('mac')
+        to_file.assert_not_called()
+        self.assertEqual(output.getvalue(), '')
+        self.assertNotEqual(raised.exception.code, 0)
+        self.assertEqual(str(raised.exception.code).count('[RED]'), 1)
+        self.assertIn(shader_lib.image_of(str(out)), str(raised.exception.code))
+        self.assertIn('No space left on device', str(raised.exception.code))
+        self.assertIn('free space on the drive and build again', str(raised.exception.code))
+        self.assertFalse((out / dmsh_chain.STAMP).exists())
+        self.assertFalse((out / (key + '_b.metal')).exists())
+        self.assertEqual(store.get(f'stage/test/mac/{key}_b.metal'), b'source')
+        store.delete_prefix('stage/test/')
+        self.assertTrue(self.ns['restore_cache'](key, 'd'))
+        self.assertEqual((out / (key + '_b.metallib')).read_bytes(), b'compiled')
+
+    def test_partial_build_enospc_restores_staged_files_into_folder(self):
+        out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
+        shader_lib.write({kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\tinputs\n'}, shader_lib.image_of(str(out)))
+        self.ns.update(want={built}, OLD_IMAGE={'mac': romfs.Path(shader_lib.image_of(str(out)))}, STAMP_BEFORE='inputs', INPUTS='inputs')
+        (out / (built + '_b.metal')).write_text('new'); self.ns['commit'](built)
+        self.ns['shader_lib'] = types.SimpleNamespace(image_of=shader_lib.image_of, write=mock.Mock(side_effect=OSError(errno.ENOSPC, 'No space left on device')))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): self.ns['publish_library']('mac')
+        self.assertEqual(output.getvalue().count('[RED]'), 1)
+        self.assertEqual((out / (built + '_b.metal')).read_text(), 'new')
+
+    def test_failed_folder_restore_cleans_written_files_keeps_disk_files_and_exits_once(self):
+        out, a, b, disk = Path(self.ns['out']), '1' * 16, '2' * 16, '3' * 16
+        for key in (a, b):
+            (out / (key + '_b.metal')).write_text(key); self.ns['commit'](key)
+        store = self.ns['STORE']; store.full = True
+        (out / (disk + '_b.metal')).write_text('on disk only')
+        (out / dmsh_chain.STAMP).write_text('game\tid\ninputs\tinputs\n')
+        self.ns['shader_lib'] = types.SimpleNamespace(image_of=shader_lib.image_of, write=mock.Mock(side_effect=OSError(errno.ENOSPC, 'No space left on device')))
+        real_to_file = store.to_file; calls = 0
+        def fail_second(name, path):
+            nonlocal calls; calls += 1
+            if calls == 2: raise OSError(errno.ENOSPC, 'No space left on device')
+            return real_to_file(name, path)
+        output = io.StringIO()
+        with mock.patch.object(store, 'to_file', side_effect=fail_second), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised: self.ns['publish_library']('mac')
+        self.assertEqual(output.getvalue(), '')
+        self.assertEqual(str(raised.exception.code).count('[RED]'), 1)
+        self.assertIn('shader cache filled up earlier', str(raised.exception.code))
+        self.assertIn('free space on the drive and build again', str(raised.exception.code))
+        self.assertEqual(sorted(p.name for p in out.iterdir()), [disk + '_b.metal'])   # newly restored file and stamp are gone; pre-existing disk file stays
+
+    def test_full_disk_with_no_staged_files_keeps_folder_as_is(self):
+        out, key = Path(self.ns['out']), '1' * 16
+        self.ns['STORE'].full = True
+        (out / (key + '_b.metal')).write_text('on disk'); (out / dmsh_chain.STAMP).write_text('game\tid\ninputs\tinputs\n')
+        self.ns['shader_lib'] = types.SimpleNamespace(image_of=shader_lib.image_of, write=mock.Mock(side_effect=OSError(errno.ENOSPC, 'No space left on device')))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output): self.ns['publish_library']('mac')
+        self.assertEqual(output.getvalue().count('[RED]'), 1)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted([key + '_b.metal', dmsh_chain.STAMP]))
+
 
 class TargetSelection(unittest.TestCase):
     def test_mesh_compiles_only_requested_targets(self):
@@ -373,6 +410,16 @@ class StageCache(unittest.TestCase):
         before = self.key(env)
         self.assertNotEqual(before, self.key(env, version='override Metal'))
         self.assertNotEqual(before, self.key(env, sdk='different SDK build'))
+
+    def test_metal_remount_preserves_reuse(self):   # Xcode 26+ mounts the Metal toolchain cryptex at a boot-random path reported in InstalledDir:
+        mnt = '/private/var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v27.2.47.0.'
+        def version(suffix, ver='32023.922'):
+            return (f'Apple metal version {ver} (metalfe-{ver}.4)\nTarget: air64-apple-darwin27.0.0\nThread model: posix\n'
+                    f'InstalledDir: {mnt}{suffix}/Metal.xctoolchain/usr/metal/current/bin\n')
+        env = dict(os.environ)
+        first = self.key(env, version=version('em8TI5'))
+        self.assertEqual(first, self.key(env, version=version('Xq3ZpA')))
+        self.assertNotEqual(first, self.key(env, version=version('em8TI5', '32023.950')))
 
 
 class MetalPrefill(unittest.TestCase):
@@ -511,6 +558,114 @@ class MetalPrefill(unittest.TestCase):
         with self.assertRaises(ValueError): self.cache.compile_split('mac', str(msl), [str(a), str(b)], lambda lib: (lib,))   # fewer pieces than libraries
         self.assertEqual(sorted(p.name for p in self.root.glob('a.metallib*')), [])
         self.assertFalse(b.exists()); self.assertEqual(self.cache.stats['mac', 'compiled'], 0)
+
+
+class BuildProgress(unittest.TestCase):
+    """dmsh_build.py's DMSH_PROGRESS reporting through ShaderWatch: throttling, final flush, mesh pairs, single/dual library images, and table steps."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.tree = ast.parse((TOOLS / 'dmsh_build.py').read_text())
+
+    def load_progress(self, progress_path):
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_prog' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.FunctionDef) and n.name == 'progress') + 1
+        ns: dict[str, Any] = dict(os=os, json=json, time=time, threading=threading, PROGRESS=str(progress_path))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return ns
+
+    def test_progress_throttles_same_step_and_flushes_step_change_or_force(self):
+        prog = self.root / 'progress.json'
+        ns = self.load_progress(prog)
+        now = [100.0]
+        ns['time'] = types.SimpleNamespace(time=lambda: now[0])
+        ns['progress']('compiling', 1, 10, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 1)
+        now[0] = 100.1
+        ns['progress']('compiling', 2, 10, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 1)   # within 0.5 s for the same step
+        ns['progress']('compiling', 10, 10, force=True, cached=10, misses=0)
+        self.assertEqual(json.loads(prog.read_text())['done'], 10)   # forced final count flushes immediately
+        ns['progress']('c1 guard')
+        self.assertEqual(json.loads(prog.read_text()), {'step': 'c1 guard'})   # step change flushes without waiting 0.5 s
+
+    def test_finished_flushes_final_count_and_mesh_reports_pairs(self):
+        prog = self.root / 'progress.json'
+        ns = self.load_progress(prog)
+        watch = nsp.ShaderWatch(prog)
+        seen = []
+        orig = ns['progress']
+        def record(*a, **kw):
+            orig(*a, **kw)
+            w = watch()
+            if w is not None: seen.append(w)
+        ns['progress'] = record
+        fn: ast.stmt = next(n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name == 'finished')
+        ns.update(DONE=collections.Counter(), keys=['a', 'b'], cache_hits={'a', 'b'}, NMISS=0)
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        ns['finished'](); ns['finished']()
+        self.assertEqual(seen[-1], {'step': 'compiling', 'done': 2, 'total': 2, 'unit': 'shaders', 'note': ''})
+        seen.clear()
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_mesh' for t in n.targets))
+        end = next(i for i, n in enumerate(self.tree.body) if i > start and isinstance(n, ast.If)) + 1
+        ns.update(cf=cf, NJ=2, GAME=None, dm_dir='', mesh_finish=lambda pair: None,
+                  dmsh_chain=types.SimpleNamespace(mesh_pairs=lambda g, d: {('v1', 'g1'), ('v2', 'g2')}, asked_mesh_pairs=lambda g: set()))
+        exec(compile(ast.Module(body=self.tree.body[start:end], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        self.assertEqual(seen[0], {'step': 'compiling mesh libraries', 'done': 0, 'total': 2, 'unit': 'pairs'})
+        self.assertEqual(seen[-1], {'step': 'compiling mesh libraries', 'done': 2, 'total': 2, 'unit': 'pairs'})
+
+    def run_tail(self, *, ios=False, want=()):
+        prog = self.root / f'progress-{"ios" if ios else "mac"}-{len(want)}.json'
+        ns = self.load_progress(prog)
+        watch = nsp.ShaderWatch(prog)
+        seen = []
+        orig = ns['progress']
+        def record(*a, **kw):
+            orig(*a, **kw)
+            w = watch()
+            if w is not None: seen.append(w)
+        ns['progress'] = record
+        mac_dir = self.root / f'mac-{"ios" if ios else "mac"}-{len(want)}'; mac_dir.mkdir()
+        (mac_dir / '0000000000000001_b.metal').write_bytes(b'msl' * 100)
+        ios_dir = self.root / f'ios-{len(want)}'
+        if ios:
+            ios_dir.mkdir()
+            (ios_dir / '0000000000000001_b.metallib').write_bytes(b'lib' * 100)
+        names = {'label_dir', 'publish_library', 'owned_output'}
+        funcs: list[ast.stmt] = [n for n in self.tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        store = shader_cache.Store(self.root / f'cas-{"ios" if ios else "mac"}-{len(want)}.db')
+        self.addCleanup(store.close)
+        ns.update(
+            os=os, sys=sys, errno=errno, re=re, shutil=shutil, shader_lib=shader_lib, dmsh_chain=dmsh_chain,
+            STORE=store, STAGE='stage/test', OLD_IMAGE={}, OUT_KEY=re.compile(r'([0-9a-f]{16})_b'),
+            out=str(mac_dir), IOSOUT=str(ios_dir) if ios else None, want=set(want),
+            GAME=types.SimpleNamespace(id='0100000000000000', table=lambda n: self.root / n),
+            INPUTS='aaaaaaaaaaaa', STAMP_BEFORE='aaaaaaaaaaaa', __file__=str(TOOLS / 'dmsh_build.py'),
+            subprocess=types.SimpleNamespace(run=lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, 'ok\n', '')),
+        )
+        exec(compile(ast.Module(body=funcs, type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        start = next(i for i, n in enumerate(self.tree.body) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '_img_labels' for t in n.targets))
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(ast.Module(body=self.tree.body[start:], type_ignores=[]), str(TOOLS / 'dmsh_build.py'), 'exec'), ns)
+        return seen, prog.exists()
+
+    def test_tail_progress_single_dual_and_partial_builds(self):
+        mac_seen, mac_left = self.run_tail(ios=False, want=())
+        self.assertFalse(mac_left)
+        mac_steps = list(dict.fromkeys(e['step'] for e in mac_seen))
+        self.assertEqual(mac_steps, ['writing the library image', 'c1 guard', 'uniform read extents'])
+        mac_img = [e for e in mac_seen if e['step'] == 'writing the library image']
+        self.assertEqual((mac_img[0]['done'], mac_img[-1]['done'], mac_img[-1]['total'], mac_img[-1]['unit']), (0, 2, 2, 'files'))
+        self.assertIn('note', mac_img[-1])
+
+        ios_seen, ios_left = self.run_tail(ios=True, want=())
+        self.assertFalse(ios_left)
+        ios_steps = list(dict.fromkeys(e['step'] for e in ios_seen))
+        self.assertEqual(ios_steps, ['writing the Mac library image', 'writing the iOS library image', 'c1 guard', 'uniform read extents'])
+
+        partial_seen, partial_left = self.run_tail(ios=False, want=('0000000000000001',))
+        self.assertFalse(partial_left)
+        self.assertEqual(list(dict.fromkeys(e['step'] for e in partial_seen)), ['writing the library image'])
 
 
 if __name__ == '__main__':

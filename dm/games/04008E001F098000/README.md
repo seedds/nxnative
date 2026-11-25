@@ -25,7 +25,7 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 ## Shaders
 
 - 11,057 shaders (`Nin_Ounce_NVN2` BNSH and BAHS) in [`shader_map.tsv`](shader_map.tsv). A full Mac build takes about 9 minutes on the M6 and 4:46 for a second one.
-- 6 are refused (4 task, 2 mesh shaders of the sea, agl `AnnaSea`): their task payloads (21-28 KB) are past Metal's 16 KB ([issue #1753](https://github.com/seedds/nxnative/issues/1753); FifteenPen's [PR #2264](https://github.com/seedds/nxnative/pull/2264) passes them through a device buffer). No draw has been seen to use them.
+- 6 sea shaders (4 task, 2 mesh of agl `AnnaSea`, plus 2 mesh shaders whose 21 KB payloads exceeded Metal's 16 KB limit) now build through the device-buffer payload spill ([A task shader's payload past Metal's 16 KB](../../../docs/reference/shaders.md#a-task-shaders-payload-past-metals-16-kb)); all 11,057 shaders build. No draw has been seen to use them in play yet.
 - 612 pixel shaders read the fragment's shading-rate size; until it read 1 x 1 the sea and the avatars' hair and clothes were black ([The fragment's shading-rate size reads 1 x 1](../../../docs/reference/shaders.md#the-fragments-shading-rate-size-reads-1-x-1)).
 - [`pso_manifest.tsv`](pso_manifest.tsv) is this Mac's own list (3,474 shaders, 1,868 render, 41 compute and 22 task / mesh pipelines): a first start, the menus and a doubles match. The pull requests' lists were recorded by an older host: none of their render or mesh pipeline keys matches the current one's.
 
@@ -33,6 +33,7 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 
 - **Render conditions.** Drawn unconditionally (as the host did for games without the profile key `render_cond`, before it evaluated them for every game), Select User's background is grey instead of the court and the outfits are black, in the menus only. FifteenPen measured why the outfits are black: their material shader `c30f0edd6c669a61` reads R and A of a screen-space shadow target that the menu blurs under a channel mask of G and B, and both read 0 there. Evaluated, the background and the outfits are right, on the same route from the same save (A/B, 2026-11-12) ([Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)). FifteenPen's [PR #2273](https://github.com/seedds/nxnative/pull/2273), a clear under a partial channel mask that keeps the other channels, is not needed with it. What a console does with a clear under a channel mask is not known: the game's `nvnCommandBufferClearColor` (`sdk+0x652380`) jumps through a pointer the system's NVN driver fills, so the game's files do not show it.
 - agl's upscaler packs its input into an RGB9E5 texture through an R32_UI render-target view; drawn in the base format the picture was solid red ([A render-target view of another class](../../../docs/reference/rendering.md#a-render-target-view-of-another-class-the-texture-is-upgraded-not-drawn-in-its-base-format)).
+- Docked the game's output is 2560x1440. Shown smaller (fullscreen on a 1080p screen, a 1280x720 window) it had stair-stepped, uneven edges that crawled as they moved, more than the game's own frame shows: the present took one bilinear tap a pixel. It is now filtered over each pixel's footprint with a separable tent filter ([A picture shown smaller than it is drawn](../../../docs/reference/rendering.md#a-picture-shown-smaller-than-it-is-drawn-stair-stepped-edges-from-the-presents-single-tap)).
 - `[RED] texture type mismatch` for shader `7309860342dd3b14_b` (a 2D texture declared where a 2D array is bound), once in a match; its effect is not checked.
 
 ## Frame rate
@@ -71,7 +72,7 @@ Raw-pointer discovery validation (2026-11-17, Apple M6, macOS 27.2): main `2925d
 - A point played on the Mac in this tree (needs a motion controller, or scripted moves that serve).
 - Sports other than tennis.
 - Mii heads need the player's own console files: without the system data the game mounts as `MiiResource` (`0400000000000849`) the host's stand-in for it draws none ([Miis](#miis)). With that archive and the console's Mii database under `DM_SYSTEM_DIR` ([A console's own Mii database and system data](../../../docs/reference/services.md#a-consoles-own-mii-database-and-system-data)) it lists the player's Miis and draws their heads (FifteenPen, PR #2274, M4 Pro); not run in this tree, which has no console files.
-- The 6 refused mesh shaders, above.
+- The 6 sea task/mesh shaders build through the payload spill, but no play session has exercised a draw with them yet.
 - iPhone and iPad: no IPA built.
 - A crash in the game's own code after 862 s of play with the Joy-Cons: `CRASH sig=11 addr=0xc pc=main+0x1cdcfb4 lr=main+0x1cd2e68` (a null store; the host's own threads were fine, and the controllers streamed up to it). Not reproduced, and not known whether the motion path had anything to do with it.
 
@@ -87,7 +88,9 @@ Raw-pointer discovery validation (2026-11-17, Apple M6, macOS 27.2): main `2925d
 - [Home button protection on a Switch 2 controller](../../../docs/reference/services.md#home-button-protection-on-a-switch-2-controller)
 - [The Switch 2's Mii model archive](../../../docs/reference/services.md#the-switch-2s-mii-model-archive) and [A Mii part the stand-in leaves out](../../../docs/reference/services.md#a-mii-part-the-stand-in-leaves-out)
 - [The fragment's shading-rate size reads 1 x 1](../../../docs/reference/shaders.md#the-fragments-shading-rate-size-reads-1-x-1)
+- [A task shader's payload past Metal's 16 KB](../../../docs/reference/shaders.md#a-task-shaders-payload-past-metals-16-kb)
 - [A render-target view of another class: the texture is upgraded, not drawn in its base format](../../../docs/reference/rendering.md#a-render-target-view-of-another-class-the-texture-is-upgraded-not-drawn-in-its-base-format)
+- [A picture shown smaller than it is drawn: stair-stepped edges from the present's single tap](../../../docs/reference/rendering.md#a-picture-shown-smaller-than-it-is-drawn-stair-stepped-edges-from-the-presents-single-tap)
 - [Conditional rendering evaluated at replay](../../../docs/reference/rendering.md#conditional-rendering-evaluated-at-replay)
 - [The GPU's wait for the host's translation between submissions](../../../docs/reference/frame-rate.md#the-gpus-wait-for-the-hosts-translation-between-submissions)
 - [Tests of one uniform word folded into switches](../../../docs/reference/shaders.md#tests-of-one-uniform-word-folded-into-switches) and [Specialized second functions in the offline pipeline archive](../../../docs/reference/shaders.md#specialized-second-functions-in-the-offline-pipeline-archive)

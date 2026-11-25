@@ -1,0 +1,41 @@
+# Apollo Justice: Ace Attorney Trilogy 1.0.1, Nintendo SDK 15.3.2, Capcom's RE Engine on NVN.
+
+# ---- Identity ----
+title_id	010020D01B890000
+program_id	010020D01B890000
+
+# ---- App ----
+name	Apollo Justice: Ace Attorney Trilogy
+ipa	ApolloJusticeAceAttorneyTrilogy.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=f1a7e0db6b0ec65f73d6cddfeb50e920	subsdk0=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# subsdk0 is NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	re_chunk_000.pak
+zip_store	.pak:.metallib
+
+# ---- Memory ----
+# The 3.14 GiB heap request fits the 3.25 GiB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares zero system resource memory.
+sys_resource	0x0
+
+# ---- NVN ----
+# Match the depth mode observed at device initialization for offline pipelines.
+depth_mode	zero
+
+# RE Engine MaxFps is discovered from the timing loop and its accessors.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	re_chunk=sdf
+shader_note	Apollo Justice: Ace Attorney Trilogy shaders

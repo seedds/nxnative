@@ -229,10 +229,12 @@ int main(int argc, char **argv) {
     cloud_saves_folder();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);
+    snprintf(p, sizeof p, "%s/Pictures/nxnative/%s", home, id); setenv("DM_ALBUM_DIR", p, 0);   // local album screenshots (hle_album.c); created lazily on first save
     snprintf(p, sizeof p, "%s/Library/Application Support/nxnative/system", home); setenv("DM_SYSTEM_DIR", p, 0);   // the player's own console files, for every game
     snprintf(p, sizeof p, "%s/msl", res); setenv("DM_MSL_DIR", p, 0);
     snprintf(p, sizeof p, "%s/font", dm); setenv("DM_FONT_DIR", p, 0);
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
+    snprintf(p, sizeof p, "%s/shader_missing.txt", sup); setenv("DM_NVN_MISSING_KEYS", p, 0);   // the shaders this app's library lacked, for the next --seen-shaders build: a log is gone after two more starts (nvn_mtl.m shader_missing_note)
     snprintf(p, sizeof p, "%s/nvn-compiler/python/bin/python3", res);
     if (!access(p, X_OK)) {
         setenv("DM_NVN_RUNTIME_PYTHON", p, 0);

@@ -6,8 +6,9 @@ pools (74 of 512 MB), which an iPhone cannot give.
 The chain, each link unique or nothing is cut:
 - the allocator's name, the UTF-16 string "Binned3" (TEXT("Binned3"); it starts a string), in ro;
 - its getter, GetDescriptiveName: adrp x0 + add x0 of the string, then ret;
-- the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to two words of 0 (offset to top, no RTTI). The getter's
-  slot number names the slot layout: 19 for Unreal Engine 4.26 and 4.27, 22 for UE 5, 26 for UE 5.6 (hle_uemalloc.c); any other stops the chain with a [RED] line;
+- the one data word holding the getter (the module's relative relocations applied), a slot of the vtable: the slots run back to a zero offset to top and either no RTTI or
+  the typeinfo for FMallocBinned3. The getter's slot number names the slot layout: 19 for Unreal Engine 4.26 and 4.27, 22 for UE 5, 26 for UE 5.5 / 5.6 (hle_uemalloc.c);
+  any other stops the chain with a [RED] line;
 - the constructor: the one function other than the vtable's two destructors that stores the vtable's address (adrp + add, then str to [xN]);
 - its call sites, each a bl (no b to it): x0 there is the object, already made (GCreateMalloc mallocs it, or a bss object in nninitStartup). DRAGON BALL Sparking! ZERO (UE 5.1) has two,
   one lazy construction inlined twice (in nninitStartup and in a getter): if the global is null, malloc 0x1c38 bytes, construct, store; a b to it (a tail call) stops the chain, as a nop there
@@ -17,8 +18,9 @@ registered cuts. Unreal Engine 3 (Batman: Arkham Knight) inlines the constructor
 Usage on its own: ue_malloc.py <module>... (what the chain finds in each)"""
 import re, struct, sys, os
 
-LAYOUTS = {17: 'Unreal Engine 4.24', 19: 'Unreal Engine 4.26 / 4.27', 22: 'Unreal Engine 5', 26: 'Unreal Engine 5.6'}   # the getter's slot → the slot layouts of hle_uemalloc.c
+LAYOUTS = {17: 'Unreal Engine 4.24', 19: 'Unreal Engine 4.26 / 4.27', 22: 'Unreal Engine 5', 26: 'Unreal Engine 5.5 / 5.6'}   # the getter's slot → the slot layouts of hle_uemalloc.c
 NAME = 'Binned3'.encode('utf-16-le') + b'\0\0'
+TYPE_NAME = b'14FMallocBinned3\0'
 RET, NOP = 0xD65F03C0, 0xD503201F
 
 def relocated(img):
@@ -66,7 +68,16 @@ def find(img, text_end, ro_off, data_off):
     vt = slots[0]
     while vt - 8 >= data_off and is_code(value(vt - 8)): vt -= 8
     slot = (slots[0] - vt) // 8
-    if (value(vt - 16), value(vt - 8)) != (0, 0): return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: no offset to top and RTTI words of 0 before it'
+    if vt - 16 < data_off or value(vt - 16) != 0:
+        return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: no zero offset-to-top word'
+    typeinfo = value(vt - 8)
+    if typeinfo:
+        if typeinfo % 8 or not data_off <= typeinfo <= len(img) - 16:
+            return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: invalid RTTI pointer {typeinfo:#x}'
+        # Itanium typeinfo stores its mangled name immediately after its own vptr.
+        name = value(typeinfo + 8)
+        if not ro_off <= name < data_off or img[name:name + len(TYPE_NAME)] != TYPE_NAME:
+            return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: RTTI does not name FMallocBinned3'
     if slot not in LAYOUTS: return None, None, None, f'[RED] FMallocBinned3 vtable at {vt:#x}: the name getter is slot {slot}, a slot layout the host does not know'
     dtors = {value(vt), value(vt + 8)}
     # Direct calls and jumps in the text: bl (top bits 100101) and b (000101), by target

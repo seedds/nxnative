@@ -91,7 +91,24 @@ import Foundation
         let both = SaveSyncReport(line: "sync=1 cloud=1 local=\(lh) saved=1 files=1 size=1 chash=\(ch) csaved=2 cfiles=1 csize=1 cdevice=iPhone17,1 sametitle=1 conflict=1 pull=0")!
         expect(SaveSyncReport.step(both) == .choose && both.localChoice == "local:" + ch && both.cloudChoice == "cloud:" + ch, "both changed: local:<cloud's hash> and cloud:<cloud's hash>")
         let none = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=0 pull=0")!
-        expect(none.localChoice == "local:none", "no cloud save: local:none")
+        expect(SaveSyncReport.step(none) == .play("ask") && none.localChoice == "local:none", "no cloud save and never synced: ask, local:none")
+        let missing = SaveSyncReport(line: "sync=1 cloud=0 local=\(lh) saved=1 files=1 size=1 chash=- csaved=0 cfiles=0 csize=0 cdevice=- sametitle=1 conflict=1 pull=0")!
+        expect(SaveSyncReport.step(missing) == .missing && missing.localChoice == "local:none", "no cloud save though previously synced: missing, local:none")
+        // Sync-off effective-folder resolution bypasses save_sync_report in the launchers
+        expect(!SaveSyncReport.syncEnabled(nil) && !SaveSyncReport.syncEnabled("") && !SaveSyncReport.syncEnabled("0"), "nil, empty and 0 disable sync")
+        expect(SaveSyncReport.syncEnabled("/tmp/cloud") && SaveSyncReport.syncEnabled("icloud"), "a folder path or icloud enables sync")
+        unsetenv("DM_SAVE_SYNC"); unsetenv("DM_SAVE")
+        d.removeObject(forKey: "cloudSaves.folder")
+        expect(!SaveSyncReport.syncEnabled(SaveCheck.effectiveFolder(defaults: d)) && SaveCheck.withoutWindow(defaults: d), "sync off by default: effective folder is off and withoutWindow bypasses report")
+        d.set("/tmp/cloud", forKey: "cloudSaves.folder")
+        expect(SaveCheck.effectiveFolder(defaults: d) == "/tmp/cloud" && SaveSyncReport.syncEnabled(SaveCheck.effectiveFolder(defaults: d)), "saved cloudSaves.folder enables sync when DM_SAVE_SYNC is unset")
+        setenv("DM_SAVE_SYNC", "0", 1)
+        expect(SaveCheck.effectiveFolder(defaults: d) == "0" && !SaveSyncReport.syncEnabled(SaveCheck.effectiveFolder(defaults: d)) && SaveCheck.withoutWindow(defaults: d), "DM_SAVE_SYNC=0 overrides saved folder and bypasses report")
+        setenv("DM_SAVE_SYNC", "", 1)
+        expect(SaveCheck.effectiveFolder(defaults: d) == "" && !SaveSyncReport.syncEnabled(SaveCheck.effectiveFolder(defaults: d)) && SaveCheck.withoutWindow(defaults: d), "empty DM_SAVE_SYNC overrides saved folder and bypasses report")
+        setenv("DM_SAVE_SYNC", "/tmp/env-cloud", 1)
+        expect(SaveCheck.effectiveFolder(defaults: d) == "/tmp/env-cloud" && SaveSyncReport.syncEnabled(SaveCheck.effectiveFolder(defaults: d)), "DM_SAVE_SYNC path overrides saved folder")
+        unsetenv("DM_SAVE_SYNC"); d.removeObject(forKey: "cloudSaves.folder")
         failed += checkLauncherLayout(LauncherModel(mac.settings, defaults: d), defaults: d)
         print("launcher storage: \(failed) failed")
         exit(failed == 0 ? 0 : 1)

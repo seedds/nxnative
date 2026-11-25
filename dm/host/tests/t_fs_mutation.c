@@ -118,6 +118,7 @@ int main(void) {
         {"create size", CREATE, "truncate", ENOSPC, 1, "alias"},
         {"create name", CREATE, "metadata", EIO, 1, "alias"},
         {"delete", DELETE, "unlink", EACCES, 1, "alias"},
+        {"delete refused", DELETE, "unlink", EPERM, 1, "alias"},   // EPERM on a file (flags, a sticky folder) is the host's: only a directory is the guest's PathNotFound
         {"mkdir", MKDIR, "mkdir", ENOSPC, 1, "alias"},
         {"directory name", MKDIR, "metadata", EIO, 1, "alias"},
         {"rmdir", RMDIR, "rmdir", EIO, 1, "alias"},
@@ -174,6 +175,22 @@ int main(void) {
             snprintf(p, sizeof p, "%s/marker", g_mnt[0].dir); CHECK(same(p, "old"), cases[i].name);
             put(p, "recovered"); CHECK(h_fs_Commit("alias") == RES_OK && same(marker, "recovered"), cases[i].name);
         }
+        if (rm_tree(root)) abort();
+    }
+    {   // DeleteFile on a directory: Horizon finds no file there (PathNotFound) and the save still commits. Apple's unlink(2) answers EPERM for a directory, Linux EISDIR; nothing injected
+        char root[] = "/private/tmp/t_fs_mutation.XXXXXX", save[1024], p[1100], marker[1100];
+        if (!mkdtemp(root)) abort();
+        snprintf(save, sizeof save, "%s/save", root); if (mkdir(save, 0755)) abort();
+        snprintf(marker, sizeof marker, "%s/marker", save); put(marker, "old");
+        snprintf(p, sizeof p, "%s/dir", save); if (mkdir(p, 0755)) abort();
+        snprintf(p, sizeof p, "%s/dir/child", save); put(p, "child");
+        g_nmnt = 0; memset(g_mnt, 0, sizeof g_mnt); g_nfail = g_lasterr = 0;
+        CHECK(mount_ex("save", save, 0, 1) == RES_OK, "delete directory as file");
+        snprintf(p, sizeof p, "%s/marker", g_mnt[0].dir); put(p, "next");
+        CHECK(h_fs_DeleteFile("save:/dir") == RES_PATH_NOT_FOUND, "delete directory as file");
+        int32_t t = -1; CHECK(h_fs_GetEntryType(&t, "save:/dir/child") == RES_OK && t == ENT_FILE, "delete directory as file: the directory stays");
+        CHECK(h_fs_Commit("save") == RES_OK && same(marker, "next"), "delete directory as file: the save commits");
+        CHECK(g_nfail == 0, "delete directory as file: no host error recorded");
         if (rm_tree(root)) abort();
     }
     printf("t_fs_mutation: %d checks, %d failures\n", checks, failures); return failures ? 1 : 0;

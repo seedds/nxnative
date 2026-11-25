@@ -94,7 +94,7 @@ static uint64_t tf_prepare(NvShader *vs, uint64_t source_count, uint64_t order, 
     if (g_blit) { enc_b_end(g_blit);g_blit=nil; }
     id<MTLBuffer> buf;size_t off=arena_alloc(sizeof j,&buf);memcpy((uint8_t *)buf.contents+off,&j,sizeof j);
     uint64_t job=buf.gpuAddress+off;
-    id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,g_tf_prepare);enc_c_args(ce,job,0);
+    id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,g_tf_prepare);enc_c_args(ce,job,0);
     enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));enc_c_end(ce);
     return job;
 }

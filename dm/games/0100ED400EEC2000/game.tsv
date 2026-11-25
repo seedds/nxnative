@@ -1,0 +1,37 @@
+# STORY OF SEASONS: Friends of Mineral Town, SDK 8.2.0, NVN.
+
+# ---- Identity ----
+title_id	0100ED400EEC2000
+program_id	0100ED400EEC2000
+
+# ---- App ----
+name	STORY OF SEASONS: Friends of Mineral Town
+ipa	StoryOfSeasonsFriendsOfMineralTown.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v327680	1.0.5	main=64da1f5fc96186983970b193056255ea	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	resource/ui/bustup_data.lzs
+zip_store	.bfsar:.bfstm:.bin:.dds:.lzs:.metallib
+
+# ---- Memory ----
+# The 1.57 GiB startup heap fits the 1.75 GiB region after the alias and stack regions.
+mem_reserve	0xa0000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource.
+sys_resource	0x0
+
+# ---- NVN ----
+# Match the depth convention the game selects at startup when building pipelines offline.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/resource/=resource /debug/=debug /common/=common
+shader_note	STORY OF SEASONS: Friends of Mineral Town shaders

@@ -15,6 +15,7 @@ dm/host/tests/*	-	host tests
 dm/gfx/tex/tests/*	-	CPU texture tests
 dm/sanitizers/*	-	test sanitizer configuration
 dm/host/hle.h	*:*	HLE and service registration declarations shared by every game
+dm/host/code_write.h	*:*	runtime code-write alias and changed.tsv helpers shared by cheats and exlaunch plugins
 dm/host/registration.h	*:*	linker registration layout shared by every game and graphics API
 dm/host/hle_table.c	*:*	C library import registrations shared by every game
 dm/host/hle_offline.c	*:*	offline service registrations present in every host
@@ -36,6 +37,8 @@ scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
+scripts/cheat_anchor.py	-	cheat files carried between builds offline: no game runs it
+scripts/prepare_mod.py	-	offline mod exefs rewriter: no game runs it
 dm/tools/usage.py	-	the usage manifests
 dm/tools/il2cpp_sym.py	-	read-only IL2CPP address analysis; not part of a game build or the host
 dm/tools/impact_map.tsv	-	this map
@@ -137,6 +140,7 @@ dm/gfx/tools/dmsh_mesh.py	shader:stage:gs	passthrough geometry composed into a m
 dm/host/hle_fpslock.c	present:*	build-gated engine frame limits and dynamic resolution
 dm/host/hle_uecvar.c	present:*	Unreal console variables found by name; the texture pool (profile ue_texture_pool)
 dm/gfx/tools/mvgl.py	api:gl	MVGL archive input to OpenGL shader scanning
+dm/gfx/tools/mvgl.py	shader:stage:*	MVGL archive input to NVN shader scanning
 dm/gfx/tools/smash_arc.py	*:*	Smash archive input to shader and NRO scanning
 dm/gfx/tools/uepak.py	shader:stage:*	Unreal archive input to shader scanning
 dm/host/romfs_image.h	hle:*fs*	RomFS image index validation shared by mounts and iOS startup
@@ -145,10 +149,13 @@ dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
 dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
 dm/host/audio_input.*	hle:*InputStream*	SDK polling microphone queues, format conversion and device lifecycle
 dm/host/audio_input_mac.m	hle:*InputStream*	Mac microphone capture and hot-plug recovery
+dm/host/audio_input_dualsense*	hle:*InputStream*	A DualSense on USB: its matching HID controller selected and unmuted when capture opens
+dm/host/dualsense_mic*	hle:*InputStream*	The DualSense SetState report and USB audio-to-HID matcher
 dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
 dm/host/Makefile	*:*	the shared host build
 dm/host/hle_thread.c	svc:*	threads and synchronization
 dm/host/hle_svc.c	svc:*	SVCs
+dm/host/hle_stack_alloc.c	svc:*	deterministic stack-region placement
 dm/host/thread.c	svc:*	threads
 dm/host/main.c	*:*	the host's start
 dm/host/loader.c	*:*	module loading
@@ -159,8 +166,8 @@ dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
-dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro Controller IMU decoder
-dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Pro Controller and DualShock 4 raw motion transport and routing
+dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless IMU decoders
+dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless raw motion transport and routing
 dm/host/switch2_proto.h	hle:*hid*	Switch 2 controller protocol: reports, sticks, buttons, motion maps
 dm/host/pad_switch2_apple.h	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)
 dm/host/pad_switch2_apple.m	hle:*hid*	Switch 2 controllers over Bluetooth LE (off unless DM_SW2=1)

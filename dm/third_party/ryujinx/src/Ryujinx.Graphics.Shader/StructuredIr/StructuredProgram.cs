@@ -75,7 +75,8 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                 LoopExitCohort.Apply(context.CurrentFunction.MainBlock, callee => callee >= 0 && callee < subgroupFunctions.Length && subgroupFunctions[callee]);
 
-                AstOptimizer.Optimize(context);
+                // nxnative: SPIR-V has no else-if construct; keep nested Else { If } blocks instead of flattening to ElseIf for GLSL syntax.
+                AstOptimizer.Optimize(context, flattenElseIf: targetLanguage != TargetLanguage.Spirv);
 
                 context.LeaveFunction();
             }

@@ -15,6 +15,8 @@ static int checks, failed;
 enum { POOL = 65536, W = 16, OFF = 0x108, ALIGNED = 0x200, FILL = 0xEE };
 static const char *kSource =
     "#include <metal_stdlib>\nusing namespace metal;\n"
+    "struct WriteArgs { texture_buffer<uint, access::write> img [[id(0)]]; };\n"
+    "kernel void write_args(constant WriteArgs &a [[buffer(0)]]) { a.img.write(uint4(42), 0u); }\n"
     "kernel void k(texture_buffer<uint, access::read_write> img [[texture(0)]], constant uint4 *table [[buffer(0)]], constant int *coords [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
     "    uint b = table[0].x, c = uint(coords[i]), m = c + b;\n"
     "    img.write(uint4(100u + i), m < b ? c : m);\n"
@@ -82,6 +84,18 @@ int main(void) { @autoreleasepool {
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(kSource) options:nil error:&error];
     id<MTLComputePipelineState> kw = lib ? kernel_named(lib, @"k") : nil, kr = lib ? kernel_named(lib, @"r") : nil;
     CHECK(kw && kr, "test kernels compiled"); if (!kw || !kr) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return 1; }
+    NvShader *writer = [NvShader new];
+    writer->fn = [lib newFunctionWithName:@"write_args"];
+    writer->ae = [writer->fn newArgumentEncoderWithBufferIndex:0];
+    CHECK(writer->ae != nil, "buffer image argument layout is available"); if (!writer->ae) return 1;
+    writer->rf.nb = 1;
+    writer->rf.b[0] = b;
+    writer->rf.b[0].tbx = 0;
+    state_reset(); mtl_sub_begin(); S.img[5][0] = 702;
+    CHECK(encode_args(nil, writer, 5, 0), "production argument encoder binds a writable buffer image");
+    CHECK(writer->ab_buf && *(const uint64_t *)((const uint8_t *)writer->ab_buf.contents + writer->ab_off) == arid,
+          "the writable buffer image binds the registered view");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "argument encoding submission completes");
     id<MTLCommandQueue> q = [g_dev newCommandQueue];
     // Writes through the image: coordinates the first and last element, two in between, and three outside it: -1 and -2 (whose sum with the offset wraps into the 8 bytes before it
     // without the guard) and W (one past its end)

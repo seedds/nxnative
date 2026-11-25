@@ -66,6 +66,82 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     EXPECT(name,0,bad);free(out);
 }
 
+#ifndef CROP_LEGACY_HEADER
+// Minification (present.metal): each minified axis is filtered by an exact radius-1 tent kernel stretched by min(step, 3),
+// while a non-minified axis takes one bilinear sample. The CPU model evaluates each texel directly (no pairing shortcut) so
+// the test checks that the GPU's bilinear-paired implementation matches the exact mathematical tent filter.
+static double tent_ref(double x) { x = fabs(x); return x < 1.0 ? 1.0 - x : 0.0; }
+static double bil_axis(const uint8_t *v, int w, int y, double cx) {
+    double u = fmin(fmax(cx, 0.5), w - 0.5) - 0.5;
+    int x0 = (int)u, x1 = x0 + 1 < w ? x0 + 1 : x0; double fx = u - x0;
+    return v[4 * (y * w + x0)] * (1.0 - fx) + v[4 * (y * w + x1)] * fx;
+}
+static double tent_x(const uint8_t *v, int w, int y, double cx, double stepx) {
+    if (stepx < 1.001) return bil_axis(v, w, y, cx);
+    double sx = fmin(stepx, 3.0), sum = 0.0, ws = 0.0;
+    int i0 = (int)floor(cx - 0.5 - sx) + 1, last = (int)ceil(cx - 0.5 + sx) - 1;
+    for (int i = i0; i <= last; i++) {
+        double wt = tent_ref((i + 0.5 - cx) / sx);
+        int ci = i < 0 ? 0 : i >= w ? w - 1 : i;
+        sum += wt * v[4 * (y * w + ci)]; ws += wt;
+    }
+    return ws > 0.0 ? sum / ws : bil_axis(v, w, y, cx);
+}
+static double minify_ref(const uint8_t *v, int w, int h, int ow, int oh, int x, int y) {
+    double stepx = (double)w / ow, stepy = (double)h / oh, cx = (x + 0.5) * stepx, cy = (y + 0.5) * stepy;
+    if (stepy < 1.001) {
+        double t = fmin(fmax(cy, 0.5), h - 0.5) - 0.5;
+        int y0 = (int)t, y1 = y0 + 1 < h ? y0 + 1 : y0; double fy = t - y0;
+        return tent_x(v, w, y0, cx, stepx) * (1.0 - fy) + tent_x(v, w, y1, cx, stepx) * fy;
+    }
+    double sy = fmin(stepy, 3.0), sum = 0.0, ws = 0.0;
+    int j0 = (int)floor(cy - 0.5 - sy) + 1, last = (int)ceil(cy - 0.5 + sy) - 1;
+    for (int j = j0; j <= last; j++) {
+        double wt = tent_ref((j + 0.5 - cy) / sy);
+        int cj = j < 0 ? 0 : j >= h ? h - 1 : j;
+        sum += wt * tent_x(v, w, cj, cx, stepx); ws += wt;
+    }
+    return ws > 0.0 ? sum / ws : tent_x(v, w, 0, cx, stepx);
+}
+// Presents a w x h image (or its crop sub-rectangle, surrounded by 255 outside the crop) whose red channel is pattern(x, y)
+// into an ow x oh square canvas (1:1 layer); returns the red channel's largest difference from the exact tent model and the
+// interior column spread (max - min). m4 = 0 uses present_encode, m4 = 1 uses present_offscreen_wait (Metal 4).
+static void check_minify_ex(const char *name, int w, int h, const int crop[4], int ow, int oh, uint8_t (*pattern)(int, int), int m4, int *maxdiff, int *spread) {
+    int flip = atomic_load(&g_origin_ll);   // lower-left origin: stored bottom-up, so output row y is model row oh - 1 - y
+    int cx = crop ? crop[0] : 0, cy = crop ? crop[1] : 0, cw = crop ? crop[2] : w, ch = crop ? crop[3] : h;
+    MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> s=[g_dev newTextureWithDescriptor:sd];uint8_t *px=calloc((size_t)w*h,4), *sub=calloc((size_t)cw*ch,4);
+    assert(px && sub);
+    for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+        int in = x>=cx && x<cx+cw && y>=cy && y<cy+ch;
+        uint8_t v = in ? pattern(x-cx, y-cy) : 255;
+        px[4*(y*w+x)]=v; px[4*(y*w+x)+3]=255;
+        if (in) { sub[4*((y-cy)*cw+(x-cx))]=v; sub[4*((y-cy)*cw+(x-cx))+3]=255; }
+    }
+    [s replaceRegion:MTLRegionMake2D(0,0,w,h) mipmapLevel:0 withBytes:px bytesPerRow:w*4];
+    MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:ow height:oh mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> dst=[g_dev newTextureWithDescriptor:od];
+    if (m4) {
+        res_add(s); res_add(dst); res_commit();
+        EXPECT(name,PRESENT_STANDARD,present_offscreen_wait(s,crop,dst));
+        res_remove(s); res_remove(dst);
+    } else {
+        id<MTLCommandBuffer> cb=[g_q commandBuffer];
+        EXPECT(name,1,ENCODE(cb,s,dst,crop));[cb commit];[cb waitUntilCompleted];
+    }
+    uint8_t *o=malloc((size_t)ow*oh*4); assert(o);
+    [dst getBytes:o bytesPerRow:ow*4 fromRegion:MTLRegionMake2D(0,0,ow,oh) mipmapLevel:0];
+    int md=0,lo=255,hi=0;
+    for(int y=0;y<oh;y++)for(int x=0;x<ow;x++){int r=o[4*(y*ow+x)],d=abs(r-(int)lround(minify_ref(sub,cw,ch,ow,oh,x,flip?oh-1-y:y)));md=d>md?d:md;if(x>0&&x<ow-1){lo=r<lo?r:lo;hi=r>hi?r:hi;}}
+    *maxdiff=md;*spread=hi-lo;free(px);free(sub);free(o);
+}
+static void check_minify(const char *name, int w, int h, int ow, int oh, uint8_t (*pattern)(int, int), int *maxdiff, int *spread) {
+    check_minify_ex(name, w, h, NULL, ow, oh, pattern, 0, maxdiff, spread);
+}
+static uint8_t stripes(int x, int y) { (void)y; return x & 1 ? 255 : 0; }   // the finest detail a picture holds: one texel on, one off
+static uint8_t ramp(int x, int y) { return (uint8_t)((x * 37 + y * 91) & 255); }
+#endif
+
 // This fixture is the only present producer. A window now holds a logical queue receipt;
 // wait for replay, then for the display ticket (snapshots do not return that ticket).
 static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
@@ -171,6 +247,33 @@ int main(int argc, char **argv) { @autoreleasepool {
     check(src,"non-zero x and y offset, 16 pixels byte-identical to a hand-written sub-rectangle",inset,4,4,-2);
     check(src,"aspect of the valid area kept, 128 pixels red in the middle / black on both sides",tl,16,8,4);
 #ifndef CROP_LEGACY_HEADER
+    {   // Minification: 3:2, 4:3 (2560x1440 -> 1920x1080), 2:1 (1280x720 window), 5:1 (width capped at 3:1), 1:1, lower-left origin,
+        // anisotropic (X upscaled, Y minified), cropped minification (no bleed from outside the crop) and Metal 4 present
+        int md,sp;
+        check_minify("3:2 stripes present",12,12,8,8,stripes,&md,&sp);
+        EXPECT("3:2 stripes match the exact tent filter within 1",1,md<=1);
+        // one bilinear tap gave columns of 64 and 191 here (spread 127): the stripes aliased into a coarser pattern of their own
+        EXPECT("3:2 stripes: spread at most 30 (one tap: 127)",1,sp<=30);
+        check_minify("4:3 ramp present",16,16,12,12,ramp,&md,&sp);
+        EXPECT("4:3 ramp matches the exact tent filter within 1",1,md<=1);
+        check_minify("2:1 ramp present",16,16,8,8,ramp,&md,&sp);
+        EXPECT("2:1 ramp matches the exact tent filter within 1",1,md<=1);
+        check_minify("5:1 ramp present",40,40,8,8,ramp,&md,&sp);
+        EXPECT("5:1 ramp matches the tent filter at 3:1 width within 1",1,md<=1);
+        check_minify("1:1 ramp present",8,8,8,8,ramp,&md,&sp);
+        EXPECT("1:1 ramp: the texels as they are",0,md);
+        check_minify("anisotropic ramp present (X upscaled 0.75x, Y minified 1.5x)",12,24,16,16,ramp,&md,&sp);
+        EXPECT("anisotropic ramp: bilinear on X and exact tent on Y within 1",1,md<=1);
+        const int midcrop[4]={6,6,12,12};
+        check_minify_ex("cropped 3:2 ramp present",24,24,midcrop,8,8,ramp,0,&md,&sp);
+        EXPECT("cropped 3:2 ramp: matches exact tent with no bleed outside the crop, within 1",1,md<=1);
+        check_minify_ex("Metal 4 4:3 ramp present",16,16,NULL,12,12,ramp,1,&md,&sp);
+        EXPECT("Metal 4 4:3 ramp matches the exact tent filter within 1",1,md<=1);
+        atomic_store(&g_origin_ll,1);
+        check_minify("3:2 ramp present, lower-left origin",24,24,16,16,ramp,&md,&sp);
+        EXPECT("3:2 ramp with the lower-left origin is the exact tent picture upside down, within 1",1,md<=1);
+        atomic_store(&g_origin_ll,0);
+    }
     {
         // sRGB swapchain: present sends the raw bytes (as the Switch's scan-out does) without decoding first; unfixed, 128/64/200 decode to about 55/13/148
         MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:8 height:8 mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
@@ -373,7 +476,7 @@ int main(int argc, char **argv) { @autoreleasepool {
         for(int y=0;y<TH;y++)for(int x=0;x<TW;x++)memcpy(sp+4*(y*TW+x),colors[x>=crop54[2]||y>=crop54[3]],4);
         [sw replaceRegion:MTLRegionMake2D(0,0,TW,TH) mipmapLevel:0 withBytes:sp bytesPerRow:TW*4];free(sp);res_add(sw);res_commit();
         double sa,sb;
-        mtl_present_layer(0,0);present_shape(sw,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
+        mtl_present_layer(0,0);present_shape(sw,NULL,&sa,&sb);EXPECT("no sized layer: the display's width",1920,(int)sa);EXPECT("no sized layer: the display's height",1080,(int)sb);
         for(int m4=0;m4<2;m4++) {
             int outH[2]={H,40};   // 16:9 fills; a 16:10 canvas keeps the bars above and below
             for(int k=0;k<2;k++) {
@@ -387,12 +490,60 @@ int main(int argc, char **argv) { @autoreleasepool {
                 EXPECT(k?"5:4 crop on a 16:10 canvas: 16:9 of red, black above and below":"5:4 crop on a 16:9 canvas: all red, no side bars",0,bad);free(o);res_remove(ot);
             }
         }
-        mtl_present_layer(4,3);present_shape(sw,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
+        mtl_present_layer(4,3);present_shape(sw,NULL,&sa,&sb);EXPECT("a sized layer gives its own shape",4*(int)sb,3*(int)sa);mtl_present_layer(0,0);
         MTLTextureDescriptor *td2=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1920 height:1344 mipmapped:NO];td2.storageMode=MTLStorageModePrivate;td2.usage=MTLTextureUsageShaderRead;
         id<MTLTexture> tall=[g_dev newTextureWithDescriptor:td2];
-        present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
-        mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
-        present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
+        present_shape(tall,NULL,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
+        mtl_present_screen(1920,1344);present_shape(tall,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
+        present_shape(sw,NULL,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);
+        // A crop whose ratio matches the screen shape takes that shape inside a larger swapchain texture; a crop of another shape stays 16:9
+        const int wide[4]={0,0,64,29}, tallc[4]={0,0,48,36};   // ~2.21:1 and 4:3 inside 64x36
+        mtl_present_screen(2207,1000);present_shape(sw,wide,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a matching wider crop gives its width",64,(int)sa);EXPECT("DM_SCREEN_ASPECT: a matching wider crop gives its height",29,(int)sb);
+        present_shape(sw,tallc,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a non-matching crop stays 16:9",1080,(int)sb);
+        mtl_present_screen(4,3);present_shape(sw,tallc,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a matching taller crop gives its width",48,(int)sa);EXPECT("DM_SCREEN_ASPECT: a matching taller crop gives its height",36,(int)sb);
+        mtl_present_screen(5,4);
+        for(int m4=0;m4<2;m4++) {
+            MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:40 height:32 mipmapped:NO];od.storageMode=MTLStorageModeShared;od.usage=MTLTextureUsageRenderTarget;
+            id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od];res_add(ot);res_commit();
+            if(m4){EXPECT("Metal 4 present of a matching 5:4 crop",1,present_offscreen_wait(sw,crop54,ot)!=PRESENT_FAILED);}
+            else{id<MTLCommandBuffer> cb=[g_q commandBuffer];EXPECT("classic present of a matching 5:4 crop",1,present_encode(cb,sw,ot,crop54));[cb commit];[cb waitUntilCompleted];}
+            uint8_t *o=malloc(40*32*4);[ot getBytes:o bytesPerRow:40*4 fromRegion:MTLRegionMake2D(0,0,40,32) mipmapLevel:0];
+            int bad=0; for(int i=0;i<40*32;i++) bad+=memcmp(o+4*i,colors[0],4)!=0;
+            EXPECT(m4?"Metal 4: 5:4 crop fills a 5:4 canvas with no bars":"classic: 5:4 crop fills a 5:4 canvas with no bars",0,bad);free(o);res_remove(ot);
+        }
+        mtl_present_screen(0,0);
+        // Picture Fill on the Mac (present_cover + present_fit): crops sides on 16:10, crops top/bottom on 21:9, leaves equal shapes whole, and clamps extreme ratios.
+        {
+            NSUInteger r[4]={0,0,3840,2160}; present_cover(1920,1080,r,3456,2160);
+            EXPECT("Fill 16:10: left edge",192,(int)r[0]); EXPECT("Fill 16:10: width",3456,(int)r[2]); EXPECT("Fill 16:10: full height",2160,(int)r[3]);
+            NSUInteger t[4]={0,0,3840,2160}; present_cover(1920,1080,t,21,9);
+            EXPECT("Fill 21:9: full width",3840,(int)t[2]); EXPECT("Fill 21:9: height",1646,(int)t[3]); EXPECT("Fill 21:9: top edge",257,(int)t[1]);
+            NSUInteger e[4]={10,20,1920,1080}; present_cover(1920,1080,e,3840,2160);
+            EXPECT("Fill 16:9 on 16:9: unchanged x",10,(int)e[0]); EXPECT("Fill 16:9 on 16:9: unchanged width",1920,(int)e[2]);
+            NSUInteger thin[4]={0,0,10,10}; present_cover(1920,1080,thin,1,10000);
+            EXPECT("Fill extreme narrow: width clamped to at least 1",1,(int)thin[2]);
+            // Real GPU render in both Metal 3 and Metal 4: 320x180 (16:9) with red side bands [0..15] and [304..319] into 288x180 (16:10) with Fill enabled.
+            MTLTextureDescriptor *fd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:320 height:180 mipmapped:NO];
+            fd.storageMode=MTLStorageModeShared; fd.usage=MTLTextureUsageShaderRead;
+            id<MTLTexture> fsrc=[g_dev newTextureWithDescriptor:fd];
+            uint8_t *fp=calloc(320*180,4);
+            for(int y=0;y<180;y++) for(int x=0;x<320;x++) memcpy(fp+4*(y*320+x), (x<16||x>=304)?colors[0]:colors[1], 4);
+            [fsrc replaceRegion:MTLRegionMake2D(0,0,320,180) mipmapLevel:0 withBytes:fp bytesPerRow:320*4]; free(fp);
+            res_add(fsrc); res_commit();
+            int prev_fill=g_present_fill; g_present_fill=1;
+            for(int m4=0;m4<2;m4++) {
+                MTLTextureDescriptor *od=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:288 height:180 mipmapped:NO];
+                od.storageMode=MTLStorageModeShared; od.usage=MTLTextureUsageRenderTarget;
+                id<MTLTexture> ot=[g_dev newTextureWithDescriptor:od]; res_add(ot); res_commit();
+                if(m4) EXPECT("Metal 4 Fill present",PRESENT_STANDARD,present_offscreen_wait(fsrc,NULL,ot));
+                else { id<MTLCommandBuffer> cb=[g_q commandBuffer]; EXPECT("classic Fill present",1,present_encode(cb,fsrc,ot,NULL)); [cb commit]; [cb waitUntilCompleted]; }
+                uint8_t *o=malloc(288*180*4); [ot getBytes:o bytesPerRow:288*4 fromRegion:MTLRegionMake2D(0,0,288,180) mipmapLevel:0];
+                int bad=0; for(int i=0;i<288*180;i++) bad+=memcmp(o+4*i,colors[1],4)!=0;
+                EXPECT(m4?"Metal 4 Fill 16:9 on 16:10: side bands cropped, full green":"classic Fill 16:9 on 16:10: side bands cropped, full green",0,bad);
+                free(o); res_remove(ot);
+            }
+            g_present_fill=prev_fill; res_remove(fsrc);
+        }
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);
         win_t w3={.ntex=1};w3.tex[0]=(NVNtexture *)&st;set((NVNwindow *)&w3,crop54[0],crop54[1],crop54[2],crop54[3]);

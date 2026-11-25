@@ -32,7 +32,6 @@ pyright	dm/gfx/tools/uepak.py	reportArgumentType	6	Argument of type "tuple[Any, 
 pyright	dm/gfx/tools/uepak.py	reportGeneralTypeIssues	1	Index 0 is out of range for type tuple[()]
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "+" not supported for types "tuple[Any, Any, *tuple[Any, ...]] | Any" and "Literal[15]" Operator "+" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "Literal[15]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "+=" not supported for types "Unknown | Any | int" and "Unknown | Any | tuple[Any, Any, *tuple[Any, ...]]" Operator "+" not supported for types "int" and "tuple[Any, Any, *tuple[Any, ...]]"
-pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "-=" not supported for types "Unknown | tuple[Any, Any, *tuple[Any, ...]] | Any" and "Unknown | tuple[Any, Any, *tuple[Any, ...]] | Any" Operator "-" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "tuple[Any, Any, *tuple[Any, ...]]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator "<" not supported for types "tuple[Any, Any, *tuple[Any, ...]] | Any" and "Literal[0]" Operator "<" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "Literal[0]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator ">>" not supported for types "tuple[Any, Any, *tuple[Any, ...]] | Any" and "Literal[22]" Operator ">>" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "Literal[22]"
 pyright	dm/gfx/tools/uepak.py	reportOperatorIssue	1	Operator ">>" not supported for types "tuple[Any, Any, *tuple[Any, ...]] | Any" and "Literal[23]" Operator ">>" not supported for types "tuple[Any, Any, *tuple[Any, ...]]" and "Literal[23]"
@@ -82,7 +81,6 @@ pyright	dm/tools/patch_nso.py	reportCallIssue	2	No overloads for "fullmatch" mat
 pyright	dm/tools/patch_nso.py	reportIndexIssue	3	"__getitem__" method not defined on type "set[Unknown]"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"exec_module" is not a known attribute of "None"
 pyright	dm/tools/patch_nso.py	reportOptionalMemberAccess	1	"loader" is not a known attribute of "None"
-pyright	dm/tools/patch_nso.py	reportOptionalSubscript	2	Object of type "None" is not subscriptable
 pyright	dm/tools/patch_nso.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/sdis.py	reportWildcardImportFromLibrary	1	Wildcard import from a library not allowed
 pyright	dm/tools/tests/test_astral_fps.py	reportArgumentType	1	Argument of type "ModuleSpec | None" cannot be assigned to parameter "spec" of type "ModuleSpec" in function "module_from_spec" Type "ModuleSpec | None" is not assignable to type "ModuleSpec" "None" is not assignable to "ModuleSpec"

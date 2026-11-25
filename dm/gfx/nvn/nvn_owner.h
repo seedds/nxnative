@@ -96,6 +96,7 @@ int own_view_drop_stale(uint64_t k, id view);        // a view no longer valid: 
 // An upgrade (a texture made again with more usage): every name of `from`, the serial tables, the pins and the sharing table, moves to `to` in place (a new epoch); then `put` (when not
 // nil) is published under serial unless the rename already named it there (an sRGB / linear twin passes its view made again on `to`). One hold of g_smu. → whether serial was one of from's names
 int own_upgrade(id from, id to, uint64_t serial, id put);
+void own_drop_object(id obj);   // drops every live/ghost serial entry naming obj (or views of it) and every sharing-table entry naming obj (unmapped sparse buffer-backed texture)
 // Shared textures another one drew over (nvn_mtl.m's tu_pass, nvn_owner.m says why). The replay layer keeps two stamps of a texture it covers, in its own clock (0: none)
 typedef struct { uint32_t use, wr; } own_use;   // its last use (a read or a write) and its last write by the GPU
 typedef int (*own_use_fn)(id o, own_use *u);    // o's stamps: 1; 0 for a texture the release does not cover (it is never released, and its writes count for nothing)
@@ -151,6 +152,9 @@ int own_note_at(uint64_t gen, uint64_t *serial);                 // the serial n
 typedef struct { uint32_t live, live_cap, ghost, retire_wait; uint64_t ghost_puts; } own_stats;
 own_stats own_stats_locked(void);
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost));
+// Every entry, live or ghost, whose object gone() names goes (each serial noted, its ring slot freed, its object dropped as serial_del drops it); each(serial) is told of
+// each. The replay layer's eviction of idle uploaded textures (nvn_mtl.m pkg_evict_idle). → how many went
+uint32_t own_drop_where_locked(int (^gone)(id o), void (^each)(uint64_t serial));
 
 // ---- What the replay layer provides (nvn_mtl.m). Called with g_smu held
 void own_hook_drop(id o, int keep_resident);   // an object the owner lets go: released after the submission in flight (keep_resident: it stays in the residency set, as something else holds it)

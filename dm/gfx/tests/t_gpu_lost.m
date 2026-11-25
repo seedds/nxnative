@@ -1,7 +1,8 @@
-// GPU access revoked (nvn_mtl.m gpu_lost_check; issue #1326), imitated by DM_TEST_GPU_LOST=3: from the third submission on, each submission's feedback reports the access revoked in the
-// shape the #1326 logs show, and the GPU does not signal its fence. Checks that the revoked access is found under Metal's top-level error and an innocent victim's, a page fault's or
-// a hang's error is not taken for it; that the front end is told once; that a SyncWait on such a fence returns at its feedback instead of waiting out its timeout, for the later
-// submissions too; and that a present no longer asks for the layer to take a drawable from. Real Metal 4 queue, no window, no game files
+// GPU access revoked (nvn_mtl.m gpu_lost_check; issue #1326) and recoverable unsignaled fence completion (post_complete -> fence_ev_raise):
+// - submission 2 skips signaling g_ev without revoking GPU access (imitating a recoverable command buffer error whose feedback completes without signaling g_ev), followed by a normal GPU-signaled submission 3;
+// - from submission 4 on (DM_TEST_GPU_LOST=4), each submission's feedback reports access revoked in the shape the #1326 logs show, and the GPU does not signal its fence.
+// Checks error shape matching, single front-end notification, immediate SyncWait wake on both recoverable and revoked unsignaled submissions, recovery on the next GPU-signaled submission, and stopped presents.
+// Real Metal 4 queue, no window, no game files
 #include "../nvn/nvn_mtl.m"
 static _Atomic int g_layer_asks;   // present_now asks for the layer just before it takes a drawable; with none it returns, as without a window
 void *front_metal_layer(void) { atomic_fetch_add(&g_layer_asks, 1); return NULL; }
@@ -35,7 +36,7 @@ static tex_t picture(void) {
 static int present_asks(const tex_t *t) { int before = atomic_load(&g_layer_asks); mtl_present_wait(mtl_present(t, 1. / 60, NULL, NULL)); return atomic_load(&g_layer_asks) - before; }
 int main(void) { @autoreleasepool {
     alarm(60); setvbuf(stdout, NULL, _IONBF, 0);
-    setenv("DM_TEST_GPU_LOST", "3", 1);
+    setenv("DM_TEST_GPU_LOST", "4", 1);
     setenv("DM_PRESENT_LINK", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);   // presents on the present thread, straight from the game's texture
 
     NSString *mtl4 = MTL4CommandQueueErrorDomain, *iogpu = @"IOGPUCommandQueueErrorDomain";
@@ -48,8 +49,24 @@ int main(void) { @autoreleasepool {
     mtl_init();
     tex_t pic = picture();
     int ok = 0; double ms = 0; uint64_t f = 0;
-    for (int i = 0; i < 2; i++) f = submit_wait(&ok, &ms);
-    CHECK("submissions before run as before", ok && !atomic_load(&g_gpu_lost) && !atomic_load(&test_gpu_lost_calls) && !mtl_last_commit_error());
+    f = submit_wait(&ok, &ms);
+    CHECK("normal submission before runs as before", ok && !atomic_load(&g_gpu_lost) && !atomic_load(&test_gpu_lost_calls) && !mtl_last_commit_error());
+
+    // Recoverable unsignaled submission: hold the queue behind a gate so feedback cannot run before g_ev is restored, redirect rec_signal to a decoy event, then release.
+    id<MTLSharedEvent> gate = [g_dev newSharedEvent], decoy = [g_dev newSharedEvent], real_ev = g_ev;
+    rec_queue_block(^{ [g_q4 waitForEvent:gate value:1]; });
+    mtl_sub_begin();
+    g_ev = decoy;
+    f = mtl_sub_commit();
+    g_ev = real_ev;
+    gate.signaledValue = 1;
+    uint64_t t0 = now_ns(); ok = mtl_wait(f, WAIT_NS); ms = (now_ns() - t0) / 1e6;
+    printf("submission %llu (recoverable unsignaled): SyncWait %s in %.1f ms, shared event at %llu\n", (unsigned long long)f, ok ? "returned" : "timed out", ms, (unsigned long long)g_ev.signaledValue);
+    CHECK("a recoverable unsignaled submission's SyncWait returns at its feedback", ok && ms < WAIT_NS / 2e6 && g_ev.signaledValue >= f);
+    CHECK("a recoverable unsignaled submission does not trigger gpu_lost", !atomic_load(&g_gpu_lost) && !atomic_load(&test_gpu_lost_calls));
+
+    f = submit_wait(&ok, &ms);
+    CHECK("a normal GPU-signaled submission still completes after CPU event raise", ok && g_ev.signaledValue >= f && !atomic_load(&g_gpu_lost) && !atomic_load(&test_gpu_lost_calls));
     CHECK("a present before asks for the layer", present_asks(&pic) == 1);
 
     f = submit_wait(&ok, &ms);

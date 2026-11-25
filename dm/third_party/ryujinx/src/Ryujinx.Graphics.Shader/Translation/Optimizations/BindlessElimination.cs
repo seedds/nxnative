@@ -99,8 +99,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // and !P0 with UP0 the vote of P0, P4 and P5 with P5 = P4 && !P1, and P6 and a branch over !P6. The phi then also takes the handle's first word and what the register held before.
         // With the OR unguarded the phi lies on its source, not on the handle.
         // A handle whose words the shader loads from memory on some path (a Load, or a global load GlobalToStorage served through a helper: IsLoaded) is a real
-        // bindless access, also as a source of the OR, for a read GenerateBindlessAccess indexes the pools for (pooled: a sampled texture other than a buffer texture): that reads the
-        // texture the handle names whatever its source. Other reads keep their candidates for those leaves (their slot arrays take c[2]'s handles only). PRAGMATA's
+        // bindless access, also as a source of the OR, for an access GenerateBindlessAccess indexes the pools for (pooled: any image, or a sampled texture other than a buffer texture): that reads or writes
+        // the resource the handle names whatever its source. Sampled buffer textures keep their candidates for those leaves (their slot arrays take c[2]'s handles only). PRAGMATA's
         // compute shader 02e1292114121308 reads its texture with (an ID from a material record, through the pool table) | constant sampler 0x104, under the guard that loads the ID; the
         // register held c[24] + 0x114 (a pushed buffer address's high word) on the other path, and that word alone was taken as the handle: the host had no slot for it and the dispatch ran
         // without its shader
@@ -109,7 +109,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // A global load GlobalToStorage served is a copy that keeps the load's storage kind, of its helper's result (or of 0 where it dropped the load): Copy.GlobalMemory(Call)
         private static bool IsLoaded(Operand leaf) => leaf.AsgOp is Operation op && (op.Inst is Instruction.Load or Instruction.Call || (op.Inst == Instruction.Copy && op.StorageKind != StorageKind.None));
 
-        private static bool IsPooled(TextureOperation texOp) => !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;   // as GenerateBindlessAccess
+        private static bool IsPooled(TextureOperation texOp) => texOp.Inst.IsImage() || (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;   // as GenerateBindlessAccess
 
         private static TableHandle TryTableHandle(BasicBlock block, ResourceManager resourceManager, IGpuAccessor gpuAccessor, TextureOperation texOp, LinkedListNode<INode> node, bool deferSeveral)
         {
@@ -380,13 +380,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             Operand bindlessHandle = texOp.GetSource(0);
 
-            // nxnative: a sampled texture other than a buffer texture is indexed in the game's whole texture and sampler pools (the replay binds them by ID: dmsh_build.py pool_arrays,
-            // nvn_mtl.m pool_gpu), so its arrays take the pool lengths. Buffer textures and images keep arrays of NvnSlotArrayLength, which the replay binds slot by slot (tex_dyn_slots)
-            bool pooled = !texOp.Inst.IsImage() && (texOp.Type & SamplerType.Mask) != SamplerType.TextureBuffer;
+            // nxnative: a sampled texture other than a buffer texture indexes the game's whole texture and sampler pools (dmsh_reflect.py pool_arrays, nvn_mtl.m pool_gpu), and any
+            // non-atomic image (2D, 3D, array, cube, 1D or buffer image, whether its handle comes from c2, a uniform buffer, memory or arithmetic) indexes the image pool by ID
+            // (nvn_mtl.m img_pool_gpu). Only sampled buffer textures keep arrays of NvnSlotArrayLength, which the replay binds slot by slot (tex_dyn_slots)
+            bool pooled = IsPooled(texOp);
 
-            // nxnative: a pooled read takes its handle from any source. Its texture ID indexes the pool as the GPU's does, so where the handle comes from does not matter; a handle the
-            // shader computes (RE Engine: a heap index from game memory or a uniform buffer, clamped to its range and ORed with a sampler ID) was deleted and read 0 before.
-            // The slot arrays of images and buffer textures keep Ryujinx's limit: the replay binds them only for handles from c2's tables
+            // nxnative: a pooled access takes its handle from any source. Its texture / image ID indexes the pool as the GPU's does, so where the handle comes from does not matter;
+            // a handle the shader computes (RE Engine: a heap index from game memory or a uniform buffer, clamped to its range and ORed with a sampler ID) or loads from memory
+            // (The Duskbloods' GXFogVolume_* fog volume) was deleted or clamped to 31 before. Sampled buffer-texture slot arrays keep Ryujinx's limit: the replay binds them only for c2's tables
             if (!pooled && !IsBindlessHandleAllowed(bindlessHandle))
             {
                 return false;

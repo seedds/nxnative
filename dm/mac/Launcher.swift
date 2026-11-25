@@ -23,13 +23,17 @@ private func save_sync_report(_ save: UnsafePointer<CChar>, _ title: UnsafePoint
 enum SaveCheck {
     enum Outcome { case play(String?), retry, cancel }
 
+    /// The folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "" or "0" = off.
+    static func effectiveFolder(defaults: UserDefaults = .standard) -> String {
+        getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (defaults.string(forKey: "cloudSaves.folder") ?? "")
+    }
+
     /// Blocks while the cloud's file comes (SaveSyncReport.waitMs at most): call it off the main thread. nil: no report (sync is then left to the host as before)
-    static func report() -> SaveSyncReport? {
+    static func report(folder: String? = nil) -> SaveSyncReport? {
         // getenv, not ProcessInfo.environment: launcher.c sets DM_SAVE and applies the env files in this process before the window
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no DMTitleID\n", stderr); return nil }
-        // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "0" = off
-        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        let folder = folder ?? effectiveFolder()
         var buf = [CChar](repeating: 0, count: 1024)
         let r = (folder.isEmpty ? "0" : folder).withCString { save_sync_report(save, id, $0, SaveSyncReport.waitMs, &buf, buf.count) }
         let line = String(cString: buf)
@@ -58,6 +62,24 @@ enum SaveCheck {
             case .alertSecondButtonReturn: return .play(r.cloudChoice)
             default: return .cancel
             }
+        case .missing:
+            guard let r else { return .play(nil) }
+            let a = NSAlert()
+            a.messageText = SaveSyncReport.missingTitle
+            a.informativeText = r.missingMessage(here: "Mac")
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Try Again")
+            a.addButton(withTitle: "Play Without Sending")
+            a.addButton(withTitle: r.sendLabel(here: "Mac"))
+            a.addButton(withTitle: cancel)
+            a.buttons[2].hasDestructiveAction = true
+            a.buttons[3].keyEquivalent = "\u{1b}"
+            switch a.runModal() {
+            case .alertFirstButtonReturn: return .retry
+            case .alertSecondButtonReturn: return .play("offline")   // this Mac's save, not sent: the next start compares again
+            case .alertThirdButtonReturn: return .play(r.localChoice)   // local:none
+            default: return .cancel
+            }
         case .unreadable:
             let a = NSAlert()
             a.messageText = SaveSyncReport.unreadableTitle
@@ -81,14 +103,16 @@ enum SaveCheck {
     }
 
     /// With the window off: the check and its question before the game, the app in front only while it asks. false: the player quit
-    static func withoutWindow() -> Bool {
+    static func withoutWindow(defaults: UserDefaults = .standard) -> Bool {
+        let folder = effectiveFolder(defaults: defaults)
+        guard SaveSyncReport.syncEnabled(folder) else { return true }
         final class Box: @unchecked Sendable { let lock = NSLock(); var report: SaveSyncReport?; var waiting = false }
         let app = NSApplication.shared
         defer { app.setActivationPolicy(.prohibited) }
         while true {
             let box = Box(), sem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .userInitiated).async {
-                let r = report()
+                let r = report(folder: folder)
                 box.lock.lock(); box.report = r; box.lock.unlock()
                 sem.signal()
                 DispatchQueue.main.async { if box.waiting { app.abortModal() } }   // runs inside the waiting alert's modal loop, if there is one
@@ -144,7 +168,17 @@ struct LauncherView: View {
                 if m.values["DM_MIC"] == "1" { MicrophoneDevicePicker() }
                 CloudSavesSection()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    // a Button, not an empty DisclosureGroup: the sections below live outside it, and in a grouped Form a DisclosureGroup does not toggle on row/label clicks (and failed to open on macOS 27)
+                    Button { advanced.toggle() } label: {
+                        HStack {
+                            Image(systemName: "chevron.right").rotationEffect(.degrees(advanced ? 90 : 0)).foregroundStyle(.secondary).accessibilityHidden(true)
+                            Text("Advanced settings")
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(advanced ? "Expanded" : "Collapsed")
                 }
                 if advanced {
                     settingSections(basic: false)
@@ -180,10 +214,12 @@ struct LauncherView: View {
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
+        let folder = SaveCheck.effectiveFolder()
+        guard SaveSyncReport.syncEnabled(folder) else { done(true); return }
         check += 1; checking = true
         let mine = check
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = SaveCheck.report()
+            let r = SaveCheck.report(folder: folder)
             DispatchQueue.main.async {
                 guard checking, check == mine else { return }   // the player played without it
                 checking = false
@@ -255,7 +291,7 @@ private enum MicrophoneInputDevices {
         return ids.compactMap { device in
             guard hasInput(device), let uid = string(device, selector: kAudioDevicePropertyDeviceUID),
                   let name = string(device, selector: kAudioObjectPropertyName), !uid.isEmpty else { return nil }
-            return MicrophoneInputDevice(uid: uid, name: name)
+            return MicrophoneInputDevice(uid: uid, name: dualSenseOverUSB(device) ? "\(name) (USB)" : name)
         }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -271,6 +307,23 @@ private enum MicrophoneInputDevices {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, data) == noErr else { return false }
         let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
         return buffers.contains { $0.mNumberChannels > 0 }
+    }
+
+    // A DualSense or DualSense Edge on USB: CoreAudio exposes its USB VID:PID at the end of ModelUID ("<name>:054C:0CE6" / ":0DF2").
+    private static func dualSenseOverUSB(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr,
+              transport == kAudioDeviceTransportTypeUSB,
+              let model = string(device, selector: kAudioDevicePropertyModelUID) else { return false }
+        let parts = model.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count >= 3,
+              let vid = UInt32(parts[parts.count - 2], radix: 16),
+              let pid = UInt32(parts[parts.count - 1], radix: 16) else { return false }
+        return vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)
     }
 
     private static func string(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {

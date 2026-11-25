@@ -28,6 +28,18 @@ static void *hook(const char *name) {
     return count == 1 ? fn : NULL;
 }
 int main(void) {
+    // Resolve the exact public SDK symbols: missing the getter let the guest open stpl:u from its input loop even after the Initialize takeover.
+    void (*set_features)(uint32_t) = hook("_ZN2nn10streamplay25SetSupportedHidFeatureSetENS_4util10BitFlagSetILi32ENS0_13HidFeatureTagEEE");
+    uint32_t (*get_features)(void) = hook("_ZN2nn10streamplay25GetSupportedHidFeatureSetEv");
+    if (set_features && get_features) {
+        CHECK(get_features() == 0, "no guest HID features configured initially");
+        const uint32_t masks[] = {8, 1, 0, 0x80000000u, 0xffffffffu, 0};
+        for (size_t i = 0; i < sizeof masks / sizeof *masks; i++) {
+            set_features(masks[i]);
+            CHECK(get_features() == masks[i], "HID feature mask round-trips, including clearing and high bits");
+        }
+        CHECK(unexpected == 0, "streamplay feature queries need no guest service or event");
+    }
     // bool arguments are widened as hle.h requires (only the low 8 bits count); the returns are bools in w0, not nn::Result
     unsigned (*check)(unsigned) = hook("_ZN2nn4pctl32CheckFreeCommunicationPermissionEb");
     unsigned (*begin)(unsigned) = hook("_ZN2nn4pctl25TryBeginFreeCommunicationEb");
@@ -72,6 +84,11 @@ int main(void) {
         linit(local, 4000, 216, 3, NULL, n);
         CHECK(blanks_live == 0 && !limg(local, 0), "a size out of the SDK's range makes no image");
     }
+    // GameChat's virtual camera window: the host's off-screen native window, not 0 (Star Fox passes it to NVN window creation without checking for 0)
+    uint64_t (*vwin)(const void *) = hook("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE");
+    if (vwin) { uint64_t nw = vwin(NULL); CHECK(nw && dm_native_window_offscreen((const void *)(uintptr_t)nw), "the virtual camera's native window is the off-screen one"); }
+    int other = 0;
+    CHECK(!dm_native_window_offscreen(NULL) && !dm_native_window_offscreen(&other), "display or null native windows are not off-screen");
     CHECK(unexpected == 0, "no guest symbol lookup or event binding");
     printf("pctl: %d checks, %d failed\n", checks, fails);
     return fails != 0;

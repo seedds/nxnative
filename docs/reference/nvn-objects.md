@@ -895,6 +895,14 @@ Games read this count as a position in their own command memory and size their h
 - **Check:** `copy_finalize_keeps_registration` in `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_cpu_tex` (a profile with `tex_dirty_upload`): after a copy's Finalize and a copy initialized again, the texture stays registered and the CPU's next rewrite is uploaded; its own Finalize, or its own object initialized again, ends the registration. 4 checks fail without the fix. Matched 55 s Hyrule Field drawbridge + pause-menu A/B runs of Ocarina of Time on an Apple M4 Pro (macOS 27.2.1, prebuilt chain `8870984a02ba` image, 60 fps, ~2,880–3,000 frames): `g_nft` stayed at 249 (peak 259, 64.1 MB) in both runs with `nvn_ft_poll` at 3.12 µs/call (baseline) vs 3.32 µs/call (candidate, ~0.04 ms/frame out of ~8.2 ms submit CPU), no new `[RED]` lines, and 0 copy-finalizes / 0 live re-initializations on that short route (longer area-streaming copy-finalize cost remains unmeasured).
 - **Found on:** code reading for [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) ([GitHub issue #2975](https://github.com/seedds/nxnative/issues/2975)).
 
+### Finalizing a memory pool left its textures in the CPU-write poll
+
+- **Symptom:** none seen in a game. Expected in a profile with `tex_dirty_upload` when a game finalizes a CPU-accessible memory pool and unmaps its backing memory or frees the pool object before finalizing its texture objects: `SIGSEGV` in `ft_hash` (small texture within two host pages) or `tex_storage_ok` (`t->pool->flags` on a larger texture) during `nvn_ft_poll`, or stale `g_cpu_pools` / `ft_flush` hits after pool-address reuse.
+- **Cause:** `nvnMemoryPoolFinalize` (`hle_nvn.c`) dropped the pool from `mtl_alias_drop_pool`, `nvn_dirty_remove_range`, `mtl_pool_del` and `fl_drop`, but never pruned its textures from `g_ft`. Once `nvn_dirty_remove_range` removed the pool's dirty span, `nvn_dirty_since_span` conservatively returned `1`, sending small textures into `ft_hash` over unmapped `f->mem` and larger textures into `mtl_tex_cpu_rewritten` over a dangling `t->pool`.
+- **Fix:** `ft_drop_pool` (`hle_nvn.c`), called at the start of `nvnMemoryPoolFinalize`, removes every `g_ft` entry belonging to that pool and serializes with `nvn_ft_poll` through `g_ft_poll_mu` so an in-flight poll finishes before the pool is torn down.
+- **Check:** `pool_finalize_drops_registration` in `make -C dm/gfx/tests GAME=0400486024DEC000 check_t_cpu_tex` finalizes a CPU-cached pool holding both a 16×16 and a 256×256 texture, unmaps its storage, poisons and frees the pool struct, and runs `nvn_ft_poll` while a second pool's texture is rewritten.
+- **Found on:** code review of `nvnMemoryPoolFinalize` and `g_ft` alongside PR #3305; no game crash is attributed to it.
+
 ### Mapped-range flushes taken as uploads (`tex_flush_upload`)
 
 - **Symptom:** a movie plays black (Age of Calamity: its intro movie under the "+ Skip" prompt).

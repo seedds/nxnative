@@ -331,9 +331,11 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     return 1;
 }
 static void fl_add(const uint8_t *a, uint64_t n); static void fl_drop(const uint8_t *a, uint64_t n);   // flushed ranges, see nvn_flushed
+static void ft_drop_pool(const void *pool);
 NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) {
     // Dead to the replay first (its IDs marked gone under g_rmu, the magic cleared), then torn down: a texture resolving on the submit thread must not find the page table or the storage already gone
     pool_t *o = (pool_t *)p;
+    ft_drop_pool(p);
     mtl_alias_drop_pool(p); o->magic = 0;
     if (o->flags & 0x200 && o->vp) vpool_release(o);
     if (o->mem && !(o->flags & 0x200)) {   // A virtual pool's storage is borrowed from a physical pool; do not unregister it
@@ -474,6 +476,8 @@ NVN(nvnTextureBuilderGetSparseTileLayout, void, const NVNtextureBuilder *b, NVNt
 // stamp: dirty-page generation at registration (tex_dirty_upload); span: its tracked range (nvn_dirty_span), so a check needs no search over every pool; edge_h: hashes of its bytes in its edge pages at the stamp (ft_edges_take), edged = they hold
 typedef struct { const uint8_t *mem; uint64_t size; tex_t t; uint64_t stamp; const void *span; uint64_t edge_h[2]; int edged; } flush_tex;
 static flush_tex *g_ft; static size_t g_nft, g_cft; static pthread_mutex_t g_ft_mu = PTHREAD_MUTEX_INITIALIZER;
+// Serializes nvn_ft_poll's out-of-lock rewrite pass with nvnMemoryPoolFinalize (ft_drop_pool), so a poll never reads freed pool memory or resurrects g_cpu_pools after finalize. Lock order: g_ft_poll_mu → g_ft_mu / g_smu
+static pthread_mutex_t g_ft_poll_mu = PTHREAD_MUTEX_INITIALIZER;
 // Writes beside a registered texture (tex_dirty_upload). The tracker marks whole host pages (16 KB) dirty, and a texture's storage need not start or end on one: its first and last pages
 // are shared with whatever lies beside it, as for the packaged textures' re-uploads (pkg_edges_clean in nvn_mtl.m). The Great Ace Attorney Chronicles keeps its window textures and render
 // targets in its 1000 MB CPU_CACHED pool at 0x200 past a page, beside textures it fills from the CPU (ser=262, 256x256, shares the first window texture's last page): every 1920x1080 one,
@@ -534,6 +538,17 @@ static void ft_del(uint64_t serial) {
     for (size_t i = 0; i < g_nft; i++) if (g_ft[i].t.serial == serial) { g_ft[i] = g_ft[--g_nft]; break; }
     pthread_mutex_unlock(&g_ft_mu);
 }
+// A memory pool's Finalize ends every texture made on its storage, whether or not its texture objects have been finalized yet: drop them from g_ft before the pool's dirty range and
+// backing memory go, so nvn_ft_poll never hashes unmapped edge pages (ft_hash) or hands a dangling t->pool to mtl_tex_cpu_rewritten, and ft_flush never matches reused addresses
+static void ft_drop_pool(const void *pool) {
+    if (!DM_GAME_TEX_FLUSH_UPLOAD || !pool) return;
+    pthread_mutex_lock(&g_ft_poll_mu);
+    pthread_mutex_lock(&g_ft_mu);
+    for (size_t i = 0; i < g_nft;)
+        if (g_ft[i].t.pool == pool) g_ft[i] = g_ft[--g_nft]; else i++;
+    pthread_mutex_unlock(&g_ft_mu);
+    pthread_mutex_unlock(&g_ft_poll_mu);
+}
 // Profile tex_dirty_upload: Tears of the Kingdom fills some textures from the CPU after creating them and publishes them with no NVN flush at all (os::FlushDataCache runs
 // natively; its 121-layer ASTC terrain material arrays, 42 MB each). They stayed GPU-only textures with content 0, which ASTC decodes as the error colour, and the cave came out magenta.
 // ft_add write-protects a registered texture's pages, and on its first resolution (tex_mtl, submit thread) a write since then makes it CPU-written like a flushed one
@@ -566,11 +581,13 @@ int nvn_ft_tracked(uint64_t serial) {   // registered and not resolved yet: its 
 enum { FT_POLL_BYTES = 128 << 20 };
 void nvn_ft_poll(void) {
     if (!DM_GAME_TEX_DIRTY_UPLOAD) return;
+    pthread_mutex_lock(&g_ft_poll_mu);
     static uint64_t gen; static size_t cur, left;
     static struct { tex_t t; size_t at; int how; } *hit; static size_t chit; size_t nhit = 0;
     uint64_t now = nvn_dirty_now(), scanned = 0;
     pthread_mutex_lock(&g_ft_mu);
     if (now != gen) { gen = now; left = g_nft; }   // guest memory changed: every entry gets one more look
+    if (left > g_nft) left = g_nft;
     while (left && g_nft && scanned < FT_POLL_BYTES) {
         if (cur >= g_nft) cur = 0;
         scanned += g_ft[cur].size; left--;
@@ -581,7 +598,7 @@ void nvn_ft_poll(void) {
         cur++;
     }
     pthread_mutex_unlock(&g_ft_mu);
-    if (!nhit) return;
+    if (!nhit) { pthread_mutex_unlock(&g_ft_poll_mu); return; }
     uint64_t st = nvn_dirty_now();
     for (size_t i = 0; i < nhit; i++) nvn_dirty_protect(hit[i].t.mem, hit[i].t.L.size);
     static uint64_t up, kept;
@@ -605,6 +622,7 @@ void nvn_ft_poll(void) {
         else g_ft[j] = g_ft[--g_nft];
     }
     pthread_mutex_unlock(&g_ft_mu);
+    pthread_mutex_unlock(&g_ft_poll_mu);
 }
 static void ft_flush(const uint8_t *a, uint64_t n) {
     if (!DM_GAME_TEX_FLUSH_UPLOAD || !a || !n) return;

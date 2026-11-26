@@ -21727,7 +21727,7 @@ static void td_dump(void) {
         id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
         if (!t) { MLOG("[texraw] ser=%llu not in the serial table", ser); continue; }
         int bw, bh; NSUInteger w = t.width, h = t.height, dz = t.depth;
-        size_t bpp = t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : t.pixelFormat == MTLPixelFormatRGBA32Float ? 16 : 4; (void)bw; (void)bh;
+        size_t bpp = !mtl_fmt_block(t.pixelFormat) && mtl_pf_block_bytes(t.pixelFormat) ? mtl_pf_block_bytes(t.pixelFormat) : 4; (void)bw; (void)bh;   // the texel size of the format (an RG32 one is 8 bytes)
         size_t row = w * bpp, img = row * h;
         id<MTLBuffer> buf = [g_dev newBufferWithLength:img * dz options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];

@@ -397,6 +397,9 @@ scheduler-config: $(B)/t_scheduler_config
 	$(B)/t_scheduler_config custom
 	$(B)/t_scheduler_config off
 	$(B)/t_scheduler_config empty
+	$(B)/t_scheduler_config large
+	$(B)/t_scheduler_config invalid
+	$(B)/t_scheduler_config backoff
 scheduler-config-tsan:
 	$(MAKE) B=$(B)/scheduler-tsan SAN="$(TSAN_FLAGS)" scheduler-config
 run: scheduler-config

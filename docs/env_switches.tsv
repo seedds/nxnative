@@ -494,5 +494,5 @@ DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default
 DM_XCODE_PROJECT_DIR	path	Folder of the per-game Xcode project that `build_ipa.sh --prepare-xcode` makes (default `$W/xcode`); the NSP script sets it
 DM_XUSB	switch	`0` stops reading wired Xbox 360 pads over USB that macOS has no driver for, such as a PDP Xbox 360 pad (`pad_gip_mac.h`, `pad_xusb.h`); Mac only
 DM_XUSB_LOG	diagnostic	`1` logs each decoded state change of a wired Xbox 360 pad read over USB (`pad_gip_mac.h`); Mac only
-DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000)
+DM_YIELD_BACKOFF	switch	`0` turns off the yield back-off; `=<cap µs>[:<start µs>]` sets its sleep cap and the run of yields after which it starts (default 250:2000). Fields accept nonnegative integer microseconds through `INT64_MAX/1000`; invalid values fall back to the full default `250:2000`
 DM_YIELD_CLOCK	diagnostic	Clock-reading yield loops: 0 uses ordinary yield backoff, 1 backs off from the start, 2 also sleeps to the predicted end (default)

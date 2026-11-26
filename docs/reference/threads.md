@@ -12,6 +12,14 @@ Guest threads, their synchronization and how the host schedules them. Each entry
 - **Check:** `make -C dm/host/tests GAME=<id> scheduler-config-tsan` runs eight simultaneous workers across `yield_backoff_cap`, `yield_backoff_ns`, `thr_yield`, and `dm_spin_wait` in fresh processes for default, custom, disabled, and empty environment settings under TSan; `t_pollwait`, `t_clockwait`, and `t_preempt` also pass.
 - **Found on:** a code audit (PR #2031), with host unit tests; no game failure is known.
 
+### Validating yield back-off durations
+
+- **Symptom:** a malformed `DM_YIELD_BACKOFF` value can overflow signed multiplication (UBSan abort), silently disable back-off, or classify long positive `SleepThread` calls as polling waits; a valid cap of 1 s or longer passes `tv_nsec >= 1,000,000,000` to `nanosleep` (`EINVAL`), leaving a busy loop instead of sleeping.
+- **Cause:** `yield_spin_init` in `hle_thread.c` parsed `DM_YIELD_BACKOFF` with unchecked `atoll(...) * 1000` (accepting negative values and trailing garbage, and overflowing signed 64-bit multiplication), and `yield_backoff_cap` cast negative caps to huge `uint64_t` values. `backoff_sleep` put the entire nanosecond duration in `timespec.tv_nsec` with `tv_sec = 0`.
+- **Fix:** `yield_spin_init` parses the complete optional `<cap>[:<start>]` pair through `strtoll`, accepting nonnegative integer microseconds up to `INT64_MAX / 1000` (with optional whitespace) and falling back to the full default `250:2000` with a log message on invalid input. `backoff_sleep` splits durations into `tv_sec` and `tv_nsec`, matching `sleep_precise`.
+- **Check:** `make -C dm/host/tests GAME=<id> scheduler-config` (plain, ASan/UBSan, and `scheduler-config-tsan`) verifies 19 valid and invalid `DM_YIELD_BACKOFF` settings, `SleepThread` fallback on negative input, and normalized `timespec` arguments for `>= 1 s` caps (`1.25 s` and `10 s`) across fresh processes and eight concurrent workers.
+- **Found on:** a code audit (PR #2231), with host unit tests; no game failure is known.
+
 ### Publishing a new thread's scheduler fields
 
 - **Symptom:** TSan reports `thread_main` writing `host_work` while `thr_runnable` reads it during a same-core yield (`t_notify_sched`, issue #411).

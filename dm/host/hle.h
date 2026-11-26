@@ -145,6 +145,7 @@ int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now
 void dm_audio_suspend(int on);
+void dm_audio_mute(int on);          // every output renders silence while on (the units keep running): the iOS front end's Keep running in background
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
 // nn::audio::AudioOutBuffer in the SDK's own layout, the audout service's buffer format (the same from SDK 8 to Switch 2's). The game fills and reads it through the SDK's own

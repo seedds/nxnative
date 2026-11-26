@@ -15,7 +15,18 @@ void dm_log(const char *fmt, ...) {
 void hle_bind_system_event(void *ev, int autoclear) { (void)ev; (void)autoclear; unexpected++; }
 void dm_applet_enter(const char *name) { if (strcmp(name, "error")) unexpected++; enters++; }
 void dm_applet_leave(void) { leaves++; }
-// hle_offline.c's socket overloads go to the host's sockets (hle_net.c): none may run here
+// hle_offline.c's socket overloads go to the host's sockets (hle_net.c; the mpsk_* ones pick Link Play's virtual UDP or the local socket): none may run here
+int mpsk_errno(void) { unexpected++; return 0; }
+int mpsk_socket(int f, int t, int p) { (void)f; (void)t; (void)p; unexpected++; return -1; }
+int mpsk_bind(int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; unexpected++; return -1; }
+int mpsk_getname(int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; unexpected++; return -1; }
+int mpsk_getopt(int s, int l, int o, void *v, unsigned *n) { (void)s; (void)l; (void)o; (void)v; (void)n; unexpected++; return -1; }
+int mpsk_setopt(int s, int l, int o, const void *v, unsigned n) { (void)s; (void)l; (void)o; (void)v; (void)n; unexpected++; return -1; }
+int mpsk_fcntl(int s, int c, int v) { (void)s; (void)c; (void)v; unexpected++; return -1; }
+long mpsk_sendto(int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; unexpected++; return -1; }
+long mpsk_recvfrom(int s, void *b, unsigned long n, int f, void *a, unsigned *al) { (void)s; (void)b; (void)n; (void)f; (void)a; (void)al; unexpected++; return -1; }
+long mpsk_recv(int s, void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; unexpected++; return -1; }
+long mpsk_send(int s, const void *b, unsigned long n, int f) { (void)s; (void)b; (void)n; (void)f; unexpected++; return -1; }
 int dm_sk_socket(int f, int t, int p) { (void)f; (void)t; (void)p; unexpected++; return -1; }
 int dm_sk_bind(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
 int dm_sk_connect(int fd, const void *a, unsigned n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }

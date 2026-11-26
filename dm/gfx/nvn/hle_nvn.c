@@ -902,6 +902,9 @@ void nvn_ctl_lens(const void *control, uint32_t *nctl, uint32_t *ncode) {
     memcpy(&own, c + 0x20, 4);
     *nctl = own >= 0x760 && own < 0x880 ? own : 0x880;
 }
+// The control bytes a shader dump keeps (DM_NVN_SHDUMP, nvn_mtl.m): an NVN2 section whole, 0xe0 bytes (a compute shader's thread group at +0x58 and shared memory at +0xb8 lie past
+// the 0x48 key bytes; Pokopia's GLSLC 0x00220015 sections are 0xe0 bytes, pokopia-native's s2_dumps.py reads them), else the key bytes
+uint32_t nvn_ctl_dump_len(const void *control) { uint32_t nctl, ncode; nvn_ctl_lens(control, &nctl, &ncode); return nvn2_ctl(control) ? 0xe0 : nctl; }
 static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t ncode = 0, nctl;
     if (!sd->control) return 0;
@@ -913,6 +916,8 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     // sections differ only in GLSLC's compile information (+0x778..+0x791, +0x7d0..+0x7e7): it hands a program the section of an earlier shader with the same rest, so the bytes there name another shader
     if (nvn2_ctl(sd->control)) {
         uint8_t ctl[NVN2_KEY_CTL]; memcpy(ctl, sd->control, NVN2_KEY_CTL); memset(ctl + 0x30, 0, 4);
+        // the profile's shader_key_skip within the key bytes: Pokopia's driver rewrites +0x20..+0x27 of some sections at run time (6 of 71 requests in pokopia-native's survey differed only there), so 0x20+0x8
+        if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= NVN2_KEY_CTL) memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
         CC_SHA256_Update(&hc, ctl, NVN2_KEY_CTL);
     } else if (DM_GAME_SHADER_KEY_SKIP_LEN && DM_GAME_SHADER_KEY_SKIP_OFF + DM_GAME_SHADER_KEY_SKIP_LEN <= nctl) {
         uint8_t ctl[0x880]; memcpy(ctl, sd->control, nctl); memset(ctl + DM_GAME_SHADER_KEY_SKIP_OFF, 0, DM_GAME_SHADER_KEY_SKIP_LEN);
@@ -948,7 +953,8 @@ NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData 
         // and its copies point at it, so it stays as long as the process, as the record does. nvn_ctl_lens reads it again: NVN's key bytes hold +0x20 and +0x704, NVN2's +0x44
         if (sd[i].control && (dump || !(k->ok >> i & 1))) {
             uint32_t nctl, ncode; nvn_ctl_lens(sd[i].control, &nctl, &ncode);
-            void *c = malloc(nctl); memcpy(c, sd[i].control, nctl); o->sd[i].control = c;
+            uint32_t keep = dump ? nvn_ctl_dump_len(sd[i].control) : nctl;   // a dump keeps the whole NVN2 section (nvn_ctl_dump_len)
+            void *c = malloc(keep); memcpy(c, sd[i].control, keep); o->sd[i].control = c;
         }
         // Diagnostic: trace the loader of selected shader keys (comma-separated hex).
         if (trace && (k->ok & (1u << i))) {
@@ -2635,6 +2641,8 @@ __attribute__((weak)) void dm_perf_present(double iv_ms) { (void)iv_ms; }   // D
 uint64_t dm_nvn_sub_cpu_ns(void) { return atomic_load(&g_cum_sub_cpu_ns); }   // Cumulative CPU nanoseconds of submit (excluding present)
 __attribute__((weak)) int dm_thermal_now(void) { return -1; }   // Default (Mac); overridden by iOS front_ios.m   // default (Mac); the strong definition in the iOS front end front_ios.m overrides it
 __attribute__((weak)) int dm_low_power_now(void) { return 0; }   // Low Power Mode (iOS front_ios.m); off on the Mac
+__attribute__((weak)) double dm_battery_now(void) { return -1; }   // battery percent (iOS front_ios.m); unknown on the Mac
+__attribute__((weak)) int dm_battery_state_now(void) { return 0; }   // 0 unknown, 1 unplugged, 2 charging, 3 full (UIDeviceBatteryState)
 // Per-frame ring for the long-frame log (GPU time only arrives 8 frames late, so store first and judge later)
 #define LFN 16
 typedef struct { uint64_t f; double fr, nv, t_s, make_ms, up_mb, up_ms; unsigned pso, lib, up, rup, hy; } lf_rec;   // hy: draws with a hybrid (pulling) pipeline
@@ -2668,10 +2676,12 @@ static void power_line(uint64_t frame) {
     uint64_t e = 0;
 #endif
     uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
+    static uint64_t t0; if (!t0) t0 = t;   // the rows carry the time since the first one, so a log without wall-clock stamps still gives battery drain per hour (nx-ios-battery.py)
     if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
         double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
-        LOG("[nvn] power up to frame %llu: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; top yielders: %s", frame,
-            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        LOG("[nvn] power up to frame %llu at %.0f s: CPU energy %.2f W, %.1f mJ per frame (%.1f fps); CPU %.0f%% (100 = one core), %.0f%% of it on performance cores; wakeups %.0f/s (out of platform idle %.0f); GPU %.1f ms/s; thermal %d; battery %.0f%% %s; top yielders: %s", frame, (t - t0) / 1e9,
+            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(),
+            dm_battery_now(), (const char *[]){"unknown", "unplugged", "charging", "full"}[(unsigned)dm_battery_state_now() <= 3 ? dm_battery_state_now() : 0], yt);   // battery: iOS only (-1% unknown elsewhere); drain per hour = the fall between two unplugged rows over their time
         void mtl_dispatch_barrier_stats(uint64_t *, uint64_t *, uint64_t *, uint64_t *); static uint64_t pdg, pdc, pdu, pdn; uint64_t dg, dc, du, dn; mtl_dispatch_barrier_stats(&dg, &dc, &du, &dn);
         if (dg + dc + du + dn != pdg + pdc + pdu + pdn) LOG("[nvn] compute dispatches up to frame %llu: %llu after a barrier of the game's, %llu after a copy's range, %llu in the full order (a binding with no range), %llu with no barrier (DM_NVN_DISPATCH_BARRIER)", frame,
             (unsigned long long)(dg - pdg), (unsigned long long)(dc - pdc), (unsigned long long)(du - pdu), (unsigned long long)(dn - pdn));

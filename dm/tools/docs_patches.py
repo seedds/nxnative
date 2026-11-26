@@ -17,7 +17,7 @@ SDK = REPO / 'dm/tools/sdk_patches.py'
 HOST = ['dm/host', 'dm/gfx', 'dm/ios']   # tracked files only: dm/host/gen and other build output are git-ignored
 HOST_EXT = ('.c', '.m', '.mm', '.h', '.inc', '.swift')
 # What a build-keyed host table does (the table's name in the source; a row of another table is listed under its own name)
-TABLES = {'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
+TABLES = {'k_coop_sites': "Link Play sites", 'k_coop_story': "Link Play story co-op site", 'k_locks': 'engine frame limit set to fps_target', 'k_ue': "Unreal's allocator on a host malloc zone", 'k_nier_dr': 'frame interval and dynamic-resolution floor'}
 # Profile keys that are not behaviour switches: per-game data or controls, not something the host does differently
 NOT_SWITCHES = {'pad_layout', 'depth_mode', 'mem_used', 'sys_resource', 'shader_versions', 'shader_covers'}
 
@@ -76,6 +76,11 @@ HOST_BINDING = [
      'why': "the studio's engine, which its other games ship", 'blocked': 'one game on that engine here'}),
     ('k_ue', '', 'feae83dc9e9fb34c77d0a62f1fa9ae9f', {'what': "UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c)", 'now': 'build', 'goal': 'game', 'purpose': 'address space',
      'why': "UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply"}),
+    ('k_coop_story', '', '', {'what': "Link Play's story co-op site in Pokémon Pokopia's main: the talk handler's IsHost read (hle_coop_interact.c)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "the game's own story logic: an observation gate at the site gives a visitor the host's talk path while the launcher's Story co-op switch is on", 'blocked': 'one game has Link Play; both of its builds are listed'}),
+    ('k_coop_sites', '', '', {'what': "Link Play's two story-area sites in Pokémon Pokopia's main: the permission-mask builder and the talk handler (hle_coop_interact.c)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "the game's own story logic: an observation gate at each site (the profile's patches.py) gives a visitor Palette Town's permissions and the host's talk path while the launcher's Interact everywhere / Story co-op switches are on",
+     'blocked': 'one game has Link Play; both of its builds are listed'}),
     ('k_nier_dr', '', '', {'what': "NieR's frame interval and dynamic-resolution floor at fixed addresses", 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'checked': "both releases' mains, where these rows were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09)",
      'why': "the game's own display object; the Asian release's function is the global one's 0x13c0 further on, so the rewriter's function match could give the host both releases' "
@@ -122,6 +127,19 @@ SWITCH_BINDING = [
      'why': "what the regions after it need, measured by the NSP script's region check, or 1 GB from its heap check; the host's cap is the default"}),
     ('shader_key_skip', '', {'what': 'control-section bytes left out of shader keys', 'now': 'game', 'goal': 'game', 'purpose': 'shaders',
      'why': "the engine shares one control section among shaders; leaving GLSLC's compile information out of every game's keys would change every shader key"}),
+    ('look_rate', '', {'what': "pointer look: the camera's turn rate at full right-stick tilt (Pokopia)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'a choice per game: the pointer is a look control only where the game has no right-stick camera of its own'}),
+    ('look_dead', '', {'what': "pointer look: the right stick's round deadzone (Pokopia)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime', 'why': 'tuned per game against its own stick curve'}),
+    ('look_cam', '', {'what': "pointer look written straight into the camera object (hle_hid.c look_cam)", 'now': 'build', 'goal': 'game', 'purpose': 'runtime',
+     'why': "a main build ID and the camera object's address per build; a rewriter pattern for the camera object would cover new versions"}),
+    ('touch_stick', '', {'what': "the virtual left stick's default mode on the iPhone: floating, digital 8-way or fixed (DmGamepad.m)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'a feel choice per game: grid and menu games (Fire Emblem) want snapped directions, free movement wants an analog floating stick; the player can change it in the launcher'}),
+    ('background_run', '', {'what': "the iPhone launcher's first value of Keep running in background (front_ios.m bg_run)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'a choice per game: a long game the player leaves mid-session wants it on; it costs a little battery, so the default stays off elsewhere; the player can change it in the launcher'}),
+    ('coop', '', {'what': "the launcher's first value of Link Play on this network (hle_coop_ldn.c)", 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': 'a choice per game: a town game played with others on the same Wi-Fi (Pokopia) hosts and finds hosts from the first start; elsewhere it stays off until chosen'}),
+    ('s2_hid_stubs', '', {'what': 'Switch 2 streamplay and vibration-graph calls as inert stubs (hle_offline.c)', 'now': 'game', 'goal': 'host', 'purpose': 'runtime',
+     'why': 'a host-side streamplay and HD rumble 2 graph would serve every Switch 2 game; until then only a game whose SDK the host cannot otherwise satisfy opts in, since the stubs replace constructors'}),
     ('ue_texture_pool', '', {'what': "Unreal's texture streaming pool", 'now': 'game', 'goal': 'game', 'purpose': 'memory', 'why': "the game's own budget, raised to its Windows value"}),
     ('snowdrop_pools', '', {'what': "Snowdrop's three page pools' address ranges", 'now': 'game', 'goal': 'game', 'purpose': 'address space',
      'why': "the rewriter finds the allocator in any build (snowdrop_pools.py); the sizes are measured against each game's regions, and the cause, an iPhone's address space, is a platform limit"}),

@@ -44,3 +44,4 @@ shader_note	Mario Kart World shaders
 # slow motion. The interval takes the host's frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it), at most 2; the game's own
 # 30 fps mode stays its own
 fps_target	60
+background_run	on

@@ -218,6 +218,8 @@ xcodegen generate -q > /dev/null || die "xcodegen"
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
   plutil -replace DMCommit -string "$COMMIT" -- Gen/Info.plist || die "DMCommit"; t "source: $COMMIT"; }
 case "$MSLDIR" in b-*) plutil -replace DMChain -string "${MSLDIR#b-}" -- Gen/Info.plist || die "DMChain";; esac
+# The audio background mode: with Keep running in background (DM_BACKGROUND_RUN, settings.tsv) the front end keeps the audio units rendering while the app is in the background, so iOS keeps the process alive
+plutil -replace UIBackgroundModes -json '["audio"]' -- Gen/Info.plist || die "UIBackgroundModes"
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then plutil -replace MetalCaptureEnabled -bool true -- Gen/Info.plist || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)

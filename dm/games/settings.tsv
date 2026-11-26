@@ -5,6 +5,7 @@
 #   variable  the environment variable the setting sets
 #   kind      choice: values value=label,..., an option only some games have with ?<shown>&<shown> after its label (languages: the game's own, from its control data; every language when it has none, with a note); range: values low:high:step, shown as a percentage;
 #             toggle: values - (on sets 1, off 0) or <on>/<off>, the two values the variable takes (on/off)
+#             text: values its longest length (1-64): a short free text, printable ASCII, such as a code or an address; empty by default
 #   default   a value (a toggle's: 1 on, 0 off); DM_GAME_<NAME>: the host's own default from the game profile (game_profile.h, game.py); build:<VAR>: the IPA build's setting (build_ipa.sh)
 #             <ios>|<mac> selects the platform's default before resolving a profile macro or build variable
 #   shown     always; DM_GAME_<NAME>!=<value> or ==<value>; fixups:<KEY>: main's rewriter table has that key (a stub in the game's build, patch_nso.py); languages>1 (more than one to pick, so also when the control data lists none); gfxapi:<API>: the packer's GFXAPI;
@@ -27,7 +28,18 @@ DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		lev
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	always	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_ROTATION	choice	auto=Automatic,landscape=Landscape,portrait=Portrait	auto	platform:ios	Game	Rotation
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
+DM_BACKGROUND_RUN	toggle	-	DM_GAME_BACKGROUND_RUN	platform:ios	Game	Keep running in background	Keeps the app alive when you switch away, so iOS does not quit the game; it stays paused and silent meanwhile. Uses a little battery in the background.
+DM_COOP	toggle	auto/off	DM_GAME_COOP	always	Game	Link Play on this network	Visit and host towns with players on the same Wi-Fi. Asks once for local network access.
+DM_COOP_JOIN	text	21		always	Game	Join address	Visit one host by its address, IPv4[:port] (on another network, turn on Internet play too). Empty: find hosts on this Wi-Fi, or host.	needs=DM_COOP=auto
+DM_COOP_INTERNET	toggle	-	0	always	Game	Internet play	Play with someone on another network: both enter the same room code. Not encrypted.	needs=DM_COOP=auto
+DM_COOP_ROOM	text	19		always	Game	Room code	The host's code, XXXX-XXXX-XXXX-XXXX. A host without one gets a new code each time.	needs=DM_COOP_INTERNET=1
+DM_COOP_RELAY	text	21		always	Game	Relay address	A relay you trust, as IPv4[:port]. Empty: visitors connect to the host's address.	needs=DM_COOP_INTERNET=1
+DM_COOP_INTERACT	toggle	-	0	always	Game	Interact everywhere	Experimental: in every town, not only Palette Town, visitors can use moves and items and build. Every player needs it on.	needs=DM_COOP=auto
+DM_COOP_STORY	toggle	-	0	always	Game	Story co-op	Experimental, with Interact everywhere: visitors can talk to the town's story characters. Story requests still count only for the host. Every player needs it on.	needs=DM_COOP=auto
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
+DM_TOUCH_STICK	choice	float=Floating,digital=Digital 8-way,fixed=Fixed	DM_GAME_TOUCH_STICK	platform:ios	Controls	Left stick	Floating: the stick appears where your thumb lands. Digital 8-way: a short flick snaps to one of eight directions, for menus and grids. Fixed: the stick stays in its corner.
+DM_LOOK_SCALE	range	0.25:3.0:0.05	1.0	DM_GAME_LOOK_RATE!=0.0f	Controls	Look sensitivity		level=basic
+DM_LOOK_INVERT_Y	toggle	-	0	DM_GAME_LOOK_RATE!=0.0f	Controls	Invert look up and down
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff

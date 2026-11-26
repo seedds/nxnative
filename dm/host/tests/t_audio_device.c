@@ -500,6 +500,31 @@ static void test_sink_route(void) {
     assert(stereo[0] == 6256 && stereo[1] == 7256 && dm_pcmout_released(key) == &b);
     dm_pcmout_close(key);
     assert(!object.key);
+
+    // DeviceSink dump on a 5.1 route latches 6-channel surround [0..5] and keeps that framing even after a mid-run route change to stereo.
+    char path[512]; snprintf(path, sizeof path, "%s/t_audio_dev_dump_%d.raw", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    setenv("DM_AUDIO_DUMP", path, 1);
+    unit.route_ch = 6;
+    void *dkey = dm_pcmout_open_sink(); aout *da = ao(dkey);
+    int did = da->id;
+    assert(da->sink_pcm && da->dev_ch == 6 && da->dump_ch == 6);
+    aout_buf db1 = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
+    assert(dm_pcmout_append(dkey, &db1));
+    unit.route_ch = 2; dm_audio_route_changed(); assert(da->dev_ch == 2 && da->dump_ch == 6);
+    aout_buf db2 = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
+    assert(dm_pcmout_append(dkey, &db2));
+    dm_pcmout_close(dkey); unsetenv("DM_AUDIO_DUMP");
+    assert(!object.key);
+    char dp[600];
+    if (did) snprintf(dp, sizeof dp, "%s.%d", path, did); else snprintf(dp, sizeof dp, "%s", path);
+    FILE *df = fopen(dp, "rb"); assert(df);
+    int16_t got[2 * 257 * 6 + 1]; size_t dn = fread(got, sizeof *got, sizeof got / sizeof *got, df);
+    fclose(df); unlink(dp);
+    assert(dn == 2 * 257 * 6);
+    for (int blk = 0; blk < 2; blk++)
+        for (int i = 0; i < 257; i++)
+            for (int j = 0; j < 6; j++)
+                assert(got[(blk * 257 + i) * 6 + j] == 1000 * j + i);
 }
 int main(void) {
     setenv("DM_AUDIO", "1", 1); unsetenv("DM_DBG_AU_FRAMES");

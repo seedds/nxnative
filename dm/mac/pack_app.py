@@ -575,7 +575,7 @@ def pack(a):
             pdm.mkdir(parents=True); copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False)
             place(f'GameData{n}', ptop, f'program {n} game files', inventory(prom), lambda d, prom=prom: copy([prom], d, can_clone(prom, res)))
             if phtml.is_dir(): copy([phtml], res / f'p{n}/html', False)
-            rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/{ptop}', f'DM_MSL_DIR=@R@/msl/p{n}', f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv', f'DM_PROGRAM={n}']))
+            rows.append('\t'.join([n, 'exe=@C@/MacOS/dmhost', f'arg=@R@/dm/p{n}', 'cwd=@S@', f'DM_ROMFS=@R@/{ptop}', f'DM_MSL_DIR=@R@/msl/p{n}'] + ([f'DM_NVN_SHMAP=@R@/dm/p{n}/shader_map.tsv'] if (pdm / 'shader_map.tsv').is_file() else []) + [f'DM_PROGRAM={n}']))
         (dm / 'programs.tsv').write_text('\n'.join(rows) + '\n')
     icon = bool(a.icon)
     if icon: step('icon'); make_icns(a.icon, res / 'AppIcon.icns')

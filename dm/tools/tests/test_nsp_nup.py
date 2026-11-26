@@ -820,6 +820,33 @@ class Programs(Base):
                 write_nup(self.path, packages)
                 with pack_nup.Nup(self.path) as n, self.assertRaisesRegex(pack_nup.Error, error): pack_nup.scan(n)
 
+    def test_same_family_multi_program_collection_defaults_to_program_zero(self):
+        # A multi-title collection NUP (all programs under the same base ID, e.g. ACA NEOGEO SELECTION Vol.9: programs 0, 1, 6)
+        # defaults to program 0 (the launcher), leaves sibling_romfs empty (each program is packed as its own executable), and exposes
+        # sibling indices (including program 6) for build_ipa_from_nsp.py's provisional discovery.
+        c0, c1, c6 = 0x01008E3025222000, 0x01008E3025222001, 0x01008E3025222006
+        write_nup(self.path, [
+            (0, c0, 0, {'exefs': version(tid=c0)['exefs'], 'romfs': {'menu.bin': b'launcher'}}, META),
+            (0, c1, 0, {'exefs': version(tid=c1)['exefs'], 'romfs': {'g1.bin': b'game1'}}, b''),
+            (0, c6, 0, {'exefs': version(tid=c6)['exefs'], 'romfs': {'g6.bin': b'magician-lord'}}, b''),
+        ])
+        n = self.open()
+        app, base, vers, dlc = pack_nup.scan(n)
+        self.assertEqual((app, n.application, n.multi_program, sorted(n.siblings), vers, dlc), (c0, c0, True, [1, 6], {}, {}))
+        self.assertEqual(pack_nup.sibling_romfs(n, base), {})
+        discovered = nsp.discover_sibling_programs({'nup': n}, c0, base, None, None, None, self.dir / 'list.log', {})
+        self.assertEqual(discovered, {
+            1: {'tid': c1, 'in_base': True, 'in_update': False},
+            6: {'tid': c6, 'in_base': True, 'in_update': False},
+        })
+        out = self.dir / 'out_coll'
+        pack_nup.pack_version(n, base, base, app, out, say=lambda s: None)
+        self.assertFalse((out / pack_nup.PROGRAMS).exists())
+        # Explicit --program 6 selects Magician Lord cleanly.
+        app6, base6, _, _ = pack_nup.scan(self.open(), 6)
+        self.assertEqual(app6, c6)
+        self.assertEqual(base6.title_id, c6)
+
     def test_script_reads_the_program_and_its_siblings(self):   # --program, --title-id (the program's or the application's), the survey's manifest, the disk estimate, the format check
         write_nup(self.path, edition(s1_updates=[(VER, 's1new')]))
         for program, want, app in ((None, S2, S2), (0, S1, S1), (None, S1, S2)):

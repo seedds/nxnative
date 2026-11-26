@@ -122,7 +122,7 @@ class Nup:
     """A validated NUP (SPEC §6.1): the superblock, the TOC's SHA-256, every record's bounds. File content is checked against its SHA-256 as it is read"""
     def __init__(self, path):
         self.path = Path(path)
-        self.application, self.aoc_base, self.siblings = None, None, {}   # scan's: the application, its add-on content base ID, the other programs
+        self.application, self.aoc_base, self.siblings, self.multi_program = None, None, {}, False   # scan's: the application, its add-on content base ID, the other programs, whether same-family multi-program
         with open(self.path, 'rb') as f:   # the map keeps its own descriptor
             try: self.mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             except ValueError: raise Error(f'{self.path}: empty file') from None
@@ -310,10 +310,11 @@ def scan(n, program=None):
             if not k.version: raise Error(f'{n.path}: an update of version 0')
             vers[k.version] = k
         layout[pid & 0xFFF] = (pid, own_bases[0] if own_bases else None, vers)
-    if program is None: program = max(layout)
+    multi_program = len(layout) > 1 and all((pid & ~0xFFF) == owner[pid] for pid in progs)
+    if program is None: program = min(layout) if multi_program else max(layout)
     if program not in layout: raise Error(f'{n.path}: no program {program}; it holds ' + ', '.join(f'{i} ({pid:016X})' for i, (pid, _, _) in sorted(layout.items())))
     app, base, vers = layout.pop(program)
-    n.application, n.siblings = owner[app], layout
+    n.application, n.siblings, n.multi_program = owner[app], layout, multi_program
     newest = [vers[v] for v in sorted(vers, reverse=True)] + ([base] if base else []) + [k for _, b, vs in layout.values() for k in [*vs.values(), *([b] if b else [])]]
     n.aoc_base = next((a for k in newest if (a := nacp_ids(k)[1]) is not None), n.application + 0x1000)
     dlc = {}
@@ -328,7 +329,9 @@ def scan(n, program=None):
 
 def sibling_romfs(n, k):
     """{program index: RomFS folder} of the other programs of the application (scan's n.siblings) at the version package k runs: each one's newest update of no higher version, else its
-    base (an update without romfs/ uses its base's). On Horizon the programs of an application are patched together, and a program mounts another's RomFS by its index"""
+    base (an update without romfs/ uses its base's). On Horizon the programs of an application are patched together, and a program mounts another's RomFS by its index. Same-family
+    multi-program collections pack each program as its own executable instead of copying every other program's RomFS beside each one."""
+    if getattr(n, 'multi_program', False): return {}
     out = {}
     for idx, (_, sbase, svers) in sorted(n.siblings.items()):
         u = max((v for v in svers if v <= k.version), default=None)

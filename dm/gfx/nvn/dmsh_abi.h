@@ -179,14 +179,15 @@
 // NVIDIA's "zero times anything is zero" float blend option, which NVN's driver switches on (SET_BLEND_FLOAT_OPTION; dm/gfx/tools/dmsh_rewrite.py blend_zero): a uint at this fragment buffer
 // index, DMSH_BLEND_ZERO_BITS bits per colour output from bit 0: 0 = the output's source colour weight is not known to be zero, 1 = it is zero where the output's alpha is 0 (SRC_ALPHA),
 // 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
-// A second uint after it rounds colour outputs as NVIDIA's colour unit converts them into a normalized target (dmsh_rewrite.py blend_zero, nvn_mtl.m rop_word):
-// DMSH_BLEND_ROUND_BITS bits per colour output from bit 0, DMSH_ROUND_* the target's channel widths; 0 = stored as Apple converts it (blended, float, sRGB, signed or another width)
+// A second uint after it rounds colour outputs as NVIDIA's colour unit converts them into a normalized or 16-bit float target (dmsh_rewrite.py blend_zero, nvn_mtl.m rop_word):
+// DMSH_BLEND_ROUND_BITS bits per colour output from bit 0, DMSH_ROUND_* the target's channel widths; 0 = stored as Apple converts it (blended, 32-bit or packed float, sRGB, signed, another width, or a GPU whose hardware already converts 16-bit float targets toward zero)
 #define DMSH_BLEND_BUFFER 28
 #define DMSH_BLEND_ZERO_BITS 2
-#define DMSH_BLEND_ROUND_BITS 2
+#define DMSH_BLEND_ROUND_BITS 3
 #define DMSH_ROUND_8 1                   // 8 bits a channel (255)
 #define DMSH_ROUND_16 2                  // 16 bits a channel (65535)
 #define DMSH_ROUND_10_2 3                // 10 bits rgb, 2 bits alpha (1023, 3)
+#define DMSH_ROUND_F16 4                 // a 16-bit float channel: the float converted toward zero (NVIDIA's rule; iOS/iPadOS GPUs such as M4/A19 Pro round to nearest even)
 
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)

@@ -1141,6 +1141,51 @@ static void udc_selftest(void) {
         MLOG("UDC self-check %s %s %lux%lu first value %08x, values differing from it %lu / %lu", g_dev.name.UTF8String, depth ? "Depth32F_S8" : "RGBA8", (unsigned long)w, (unsigned long)h, px[0], (unsigned long)bad, (unsigned long)(w * h));
     }
 }
+// One-time startup probe of hardware float32 -> 16-bit float render-target conversion (called from mtl_init_once, using the precompiled clear library):
+// writes four floats into a 1x1 RGBA16Float target and reads back the stored halves:
+//   x = 1 + 3/4 half-ulp (0x3f801800)        -> RTZ 0x3c00, RTNE 0x3c01 (normal midpoint)
+//   y = 2^-14 - 2^-26    (0x387ff000)        -> RTZ 0x03ff, RTNE 0x0400 (subnormal / normal boundary)
+//   z = 0.75 * 2^-24     (0x33400000)        -> RTZ 0x0000, RTNE 0x0001 (below smallest half subnormal)
+//   w = 70000.0f         (0x4788b800)        -> RTZ 0x7bff, RTNE 0x7c00 (finite overflow clamped to 65504)
+// If all four match NVIDIA's RTZ rule (as measured on macOS M4 Pro / M5 Pro), rop_class() leaves 16-bit float targets at 0 so FN_OFF_BLEND compiles dm_blend0 away.
+// Otherwise (as on iPad Pro M4 / iPhone 17 Pro Max, which round to nearest even), DMSH_ROUND_F16 truncates in dm_rop. Conservative default (0 -> needs shader guard) on probe failure.
+static int g_rop_f16_hw_rtz;
+static void rop_f16_probe(void) {
+    @autoreleasepool {
+        NSError *e = nil;
+        id<MTLLibrary> lib = host_lib("clear", &e);
+        if (!lib) return;
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        d.vertexFunction = [lib newFunctionWithName:@"clr_vs"];
+        d.fragmentFunction = [lib newFunctionWithName:@"clr_fs_0_float"];
+        d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+        id<MTLRenderPipelineState> ps = dev_rps(d, &e);
+        if (!ps) return;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:1 height:1 mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget; td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> rt = [g_dev newTextureWithDescriptor:td];
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        if (!rt || !cb) return;
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor new];
+        rp.colorAttachments[0].texture = rt; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+        static const float z = 0.0f;
+        static const uint32_t bits[4] = {0x3f801800u, 0x387ff000u, 0x33400000u, 0x4788b800u};
+        [enc setRenderPipelineState:ps];
+        [enc setVertexBytes:&z length:sizeof z atIndex:0];
+        [enc setFragmentBytes:bits length:sizeof bits atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [enc endEncoding];
+        [cb commit]; [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return;
+        uint16_t h[4] = {0};
+        [rt getBytes:h bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0];
+        g_rop_f16_hw_rtz = (h[0] == 0x3c00u && h[1] == 0x03ffu && h[2] == 0x0000u && h[3] == 0x7bffu);
+        MLOG("f16 ROP probe: hardware converts float32 -> RGBA16F %s (got %#x %#x %#x %#x)",
+             g_rop_f16_hw_rtz ? "toward zero (shader guard skipped)" : "not toward zero (DMSH_ROUND_F16 enabled)", h[0], h[1], h[2], h[3]);
+    }
+}
+
 static void mtl_init_once(void) {
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -1229,6 +1274,7 @@ static void mtl_init_once(void) {
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
     MLOG("Metal device %s", g_dev.name.UTF8String);
+    rop_f16_probe();
     udc_selftest();
 }
 
@@ -11007,14 +11053,27 @@ static uint32_t bz_word(const uint8_t *lm) { return bz_word_for(g_pass.cfmt, lm,
 // and were 67 here, which turned its ambient light off. The pixel shader rounds such outputs itself (dmsh_rewrite.py blend_zero, dm_rop), and which ones and to what width comes from
 // here: DMSH_BLEND_ROUND_BITS bits per colour output, for an 8-bit, 16-bit or RGB10A2 normalized target whose stored value is the conversion of the colour: blending off for it, MIN or
 // MAX on both its colour and alpha (they keep one of two stored values, so a colour rounded first keeps the same one), or a logic operation (which takes the place of blending and
-// rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). sRGB, signed, float, packed 16-bit formats and blended sums (rounded after the blend,
-// out of a shader's reach) keep Apple's conversion. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
-static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized targets as Apple's GPU converts them"); } return v; }
+// rounds the colour as the target stores it; dmsh_logic.py dm_logic_norm then finds it exact). A 16-bit float target (R16F, RG16F, RGBA16F) takes DMSH_ROUND_F16 under the same
+// conditions when hardware does not already convert toward zero (probed once in mtl_init_once: macOS M4 Pro / M5 Pro truncate in hardware so FN_OFF_BLEND keeps dm_blend0 compiled out,
+// while iPad Pro M4 / iPhone 17 Pro Max round to nearest even, breaking Super Mario Bros. Wonder's back-layer player depth compare). DM_NVN_ROP_F16=0/1 overrides the probe for testing.
+// sRGB, signed, 32-bit and packed (RG11B10F, RGB9E5) float formats, packed 16-bit normalized formats and blended sums (rounded after the blend, out of a shader's reach) keep Apple's
+// conversion. DM_NVN_ROP_ROUND=0 gives 0 for every draw, for A/B runs
+static int rop_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_ROP_ROUND"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_ROP_ROUND=0: colours go into normalized and 16-bit float targets as Apple's GPU converts them"); } return v; }
+static int rop_f16_need(void) {
+    static int ov = -2;   // -2 unread, -1 auto (rop_f16_probe), 0 forced off, 1 forced on
+    if (ov == -2) {
+        const char *e = getenv("DM_NVN_ROP_F16");
+        ov = (e && !strcmp(e, "0")) ? 0 : (e && !strcmp(e, "1")) ? 1 : -1;
+        if (ov >= 0) MLOG("DM_NVN_ROP_F16=%d: 16-bit float targets %s", ov, ov ? "truncated toward zero in shaders" : "keep Apple's conversion");
+    }
+    return ov >= 0 ? ov : !g_rop_f16_hw_rtz;
+}
 static uint32_t rop_class(MTLPixelFormat f) {
     switch (f) {
         case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: return DMSH_ROUND_8;
         case MTLPixelFormatR16Unorm: case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: return DMSH_ROUND_16;
         case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatBGR10A2Unorm: return DMSH_ROUND_10_2;
+        case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: return rop_f16_need() ? DMSH_ROUND_F16 : 0;
         default: return 0;
     }
 }

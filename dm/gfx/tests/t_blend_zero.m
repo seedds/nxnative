@@ -82,7 +82,7 @@ static void merged_case(NSString *source, prog_t *program, int on) {
     static const uint8_t lmap[8] = {0xff, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     g_pso_lmap = lmap; g_pso_fsfn = fn; memset(g_bz_last, 0xee, sizeof g_bz_last);   // as draw has them for a merged pass; it clears them once it has the pipeline
     mtl_sub_begin(); mtl_exec(cmds);
-    CHECK(g_bz_last[0] == (on ? 1u : 0u)); CHECK(g_bz_last[1] == 0);   // the words the draw bound: output 0's zero bit under the map; no rounding (a float target)
+    CHECK(g_bz_last[0] == (on ? 1u : 0u)); CHECK(g_bz_last[1] == 0);   // the words the draw bound: output 0's zero bit under the map; no rounding (blended sum)
     CHECK(!g_pso_lmap);   // the map is the draw's alone
     id<MTLBuffer> pixels = [g_dev newBufferWithLength:256 options:MTLResourceStorageModeShared];
     CHECK(pixels != nil); if (!pixels) { mtl_sub_commit(); mtl_pool_del(cmds); free(cmds); return; }
@@ -160,10 +160,10 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     // pso_blend_live / pso_off must read k->cfmt (not global g_pass.cfmt), so fsp_plan, fb_tile_ready, warm_task and pso_predict_rest_ never use another pass's formats
     {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm;
-        pso_key k = {.cfmt = {MTLPixelFormatRGBA16Float}, .blend_en = 0, .chmask = 0xf};
+        pso_key k = {.cfmt = {MTLPixelFormatRGBA32Float}, .blend_en = 0, .chmask = 0xf};
         CHECK(pso_blend_live(&k, ps, 0) == 0 && pso_off(&k, ps, 0) == (FN_OFF_BORDER | FN_OFF_BLEND));
         memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
-        k.blend_en = 1; k.blend[0] = state(1);
+        k.cfmt[0] = MTLPixelFormatRGBA16Float; k.blend_en = 1; k.blend[0] = state(1);
         CHECK(pso_blend_live(&k, ps, 0) == (on ? 1 : 0));
         CHECK(pso_off(&k, ps, 0) == (on ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));
         // Force FN_OFF_BLEND on the mist state with bz_word = 1 bound: dm_blend0 is compiled out, so Apple's blender stores NaN at alpha 0

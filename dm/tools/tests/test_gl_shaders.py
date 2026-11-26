@@ -339,6 +339,98 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             self.assertIsInstance(err, str)
             self.assertIn('glslang -E:', err)
 
+    def test_variable_texel_offsets_in_every_offset_function(self):
+        # NVIDIA's compiler takes any expression as a texel offset; GLSL and glslang want a constant ("'texel offset' : argument must be compile-time constant").
+        # Digimon's FXAA calls textureOffset with one; FINAL FANTASY VII's fxaanv5_p.glsl (#3292) fails the same way on textureLodOffset.
+        decl = {'2D': 'sampler2D tex', '2DArray': 'highp sampler2DArray tex', '3D': 'highp sampler3D tex', '2DShadow': 'highp sampler2DShadow tex',
+                'i2D': 'highp isampler2D tex'}
+        coord = {'2D': 'uv', '2DArray': 'vec3(uv, 1.0)', '3D': 'vec3(uv, 0.5)', '2DShadow': 'vec3(uv, 0.5)'}
+        off = {'2D': 'o', '2DArray': 'o', '3D': 'ivec3(o, 1)', '2DShadow': 'o'}
+        grad = {'2D': 'vec2(0.01)', '2DArray': 'vec2(0.01)', '3D': 'vec3(0.01)', '2DShadow': 'vec2(0.01)'}
+        calls = [(k, f'textureOffset(tex, {coord[k]}, {off[k]})') for k in coord]
+        calls += [(k, f'textureOffset(tex, {coord[k]}, {off[k]}, 0.5)') for k in ('2D', '2DArray', '3D', '2DShadow')]   # with a bias
+        calls += [(k, f'textureLodOffset(tex, {coord[k]}, 1.0, {off[k]})') for k in ('2D', '2DArray', '3D', '2DShadow')]
+        calls += [(k, f'textureGradOffset(tex, {coord[k]}, {grad[k]}, {grad[k]}, {off[k]})') for k in coord]
+        calls += [('2D', 'texelFetchOffset(tex, ivec2(uv * 64.0), 0, o)'), ('2DArray', 'texelFetchOffset(tex, ivec3(uv * 64.0, 1), 0, o)'),
+                  ('3D', 'texelFetchOffset(tex, ivec3(uv * 64.0, 1), 0, ivec3(o, 1))'), ('i2D', 'vec4(texelFetchOffset(tex, ivec2(uv * 64.0), 0, o))')]
+        calls += [('2D', 'textureProjOffset(tex, vec3(uv, 1.0), o)'), ('2D', 'textureProjOffset(tex, vec4(uv, 0.0, 1.0), o, 0.5)'),
+                  ('2D', 'textureProjLodOffset(tex, vec3(uv, 1.0), 1.0, o)'), ('2D', 'textureProjGradOffset(tex, vec4(uv, 0.0, 1.0), vec2(0.01), vec2(0.01), o)'),
+                  ('3D', 'textureProjOffset(tex, vec4(uv, 0.5, 1.0), ivec3(o, 1))'),
+                  ('2DShadow', 'textureProjOffset(tex, vec4(uv, 0.5, 1.0), o)')]
+        for kind, call in calls:
+            src = (f'#version 320 es\nprecision highp float;\nprecision highp int;\nuniform {decl[kind]};\nuniform ivec2 step_;\nin vec2 uv;\nout vec4 color;\n'
+                   f'void main() {{ ivec2 o = step_ * 2; color = vec4({call}); }}\n').encode()
+            with self.subTest(call=call), tempfile.TemporaryDirectory() as tmp:
+                r = gl_shaders.translate(src, 'frag', gl_shaders.hashlib.sha256(src).hexdigest()[:16], tmp)
+                self.assertIsInstance(r, tuple, r)
+                fixed = gl_shaders.fixups(src.decode(), 'frag')
+                self.assertNotRegex(fixed, gl_shaders.OFFSET_RE, 'raw offset call is routed to helper')
+                self.assertIn('dm_var_', fixed)
+        # A constant offset stays untouched with no helpers injected (glslang takes it, and the sampler applies it at each mip level it reads)
+        const = 'textureLodOffset(tex, uv, 1.0, ivec2(1, -1))'
+        src_const = f'uniform sampler2D tex;\nvoid main() {{ c = {const}; }}\n'
+        self.assertEqual(gl_shaders.fixups(src_const, 'frag'), src_const)
+        # textureLodOffset helper clamps lod and size against negative/out-of-range levels; texelFetchOffset preserves array layer.
+        lod = gl_shaders.fixups('#version 320 es\nuniform sampler2D tex;\nvoid main() { c = textureLodOffset(tex, uv, lv, o); }\n', 'frag')
+        self.assertIn('dm_var_textureLodOffset(tex, uv, lv, o)', lod)
+        self.assertIn('max(textureSize(s, max(int(l), 0)), ivec2(1))', lod)
+        fetch = gl_shaders.fixups('#version 320 es\nuniform highp sampler2DArray tex;\nvoid main() { c = texelFetchOffset(tex, p, 2, o); }\n', 'frag')
+        self.assertIn('dm_var_texelFetchOffset(tex, p, 2, o)', fetch)
+        self.assertIn('texelFetch(s, p + ivec3(o, 0), l)', fetch)
+
+    def test_variable_texel_offsets_more_forms(self):
+        head = '#version 320 es\nprecision highp float;\nprecision highp int;\nuniform ivec2 step_;\nin vec2 uv;\nout vec4 color;\n'
+        cases = [  # (declarations, the expression; it must compile)
+            ('uniform highp sampler2DArrayShadow tex;', 'vec4(textureGradOffset(tex, vec4(uv, 1.0, 0.5), vec2(0.01), vec2(0.01), o))'),
+            ('uniform highp isampler2DArray tex;', 'vec4(texelFetchOffset(tex, ivec3(uv * 64.0, 1), 0, o))'),
+            ('uniform highp usampler2DArray tex;', 'vec4(texelFetchOffset(tex, ivec3(uv * 64.0, 1), 0, o))'),
+            ('uniform sampler2D tex;\nuniform sampler2D t2;', 'textureLodOffset(tex, uv + vec2(texelFetchOffset(t2, ivec2(uv * 8.0), 0, o).xy), 0.0, o)'),   # nested variable calls
+            ('uniform sampler2D tex;\nuniform sampler2D t2;', 'textureLodOffset(tex, uv + vec2(texelFetchOffset(t2, ivec2(uv * 8.0), 0, o).xy), 0.0, ivec2(1, 0))'),  # inner only
+            ('uniform sampler2D tex;\nuniform highp sampler2DArray arr;\nvec4 f(sampler2D s, ivec2 d) { return textureOffset(s, uv, d, 0.5); }\n'
+             'vec4 h(highp sampler2DArray s, ivec2 d) { return textureGradOffset(s, vec3(uv, 1.0), vec2(0.01), vec2(0.01), d); }', 'f(tex, o) + h(arr, o)'),   # one name, two types
+            # Comma-separated uniform samplers, and an earlier function's parameter not shadowing a global uniform in main
+            ('uniform sampler2D s0, s1;\nvec4 f(highp sampler2DArray s1, ivec2 d) { return textureLodOffset(s1, vec3(uv, 0.0), 0.0, d); }',
+             'textureLodOffset(s1, uv, 0.0, o)'),
+            # mediump sampler and dynamic sampler-array element work through highp helpers
+            ('uniform mediump sampler2D arr[2];\nuniform int idx;', 'textureLodOffset(arr[idx], uv, 0.0, o)'),
+            # A const function parameter is read-only, not a compile-time constant expression (common in FXAA helpers)
+            ('uniform sampler2D tex;\nvec4 fxaaOff(sampler2D s, vec2 p, const ivec2 d) { return textureLodOffset(s, p, 0.0, d); }', 'fxaaOff(tex, uv, o)'),
+            # A const name in one function must not suppress lowering when another function uses a non-const local with the same name
+            ('uniform sampler2D tex;\nint helper() { const int o = 1; return o; }', 'textureLodOffset(tex, uv, 0.0, o) + float(helper())'),
+            # Ternary offset in texelFetchOffset keeps precedence
+            ('uniform sampler2D tex;', 'texelFetchOffset(tex, ivec2(uv * 64.0), 0, o.x > 0 ? o : ivec2(1, 0))'),
+        ]
+        for decl, expr in cases:
+            src = f'{head}{decl}\nvoid main() {{ ivec2 o = step_ * 2; color = {expr}; }}\n'.encode()
+            with self.subTest(expr=expr), tempfile.TemporaryDirectory() as tmp:
+                r = gl_shaders.translate(src, 'frag', gl_shaders.hashlib.sha256(src).hexdigest()[:16], tmp)
+                self.assertIsInstance(r, tuple, r)
+        # Vertex stage emits no fragment-only bias overloads
+        vert_src = (b'#version 320 es\nprecision highp float;\nprecision highp int;\nuniform sampler2D tex;\nuniform ivec2 step_;\nin vec2 uv;\n'
+                    b'void main() { gl_Position = textureOffset(tex, uv, step_) + textureProjOffset(tex, vec3(uv, 1.0), step_); }\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(vert_src, 'vert', gl_shaders.hashlib.sha256(vert_src).hexdigest()[:16], tmp)
+            self.assertIsInstance(r, tuple, r)
+        # Desktop GLSL: non-constant `const` locals, plus 1D, 1DArray, 2DRect (3-arg fetch), and shadow/projective desktop samplers
+        desktop_src = (b'#version 450 core\nuniform sampler1D s1;\nuniform sampler1DArray s1a;\nuniform sampler2DRect sr;\n'
+                       b'uniform sampler1DShadow s1s;\nuniform sampler1DArrayShadow s1as;\nuniform sampler2DRectShadow srs;\n'
+                       b'uniform ivec2 step_;\nin vec4 uv;\nout vec4 color;\n'
+                       b'void main() {\n'
+                       b'    const ivec2 o = step_ * 2;\n'
+                       b'    color = textureLodOffset(s1, uv.x, 0.0, o.x) + textureOffset(s1a, uv.xy, o.x)\n'
+                       b'          + textureOffset(sr, uv.xy, o) + texelFetchOffset(sr, ivec2(uv.xy), o)\n'
+                       b'          + textureProjOffset(s1, uv.xy, o.x) + textureProjOffset(sr, uv.xyz, o)\n'
+                       b'          + vec4(textureOffset(s1s, uv.xyz, o.x) + textureLodOffset(s1as, uv.xyz, 0.0, o.x) + textureProjOffset(srs, uv, o));\n'
+                       b'}\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(desktop_src, 'frag', gl_shaders.hashlib.sha256(desktop_src).hexdigest()[:16], tmp)
+            self.assertIsInstance(r, tuple, r)
+        # Constant expressions stay as written with no helpers injected
+        for call in ('textureGradOffset(tex, uv, vec2(0.01), vec2(0.01), K)', 'textureOffset(tex, uv, ivec2(1u, 0u), 0.5)', 'textureOffset(tex, uv, K)',
+                     'textureLodOffset(tex, uv, 0.0, K2)'):
+            t = f'const int DX = 1, DY = -1;\nconst ivec2 K = ivec2(1, -1);\nconst ivec2 K2 = ivec2(DX, DY);\nuniform sampler2D tex;\nvoid main() {{ c = {call}; }}\n'
+            self.assertEqual(gl_shaders.fixups(t, 'frag'), t)
+
 
 class MainStrings(unittest.TestCase):
     def test_a_prefix_is_not_a_shader(self):

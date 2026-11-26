@@ -23,6 +23,8 @@ class BugReport(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.home = self.root / 'home'
+        self.system = self.root / 'system/Library/Logs/DiagnosticReports'
+        self.system.mkdir(parents=True)
         (self.home / 'Library/Logs/nxnative').mkdir(parents=True)
         (self.home / 'Library/Logs/DiagnosticReports').mkdir(parents=True)
         (self.home / f'Library/Application Support/nxnative/{TID}').mkdir(parents=True)
@@ -40,7 +42,8 @@ class BugReport(unittest.TestCase):
         (b / 'shader/b-deadbeef0001/lib.metallib').write_bytes(b'metallib')
         (self.nsp / 'game.nsp').write_bytes(b'nsp')
         self.patches = [mock.patch.object(br, 'read_prefs', return_value={'launcher.DM_FPS_TARGET': '30', 'dataFolder': f'{self.home}/data'}),
-                        mock.patch.object(br, 'device', return_value={'Mac': 'Mac99,1', 'Chip': 'Apple M9', 'macOS': '27.0', 'Xcode': 'Xcode 27.1', 'Metal compiler': 'metal 1'})]
+                        mock.patch.object(br, 'device', return_value={'Mac': 'Mac99,1', 'Chip': 'Apple M9', 'macOS': '27.0', 'Xcode': 'Xcode 27.1', 'Metal compiler': 'metal 1'}),
+                        mock.patch.object(br, 'SYSTEM_REPORTS', str(self.system))]
         self.mocks = [p.start() for p in self.patches]
         for p in self.patches: self.addCleanup(p.stop)
 
@@ -235,6 +238,61 @@ class BugReport(unittest.TestCase):
         code, out = self.run_main(TID)
         n = {i for i in self.names(out) if i.startswith('crash/')}
         self.assertEqual(n, {'crash/dmhost-0.ips', 'crash/dmhost-1.ips', 'crash/dmhost-2.ips'})
+
+    def _put_gpu_event(self, folder, name, age_s=60, text=None):
+        p = folder / name
+        p.write_text(text or '{"bug_type":"284","timestamp":"2026-11-15 13:55:50.00 +0000"}\n{"process_name":"dmhost","analysis":{"restart_reason_desc":"firmware-detected lockup","signature":577}}\n')
+        t = time.time() - age_s; os.utime(p, (t, t)); return p
+
+    def _set_run_log(self, name, start_age_s, end_age_s):
+        p = self.home / 'Library/Logs/nxnative' / name
+        p.write_text('[RED] command buffer error: Caused GPU Hang Error\n')
+        now = time.time()
+        # Setting an earlier mtime also moves APFS st_birthtime back; the second call advances only mtime to the run's end.
+        os.utime(p, (now - start_age_s, now - start_age_s))
+        os.utime(p, (now - end_age_s, now - end_age_s))
+        return p
+
+    def test_gpu_event_reports_sources_filtering_and_cap(self):
+        self._set_run_log(f'{TID}.log', 600, 10)
+        user_d = self.home / 'Library/Logs/DiagnosticReports'
+        self._put_gpu_event(user_d, 'gpuEvent-dmhost-2026-11-15-135550.ips', age_s=60)
+        self._put_gpu_event(user_d, 'gpuEvent-Safari-2026-11-15-135551.ips', age_s=60)
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-2026-11-15-135550.ips', age_s=50, text='{"bug_type":"284"}\n{"analysis":{"restart_reason_desc":"MMU interrupt"}}\n')   # same name in both folders: newer wins, once
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-2026-11-15-135550.000.ips', age_s=55)
+        self._put_gpu_event(self.system, 'gpuEvent--2026-11-15-135550.ips', age_s=55)          # unattributed empty process name
+        self._put_gpu_event(self.system, 'gpuEvent-WindowServer-2026-11-15-135552.ips', age_s=55)
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-2026-10-01-000000.ips', age_s=30 * 86400)
+        (self.system / 'gpuEvent-dmhost-link.ips').symlink_to(self.system / 'gpuEvent-dmhost-2026-11-15-135550.000.ips')
+        (user_d / 'dmhost-2026-11-15-135600.ips').write_text('crash\n')
+        b, _ = br.collect(br.resolve(str(self.app)), home=str(self.home), system_reports=str(self.system))
+        crash = {n for n in b.files if n.startswith('crash/')}
+        self.assertEqual(crash, {'crash/dmhost-2026-11-15-135600.ips', 'crash/gpuEvent-dmhost-2026-11-15-135550.ips', 'crash/gpuEvent-dmhost-2026-11-15-135550.000.ips'})
+        self.assertIn('MMU interrupt', b.files['crash/gpuEvent-dmhost-2026-11-15-135550.ips'])
+        # Cap at GPU_EVENT_MAX (newest 10)
+        for i in range(12):
+            self._put_gpu_event(self.system, f'gpuEvent-dmhost-cap-{i:02d}.ips', age_s=20 + i)
+        gpu, other = br.gpu_event_reports(str(self.home), ['dmhost'], str(self.system), windows=br.run_windows(str(self.home), TID))
+        self.assertEqual(len(gpu), br.GPU_EVENT_MAX); self.assertEqual(other, 0)
+        self.assertEqual(gpu[0].name, 'gpuEvent-dmhost-cap-00.ips')
+
+    def test_gpu_event_reports_run_windows_and_no_log_fallback(self):
+        self._set_run_log(f'{TID}.log', 600, 120)
+        self._set_run_log(f'{TID}.prev.log', 7200, 6800)
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-current.ips', age_s=300)
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-margin.ips', age_s=60)      # within +120s after log's last write
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-prev.ips', age_s=7000)      # during .prev.log run
+        self._put_gpu_event(self.system, 'gpuEvent-dmhost-other.ips', age_s=3600)     # between runs: another game
+        b, report = br.collect(br.resolve(str(self.app)), home=str(self.home), system_reports=str(self.system))
+        crash = {n for n in b.files if n.startswith('crash/')}
+        self.assertEqual(crash, {'crash/gpuEvent-dmhost-current.ips', 'crash/gpuEvent-dmhost-margin.ips', 'crash/gpuEvent-dmhost-prev.ips'})
+        self.assertIn("1 from outside this game's last two Mac app runs left out", report)
+        # No Mac app logs: fall back to last 7 days, explicitly marked as not matched
+        (self.home / f'Library/Logs/nxnative/{TID}.log').unlink()
+        (self.home / f'Library/Logs/nxnative/{TID}.prev.log').unlink()
+        b, report = br.collect(br.resolve(str(self.app)), home=str(self.home), system_reports=str(self.system))
+        self.assertIn('crash/gpuEvent-dmhost-other.ips', b.files)
+        self.assertIn('not matched to this game', report)
 
     def test_exit_codes(self):
         self.assertEqual(self.run_main('/nonexistent/thing')[0], 2)

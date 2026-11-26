@@ -451,6 +451,38 @@ int main(void) {
         unlink(hid); unlink(cf6); put(p, "w4");   // the cloud's file removed for good, and this device saves on
         CHECK(session(W, cloud6, NULL, NULL) == 0 && cloud_has(cf6, root, "game.dat", "w4"), "no front end asks: sent, as before");
     }
+    printf("(18) conflict cloud backup rotates to newest 10 and keeps user folders\n");
+    {   char K[1200], L[1200], cloud7[1200], cf7[1400], bdir[1300];
+        snprintf(K, sizeof K, "%s/mac9/save", root); snprintf(L, sizeof L, "%s/iphone6/save", root);
+        snprintf(cloud7, sizeof cloud7, "%s/iCloud Drive/Seventh Saves", root); mkd(K); mkd(L); mkd(cloud7);
+        snprintf(cf7, sizeof cf7, "%s/%s/save.dmsync", cloud7, id);
+        snprintf(p, sizeof p, "%s/game.dat", K); put(p, "k0");
+        CHECK(session(K, cloud7, NULL, NULL) == 0 && session(L, cloud7, "game.dat", "l1") == 0, "Mac sends k0 and iPhone advances cloud to l1");
+        CHECK(session(K, NULL, "game.dat", "k1") == 0, "Mac diverges offline with k1");
+        snprintf(bdir, sizeof bdir, "%s-backups", K);
+        for (int i = 1; i <= 10; i++) {
+            char mark[32];
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save", bdir, i); mkd(p);
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save/mark.txt", bdir, i);
+            snprintf(mark, sizeof mark, "old-%02d", i); put(p, mark);
+        }
+        snprintf(p, sizeof p, "%s/player-folder", bdir); mkd(p);
+        snprintf(p, sizeof p, "%s/player-folder/keep.txt", bdir); put(p, "mine");
+        CHECK(run(K, cloud7, NULL, NULL, choice_of("local", cf7), NULL, READABLE) == 0 && cloud_has(cf7, root, "game.dat", "k1"),
+              "local choice backs up cloud save and sends k1");
+        int clouds = 0; DIR *bd = opendir(bdir); struct dirent *be;
+        while (bd && (be = readdir(bd))) {
+            size_t l = strlen(be->d_name);
+            clouds += l > 6 && (!strcmp(be->d_name + l - 6, " cloud") || strstr(be->d_name, " cloud "));
+        }
+        if (bd) closedir(bd);
+        backup_of(K, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.01 cloud", bdir);
+        snprintf(u, sizeof u, "%s/2001-01-01 00.00.02 cloud/save/mark.txt", bdir);
+        char userf[1400]; snprintf(userf, sizeof userf, "%s/player-folder/keep.txt", bdir);
+        CHECK(clouds == 10 && *back && same(q, "l1") && !exists(p) && same(u, "old-02") && same(userf, "mine"),
+              "exactly 10 completed cloud backups stay with l1 published, oldest pruned and user folder intact (%d)", clouds);
+    }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }
     return fails != 0;

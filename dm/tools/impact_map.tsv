@@ -166,6 +166,9 @@ dm/host/front_role.h	present:*	task scheduling for windowless Mac games
 dm/host/dm_input.h	hle:*hid*	the shared input interface
 dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
 dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
+dm/host/pad_hid.h	hle:*hid*	raw HID gamepad button and stick maps
+dm/host/pad_hid_mac.h	hle:*hid*	raw HID gamepads on the Mac: discovery, reports, players
+dm/host/pad_steam.h	hle:*hid*	Valve's Steam Controller: its reports and commands over USB, its receiver and Bluetooth LE
 dm/host/motion_fusion.h	hle:*SixAxisSensor*	six-axis motion mapping and orientation
 dm/host/motion_pro.h	hle:*SixAxisSensor*	passive Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless IMU decoders
 dm/host/motion_pro_mac.h	hle:*SixAxisSensor*	Mac Switch Pro, DualShock 4 and 8BitDo Ultimate 2 Wireless raw motion transport and routing

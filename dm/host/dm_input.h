@@ -2,6 +2,7 @@
 // A0 B1 X2 Y3 StickL4 StickR5 L6 R7 ZL8 ZR9 Plus10 Minus11 Left12 Up13 Right14 Down15; sticks ±32767.
 #pragma once
 #include <stdint.h>
+#include <stdlib.h>
 // Button bits (= nn::hid::NpadButton bit order; the DM_KEYS key-name table in hle_hid.c is generated from here). Frontends always compose buttons from these names.
 enum {
     DM_BTN_A = 1u << 0, DM_BTN_B = 1u << 1, DM_BTN_X = 1u << 2, DM_BTN_Y = 1u << 3,
@@ -12,6 +13,14 @@ enum {
     DM_BTN_LSL = 1u << 24, DM_BTN_LSR = 1u << 25, DM_BTN_RSL = 1u << 26, DM_BTN_RSR = 1u << 27,
 };
 #define DM_BTN_SHAKE (1ull << 63)   // not an NpadButton: the controller is shaken while set (its six-axis sensor, hle_hid.c); never reaches the game's buttons
+// Face buttons by position (the default): right A, bottom B, top X, left Y, as on a Switch controller, so the game's prompts point at the right place but an Xbox pad's letters
+// differ. DM_PAD_LETTERS=1 (the Buttons by letter setting): a pad with an Xbox pad's letters (A bottom, B right, X left, Y top) presses the Switch button of the letter it shows.
+// Nintendo's pads have the Switch's letters at the Switch's places and do not change. dm_face_by_letter turns the buttons of the positions into those of the letters (A and B,
+// X and Y trade places); the readers of pads with an Xbox pad's letters call it: GameController's pads (pad_apple.h), raw HID pads (pad_hid.h) and the Steam Controller (pad_steam.h)
+static inline int dm_pad_letters(void) { const char *e = getenv("DM_PAD_LETTERS"); return e && atoi(e) > 0; }
+static inline uint64_t dm_face_by_letter(uint64_t m) {
+    return (m & ~(uint64_t)(DM_BTN_A | DM_BTN_B | DM_BTN_X | DM_BTN_Y)) | (m & (DM_BTN_A | DM_BTN_X)) << 1 | (m & (DM_BTN_B | DM_BTN_Y)) >> 1;
+}
 #define DM_STICK_MAX 32767
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller

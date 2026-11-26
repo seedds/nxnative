@@ -148,6 +148,25 @@ int main(void) {
     pad_hid_init(&h, NULL, pad_hid_layout_for(0, 0x0e6f, 0x0185, wired));
     { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R};
       for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
+    // DM_PAD_LETTERS: the default and Xbox 360 maps by an Xbox pad's letters (usage 1 A bottom, 2 B right); Nintendo's report and the Switch wired layout keep their map;
+    // DM_HID_MAP still replaces entries
+    setenv("DM_PAD_LETTERS", "1", 1);
+    pad_hid_init(&h, NULL, PAD_HID_X360);
+    { static const unsigned usage[] = {1, 2, 3, 4, 10, 9};
+      static const uint64_t want[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_MINUS, DM_BTN_PLUS};
+      for (unsigned i = 0; i < sizeof usage / sizeof *usage; i++) { h.buttons = 1u << (usage[i] - 1); CHECK(pad_hid_buttons(&h) == want[i]); } }
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    { static const unsigned usage[] = {1, 2, 4, 5, 7};
+      static const uint64_t want[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_L};
+      for (unsigned i = 0; i < sizeof usage / sizeof *usage; i++) { h.buttons = 1u << (usage[i] - 1); CHECK(pad_hid_buttons(&h) == want[i]); } }
+    pad_hid_init(&h, "A=2,B=1", PAD_HID_DEFAULT); h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP's entries over the letters'
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_B); h.buttons = 1u << 3; CHECK(pad_hid_buttons(&h) == DM_BTN_X);
+    pad_hid_init(&h, NULL, PAD_HID_NINTENDO); h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
+    pad_hid_init(&h, NULL, PAD_HID_SWITCH_WIRED); h.buttons = 1u << 2; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
+    setenv("DM_PAD_LETTERS", "0", 1); pad_hid_init(&h, NULL, PAD_HID_X360); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_B);   // 0: by position
+    unsetenv("DM_PAD_LETTERS");
+    CHECK(dm_face_by_letter(DM_BTN_A | DM_BTN_Y | DM_BTN_ZR | DM_BTN_SHAKE) == (DM_BTN_B | DM_BTN_X | DM_BTN_ZR | DM_BTN_SHAKE));
+    CHECK(dm_face_by_letter(DM_BTN_B | DM_BTN_X | DM_BTN_UP) == (DM_BTN_A | DM_BTN_Y | DM_BTN_UP));
     // identical pads: a model is read here only with two or more pads and more than GameController lists, after the wait, and stops at once
     CHECK(pad_dupes_want(1, 0, 0, 1) == 0); CHECK(pad_dupes_want(2, 2, 1, 0) == 0); CHECK(pad_dupes_want(3, 3, 0, 1) == 0);
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);

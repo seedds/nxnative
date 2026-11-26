@@ -20754,8 +20754,12 @@ static id<MTLRenderPipelineState> dlss_alpha_pso(MTLPixelFormat pf) {
     return ps;
 }
 
-typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; float lo, hi; int fresh, mask; } dlss_scaler;
-static dlss_scaler g_dlss[4];
+// One scaler per network and input box, not one per network: a game with dynamic resolution renders into textures of a few sizes and steps between them every few
+// seconds, and each synchronous build stalls the replay about 80 ms (Xenoblade Chronicles DE, 0400FF500E34A001: 1280x720 to 960x540, 191 builds and 190 frames of
+// about 88 ms in 5 minutes of play). A kept scaler that becomes the network's current one again starts with a reset, as a new one does: its history is from another size
+typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; float lo, hi; int fresh, mask, cur; } dlss_scaler;
+#define DLSS_KEEP 12
+static dlss_scaler g_dlss[DLSS_KEEP];
 static uint64_t g_dlss_use;
 static id<MTL4Compiler> g_dlss_comp;
 static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
@@ -20764,9 +20768,15 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     if (bias) { bw = MIN(bw, bias.width); bh = MIN(bh, bias.height); }
     NSUInteger key[10] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, bias ? bias.pixelFormat : 0, bw, bh, out.width, out.height, c->flags};
     float s_lo = MIN((float)out.width / (float)iw, (float)out.height / (float)ih), s_hi = MAX((float)out.width / (float)iw, (float)out.height / (float)ih);   // this evaluation's scale
-    dlss_scaler *e = NULL, *spare = NULL;
-    for (int i = 0; i < 4 && !e; i++) { if (g_dlss[i].net == c->net) e = &g_dlss[i]; else if (!spare || (spare->net && (!g_dlss[i].net || g_dlss[i].used < spare->used))) spare = &g_dlss[i]; }
-    if (!e) { e = spare; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); }
+    dlss_scaler *e = NULL, *spare = NULL, *prev = NULL;
+    for (int i = 0; i < DLSS_KEEP; i++) {
+        dlss_scaler *s = &g_dlss[i];
+        if (s->net == c->net && s->net && s->cur) prev = s;
+        if (!e && s->net == c->net && s->net && !memcmp(s->key, key, sizeof key)) e = s;
+        else if (!spare || (spare->net && (!s->net || s->used < spare->used))) spare = s;
+    }
+    if (!e) { e = spare; if (e == prev) prev = NULL; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); e->cur = 0; }
+    if (e != prev) { if (prev) prev->cur = 0; e->cur = 1; e->fresh = 1; }   // back to a kept scaler: its history is another size's
     e->used = ++g_dlss_use;
     if (!memcmp(e->key, key, sizeof key) && (!e->sc || (s_lo >= e->lo && s_hi <= e->hi))) return e->sc ? e : NULL;
     memcpy(e->key, key, sizeof key); dlss_scaler_drop(e); e->fresh = 1;
@@ -20778,6 +20788,12 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     d.colorTextureFormat = col.pixelFormat; d.depthTextureFormat = dep.pixelFormat; d.motionTextureFormat = mot.pixelFormat; d.outputTextureFormat = out.pixelFormat;
     d.inputWidth = bw; d.inputHeight = bh; d.outputWidth = out.width; d.outputHeight = out.height;
     d.autoExposureEnabled = (c->flags & DLSS_F_AUTO_EXPOSURE) != 0;
+    // Build the final upscaler now, not in the background. With the default (NO), MetalFX hands back an interim upscaler and swaps in the one it compiles behind it; on
+    // Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition (0400FF500E34A001, 2.0.0; M2 Pro, macOS 27.3 26C5035r) that swap failed every run on the 97th
+    // evaluation of the fourth scaler the game's dynamic resolution made in its first second: MPSGraph's ANE region asserted `ANE inference operation failed`
+    // (Code=-19, inferenceCount 96) and aborted; with MTL_ERROR_MODE=nslog the GPU command buffer waiting on that inference timed out instead and macOS revoked GPU
+    // access. Built synchronously, the same boot ran 2,697 evaluations to its time limit, and the frames that make the scalers took no longer
+    d.requiresSynchronousInitialization = YES;
     d.inputContentPropertiesEnabled = YES; d.inputContentMinScale = e->lo; d.inputContentMaxScale = e->hi;
     const int fx = g_dlss_comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev];
     e->mask = bias != nil;

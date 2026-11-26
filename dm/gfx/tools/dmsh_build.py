@@ -882,6 +882,17 @@ def cross_msl(spv, msl):
     return subprocess.run([SPIRV_CROSS, *XC, spv, '--output', msl], capture_output=True, text=True)
 
 
+#   shader_rog <key>[,<key>...]: those pixel shaders' read-write images get a raster order group (see rog_images)
+ROG_KEYS = {k.strip().lower() for k in GAME.get('shader_rog', '').split(',') if k.strip()}
+_ROG_DECL = re.compile(r'(texture\w*<[^>]*access::read_write>\s+\w+\s+\[\[(?:id|texture)\(\d+\))(\]\])')
+def rog_images(msl):
+    """Every read-write image of a pixel shader the profile lists (shader_rog) in raster order group 0: the accesses of fragments at one pixel then run in draw order inside a render
+    pass, so the host keeps the pass across the game's ORDER_FRAGMENTS barrier between such draws (nvn_mtl.m rog_pass). Only for shaders that read and write their images at their own
+    pixel, which the profile vouches for: Xenoblade Chronicles: Definitive Edition builds a per-pixel light list (a bit mask image) one light volume a draw, a barrier after each.
+    Returns the source and the number of images put in the group"""
+    n = [0]
+    def put(m): n[0] += 1; return m.group(1) + ', raster_order_group(0)' + m.group(2)
+    return _ROG_DECL.sub(put, msl), n[0]
 def finish(key, w, j, c1):
     name, k = loc[key]
     msl = os.path.join(w, key + '.metal'); lib = os.path.join(out, key + '_b.metallib')
@@ -939,6 +950,8 @@ def finish(key, w, j, c1):
     if j['stage'] == 'ps': src = dmsh_rewrite.frag_z_snap(src)[0]   # gl_FragCoord.z against a depth of its own surface (see frag_z_snap)
     try: src = dmsh_rewrite.uniform_tests(src)   # a uniform word tested against constants read by a volatile load per test, so the front end folds no switch (see uniform_tests)
     except ValueError as e: return 'uniform tests rewrite failed', str(e)[:160], None
+    nrog = 0
+    if j['stage'] == 'ps' and key.lower() in ROG_KEYS: src, nrog = rog_images(src)   # the profile's raster order groups (see rog_images)
     blend0 = 0
     if j['stage'] == 'ps': src, blend0 = dmsh_rewrite.blend_zero(src)   # a zero blend weight makes 0 of a NaN colour, as NVIDIA's blender does; before the entry points that share main0's body (see blend_zero)
     open(msl, 'w').write(src)
@@ -1028,7 +1041,7 @@ def finish(key, w, j, c1):
             **({'layer_out': True} if j['stage'] == 'vs' and dmsh_entry.layer_out(src) else {}),   # main0 writes the layer (see layer_out)
             **({'entry_discard': 'main0_discard'} if discard else {}),
             **({'entry_tf': 'main0_tf', 'tf_strides': [e['stride'] if e else 0 for e in j['tf']]} if j.get('tf') else {}),
-            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u', **{f'entry_u_{k}': True for k, v in dmsh_entry.typed_ops(fu).items() if v}} if fu else {}), **({'blend_zero': True} if blend0 else {}), **({'entries_lost': lost} if lost else {}),
+            **({'entry_layer': 'main0_l', 'entry_layer_z': 'main0_lz', 'layer_from': lay} if lay else {}), **({'entry_u': 'main0_u', **{f'entry_u_{k}': True for k, v in dmsh_entry.typed_ops(fu).items() if v}} if fu else {}), **({'blend_zero': True} if blend0 else {}), **({'rog': True} if nrog else {}), **({'entries_lost': lost} if lost else {}),
             **({'first_store': [{'reg': next(b['reg'] for b in binds if b['msl_name'] == n), 'word': w, 'value': v} for n, w, v in first]} if first else {}),
             **({'tg_spill': spill} if spill else {}),
             **({'loop_sites': loop_sites} if j['stage'] == 'cs' and loop_sites else {}),

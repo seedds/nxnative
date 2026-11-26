@@ -703,6 +703,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the four clear-only passes before the G-buffer fold into its first pass (about 30 MB less loaded and stored a frame at 1600x900).
 
+### Light-list passes split at every barrier
+
+- **Symptom:** in a scene with many lights, `DM_NVN_PASSDUMP` shows dozens of small passes into one target, each one light volume (a stencil-marking draw, then a draw whose pixel shader writes an image), each ending at `barrier bits 0x2: ends the pass (shader writes)`; a Metal System Trace shows the GPU idle between them more than it works in them.
+- **Cause:** the pixel shader builds a per-pixel light list: it reads a bit-mask image at its own pixel, sets its light's bit and writes it back, and the game orders each light after the one before with an ORDER_FRAGMENTS barrier. Apple's GPUs have no fragment-to-fragment memory barrier inside a render pass, so each barrier ended the pass.
+- **Fix:** in the chain and the host. The profile key `shader_rog` lists the pixel shaders that read and write their images only at their own pixel; `dmsh_build.py` (`rog_images`) puts their read-write images in raster order group 0, and the reflection records `rog`. In `nvn_mtl.m`, while every shader write of the open pass is an image write of such a shader (`rog_prog`, `swrite_note`), a barrier that orders primitives or fragments keeps the pass: fragments at one pixel then access those images in draw order, as the barrier asks. A draw that reads one of the written images any other way (a texture, another stage's or shader's image, a handle the reflection cannot name) ends the pass first (`rog_reads`). `DM_NVN_ROG_PASS=0` ends the pass as before; `ab` alternates it with `DM_AB`.
+- **Found on:** Xenoblade Chronicles: Definitive Edition, Switch 2 Edition (`0400FF500E34A001`, no profile in the repository): fragment shaders `166eac140e045d0d`, `1fb1c5c0eef2e853`, `55a557e9696ccb2b`, `886f328e8c15e8ca` and `e6d18dd1a7ea428f` build the light list at 480x270, up to about 100 light volumes a combat frame. Docked combat on an M2 Pro, `DM_AB=600` over the same run: frames over 17.5 ms 19.8 % → 9.5 %, frame p90 18.09 → 17.46 ms, GPU p50 14.93 → 14.38 ms, passes 171 → 154 a frame.
+- **Check:** `DM_NVN_TEXRAW` of the mask and the colour target at a combat frame with the passes kept (33 barriers): every one of the 129,600 pixels holds exactly the lights its mask names, each once, in its colour lanes.
+
 ### Waiting clears landed one pass each
 
 - **Symptom:** a frame starts with a dozen clear-only passes (`DM_NVN_PASSDUMP`: passes ending in `lc_land` with no draw), each one target.

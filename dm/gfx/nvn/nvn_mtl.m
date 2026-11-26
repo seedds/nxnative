@@ -2180,6 +2180,10 @@ static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note
 static int g_pass_swst;     // the stages those writes came from (prog_swrites bits: 1 vertex, 2 fragment, 4 another)
 static int g_pass_order;    // ordering barriers came in the open draw pass after its draws, none of which wrote (1 primitives, 2 fragments): the next draw that writes is ordered after them first (order_draw)
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
+// Raster-ordered writes (DM_NVN_ROG_PASS, rog_pass_on): every shader write of the open pass came from pixel shaders whose written images are in a raster order group (rog_prog); the images
+// they wrote (serials). A barrier that orders fragments then keeps the pass; a draw that reads one of them otherwise ends it first (rog_reads)
+enum { ROG_MAX = 8 };
+static int g_pass_rog, g_pass_rog_n; static uint64_t g_pass_rog_ser[ROG_MAX]; static uint64_t g_rog_kept, g_rog_split;
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
 static void img_fit_upgrade(void); static int g_imfit_npend;   // textures an image slot needs a format view of (img_fit), upgraded before the next draw pass opens
 static int g_last_end_relaxed, g_game_barrier;   // the last encoder ended was a draw pass with the relaxed end barrier (nothing else since); the bits of the game's nvnCommandBufferBarrier calls since the last draw pass began
@@ -7557,7 +7561,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static void *rp_begin_ex_(int clear_only) {
     if (g_enc) return (__bridge void *)g_enc;
     if (g_nlc) lc_take_rt();   // waiting lazy clears: this pass's load actions, or landed before it, so none waits past a pass that opens (see lc_take_rt)
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_swst = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0; g_fsp_pass = 0;
+    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_swst = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0; g_fsp_pass = 0; g_pass_rog = 1; g_pass_rog_n = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return NULL; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     rt_view_upgrade_all(clear_only);   // as above: before any slot is attached (rt_view_upgrade_all)
@@ -7996,7 +8000,7 @@ static void shmap_read(void) {
     NSString *ventry; id<MTLFunction> vfn; int vfn_state;
     NSString *pentry, *wlentry, *vinentry;   // a vertex shader's entry point in its pulling library, that library's wide-line one, and its entry point in the shadow-input library, as the reflection names them (side_entry); nil: ventry's name (a layer entry point)
     id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (wlentry, dmsh_pull.py; nvn_wline.inc), nil when it has none
-    id<MTLLibrary> alib; id<MTLFunction> afn; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
+    id<MTLLibrary> alib; id<MTLFunction> afn; int afn_state, has_alpha, has_bz, rog;   // has_bz: its entry points read the blend weight word (bz_bind); rog: its read-write images are in raster order group 0 (dmsh_build.py rog_images)
     id<MTLLibrary> llib; NSMutableDictionary<NSNumber *, id<MTLFunction>> *lfn; int lfn_state, has_logic; } @end   // llib: the side library <key>_bx for logic operations, lfn: fn's entry point (a shader without the typed-output one, which holds its own) specialized per set of targets (lo_fn; lfn_state as afn_state; has_logic: the reflection names its entry points, dmsh_logic.py)   // afn: the alpha test entry point of fn in the side library <key>_bx (alib), (at_fn; afn_state 0 untried, 1 loaded, 2 failed; has_alpha: the reflection names it, dmsh_alpha.py)   // pfn: the same entry of the pulling library <key>_bp (pull_fn; has_pull: the reflection names one, dmsh_pull.py)   // vertex: the entry point loaded (by the depth mode); vfn: the same entry of the shadow-input library <key>_bv (vin_fn; state 0 untried, 1 loaded, 2 failed)
 @implementation NvShader
 - (void)dealloc { free(rf.c1); free(geo_slot); }
@@ -8446,6 +8450,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if (stage == 0 && !layer) o->has_pull = [j[@"pull"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_alpha = [j[@"alpha"] isKindOfClass:[NSDictionary class]];
     if (stage == 1) o->has_bz = [j[@"blend_zero"] boolValue];
+    if (stage == 1) o->rog = [j[@"rog"] boolValue];
     if (stage == 1) o->has_logic = [j[@"logic"] isKindOfClass:[NSDictionary class]];
     // A function that declares function constants cannot go into a pipeline until it is specialized, even when every constant is optional (fn_load specializes defaults before touching g_fn4).
     if (j[@"entry_discard"]) {
@@ -10114,9 +10119,42 @@ static void order_draw(NvProg *pr, int merged) {   // merged: a merged (readable
     static int once; if (!once++) MLOG("a draw with shader writes after a game barrier in a draw pass: the pass ends before it (first case pass %llu)", g_stat_pass);
     PD("M %llu a draw with shader writes after an ordering barrier; split here", g_stat_pass); rp_end();
 }
+static int rog_reads(NvProg *pr);
+static int rog_pass_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_ROG_PASS", 1); if (!m) MLOG("DM_NVN_ROG_PASS=0: a barrier after raster-ordered image writes ends the pass"); } return sw_on(m); }
+// The program writes only images of its pixel shader that are in a raster order group: the shader the profile lists (shader_rog), image writes alone, in the pixel stage alone
+static int rog_prog(NvProg *pr) {
+    if (!pr || prog_swrites(pr) != 2 || !pr->sh[1] || !pr->sh[1]->rog) return 0;
+    for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (st != 1 || sh->rf.b[i].kind != NVN_RB_IMG)) return 0; }
+    return 1;
+}
+// The draw may read an image the open pass wrote raster-ordered other than through its own raster order group (a texture, an image of another stage or shader, a handle the reflection
+// cannot name): only the same kind of draw reads them in order
+static int rog_reads(NvProg *pr) {
+    if (!pr) return 1;
+    int same = rog_prog(pr) || (!prog_swrites(pr) && pr->sh[1] && pr->sh[1]->rog);
+    for (int st = 0; st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        if (sh->rf.dyn || sh->rf.pool || sh->rf.bindless) return 1;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i]; uint64_t h;
+            if (b->kind == NVN_RB_IMG) { if (same && st == 1) continue; h = b->reg < 32 ? bound_img(st, b->reg) : 0; }
+            else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TBUF) h = bound_tex(st, b->reg);
+            else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_TEXD || b->kind == NVN_RB_TEXA || b->kind == NVN_RB_TEXP || b->kind == NVN_RB_TEXH || b->kind == NVN_RB_IMGU || b->kind == NVN_RB_IMGP || b->kind == NVN_RB_TBUFU) return 1;
+            else continue;
+            int tid = h ? bound_tex_id(h) : -1; uint64_t ser = tid >= 0 ? tid_ser(tid) : 0; if (!ser) continue;
+            for (int k = 0; k < g_pass_rog_n; k++) if (g_pass_rog_ser[k] == ser) return 1; } }
+    return 0;
+}
 static void swrite_note(NvProg *pr) {
     if (!pr) return;
     int w = prog_swrites(pr); g_pass_swst |= w;
+    if (w && g_pass_rog) {
+        if (!rog_prog(pr)) g_pass_rog = 0;
+        else { __unsafe_unretained NvShader *fs = pr->sh[1];
+            for (int i = 0; i < fs->rf.nb && g_pass_rog; i++) { const nvn_rbind *b = &fs->rf.b[i]; if (!b->rw) continue;
+                int tid = b->reg < 32 ? bound_tex_id(bound_img(1, b->reg)) : -1; uint64_t ser = tid >= 0 ? tid_ser(tid) : 0;
+                if (!ser) { g_pass_rog = 0; break; }
+                int f = 0; for (int k = 0; k < g_pass_rog_n && !f; k++) f = g_pass_rog_ser[k] == ser;
+                if (!f) { if (g_pass_rog_n >= ROG_MAX) g_pass_rog = 0; else g_pass_rog_ser[g_pass_rog_n++] = ser; } } } }
     if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
     if (w) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
 }
@@ -19024,6 +19062,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_split_resume = 0;
     g_rp_layered = pr->sh[0] && pr->sh[0]->layer_out;
     if (g_enc && g_pass.layered != g_rp_layered) rp_end();   // a layered pass only for layer-writing vertex shaders (see rp_begin_ex)
+    if (g_enc && g_pass_rog_n && rog_reads(pr)) { g_rog_split++; PD("M %llu a draw reads raster-ordered images of the pass otherwise; split here", g_stat_pass); rp_end(); }
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
     if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
     if (!g_enc && !g_rp_layered && g_exec_next && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
@@ -21650,6 +21689,12 @@ void mtl_exec(const uint8_t *p) {
                     g_order_vbar++; split = 0;
                     static int once; if (!once++) MLOG("a game barrier (bits %#x) after vertex-stage shader writes in a draw pass: a barrier from the vertex stage keeps the pass (first case pass %llu)", bits, (unsigned long long)g_stat_pass);
                     PD("M %llu vertex-stage writes before the barrier: a barrier from the vertex stage, the pass goes on", g_stat_pass);
+                } else if (split && g_pass_rog && g_pass_rog_n && g_pass_swst == 2 && !(bits & ~(NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT)) && !g_rt_merged && !g_sm_pass && !g_fsp_pass && rog_pass_on()) {
+                    // Every write of the pass is a raster-ordered image write at the fragment's own pixel (rog_prog): later fragments at a pixel see the earlier ones' writes in draw order
+                    // without the pass ending, which is what the barrier asks of them. A draw that reads those images otherwise ends the pass first (rog_reads)
+                    split = 0; g_rog_kept++;
+                    static int once; if (!once++) MLOG("a game barrier (bits %#x) after raster-ordered image writes: the pass goes on (first case pass %llu; DM_NVN_ROG_PASS)", bits, (unsigned long long)g_stat_pass);
+                    PD("M %llu raster-ordered image writes before the barrier: the pass goes on", g_stat_pass);
                 } else if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (g_tf_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_tf_bar = 1;   // the next capture of the open capture pass waits for its earlier ones (tf_order)

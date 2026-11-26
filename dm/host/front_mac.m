@@ -11,6 +11,7 @@
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdatomic.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
 #include "dm.h"
@@ -41,6 +42,50 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include <sys/stat.h>
 
 static CAMetalLayer *g_layer;
+// HDR output (DM_HDR=1, Switch 2 games). The window's layer is the SDR one the host always had (BGRA8Unorm) until hle_vi.c's dm_hdr_layer_tick asks for the HDR layer: once a
+// Switch 2 game asks for its status with HDR on and the window's screen can show EDR. The HDR layer is RGB10A2 in BT.2100 PQ, without HDR10 metadata: the game's HDR10 window goes in
+// as it is, an SDR source is encoded as HDR10 at the paper white (nvn_mtl.m present_mode) (docs/reference/rendering.md, HDR output). The tick runs on the main thread four times a
+// second (in every run loop mode, so a window dragged to another screen or a menu held open does not pause it) and on screen changes
+static _Atomic float g_hdr_headroom = 1.0f, g_hdr_potential;
+// The screen's current EDR headroom (maximumExtendedDynamicRangeColorComponentValue, read at each tick): hle_vi.c's automatic peak is 100 nits times it, and the roll-off's target
+// follows it. 1.0 unless a layer on the screen asks for EDR (NSScreen.h), so it is kept only while the window has the HDR layer: on the XDR panel it read 1.2 when the layer was made
+// and 16 two seconds later, then followed the brightness slider (16 at low brightness, 3.2 at full); in a window behind others it stays at 1.2. A change posts
+// NSApplicationDidChangeScreenParametersNotification (NSScreen.h), which ticks too
+float front_hdr_headroom(void) { return atomic_load(&g_hdr_headroom); }
+float front_hdr_potential(void) { return atomic_load(&g_hdr_potential); }   // what it rises to (hle_vi.c: the automatic peak's first answer)
+int dm_hdr_layer_tick(int can, float headroom, int layer_pq, int64_t now_ms);   // hle_vi.c: the layer the window should have
+static int g_hdr_layer_pq;   // the window has the HDR layer (main thread)
+static void front_hdr_layer_set(int on) {   // main thread. A drawable already taken keeps its format; the present draws each frame by its drawable's format (nvn_mtl.m present_mode)
+    if (on == g_hdr_layer_pq) return;
+    g_hdr_layer_pq = on;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];   // the format, color space and EDR together
+    if (on) {
+        g_layer.pixelFormat = MTLPixelFormatRGB10A2Unorm;
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ); g_layer.colorspace = cs; CGColorSpaceRelease(cs);
+        g_layer.wantsExtendedDynamicRangeContent = YES;
+    } else {
+        // sRGB, what the game's SDR bytes are: back from the HDR layer the layer kept the PQ color space, or none once set to NULL ("If nil, no colormatching occurs", CAMetalLayer.h)
+        g_layer.wantsExtendedDynamicRangeContent = NO;
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB); g_layer.colorspace = cs; CGColorSpaceRelease(cs);
+        g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm; atomic_store(&g_hdr_headroom, 1.0f);
+    }
+    [CATransaction commit];
+    LOG("front end: the window's layer is the %s", on ? "HDR one: RGB10A2 in BT.2100 PQ, no HDR10 metadata; the present rolls off what the screen cannot show" : "SDR one (BGRA8Unorm, sRGB)");
+}
+static NSWindow *g_win;   // the game's window
+static void front_hdr_tick(void) {   // main thread
+    if (!g_layer || (!dm_hdr_mode() && !g_hdr_layer_pq)) return;
+    NSScreen *s = g_win.screen ?: NSScreen.mainScreen;
+    // In a reference mode (an XDR preset) the reference headroom is the limit the system keeps to (0 when the screen has none)
+    double cur = s.maximumExtendedDynamicRangeColorComponentValue, ref = s.maximumReferenceExtendedDynamicRangeColorComponentValue, pot = s.maximumPotentialExtendedDynamicRangeColorComponentValue;
+    float h = (float)(ref > 0 && ref < cur ? ref : cur);
+    if (!(isfinite(h) && h > 0)) h = 1.0f;   // no reading: the SDR white, as on iOS
+    if (g_hdr_layer_pq) atomic_store(&g_hdr_headroom, h);
+    atomic_store(&g_hdr_potential, (float)(ref > 0 && ref < pot ? ref : pot));
+    static double last_pot = -1; if (pot != last_pot) { last_pot = pot; LOG("front end: the window's screen: %s, potential EDR headroom %.2f", s.localizedName.UTF8String, pot); }
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    front_hdr_layer_set(dm_hdr_layer_tick(pot > 1.0, h, g_hdr_layer_pq, (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000));
+}
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
@@ -131,7 +176,7 @@ int front_screen_settling(void) {
 // rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
 // 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
 // the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
-static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
+static _Atomic int g_match_want;   // the frame rate to match (0 = not known yet), written by the present thread only
 // A switch reconfigures every screen, and with several screens (a DisplayLink one among them) that moved the fullscreen window off the switched screen and back: each move
 // switched the screen back and then again, 18 times in a minute, until two of three screens lost their signal and the Dock and Finder stopped answering (LNPANDY/NX2Apple#1085).
 // A switch is undone when the screens take it back, not the player or the game: the fullscreen window left the switched screen, or the screen is at its own mode again
@@ -1799,6 +1844,7 @@ void front_run(void (*guest)(void)) {
         g_layer = [CAMetalLayer layer];
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        dm_hdr_front();             // HDR is answered only once front_hdr_tick has read the window's screen
         g_layer.contentsScale = win.backingScaleFactor;
         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
         int want_fs = fs && strcmp(fs, "0");
@@ -1812,6 +1858,10 @@ void front_run(void (*guest)(void)) {
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);
         g_win = win;
+        if (dm_hdr_mode() && dm_sdk_ounce()) {   // HDR output (DM_HDR=1, a Switch 2 game): the layer follows the game's status queries and the window's screen (front_hdr_tick), in every run loop mode
+            front_hdr_tick();
+            [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) { (void)t; front_hdr_tick(); }] forMode:NSRunLoopCommonModes];
+        }
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
         // another app's window macOS fires its display link about once a second: Breath of the Wild stepped up to 3 vsyncs at boot and never came back (20 fps runs).
@@ -1895,8 +1945,8 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); screen_match_apply(); dm_fstep_settle(); }];
-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); screen_match_apply(); dm_fstep_settle(); front_hdr_tick(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); front_hdr_tick(); }];   // also posted when the EDR headroom changes (NSScreen.h)
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
         [nc addObserverForName:NSWindowWillEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; layer_opaque_sync(win.screen, 1); dm_fstep_settle(); }];

@@ -60,6 +60,13 @@ import Foundation
         plain.reset()
         expect(d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "DM_SAVED_CHOICES=0: Reset leaves the saved choices too")
         unsetenv("DM_SAVED_CHOICES")
+        // HDR (DM_HDR) is on by default where the list offers it, while the host's own default is off: set without the screen too; a saved choice of off still wins
+        let hdrRow = try! JSONDecoder().decode(SettingsFile.self, from: Data(#"{"settings":[{"env":"DM_HDR","kind":"toggle","label":"HDR","note":"","default":"1"}]}"#.utf8))
+        unsetenv("DM_HDR"); LauncherModel(hdrRow.settings, defaults: d).applySaved()
+        expect(getenv("DM_HDR").map { String(cString: $0) } == "1", "without the screen, HDR goes into the environment on")
+        d.set("0", forKey: "launcher.DM_HDR"); unsetenv("DM_HDR"); LauncherModel(hdrRow.settings, defaults: d).applySaved()
+        expect(getenv("DM_HDR").map { String(cString: $0) } == "0", "a saved choice of HDR off goes into the environment")
+        d.removeObject(forKey: "launcher.DM_HDR"); unsetenv("DM_HDR")
         // The Mac window's list (second argument): Basic first, then Advanced in the list's sections; Display mode; the render scale in pixels; values set at launch are fixed
         let mac = try! JSONDecoder().decode(SettingsFile.self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[2])))
         setenv("DM_ENV_FILE_KEYS", "", 1); unsetenv("DM_FULLSCREEN"); unsetenv("DM_OPMODE")

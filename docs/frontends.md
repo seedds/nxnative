@@ -87,6 +87,7 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
   3. the bundle's `dm/env.txt`;
   4. saved choices;
   5. the tested defaults (the host's own, from the game's profile).
+- **HDR is the exception to the host's own default.** For a game whose list has the `DM_HDR` row, its default, on, is not the host's: the host leaves HDR off when `DM_HDR` is unset, so its own windowed runs (`scripts/regress.py`, `bench.py`) stay SDR. A front end that starts such a game sets `DM_HDR=1` unless the order above set it, as both apps do (`dm/mac/launcher.c` `hdr_default`, `LauncherSettings.swift` `applySaved`).
 - **Launch overrides are temporary.** A front end that starts the game with a variable in its environment overrides the saved choice for that start only. It writes the store only when the player means to keep the choice.
 - **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.

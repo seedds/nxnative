@@ -1,6 +1,6 @@
-"""Offer the resolution control only when the rewritten build supports it, and the game's upscaler choice only to games whose shader map holds their own upscaler (an NDSR pack's network: game.py upscaler_keys)."""
+"""Offer the resolution control only when the rewritten build supports it, the game's upscaler choice only to games whose shader map holds their own upscaler (an NDSR pack's network: game.py upscaler_keys), and the HDR setting only to Switch 2 games that ask for their HDR status (their sdk module names the Ounce spec, and a module of their own imports the status query), on the Mac and iOS."""
 from pathlib import Path
-import sys,tempfile,unittest
+import os,sys,tempfile,unittest
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'games'))
 import settings
@@ -49,5 +49,28 @@ class UpscalerSetting(unittest.TestCase):
                 up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
+
+def hdr_rows(gid,platform,sdk,env='DM_HDR',asks=True):   # the rows for env settings.py offers for a game whose sdk module is sdk (bytes; None: no sdk module) and whose own modules import the HDR status query (asks)
+    with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']),patch.dict(os.environ,{'SETTINGS_PLATFORM':platform}),patch.object(settings.nso_syms,'any_imports',return_value=asks) as imp:
+        (Path(tmp)/'main.fixups.tsv').write_text('')
+        if sdk is not None:(Path(tmp)/'sdk.patched.bin').write_bytes(sdk)
+        rows=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']==env]
+        assert all(c.args[1]=='_ZN2nn2vi21QueryDisplayHdrStatus' for c in imp.call_args_list),imp.call_args_list   # the query hle_vi.c dm_hdr_boot looks for
+        return rows
+
+class HdrSetting(unittest.TestCase):
+    def test_switch2_games_that_ask_on_mac_and_ios(self):   # general, not per game: the host's own rule (hle_vi.c dm_hdr_boot), a Switch 2 sdk and a game module importing the status query
+        ounce,nx=b'FS_ACCESS: { sdk_version: 20.5.19, spec: Ounce }',b'FS_ACCESS: { sdk_version: 12.0.0, spec: NX }'
+        for platform in ('mac','ios'):
+            for gid,sdk,asks,shown in [('040074A01BF12000',ounce,True,True),('040074A01BF12000',ounce,False,False),('040074A01BF12000',nx,True,False),('010056B015FE8000',nx,False,False),('040074A01BF12000',None,True,False)]:   # Donkey Kong Bananza (Switch 2); one that never asks; the same game on a Switch 1 SDK; NieR:Automata (Switch 1); no sdk module
+                hdr=hdr_rows(gid,platform,sdk,asks=asks)
+                self.assertEqual(bool(hdr),shown,(platform,gid,sdk,asks))
+                if hdr:self.assertEqual((hdr[0]['kind'],hdr[0]['default']),('toggle','1'),platform)
+
+    def test_upscaling_stays_with_hdr(self):   # the present scales an HDR picture bilinearly by itself (nvn_mtl.m present_hdr_source): MetalFX stays a choice for the SDR picture
+        ounce=b'FS_ACCESS: { sdk_version: 20.5.19, spec: Ounce }'
+        for platform in ('mac','ios'):
+            row,=hdr_rows('040074A01BF12000',platform,ounce,'DM_PRESENT_UPSCALE')
+            self.assertNotIn('needs',row,platform)
 
 if __name__=='__main__':unittest.main()

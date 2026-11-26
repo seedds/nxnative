@@ -144,6 +144,15 @@ int dm_game_imports(const char *prefix) {
     }
     return 0;
 }
+// Any of the game's modules but the SDK's own (main, its subsdk libraries, an NRO) imports a symbol whose name starts with prefix: a call the game makes, from whichever of its modules
+int dm_game_any_imports(const char *prefix) {
+    size_t n = strlen(prefix);
+    for (int i = 0; i < g_nmod; i++) if (strcmp(g_mod[i].name, "sdk")) {
+        module_t *m = &g_mod[i];
+        for (unsigned k = 1; k < m->nsym; k++) if (!m->symtab[k].st_shndx && !strncmp(m->strtab + m->symtab[k].st_name, prefix, n)) return 1;
+    }
+    return 0;
+}
 
 // SDK major version, from the version string the SDK's libraries keep in the sdk module's read-only data ("NintendoSDK_nnSdk-10_4_0"; SDK 12 spells it NintendoSdk_;
 // Switch 2 SDKs name a variant first: "NintendoSdk_nnSdk-Generic_20_5_19", Donkey Kong Bananza).

@@ -30,6 +30,15 @@ def dynsyms(img):
 _INPUT_STREAM_OPEN = '_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi'
 
 
+def any_imports(modules, prefix):   # one of the rewritten modules (*.patched.bin) imports a symbol whose name starts with prefix
+    for module in modules:
+        if not module.name.endswith('.patched.bin'): continue
+        try: symbols = dynsyms(module.read_bytes())
+        except (AssertionError, KeyError, IndexError, ValueError, struct.error): continue
+        if any(name.startswith(prefix) and not defined for name, defined, _ in symbols): return True
+    return False
+
+
 def audio_input_capable(modules):
     for module in modules:
         if not module.name.endswith('.patched.bin'): continue

@@ -1,6 +1,7 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
 #include <stdlib.h>
+#include <stdint.h>
 // Metal reads HUD switches when the first device is made. Called before host preload and again after the launcher applies its settings; explicit environment values win.
 static inline void front_hud_env(void) {
     const char *e = getenv("DM_METAL_HUD");
@@ -22,6 +23,16 @@ int front_screen_capable_fps(void);
 int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
+// HDR output (DM_HDR=1; front_mac.m, front_ios.m): the front end owns the window's layer and asks hle_vi.c's dm_hdr_layer_tick, on its main thread four times a second and on
+// screen changes, which one to have (SDR, or RGB10A2 in BT.2100 PQ once a Switch 2 game asks for its status on a screen that can show EDR); it reports its screen's current EDR
+// headroom (front_hdr_headroom) and its potential one (front_hdr_potential). hle_vi.c has weak defaults for runs without a front end
+float front_hdr_headroom(void);
+float front_hdr_potential(void);
+int dm_hdr_layer_tick(int can, float headroom, int layer_pq, int64_t now_ms);   // hle_vi.c: can = the screen's potential headroom is above 1; returns 1 for the HDR layer
+void dm_hdr_front(void);          // hle_vi.c: a front end will tick (when it makes the game's layer, before the guest starts): HDR is not answered before its first tick
+float dm_hdr_paper_white(void);   // hle_vi.c: the paper white in nits told to the game (100), the luminance its SDR white has
+int dm_hdr_mode(void);            // hle_vi.c: the HDR mode, 0 off, 1 by the screen (DM_HDR at start)
+void dm_hdr_set_mode(int m);      // hle_vi.c: change it while the game runs (the iOS in-game menu); the game switches its window on its next status query
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
 // to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
 void front_screen_match(int fps);

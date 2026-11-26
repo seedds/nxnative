@@ -59,6 +59,13 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table, as
 UNKNOWN_LANGUAGES = 'This game\'s files do not list its languages, so some of these may not be in the game. It may then show another one.'
 
 
+def switch2_hdr(patched):   # the host's rule for HDR output (hle_vi.c dm_hdr_boot): the sdk module names the Switch 2's build spec ("spec: Ounce"; dm_sdk_ounce, dm/host/loader.c, searches
+    # the loader's range for it, this the whole file, a superset that gives the same answer on the local modules), and one of the game's own modules imports the HDR status query
+    path = Path(patched) / 'sdk.patched.bin'
+    return path.is_file() and b'spec: Ounce' in path.read_bytes() and nso_syms.any_imports(
+        (p for p in Path(patched).glob('*.patched.bin') if p.name != 'sdk.patched.bin'), '_ZN2nn2vi21QueryDisplayHdrStatus')
+
+
 def build(gid, patched, control, other_programs=()):
     platform = os.environ.get('SETTINGS_PLATFORM') or 'ios'
     if platform not in ('ios', 'mac'): sys.exit(f'SETTINGS_PLATFORM must be ios or mac: {platform}')
@@ -79,6 +86,7 @@ def build(gid, patched, control, other_programs=()):
         if cond == 'always': return True
         if cond == 'mac-mic': return mac_mic
         if cond == 'languages>1': return len(langs) > 1
+        if cond == 'switch2-hdr': return switch2_hdr(patched)
         if cond.startswith('fixups:'): return cond[7:] in keys
         if cond.startswith('gfxapi:'): return os.environ.get('GFXAPI', '') == cond[7:]
         if cond.startswith('platform:'): return platform == cond[9:]

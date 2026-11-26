@@ -158,9 +158,11 @@ void *module_sym(module_t *m, const char *name);
 int dm_sdk_major(void);   // SDK major version from the sdk module's version string (loader.c); 0 = unknown
 int dm_sdk_ounce(void);   // 1 when the sdk module was built for the Switch 2 (its spec string "spec: Ounce", loader.c)
 int dm_sdk_nvn1_minor(void);   // the minor version from older NVN's own nvnDeviceGetInteger switch, or -1 if its layout is unrecognized
+void dm_hdr_boot(void);   // hle_vi.c: after loading, records whether a Switch 2 game runs, so its HDR layer (DM_HDR) is ready before its first status query; DM_HDR itself is read later
 int dm_sdk_nvn2_item(unsigned item, int *out);   // a constant NVN2's own nvnDeviceGetInteger answers for item, read from the sdk module (loader.c); 0 when it has none
 #define DM_SDK_OLD(major) ((major) > 0 && (major) <= 10)   // SDK 10 and older: NVN API 53, the shared-font address points at the TTF itself
 int dm_game_imports(const char *prefix);   // main or an NRO imports a symbol whose name starts with prefix (loader.c)
+int dm_game_any_imports(const char *prefix);   // any module but sdk (main, a subsdk, an NRO) imports it (loader.c)
 void *guest_sym(const char *name);
 void *guest_module_sym(uintptr_t base, const char *name);
 module_t *module_of(const void *p);

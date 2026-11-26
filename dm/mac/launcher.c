@@ -116,6 +116,15 @@ static int rule_env(CFTypeRef rule, char *env, size_t n) {   // a rule's variabl
     return e && CFGetTypeID(e) == CFStringGetTypeID() && CFStringGetCString(e, env, (CFIndex)n, kCFStringEncodingUTF8);
 }
 
+// HDR output (DM_HDR): on by default for a game whose bundle offers the HDR row (a Switch 2 game that asks for its HDR status, settings.py), while the host's own default, DM_HDR
+// unset, is off: its windowed runs (scripts/regress.py, bench.py) stay SDR. The settings window and the saved choices set only what differs from a row's default, so with the window,
+// without it (DM_LAUNCHER=0, --no-launcher) or with DM_SAVED_CHOICES=0, an HDR that nothing turned off is turned on here (docs/frontends.md, HDR)
+static void hdr_default(void) {
+    CFArrayRef rules = setting_rules(); if (!rules || getenv("DM_HDR")) return;
+    for (CFIndex i = 0; i < CFArrayGetCount(rules); i++) { char env[128];
+        if (rule_env(CFArrayGetValueAtIndex(rules, i), env, sizeof env) && !strcmp(env, "DM_HDR")) { setenv("DM_HDR", "1", 0); fprintf(stderr, "launcher: env DM_HDR=1 (HDR, on by default)\n"); return; } }
+}
+
 static void saved_choices(void) {   // after the env files, before the bundle's own defaults (DM_LANG): a variable already set keeps its value
     CFArrayRef rules = setting_rules(); CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
     if (!rules || !domain) return;   // packed without launcher settings: nothing to choose
@@ -226,6 +235,7 @@ int main(int argc, char **argv) {
     int shown = window ? dm_mac_launcher() : 2;
     if (!shown) return 0;   // Quit: no game
     if (shown == 2) saved_choices();
+    hdr_default();
     cloud_saves_folder();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);

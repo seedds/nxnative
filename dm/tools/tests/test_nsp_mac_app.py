@@ -834,7 +834,8 @@ class App(unittest.TestCase):
             {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'},
             {'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Language', 'note': '', 'default': 'fr', 'options': [['fr', 'French'], ['ja', 'Japanese']]},
             {'env': 'DM_BOTH', 'kind': 'choice', 'section': 'Game', 'label': 'Both', 'note': '', 'default': 'bundle', 'options': [['bundle', 'b'], ['player', 'p'], ['saved', 's']]},
-            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'}]}
+            {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'},
+            {'env': 'DM_HDR', 'kind': 'toggle', 'section': 'Game', 'label': 'HDR', 'note': '', 'default': '1', 'on': '1', 'off': '0'}]}
         sup = self.tmp / f'home/Library/Application Support/nxnative/{TID}'; sup.mkdir(parents=True, exist_ok=True); (sup / 'env.txt').write_text('DM_BOTH=player\n')
 
         def pack(name, settings):
@@ -860,6 +861,7 @@ class App(unittest.TestCase):
             self.assertEqual(r['DM_LANG'], 'ja')   # a saved choice before the packed language
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
+            self.assertEqual(r['DM_HDR'], '1')   # HDR on by default where the list offers it, though the host's own default is off (launcher.c hdr_default)
             self.assertEqual((r['DM_ENV_FILE_KEYS'], r['DM_ENV_LAUNCH_KEYS']), ('DM_BOTH DM_BAKED', ''))   # what the settings window keeps: the env files' variables
             r = run(app, DM_FPS_TARGET='60', DM_RENDER_SCALE='0.5')   # a front end's launch overrides: they win, and are not saved
             self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE']), ('60', '0.5'))
@@ -868,7 +870,9 @@ class App(unittest.TestCase):
             self.assertEqual(r['DM_FPS_TARGET'], '30')
             self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
             r = run(app, DM_SAVED_CHOICES='0')
-            self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
+            self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG'], r['DM_HDR']), (None, None, 'fr', '1'))
+            save('DM_HDR', '-string', '0')   # turned off: the saved choice wins over the HDR default
+            self.assertEqual(run(app)['DM_HDR'], '0')
             save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
             self.assertNotIn('DM_RENDER_SCALE', run(app))
             save('DM_RENDER_SCALE', '-string', ' 0.75')   # a number the iPhone's settings screen would not take either

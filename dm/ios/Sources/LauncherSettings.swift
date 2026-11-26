@@ -134,5 +134,7 @@ final class LauncherModel: ObservableObject {
             let v = values[s.env] ?? s.def
             if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
         }
+        // HDR (DM_HDR) is on by default where the list offers it, while the host's own default, the variable unset, is off (launcher.c hdr_default): set it unless a choice turned it off
+        if getenv("DM_HDR") == nil, settings.contains(where: { $0.env == "DM_HDR" }) { setenv("DM_HDR", "1", 0); fputs("launcher: DM_HDR=1 (HDR, on by default)\n", stderr) }
     }
 }

@@ -648,6 +648,37 @@ int main(void) {
         g_nmnt = 0;
     }
 
+    printf("⑩ stale writable handles rejected after rollback\n");
+    {   char s1[1100], s2[1100], f1[1200], f2[1200];
+        snprintf(s1, sizeof s1, "%s/stale1", root); snprintf(s2, sizeof s2, "%s/stale2", root);
+        mkdir(s1, 0755); mkdir(s2, 0755);
+        unsetenv("DM_TEST_FS_FAIL"); unsetenv("DM_TEST_FS_FAILAT");
+        setenv("DM_SAVE", s1, 1); g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && mount_ex("save2", s2, 0, 1) == RES_OK, "mount two independent transactional saves");
+        CHECK(h_fs_CreateFile("save:/stale", 0) == RES_OK && write_save("save:/stale", "orig") == RES_OK && h_fs_Commit("save") == RES_OK, "commit original bytes to save:/stale");
+        CHECK(h_fs_CreateFile("save2:/peer", 0) == RES_OK && write_save("save2:/peer", "peer0") == RES_OK && h_fs_Commit("save2") == RES_OK, "commit original bytes to save2:/peer");
+        uint64_t h = 0, h2 = 0, h_new = 0;
+        CHECK(h_fs_OpenFile(&h, "save:/stale", MODE_WRITE) == RES_OK, "open writable handle on save:/stale");
+        CHECK(h_fs_OpenFile(&h2, "save2:/peer", MODE_WRITE) == RES_OK, "open writable handle on unaffected save2:/peer");
+        g_mode = 1; g_calls = 0;
+        CHECK(h_fs_WriteFile(h, 0, "bad", 3, NULL) == RES_FAIL, "injected zero-byte write fails and taints save");
+        g_mode = 0;
+        CHECK(h_fs_Commit("save") == RES_FAIL, "commit rolls back save while handle h remains open");
+        snprintf(f1, sizeof f1, "%s/stale", s1); snprintf(f2, sizeof f2, "%s/peer", s2);
+        CHECK(same(f1, "orig"), "committed save:/stale remains orig after rollback");
+        CHECK(h_fs_WriteFile(h, 0, "after", 5, NULL) == RES_FAIL, "WriteFile rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h, 1) == RES_FAIL, "SetFileSize rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h2, 5) == RES_OK && h_fs_WriteFile(h2, 0, "peer1", 5, NULL) == RES_OK, "unaffected second transaction handle still writes and resizes");
+        h_fs_CloseFile(h2);
+        CHECK(h_fs_Commit("save2") == RES_OK && same(f2, "peer1"), "unaffected second transaction commits peer1");
+        h_fs_CloseFile(h);
+        CHECK(h_fs_OpenFile(&h_new, "save:/stale", MODE_WRITE) == RES_OK, "close and reopen save:/stale (FD reuse)");
+        CHECK(h_fs_SetFileSize(h_new, 8) == RES_OK && h_fs_WriteFile(h_new, 0, "replaced", 8, NULL) == RES_OK, "reopened handle writes replacement bytes");
+        h_fs_CloseFile(h_new);
+        CHECK(h_fs_Commit("save") == RES_OK && same(f1, "replaced"), "commit succeeds and on-disk save:/stale equals replaced");
+        g_nmnt = 0;
+    }
+
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;

@@ -1268,8 +1268,12 @@ def fingerprint(*items, env=None):
         if kind == 'files':
             for p in map(rfs.Path, v):
                 h.update(p.name.encode() + b'\0')
-                try: h.update(hashlib.sha256(p.read_bytes()).digest())
+                try:
+                    fh = hashlib.sha256()
+                    with rfs.open(p, 'rb') as f:
+                        while chunk := f.read(1 << 20): fh.update(chunk)
                 except OSError: h.update(b'missing')
+                else: h.update(fh.digest())
         elif kind in ('tree', 'stat'):
             for rel, st in files_under(v): h.update(f'{rel}\0{st.st_size}\0{st.st_mtime_ns if kind == "stat" else ""}\n'.encode())
         elif kind == 'cmd':
@@ -1328,8 +1332,9 @@ def side_table(g, pkg, name):   # the profile's table, else the split's copy bes
     return g.table(name) if g.table(name).is_file() else pkg.with_name(name)
 
 
-def split_output_key(pkg, g):   # detect deleted/edited packages and supplemental pairs before reusing a successful split
-    return fingerprint(package_key(pkg), ('files', [pkg.with_name(n) for n in SPLIT_SIDE_TABLES if not g.table(n).is_file()]))
+def split_output_key(pkg, g, pkg_key=None):   # detect deleted/edited packages and supplemental pairs before reusing a successful split
+    if pkg_key is None: pkg_key = package_key(pkg)
+    return fingerprint(pkg_key, ('files', [pkg.with_name(n) for n in SPLIT_SIDE_TABLES if not g.table(n).is_file()]))
 
 
 def package_key(pkg):   # the shader package's content (file names and bytes): what the iOS shaders are built from
@@ -2685,8 +2690,10 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             promote(derive_compute, 'compute')
             key = fingerprint(*inputs, *split_profile_inputs(g))
     have_pairs = all(side_table(g, pkg, n).is_file() for n in SPLIT_SIDE_TABLES)   # a split from before geo_pairs.tsv runs again once
-    if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None and reused(outputkf, split_output_key(pkg, g)) is not None:
-        PROG.end(f'{note}, reused (inputs unchanged)'); return package_key(pkg)
+    if key and pkg.is_dir() and have_pairs and (note := reused(kf, key)) is not None:
+        pkg_key = package_key(pkg)
+        if reused(outputkf, split_output_key(pkg, g, pkg_key)) is not None:
+            PROG.end(f'{note}, reused (inputs unchanged)'); return pkg_key
     PROG.set(step='splitting')
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
@@ -2726,16 +2733,18 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             raise BuildError(f'the split shader tables differ from game profile {g.id}\'s:\n{rows}\nEither these game files are not the versions the profile registers, or shader_split.py now reads them differently and the profile\'s tables were not split again (the split\'s tables: {tmp / "tables"})')
     rmtree(kf); rmtree(outputkf); swap_in(tmp / 'pkg', pkg); rmtree(tmp)
     note = (f'{int(m.group(1)):,} shaders' if m else '') + (f', {bad.group(1)} file(s) unreadable' if bad else '')
+    pkg_key = None
     if key:   # an own profile's tables are outputs too; the next split checks the profile after they were written
         key = fingerprint(*inputs, *split_profile_inputs(g))
-        outputkf.write_text(split_output_key(pkg, g) + '\n')
+        pkg_key = package_key(pkg)
+        outputkf.write_text(split_output_key(pkg, g, pkg_key) + '\n')
         kf.write_text(f'{key}\n{note}\n')
     if promoted == 'dlc' and dlckey: dlckf.write_text(f'{dlckey}\nOptional shader content\n')
     else: rmtree(dlckf)
     if promoted == 'compute' and cskey: cskf.write_text(f'{cskey}\nNewly decoded compute kernels\n')
     else: rmtree(cskf)
     PROG.end(note)
-    return key and package_key(pkg)
+    return pkg_key
 
 
 def shader_keys(g, source_prefix=''):   # the shaders dmsh_build.py builds, shared by progress and the stale-library event
@@ -3049,24 +3058,32 @@ def shader_regressions(py, repo, lib_dir, chain, logs):
 
 def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, options=(), mac_out=None):
     """What build_vk_shaders and build_gl_shaders share: dm/gfx/tools/<api>_shaders.py on the roots → sh/<api>/ for the Mac and, unless mac (a Mac-only build), sh/ios/<api>/ for the iPhone.
-    Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). The iOS libraries' key is sh/ios/<api>.key,
-    the Mac's sh/<api>.key, which an iOS build writes too (it builds both), so a Mac-only build is reused after either; an iOS build after a Mac-only one translates again.
+    Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). Each target checks only its own
+    stamp and output (sh/<api>.key for the Mac, sh/ios/<api>.key for iOS), and a dual-target run verifies both expected outputs before publishing each stamp.
     Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
     mac_out = mac_out or sh
     ios = sh / 'ios'; out = mac_out if mac else ios
-    kf, kmac, lib, log = ios / f'{api}.key', mac_out / f'{api}.key', out / api / f'{api}_shaders.metallib', logs / f'{api}_shaders.log'
-    note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None) if key else None
-    if lib.is_file() and note is not None:
+    kf, kmac, log = ios / f'{api}.key', mac_out / f'{api}.key', logs / f'{api}_shaders.log'
+    mac_lib, ios_lib = mac_out / api / f'{api}_shaders.metallib', ios / api / f'{api}_shaders.metallib'
+    lib, stamp = (mac_lib, kmac) if mac else (ios_lib, kf)
+    note = reused(stamp, key) if key and lib.is_file() else None
+    if note is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return out
     PROG.set(step='translating')
     rmtree(kmac); rmtree(mac_out / api)
     if not mac: rmtree(kf); rmtree(ios / api)
     run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, mac_out, *options] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
     if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else "iOS"} {name} shader library in {lib.parent}')
-    m = re.search(r'macosx: (\d+)' if mac else r'iphoneos: (\d+)', log.read_text(errors='replace'))
-    note = f'{int(m.group(1)):,} shaders for the Mac' + ('' if mac else ' and iOS') if m else ''
+    if not mac and not mac_lib.is_file(): raise BuildError(f'no Mac {name} shader library in {mac_lib.parent}')
+    log_text = log.read_text(errors='replace')
+    m_mac = re.search(r'macosx: (\d+)', log_text)
+    m_ios = re.search(r'iphoneos: (\d+)', log_text)
+    mac_note = f'{int(m_mac.group(1)):,} shaders for the Mac' if m_mac else ''
+    ios_note = f'{int(m_ios.group(1)):,} shaders for the Mac and iOS' if m_ios else ''
+    note = mac_note if mac else ios_note
     if key:
-        for k in (kmac,) if mac else (kf, kmac): k.write_text(f'{key}\n{note}\n')
+        kmac.write_text(f'{key}\n{mac_note}\n')
+        if not mac: kf.write_text(f'{key}\n{ios_note}\n')
     PROG.end(note)
     return out
 
@@ -3090,7 +3107,7 @@ def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
     PROG.stage('GL shaders', step='checking the inputs')
     if not fixed: require_glslang(env)
     compiler = ('option', 'fixed-function') if fixed else ('cmd', ['glslangValidator', '--version'])
-    key = fingerprint(*[('stat' if provisional else 'tree', r) if Path(r).is_dir() else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
+    key = fingerprint(*[('stat' if provisional else 'tree', r) if rfs.isdir(r) else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
                       compiler, env=env) if reuse else None
     return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac, ('--fixed-function',) if fixed else (), mac_out=mac_out)
 

@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/clonefile.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -22,6 +23,7 @@
 
 static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno, track_metadata;
 static int fail_stage_write_after, stage_write_seen, stage_write_fd = -1, fail_stage_publish;
+static int fail_start_clone, fail_start_publish;
 static const char *fail_xattr_suffix;
 static int fail_xattr_errno;
 static int closes, metadata_fd;
@@ -105,6 +107,9 @@ static int test_renamex_np(const char *from, const char *to, unsigned flags) {
     if (fail_stage_publish && strstr(from, "/.cloud-stage.")) {
         fail_stage_publish = 0; errno = EIO; return -1;
     }
+    if (fail_start_publish && strstr(from, "/.start-stage.")) {
+        fail_start_publish = 0; errno = EIO; return -1;
+    }
     if (faulted(2, from, to)) return -1;
     if (race_hold_ms > 0 && ends(to, "/save.dmsync")) {
         if (atomic_fetch_add(&rename_in_flight, 1) > 0) rename_overlap = 1;
@@ -139,6 +144,12 @@ static ssize_t test_getxattr(const char *path, const char *name, void *value, si
     if (fail_xattr_suffix && ends(path, fail_xattr_suffix)) { errno = fail_xattr_errno; return -1; }
     return getxattr(path, name, value, size, position, options);
 }
+static int test_clonefile(const char *src, const char *dst, uint32_t flags) {
+    if (fail_start_clone && strstr(dst, "/.start-stage.")) {
+        fail_start_clone = 0; errno = ENOSPC; return -1;
+    }
+    return clonefile(src, dst, flags);
+}
 static int test_unlink(const char *path) {
     unlinks++;
     int r = unlink(path);
@@ -152,6 +163,7 @@ static int test_unlink(const char *path) {
 #define open test_open
 #define write test_write
 #define getxattr test_getxattr
+#define clonefile test_clonefile
 #define rename test_rename
 #define unlink test_unlink
 #define renamex_np test_renamex_np
@@ -163,6 +175,7 @@ static int test_unlink(const char *path) {
 #undef open
 #undef write
 #undef getxattr
+#undef clonefile
 #undef rename
 #undef unlink
 #undef renamex_np
@@ -209,7 +222,7 @@ static int holds(const char *dir, const char *text) {
     free_names(v, n); return k;
 }
 static int is(const char *path, const char *text) {
-    char b[64] = {0}; FILE *f = fopen(path, "r"); if (!f) return 0; size_t k = fread(b, 1, sizeof b - 1, f); fclose(f);
+    char b[512] = {0}; FILE *f = fopen(path, "r"); if (!f) return 0; size_t k = fread(b, 1, sizeof b - 1, f); fclose(f);
     return k == strlen(text) && !memcmp(b, text, k);
 }
 static void put(const char *path, const char *text) { FILE *f = fopen(path, "w"); if (!f || fputs(text, f) < 0 || fclose(f)) abort(); }
@@ -263,9 +276,10 @@ static void device_save(const char *root, int dev_had) {
     if (dev_had != HAD_NONE) mkdirs(dev);
     if (dev_had == HAD_SAVE) { snprintf(p, sizeof p, "%s/b", dev); put(p, "original 1"); }
 }
-// This device's save as device_save made it, and nothing of the cloud's anywhere under root but the bundles
+// This device's save as device_save made it, no cloud files anywhere under root (except bundles), no local/cloud backups or staging,
+// and exactly one start copy holding this device's recovered save (nothing of the cloud's)
 static int as_before(const char *root, int dev_had) {
-    char p[PATH_MAX], dev[PATH_MAX], **v; size_t n; int ok = 1;
+    char p[PATH_MAX], dev[PATH_MAX], bdir[PATH_MAX], **v; size_t n; int ok = 1;
     snprintf(p, sizeof p, "%s/save/a", root); ok &= is(p, "original 0");
     snprintf(p, sizeof p, "%s/save", root); if (!names_of(p, &v, &n)) { ok &= n == 1; free_names(v, n); } else ok = 0;
     snprintf(dev, sizeof dev, "%s/save_device", root);
@@ -273,7 +287,20 @@ static int as_before(const char *root, int dev_had) {
     else if (dev_had == HAD_EMPTY) ok &= !access(dev, F_OK) && !has_entries(dev);
     else ok &= access(dev, F_OK) == -1;
     snprintf(p, sizeof p, "%s/save", root); ok &= !holds(p, "cloud") && !holds(dev, "cloud");
-    snprintf(p, sizeof p, "%s/save-backups", root); ok &= !holds(p, "cloud") && !holds(p, "original");
+    snprintf(bdir, sizeof bdir, "%s/save-backups", root);
+    ok &= !holds(bdir, "cloud");
+    int starts = 0, others = 0;
+    if (!names_of(bdir, &v, &n)) {
+        for (size_t i = 0; i < n; i++) {
+            if (is_backup(v[i], START_SIDE)) {
+                starts++;
+                snprintf(p, sizeof p, "%s/%s", bdir, v[i]);
+                ok &= holds(p, "original") == (dev_had == HAD_SAVE ? 2 : 1) && !holds(p, "cloud");
+            } else others++;
+        }
+        free_names(v, n);
+    } else ok = 0;
+    ok &= starts == 1 && others == 0;
     snprintf(p, sizeof p, "%s/save.pull", root); ok &= access(p, F_OK) == -1;
     return ok;
 }
@@ -728,6 +755,138 @@ static void xattr_failure_cases(const char *folder) {
     free(cloud_before);
     rm_tree(root);
 }
+static int count_start_backups(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int k = 0; snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) k += is_backup(v[i], START_SIDE);
+    free_names(v, n); return k;
+}
+static int has_start_stage(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int found = 0; snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) if (!strncmp(v[i], START_STAGE_PREFIX, sizeof START_STAGE_PREFIX - 1)) found = 1;
+    free_names(v, n); return found;
+}
+static void start_backup_cases(const char *folder) {
+    const char *name = "start backup staging, hash cache, and budget";
+    char root[PATH_MAX], save[PATH_MAX], backups[PATH_MAX], p[PATH_MAX], newest[PATH_MAX];
+    snprintf(root, sizeof root, "%s/start-backup", folder);
+    snprintf(save, sizeof save, "%s/save", root);
+    snprintf(backups, sizeof backups, "%s-backups", save);
+    rm_tree(root); mkdirs(save);
+    unsetenv("DM_SAVE_SYNC"); unsetenv("DM_SAVE_BACKUPS");
+
+    // 1. Seed 10 start backups + a player folder; inject clone failure and publish failure: neither prunes nor leaves staging.
+    for (int i = 1; i <= KEEP_BACKUPS; i++) {
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 start/save", backups, i); mkdirs(p);
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 start/save/mark.txt", backups, i); put(p, "old");
+    }
+    snprintf(p, sizeof p, "%s/player-keep", backups); mkdirs(p);
+    snprintf(p, sizeof p, "%s/player-keep/note.txt", backups); put(p, "keep");
+    snprintf(p, sizeof p, "%s/a", save); put(p, "v1");
+
+    fail_start_clone = 1;
+    CHECK(mount_once(save, "0100000000010000") == 0, "clone failure does not block mount");
+    CHECK(!fail_start_clone && !has_start_stage(save), "clone failure cleans up staging");
+    CHECK(count_start_backups(save) == KEEP_BACKUPS, "clone failure prunes no existing start backups");
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 start/save/mark.txt", backups);
+    CHECK(is(p, "old"), "oldest start backup survives clone failure");
+
+    fail_start_publish = 1;
+    CHECK(mount_once(save, "0100000000010000") == 0, "publish failure does not block mount");
+    CHECK(!fail_start_publish && !has_start_stage(save), "publish failure cleans up staging");
+    CHECK(count_start_backups(save) == KEEP_BACKUPS, "publish failure prunes no existing start backups");
+    CHECK(is(p, "old"), "oldest start backup survives publish failure");
+
+    // 2. Leftover interrupted .start-stage.* is swept on mount, then valid start copy publishes and rotates oldest out.
+    snprintf(p, sizeof p, "%s/%s99999-0/save", backups, START_STAGE_PREFIX); mkdirs(p);
+    snprintf(p, sizeof p, "%s/%s99999-0/save/partial", backups, START_STAGE_PREFIX); put(p, "half");
+    CHECK(has_start_stage(save), "seeded interrupted start staging exists");
+    CHECK(mount_once(save, "0100000000010000") == 0, "mount sweeps staging and publishes start copy");
+    CHECK(!has_start_stage(save), "no start staging remains after mount");
+    CHECK(count_start_backups(save) == KEEP_BACKUPS, "start backups rotate to KEEP_BACKUPS after publish");
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 start", backups);
+    CHECK(access(p, F_OK) == -1 && errno == ENOENT, "oldest start backup rotated out");
+    snprintf(p, sizeof p, "%s/player-keep/note.txt", backups);
+    CHECK(is(p, "keep"), "player folder survives staging cleanup and rotation");
+
+    // 3. Cached .hash skips re-scanning the newest backup's save/ directory; removing .hash falls back to ss_scan cleanly.
+    newest_start_copy(save, newest, sizeof newest);
+    CHECK(*newest != 0, "newest start copy found");
+    snprintf(p, sizeof p, "%s/save", newest);
+    chmod(p, 0);
+    CHECK(mount_once(save, "0100000000010000") == 0 && count_start_backups(save) == KEEP_BACKUPS,
+          "unchanged save deduplicates via .hash without reading backup save/");
+    // Verify no second new copy was created (2020-01-02 still present)
+    snprintf(p, sizeof p, "%s/2020-01-02 00.00.00 start", backups);
+    CHECK(access(p, F_OK) == 0, "dedup via .hash created no duplicate backup");
+    snprintf(p, sizeof p, "%s/save", newest); chmod(p, 0755);
+    snprintf(p, sizeof p, "%s/%s", newest, START_HASH_FILE); unlink(p);
+    CHECK(mount_once(save, "0100000000010000") == 0 && access(backups, F_OK) == 0, "mount without .hash succeeds");
+    snprintf(p, sizeof p, "%s/2020-01-02 00.00.00 start", backups);
+    CHECK(access(p, F_OK) == 0, "missing .hash falls back to ss_scan and still deduplicates");
+
+    // 4. Same-second collision suffix ordering ("start" < "start 2" < ... < "start 10")
+    rm_tree(backups);
+    char ten_path[PATH_MAX];
+    for (int k = 1; k <= 10; k++) {
+        if (k == 1) snprintf(p, sizeof p, "%s/2025-05-05 12.00.00 start/save", backups);
+        else snprintf(p, sizeof p, "%s/2025-05-05 12.00.00 start %d/save", backups, k);
+        mkdirs(p);
+        char fp[PATH_MAX], body[32];
+        snprintf(fp, sizeof fp, "%s/a", p); snprintf(body, sizeof body, "seq-%d", k); put(fp, body);
+        if (k == 10) snprintf(ten_path, sizeof ten_path, "%s/2025-05-05 12.00.00 start 10", backups);
+    }
+    newest_start_copy(save, newest, sizeof newest);
+    CHECK(!strcmp(newest, ten_path), "same-second ordering picks start 10 over start 2");
+    snprintf(p, sizeof p, "%s/a", save); put(p, "seq-10");
+    CHECK(mount_once(save, "0100000000010000") == 0 && count_start_backups(save) == 10,
+          "matching start 10 deduplicates without adding a copy");
+    put(p, "seq-11");
+    CHECK(mount_once(save, "0100000000010000") == 0 && count_start_backups(save) == 10,
+          "adding an 11th same-second/later copy keeps 10");
+    snprintf(p, sizeof p, "%s/2025-05-05 12.00.00 start", backups);
+    CHECK(access(p, F_OK) == -1 && errno == ENOENT, "oldest same-second backup (no suffix) was pruned first");
+    snprintf(p, sizeof p, "%s/2025-05-05 12.00.00 start 2", backups);
+    CHECK(access(p, F_OK) == 0 && access(ten_path, F_OK) == 0, "start 2 and start 10 survive");
+
+    // 5. Logical byte budget: cap total start backup bytes while always keeping at least the newest 1.
+    rm_tree(backups);
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 local/save", backups); mkdirs(p);
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 local/save/keep", backups); put(p, "local-keep");
+    int64_t saved_budget = g_start_budget;
+    g_start_budget = 250;
+    char blob[101]; memset(blob, 'A', 100); blob[100] = 0;
+    for (int step = 0; step < 4; step++) {
+        blob[0] = (char)('A' + step);
+        snprintf(p, sizeof p, "%s/a", save); put(p, blob);
+        CHECK(mount_once(save, "0100000000010000") == 0, "budgeted start mount succeeds");
+    }
+    CHECK(count_start_backups(save) == 2, "250-byte budget retains only the newest 2 of four 100-byte saves");
+    newest_start_copy(save, newest, sizeof newest);
+    snprintf(p, sizeof p, "%s/save/a", newest); blob[0] = 'D';
+    CHECK(is(p, blob), "newest budgeted backup holds latest save");
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 local/save/keep", backups);
+    CHECK(is(p, "local-keep"), "budget pruning leaves local backups untouched");
+    // Single save larger than budget still keeps itself (newest 1) and prunes older start backups
+    char big[401]; memset(big, 'Z', 400); big[400] = 0;
+    snprintf(p, sizeof p, "%s/a", save); put(p, big);
+    CHECK(mount_once(save, "0100000000010000") == 0 && count_start_backups(save) == 1,
+          "oversized single save always keeps the newest 1 start backup and trims older ones");
+    newest_start_copy(save, newest, sizeof newest);
+    snprintf(p, sizeof p, "%s/save/a", newest);
+    CHECK(is(p, big), "oversized single start backup holds the complete save");
+    g_start_budget = saved_budget;
+
+    // 6. DM_SAVE_BACKUPS=0 disables start copies completely.
+    rm_tree(backups);
+    setenv("DM_SAVE_BACKUPS", "0", 1);
+    CHECK(mount_once(save, "0100000000010000") == 0 && access(backups, F_OK) == -1,
+          "DM_SAVE_BACKUPS=0 skips start backups completely");
+    unsetenv("DM_SAVE_BACKUPS");
+
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -763,6 +922,7 @@ int main(void) {
     concurrent_send_cases(folder);
     conflict_cloud_backup_cases(folder);
     xattr_failure_cases(folder);
+    start_backup_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

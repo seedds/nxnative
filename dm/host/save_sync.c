@@ -342,12 +342,60 @@ static int is_backup(const char *name, const char *side) {
     return 1;
 }
 
+static unsigned long backup_suffix(const char *name) {
+    const char *s = strrchr(name + 19, ' ');
+    return s && isdigit((unsigned char)s[1]) ? strtoul(s + 1, NULL, 10) : 1;
+}
+
+// Chronological order for dated backups of one side: timestamp first, then numeric collision suffix (no suffix = 1, " 2" = 2, " 10" = 10)
+static int by_backup_order(const void *pa, const void *pb) {
+    const char *a = *(const char *const *)pa, *b = *(const char *const *)pb;
+    int c = strncmp(a, b, 19);
+    if (c) return c;
+    unsigned long na = backup_suffix(a), nb = backup_suffix(b);
+    return na < nb ? -1 : na > nb ? 1 : strcmp(a, b);
+}
+
+// Ensure <save>-backups exists and apply platform backup exclusion (iOS: exclude from device backups so clones never multiply iCloud Backup usage)
+static int ensure_backup_root(const char *save, char *dir, size_t n) {
+    if (snprintf(dir, n, "%s-backups", save) >= (int)n) { errno = ENAMETOOLONG; return -1; }
+    if (mkdirs(dir)) return -1;
+    front_save_backup_exclude(dir);
+    return 0;
+}
+
+// Atomically publish a staged backup directory into <dir>/<date> <side>[ <k>] via RENAME_EXCL,
+// starting above any existing suffix for that timestamp so pruning within the same second never breaks chronological order
+static int publish_staged_backup(const char *dir, const char *stage, const char *side, char *kept, size_t kn) {
+    char stamp[32]; time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm);
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
+    unsigned long start_k = 1;
+    char **v; size_t count;
+    if (!names_of(dir, &v, &count)) {
+        for (size_t i = 0; i < count; i++) {
+            if (is_backup(v[i], side) && !strncmp(v[i], stamp, 19)) {
+                unsigned long s = backup_suffix(v[i]);
+                if (s >= start_k) start_k = s + 1;
+            }
+        }
+        free_names(v, count);
+    }
+    for (unsigned long k = start_k; ; k++) {
+        int w = k == 1 ? snprintf(kept, kn, "%s/%s %s", dir, stamp, side) : snprintf(kept, kn, "%s/%s %s %lu", dir, stamp, side, k);
+        if (w < 0 || w >= (int)kn) { kept[0] = 0; errno = ENAMETOOLONG; return -1; }
+        if (!renamex_np(stage, kept, RENAME_EXCL)) return 0;
+        if (errno == EEXIST) continue;
+        int e = errno; kept[0] = 0; errno = e; return -1;
+    }
+}
+
 // Only the newest KEEP_BACKUPS of a side stay: each switch between devices keeps a whole save, and on a phone they add up. `made` (just made) is one of them whatever its date says
 static void prune_backups(const char *save, const char *side, const char *made) {
     char dir[PATH_MAX], **v; size_t n, k = 0, gone = 0; snprintf(dir, sizeof dir, "%s-backups", save);
     if (names_of(dir, &v, &n)) return;
     const char *mine = strrchr(made, '/'); mine = mine ? mine + 1 : made;
-    for (size_t i = 0; i < n; i++) if (is_backup(v[i], side) && strcmp(v[i], mine)) v[k++] = v[i]; else free(v[i]);   // in date order (names_of sorts them)
+    for (size_t i = 0; i < n; i++) if (is_backup(v[i], side) && strcmp(v[i], mine)) v[k++] = v[i]; else free(v[i]);
+    if (k) qsort(v, k, sizeof *v, by_backup_order);
     for (size_t i = 0; i + (KEEP_BACKUPS - 1) < k; i++) {
         char p[PATH_MAX]; snprintf(p, sizeof p, "%s/%s", dir, v[i]);
         if (rm_tree(p)) SRED("cannot remove the old backup %s (errno=%d)", p, errno); else gone++;
@@ -359,20 +407,24 @@ static void prune_backups(const char *save, const char *side, const char *made) 
 // A folder for a save about to be replaced: <save>-backups/<date> <side> (local: this device's, cloud: the cloud's).
 // Callers prune older backups only after their replacement has committed (a failure keeps every backup it found).
 static int backup_dir(const char *save, const char *side, char *out, size_t n) {
-    char stamp[32]; time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
-    snprintf(out, n, "%s-backups/%s %s", save, stamp, side);
-    for (int k = 2; !access(out, F_OK); k++) snprintf(out, n, "%s-backups/%s %s %d", save, stamp, side, k);
+    char dir[PATH_MAX], stamp[32];
+    if (ensure_backup_root(save, dir, sizeof dir)) return -1;
+    time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
+    snprintf(out, n, "%s/%s %s", dir, stamp, side);
+    for (int k = 2; !access(out, F_OK); k++) snprintf(out, n, "%s/%s %s %d", dir, stamp, side, k);
     return mkdirs(out);
 }
 
 #define CLOUD_STAGE_PREFIX ".cloud-stage."
-// Remove owned cloud-backup staging left behind if a previous mount was interrupted mid-restore; dated backups and player folders are untouched
+#define START_STAGE_PREFIX ".start-stage."
+// Remove owned backup staging left behind if a previous mount was interrupted mid-restore or mid-clone; dated backups and player folders are untouched
 static void clean_backup_staging(const char *save) {
     char dir[PATH_MAX], **v; size_t n;
     if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir) return;
     if (names_of(dir, &v, &n)) return;
     for (size_t i = 0; i < n; i++) {
-        if (strncmp(v[i], CLOUD_STAGE_PREFIX, sizeof CLOUD_STAGE_PREFIX - 1)) continue;
+        if (strncmp(v[i], CLOUD_STAGE_PREFIX, sizeof CLOUD_STAGE_PREFIX - 1) &&
+            strncmp(v[i], START_STAGE_PREFIX, sizeof START_STAGE_PREFIX - 1)) continue;
         char p[PATH_MAX];
         if (snprintf(p, sizeof p, "%s/%s", dir, v[i]) < (int)sizeof p && rm_tree(p))
             SRED("cannot remove leftover backup staging %s (errno=%d)", p, errno);
@@ -384,10 +436,9 @@ static void clean_backup_staging(const char *save) {
 // atomically publish it to a collision-free backup name, and only then prune older cloud backups
 static int backup_cloud_restore(const char *save, const char *bundle, ss_meta *other, char *kept, size_t kn) {
     static _Atomic unsigned seq;
-    char dir[PATH_MAX], stage[PATH_MAX], stamp[32];
+    char dir[PATH_MAX], stage[PATH_MAX];
     kept[0] = 0;
-    if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir) { errno = ENAMETOOLONG; return -1; }
-    if (mkdirs(dir)) return -1;
+    if (ensure_backup_root(save, dir, sizeof dir)) return -1;
     if (snprintf(stage, sizeof stage, "%s/%s%d-%u", dir, CLOUD_STAGE_PREFIX, (int)getpid(), atomic_fetch_add(&seq, 1)) >= (int)sizeof stage) {
         errno = ENAMETOOLONG; return -1;
     }
@@ -395,16 +446,187 @@ static int backup_cloud_restore(const char *save, const char *bundle, ss_meta *o
     if (ss_read(bundle, stage, other)) {
         int e = errno; rm_tree(stage); errno = e; return -1;
     }
-    time_t t = time(NULL); struct tm tm; localtime_r(&t, &tm); strftime(stamp, sizeof stamp, "%Y-%m-%d %H.%M.%S", &tm);
-    for (int k = 1; ; k++) {
-        int w = k == 1 ? snprintf(kept, kn, "%s/%s cloud", dir, stamp) : snprintf(kept, kn, "%s/%s cloud %d", dir, stamp, k);
-        if (w < 0 || w >= (int)kn) { rm_tree(stage); kept[0] = 0; errno = ENAMETOOLONG; return -1; }
-        if (!renamex_np(stage, kept, RENAME_EXCL)) break;
-        if (errno == EEXIST) continue;
-        int e = errno; rm_tree(stage); kept[0] = 0; errno = e; return -1;
+    if (publish_staged_backup(dir, stage, "cloud", kept, kn)) {
+        int e = errno; rm_tree(stage); errno = e; return -1;
     }
     prune_backups(save, "cloud", kept);
     return 0;
+}
+
+// ---------- the copy at each start ----------
+#define BLOG(...) do { fprintf(stderr, "[dm] save backup: " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define BRED(...) do { fprintf(stderr, "[dm] [RED] save backup: " __VA_ARGS__); fputc('\n', stderr); } while (0)
+#define START_SIDE "start"                 // its own side, so start copies never push sync's backups (local, cloud) out of KEEP_BACKUPS
+#define START_HASH_FILE ".hash"            // <hash>\t<bytes>\n beside save/ inside <date> start, so the next start compares without re-hashing the backup
+#define START_BUDGET_BYTES ((int64_t)(256 << 20))   // 256 MiB logical cap across retained start copies; the newest 1 always stays
+static int64_t g_start_budget = START_BUDGET_BYTES; // test override in t_save_sync_metadata.c
+
+static int read_start_hash(const char *bdir, char *hash_out, int64_t *bytes_out) {
+    char p[PATH_MAX], ln[128];
+    if (snprintf(p, sizeof p, "%s/%s", bdir, START_HASH_FILE) >= (int)sizeof p) return -1;
+    FILE *f = fopen(p, "r"); if (!f) return -1;
+    int ok = fgets(ln, sizeof ln, f) != NULL;
+    fclose(f);
+    if (!ok || strspn(ln, "0123456789abcdef") != SS_HASH) return -1;
+    if (ln[SS_HASH] != '\0' && ln[SS_HASH] != '\n' && ln[SS_HASH] != '\t' && ln[SS_HASH] != ' ') return -1;
+    if (hash_out) { memcpy(hash_out, ln, SS_HASH); hash_out[SS_HASH] = 0; }
+    if (bytes_out) {
+        *bytes_out = -1;
+        if (ln[SS_HASH] == '\t' || ln[SS_HASH] == ' ') {
+            char *end = NULL; long long v = strtoll(ln + SS_HASH + 1, &end, 10);
+            if (end && end != ln + SS_HASH + 1 && (*end == '\n' || *end == '\0') && v >= 0) *bytes_out = (int64_t)v;
+        }
+    }
+    return 0;
+}
+
+static int write_start_hash(const char *stage, const ss_meta *now) {
+    char p[PATH_MAX], buf[96];
+    if (snprintf(p, sizeof p, "%s/%s", stage, START_HASH_FILE) >= (int)sizeof p) { errno = ENAMETOOLONG; return -1; }
+    int n = snprintf(buf, sizeof buf, "%s\t%lld\n", now->hash, (long long)now->bytes);
+    if (n <= 0 || n >= (int)sizeof buf) { errno = EINVAL; return -1; }
+    int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) return -1;
+    int err = write_all(fd, buf, (size_t)n) ? (errno ? errno : EIO) : 0;
+    if (close(fd) && !err) err = errno;
+    if (err) { unlink(p); errno = err; return -1; }
+    return 0;
+}
+
+static int64_t dir_bytes(const char *dir) {
+    char **v; size_t n;
+    if (names_of(dir, &v, &n)) return errno == ENOENT ? 0 : -1;
+    int64_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (!strcmp(v[i], ".DS_Store")) continue;
+        char a[PATH_MAX]; struct stat st;
+        if (snprintf(a, sizeof a, "%s/%s", dir, v[i]) >= (int)sizeof a || lstat(a, &st)) { total = -1; break; }
+        if (S_ISDIR(st.st_mode)) {
+            int64_t sub = dir_bytes(a);
+            if (sub < 0) { total = -1; break; }
+            total += sub;
+        } else if (S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+    }
+    free_names(v, n);
+    return total;
+}
+
+static int64_t backup_bytes(const char *bdir) {
+    int64_t cached = -1;
+    if (!read_start_hash(bdir, NULL, &cached) && cached >= 0) return cached;
+    int64_t total = 0;
+    for (int i = 0; i < 2; i++) {
+        char f[PATH_MAX];
+        if (snprintf(f, sizeof f, "%s/%s", bdir, FOLDERS[i]) >= (int)sizeof f) return -1;
+        int64_t sub = dir_bytes(f);
+        if (sub < 0) return -1;
+        total += sub;
+    }
+    return total;
+}
+
+// The newest start copy's backup folder (<save>-backups/<newest> start), "" when there is none
+static void newest_start_copy(const char *save, char *out, size_t n) {
+    char dir[PATH_MAX], **v; size_t count; out[0] = 0;
+    if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir) return;
+    if (names_of(dir, &v, &count)) return;
+    const char *best = NULL;
+    for (size_t i = 0; i < count; i++) {
+        if (!is_backup(v[i], START_SIDE)) continue;
+        if (!best || by_backup_order(&best, &v[i]) < 0) best = v[i];
+    }
+    if (best) {
+        int w = snprintf(out, n, "%s/%s", dir, best);
+        if (w < 0 || w >= (int)n) out[0] = 0;
+    }
+    free_names(v, count);
+}
+
+// Keep at most KEEP_BACKUPS start copies and at most g_start_budget logical bytes across them, oldest pruned first;
+// `made` (just published) always stays even if a single save exceeds the budget.
+static void prune_start_backups(const char *save, const char *made, int64_t made_bytes) {
+    char dir[PATH_MAX], **v; size_t n, k = 0, gone = 0;
+    if (snprintf(dir, sizeof dir, "%s-backups", save) >= (int)sizeof dir) return;
+    if (names_of(dir, &v, &n)) return;
+    const char *mine = strrchr(made, '/'); mine = mine ? mine + 1 : made;
+    for (size_t i = 0; i < n; i++) if (is_backup(v[i], START_SIDE) && strcmp(v[i], mine)) v[k++] = v[i]; else free(v[i]);
+    if (k) qsort(v, k, sizeof *v, by_backup_order);
+    size_t keep_from = k;
+    int64_t budget = g_start_budget, total = made_bytes;
+    for (size_t i = k; i-- > 0; ) {
+        if (k - i > (size_t)(KEEP_BACKUPS - 1)) break;
+        if (budget > 0) {
+            char p[PATH_MAX];
+            if (snprintf(p, sizeof p, "%s/%s", dir, v[i]) >= (int)sizeof p) break;
+            int64_t sz = backup_bytes(p);
+            if (sz < 0) sz = 0;
+            if (sz > budget || total > budget - sz) break;
+            total += sz;
+        }
+        keep_from = i;
+    }
+    for (size_t i = 0; i < keep_from; i++) {
+        char p[PATH_MAX];
+        if (snprintf(p, sizeof p, "%s/%s", dir, v[i]) >= (int)sizeof p) continue;
+        if (rm_tree(p)) BRED("cannot remove the old start backup %s (errno=%d)", p, errno);
+        else gone++;
+    }
+    if (gone) BLOG("removed %zu old start backup%s", gone, gone == 1 ? "" : "s");
+    free_names(v, k);
+}
+
+// The committed save as the game is about to start from it, cloned into same-filesystem staging and atomically published to
+// <save>-backups/<date> start (laid out as sync's backups: save, save_device, plus .hash). Skipped when DM_SAVE_BACKUPS=0,
+// when there is no save, or when its hash matches the newest start copy's. Older copies are pruned only after atomic publish;
+// a failure removes its staging folder, logs a [RED] line, and lets the game start.
+static void keep_start_copy(const char *save, const ss_meta *known) {
+    const char *opt = getenv("DM_SAVE_BACKUPS");
+    if (opt && !strcmp(opt, "0")) return;
+    ss_meta scanned;
+    const ss_meta *now = known;
+    if (!now) {
+        if (ss_scan(save, &scanned)) { BRED("%s cannot be read (errno=%d): no copy of it this start", save, errno); return; }
+        now = &scanned;
+    }
+    if (!now->files) return;
+    char newest[PATH_MAX], last_hash[SS_HASH + 1];
+    newest_start_copy(save, newest, sizeof newest);
+    if (*newest) {
+        if (!read_start_hash(newest, last_hash, NULL)) {
+            if (!strcmp(last_hash, now->hash)) return;
+        } else {
+            char ns[PATH_MAX]; ss_meta last;
+            if (snprintf(ns, sizeof ns, "%s/save", newest) < (int)sizeof ns && !ss_scan(ns, &last) && !strcmp(last.hash, now->hash)) return;
+        }
+    }
+    static _Atomic unsigned seq;
+    char dir[PATH_MAX], stage[PATH_MAX], made[PATH_MAX];
+    if (ensure_backup_root(save, dir, sizeof dir)) { BRED("cannot make %s-backups (errno=%d): no copy of the save this start", save, errno); return; }
+    if (snprintf(stage, sizeof stage, "%s/%s%d-%u", dir, START_STAGE_PREFIX, (int)getpid(), atomic_fetch_add(&seq, 1)) >= (int)sizeof stage) {
+        BRED("start backup staging path is too long: no copy of the save this start"); return;
+    }
+    if (mkdir(stage, 0755)) { BRED("cannot make %s (errno=%d): no copy of the save this start", stage, errno); return; }
+    for (int i = 0; i < 2; i++) {
+        char from[PATH_MAX], to[PATH_MAX]; folder_path(save, i, from, sizeof from);
+        if (snprintf(to, sizeof to, "%s/%s", stage, FOLDERS[i]) >= (int)sizeof to) {
+            rm_tree(stage); BRED("start backup path is too long: no copy of the save this start"); return;
+        }
+        int h = has_entries(from);
+        if (h < 0 || (h && clonefile(from, to, 0))) {
+            int e = errno; rm_tree(stage);
+            BRED("%s %s failed (errno=%d): no copy of the save this start", h < 0 ? "reading" : "cloning", from, e); return;
+        }
+    }
+    if (write_start_hash(stage, now)) {
+        int e = errno; rm_tree(stage);
+        BRED("writing %s/%s failed (errno=%d): no copy of the save this start", stage, START_HASH_FILE, e); return;
+    }
+    if (publish_staged_backup(dir, stage, START_SIDE, made, sizeof made)) {
+        int e = errno; rm_tree(stage);
+        BRED("publishing start backup from %s failed (errno=%d): no copy of the save this start", stage, e); return;
+    }
+    prune_start_backups(save, made, now->bytes);
+    BLOG("the save as the game starts from it (%d files) is kept in %s", now->files, made);
 }
 
 // A DM_SAVE_SYNC value → <folder>/<title ID>/save.dmsync; 0 when sync is off
@@ -695,14 +917,14 @@ static int mount_once(const char *save, const char *title) {
         SLOG("this device's save is back as it was before that pull");
     }
     clean_backup_staging(save);
-    if (!cloud_file(title, cloud, sizeof cloud)) return 0;
+    if (!cloud_file(title, cloud, sizeof cloud)) { keep_start_copy(save, NULL); return 0; }
     SLOG("on: %s", cloud);
     snprintf(tmp, sizeof tmp, "%s.sync-tmp", save); snprintf(theirs, sizeof theirs, "%s/in.dmsync", tmp);
-    if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d): off", tmp, errno); return 0; }   // rm_tree: what an earlier session left
+    if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d): off", tmp, errno); keep_start_copy(save, NULL); return 0; }   // rm_tree: what an earlier session left
     if (ss_scan(save, &mine)) { SRED("this device's save %s cannot be read (errno=%d): off", save, errno); return 0; }
     read_base(save, base);
     choice_kind choice = read_choice(chosen);
-    int got = choice == CH_OFFLINE ? -1 : fetch_timed(cloud, theirs, FETCH_MS, NULL), both = 0, failed = 0, damaged = 0, pr;
+    int got = choice == CH_OFFLINE ? -1 : fetch_timed(cloud, theirs, FETCH_MS, NULL), both = 0, failed = 0, damaged = 0, pulled = 0, pr;
     if (got > 0 && ss_read(theirs, NULL, &other)) { SRED("the cloud's save %s is damaged: playing on with this device's, which replaces it (the damaged file is kept)", cloud); got = 0; damaged = 1; }
     else if (got > 0 && strcasecmp(other.title, title)) { SRED("the cloud's save %s is %s's, not %s's: not used", cloud, other.title, title); got = -1; }
     if (got < 0) { SLOG("playing on with this device's save; it is not sent until it has been compared with the cloud's"); failed = 1; }
@@ -723,6 +945,7 @@ static int mount_once(const char *save, const char *title) {
             failed = 1; break;
         }
         write_base(save, other.hash);
+        pulled = 1;
         SLOG("brought in the cloud's save (from %s, saved %s%s)%s%s", other.device, t, choice == CH_CLOUD ? ", the player's choice" : both ? ", the newer of two that both changed" : "", *kept ? "; this device's is kept in " : "", kept);
         break;
     case SS_PUSH:
@@ -760,6 +983,8 @@ static int mount_once(const char *save, const char *title) {
         break;
     }
     rm_tree(tmp);
+    // Keep the start copy before starting the sender thread, reusing the hash sync already computed (mine, or other after a completed pull)
+    keep_start_copy(save, pulled ? &other : &mine);
     snprintf(g_save, sizeof g_save, "%s", save); upper_title(title, g_title, sizeof g_title); snprintf(g_cloud, sizeof g_cloud, "%s", cloud);
     g_failed = failed;
     pthread_t th;
@@ -926,5 +1151,6 @@ int ss_store_conditional(const char *local, const char *cloud, const ss_cloud_id
 
 __attribute__((weak)) int front_save_sync_fetch(const char *cloud, const char *local, ss_cloud_id *id) { return ss_fetch_copy(cloud, local, id); }
 __attribute__((weak)) int front_save_sync_store(const char *local, const char *cloud, const ss_cloud_id *expected) { return ss_store_conditional(local, cloud, expected); }
+__attribute__((weak)) void front_save_backup_exclude(const char *dir) { (void)dir; }
 
 __attribute__((weak)) int dm_fs_clone_committed(const char *dir, const char *to) { return clonefile(dir, to, 0) ? -1 : 0; }

@@ -188,7 +188,7 @@ void dm_movie_active(int active);   // iOS movie decoder recovery waits for acti
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
-void dm_guest_frame_tick(void);        // Called on every present (hle_nvn.c): when DM_DETCLOCK is on, advances the guest clock by one fixed step
+void dm_guest_frame_tick(void);        // Called on every present (NVN, Vulkan, OpenGL): runs dm_cheats_present and, when DM_DETCLOCK is on, advances the guest clock
 uint64_t dm_nvn_frame_count(void);
 uint64_t dm_nvn_sub_cpu_ns(void);     // Cumulative CPU nanoseconds of submit (excluding present)
 void dm_backtrace(uint64_t fp);
@@ -251,7 +251,7 @@ int dm_guest_heap_read(uint64_t addr, void *out, size_t len);    // hle_svc.c: h
 int dm_guest_heap_write(uint64_t addr, const void *src, size_t len);   // hle_svc.c: hole-free guest heap write (the dirty tracking sees it first)
 // Cheats (hle_cheats.c): Atmosphère-format cheat code files applied to the running game (docs/development.md "Cheats")
 void dm_cheats_init(void);            // Called once in host_preload after loading the modules (main.c): reads DM_CHEATS and friends, loads the build's file
-void dm_cheats_present(void);         // Per presented frame (hle_nvn.c presents): applies the enabled cheats once
+void dm_cheats_present(void);         // Per presented frame (called from hle_os.c dm_guest_frame_tick): applies the enabled cheats once
 // The Cheats submenu's rows (front_mac.m, Mac window only). Readers of the list of cheats; the front end copies the strings out immediately
 int dm_cheats_found(void);            // A cheat file is loaded (this build's, or another build's on DM_CHEATS_ANY_BUILD)
 int dm_cheats_ncheats(void);          // The loaded file's cheats, in file order

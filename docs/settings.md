@@ -221,7 +221,7 @@ flowchart LR
 ```
 
 - **On** (the default for most games): an even 30 fps (or 20) in heavy scenes instead of a mix of 30 and 60.
-- **Off:** the game keeps aiming at 60; a late frame is shown one refresh later and the next one goes on as usual, so heavy scenes look less even but stay closer to 60 on average.
+- **Off:** the game keeps aiming at the chosen rate (60 or 120); a late frame is shown at the next refresh and the next one goes on as usual, so heavy scenes look less even but stay closer to the target on average. At 120 fps, games that step by their target frame rate run in slow motion when frames come late, so leave this **On** there if you notice slowdowns.
 - **When to change it:** turn it off if the game often falls to 30 fps although it is only slightly late.
 
 ### Performance HUD

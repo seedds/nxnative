@@ -235,11 +235,103 @@ static void draw_clear_draw(void) {
     for (int i = 0; i < 2; i++) { h_vkDestroyBuffer(&g_device, vb[i], NULL); h_vkFreeMemory(&g_device, mem[i], NULL); }
     free_target(&t); cases++;
 }
+static void partial_render_area_depth_stencil(void) {
+    const VkFormat formats[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT};
+    for (uint32_t k = 0; k < 3; k++) {
+        const fmt_t *f = fmt_of(formats[k]); int has_d = fmt_has_depth(f), has_s = fmt_has_stencil(f);
+        for (int mode = 0; mode < 4; mode++) {
+            // mode 0: partial depth clear; 1: partial stencil clear; 2: partial both clear + DONT_CARE store; 3: full-area clear control
+            if (mode == 0 && !has_d) continue;
+            if (mode == 1 && !has_s) continue;
+            target t = make_target(formats[k], 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_1_BIT);
+            VkCommandBuffer cb = begin(&t, (VkClearValue){.depthStencil = {1.0f, 0x35}});
+            h_vkCmdEndRenderPass(cb); submit(cb);
+
+            t.rp.att[0].load = (mode == 0 || mode == 2 || mode == 3) && has_d ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            t.rp.att[0].sload = (mode == 1 || mode == 2 || mode == 3) && has_s ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            t.rp.att[0].store = mode == 2 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+            t.rp.att[0].sstore = mode == 2 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+            cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+            VkClearValue clear = {.depthStencil = {0.25f, 0xa7}};
+            VkRect2D area = mode == 3 ? (VkRect2D){{0, 0}, {4, 4}} : (VkRect2D){{1, 1}, {2, 2}};
+            VkRenderPassBeginInfo bi = {.renderPass = &t.rp, .framebuffer = &t.fb, .renderArea = area, .clearValueCount = 1, .pClearValues = &clear};
+            h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+            h_vkCmdEndRenderPass(cb); submit(cb);
+
+            if (has_d) {
+                id<MTLBuffer> out = pixels(t.im, 0, 0, 4, has_s ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone); const float *p = out.contents;
+                float want_in = (mode == 0 || mode == 2 || mode == 3) ? 0.25f : 1.0f;
+                for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++)
+                    assert(p[y * 4 + x] == ((mode == 3 || inside(x, y)) ? want_in : 1.0f));
+            }
+            if (has_s) {
+                id<MTLBuffer> out = pixels(t.im, 0, 0, 1, has_d ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionNone); const uint8_t *p = out.contents;
+                uint8_t want_in = (mode == 1 || mode == 2 || mode == 3) ? 0xa7 : 0x35;
+                for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++)
+                    assert(p[y * 4 + x] == ((mode == 3 || inside(x, y)) ? want_in : 0x35));
+            }
+            free_target(&t); cases++;
+        }
+    }
+}
+static void partial_render_area_discard_and_resolve(void) {
+    // Partial color STORE_OP_DONT_CARE preserves exterior pixels within a single tile.
+    {
+        target t = make_target(VK_FORMAT_R32_UINT, 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_1_BIT);
+        VkCommandBuffer cb = begin(&t, (VkClearValue){.color.uint32 = {11}});
+        h_vkCmdEndRenderPass(cb); submit(cb);
+
+        t.rp.att[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        t.rp.att[0].store = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+        VkClearValue clear = {.color.uint32 = {22}};
+        VkRenderPassBeginInfo bi = {.renderPass = &t.rp, .framebuffer = &t.fb, .renderArea = {{1, 1}, {2, 2}}, .clearValueCount = 1, .pClearValues = &clear};
+        h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdEndRenderPass(cb); submit(cb);
+
+        id<MTLBuffer> out = pixels(t.im, 0, 0, 4, MTLBlitOptionNone); const uint32_t *p = out.contents;
+        for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++)
+            assert(p[y * 4 + x] == (inside(x, y) ? 22 : 11));
+        free_target(&t); cases++;
+    }
+    // Partial and full MSAA resolve with both STORE_OP_STORE and STORE_OP_DONT_CARE.
+    for (int mode = 0; mode < 3; mode++) {
+        // mode 0: partial + STORE; 1: partial + DONT_CARE; 2: full-area control
+        target msaa = make_target(VK_FORMAT_R8G8B8A8_UNORM, 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_4_BIT);
+        target res = make_target(VK_FORMAT_R8G8B8A8_UNORM, 4, 1, 1, 0, 0, 1, VK_SAMPLE_COUNT_1_BIT);
+        VkCommandBuffer cb = begin(&msaa, (VkClearValue){.color.float32 = {0, 0, 1, 1}});   // blue (0xffff0000)
+        h_vkCmdEndRenderPass(cb); submit(cb);
+        cb = begin(&res, (VkClearValue){.color.float32 = {0, 1, 0, 1}});                   // green (0xff00ff00)
+        h_vkCmdEndRenderPass(cb); submit(cb);
+
+        msaa.rp.natt = 2; msaa.rp.res[0] = 1; msaa.rp.att[1] = res.rp.att[0];
+        msaa.rp.att[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        msaa.rp.att[0].store = mode == 1 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+        msaa.fb.n = 2; msaa.fb.v[1] = res.view;
+        cb = commands(VK_COMMAND_BUFFER_LEVEL_PRIMARY, NULL, NULL);
+        VkClearValue clear[] = {{.color.float32 = {1, 0, 0, 1}}, {0}};   // red (0xff0000ff)
+        VkRect2D area = mode == 2 ? (VkRect2D){{0, 0}, {4, 4}} : (VkRect2D){{1, 1}, {2, 2}};
+        VkRenderPassBeginInfo bi = {.renderPass = &msaa.rp, .framebuffer = &msaa.fb, .renderArea = area, .clearValueCount = 2, .pClearValues = clear};
+        h_vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdEndRenderPass(cb); submit(cb);
+
+        id<MTLBuffer> pr = pixels(res.im, 0, 0, 4, MTLBlitOptionNone); const uint32_t *rp = pr.contents;
+        for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++)
+            assert(rp[y * 4 + x] == ((mode == 2 || inside(x, y)) ? 0xff0000ff : 0xff00ff00));
+        if (mode != 2) {
+            id<MTLBuffer> pm = pixels(msaa.im, 0, 0, 4, MTLBlitOptionNone); const uint32_t *mp = pm.contents;
+            for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++)
+                assert(mp[y * 4 + x] == (inside(x, y) ? 0xff0000ff : 0xffff0000));
+        }
+        free_target(&msaa); free_target(&res); cases++;
+    }
+}
 int main(void) {
     @autoreleasepool {
         dev_init(); VkCommandPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         assert(h_vkCreateCommandPool(&g_device, &ci, NULL, &pool) == VK_SUCCESS);
         typed_colors(); attachments_and_rectangles(); view_layers(); multisample(); depth_stencil(); secondary_clear(); draw_clear_draw();
+        partial_render_area_depth_stencil(); partial_render_area_discard_and_resolve();
         h_vkDestroyCommandPool(&g_device, pool, NULL);
     }
     printf("Vulkan attachment clears: %d GPU cases passed\n", cases); return 0;

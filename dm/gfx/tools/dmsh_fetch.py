@@ -204,7 +204,7 @@ def fold(msl, bindings, om_only_ok=False):
     # A sample the border colour correction wrapped (dmsh_rewrite.py border_emu) is taken whole: a tile read replaces the corrected sample, never feeds the correction
     pat = re.compile(r'(dm_bs\()?spvDescriptorSet0\.(\w+)\.sample\(spvDescriptorSet0\.(\w+)Smplr, select\((_\d+), float2\(0\.0\), isnan\(\4\)\)\)'
                      r'(?(1), spvDescriptorSet0\.%s, \d+u, spvDescriptorSet0\.\2, spvDescriptorSet0\.\3Smplr%s, select\(\4, float2\(0\.0\), isnan\(\4\)\)\))' % (abi.BORDER_MEMBER, abi.BORDER_TWIN))
-    calls, out_parts, pos = [], [], 0
+    calls, out_parts, pos, sites, tiled_fc = [], [], 0, collections.Counter(), {}
     for m in pat.finditer(text):
         member, var = m.group(2), m.group(4)
         if member not in tex or member != m.group(3) or member not in reg: continue
@@ -216,21 +216,28 @@ def fold(msl, bindings, om_only_ok=False):
             fx, fy = (_frag_pos(text, d.group(1), 'x'), _frag_pos(text, d.group(2), 'y')) if d else (None, None)
             if pa and pa == pb: how = {'varying_locn': locn[pa], 'proj': 1}
             elif fx and fy: how = {'frag_pos': [fx, fy]}
+            # Not provably this pixel's texel: a candidate only for a shader the profile lists (bf_want.tsv), which the host reads from the tile only after the game's barrier
+            # with ORDER_FRAGMENTS_TILED, by which NVN's contract each fragment reads the texels at its own position (nvn_mtl.m fb_tile_plan, 'tiled')
+            elif om_only_ok: how = {'tiled': 1}
             else: continue
-        i = len(calls)
-        if i >= 32: break
+        # every tiled sample of one texture slot shares its call: the host reads all of them from the tile or none (Xenoblade's c6e37d2d097466b7 has more than 32 sample sites,
+        # its G-buffer reads among the last)
+        i = tiled_fc.get(reg[member], len(calls)) if 'tiled' in how else len(calls)
+        if i >= 32: continue
         sel = ''.join(f'fx{i} == {k} ? fb{k} : ' for k in range(NFB))
-        out_parts.append(text[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end()
-        calls.append({'fc': i, 'tex_reg': reg[member], **how})
+        out_parts.append(text[pos:m.start()]); out_parts.append(f'({sel}{m.group(0)})'); pos = m.end(); sites[reg[member]] += 1
+        if i == len(calls):
+            calls.append({'fc': i, 'tex_reg': reg[member], **how})
+            if 'tiled' in how: tiled_fc[reg[member]] = i
     if not calls and not om_only_ok:
         return None, 'no rewritable sample'
     # Mixed-use slots: the same texture also has other (non-rewritable) uses - at runtime this texture must not be switched to tile reads (the rewritten reads and the unrewritten ones would not see the same data)
-    conv = collections.Counter(c['tex_reg'] for c in calls)
+    conv = sites
     mixed = sorted({reg[mb] for mb in reg if mb in tex and text.count(f'spvDescriptorSet0.{mb}.') > conv[reg[mb]]})
     om = re.search(r'struct main0_out\s*\{(.*?)\};', src, re.S)
     if not om: return None, 'no output struct'
     outs = [(t, n, int(c)) for t, n, c in re.findall(r'(\w+) (m_\d+) \[\[color\((\d+)\)\]\];', om.group(1))]
-    if not outs or len(outs) > 4 or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than 4)'
+    if not outs or len(outs) > NFB or re.sub(r'\w+ m_\d+ \[\[color\(\d+\)\]\];', '', om.group(1)).strip(): return None, 'the output struct is not plain color outputs (or has more than ' + str(NFB) + ')'
     rest = src[end:]
     if calls:   # the body's new parameters, and every call of it (the definition comes first) passing what turns the tile read off
         params = [f'int fx{i}' for i in range(len(calls))] + [f'float4 fb{k}' for k in range(NFB)]

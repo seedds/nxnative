@@ -97,6 +97,35 @@ fragment main0_out main0(main0_in in [[stage_in]], constant spvDescriptorSetBuff
 '''
 BINDINGS = [{'kind': dmsh_abi.KIND_TEX, 'msl_name': 'fp_t_tcb_8', 'reg': 0}]
 FS_KEY = 'fedcba9876543210'
+# A sample at a position the chain cannot follow (Xenoblade Chronicles: Definitive Edition's decals project it through emulated round-toward-zero products): a 'tiled' call
+# only with the flag (bf_want.tsv), which the host reads from the tile only after a barrier with ORDER_FRAGMENTS_TILED; every such sample of one slot shares its call
+FS_TILED = FS.replace('float _67 = 1.0 / _57;', 'float _67 = 2.0 / _57;')
+class TiledSample(unittest.TestCase):
+    def test_refused_without_the_flag(self):
+        self.assertEqual(dmsh_fetch.fold(FS_TILED, BINDINGS), (None, 'no rewritable sample'))
+
+    def test_tiled_with_the_flag(self):
+        v, meta = dmsh_fetch.fold(FS_TILED, BINDINGS, om_only_ok=True)
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+        self.assertIn('(fx0 == 0 ? fb0 : ', v)
+
+    def test_samples_of_one_slot_share_a_call(self):
+        sample = 'float4 _84 = spvDescriptorSet0.fp_t_tcb_8.sample(spvDescriptorSet0.fp_t_tcb_8Smplr, select(_309, float2(0.0), isnan(_309))).xyzw;'
+        src = FS_TILED.replace(sample, sample + '\n    ' + sample.replace('_84', '_85')).replace('_84.x, 1.0', '_85.x, 1.0')
+        v, meta = dmsh_fetch.fold(src, BINDINGS, om_only_ok=True)
+        self.assertEqual(meta['calls'], [{'fc': 0, 'tex_reg': 0, 'tiled': 1}])
+        self.assertEqual(v.count('(fx0 == 0 ? fb0 : '), 2)
+        self.assertEqual(meta['mixed_regs'], [])
+
+    def test_five_outputs(self):
+        outs = ''.join(f'    float4 m_{50 + j} [[color({j})]];\n' for j in range(1, 5))
+        src = FS_TILED.replace('    float4 m_46 [[color(0)]];\n', '    float4 m_46 [[color(0)]];\n' + outs)
+        v, meta = dmsh_fetch.fold(src, BINDINGS, om_only_ok=True)
+        self.assertEqual([o['color'] for o in meta['outputs']], [0, 1, 2, 3, 4])
+        with tempfile.TemporaryDirectory() as d:
+            try: compile_lib(v, pathlib.Path(d), 'fs_tiled')
+            except subprocess.CalledProcessError as e: self.fail(e.stderr)
+
 # Splatoon Raiders' ink stamp (6a5b76a60670e513), cut down: its ink map sampled at gl_FragCoord over the render scale times c[6].xy (1 / the map's size), through the border colour
 # correction; the read's channels rotated into its output (red from green, green from blue plus one minus alpha): red where it read green, black where it read red, and green
 # wherever a missing channel of an R or RG map read other than 0, 0, 1

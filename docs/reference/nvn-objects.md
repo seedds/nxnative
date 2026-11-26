@@ -1129,6 +1129,14 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** code review of the shared tracker, from a fork's compatibility commit `587d5206` ported through [PR #686](https://github.com/seedds/nxnative/pull/686). No game is known to hit it: a game normally finalizes a pool only after the GPU is done with it.
 - **Check:** `t_dirty_retire_race` retires the pool between protect's lookup and its first page-state exchange, then reads 16 bytes into the pool with `read()`. Without the fix, retirement completes first and the read fails with `EFAULT`; with it, retirement waits for protection, unregisters the pool and the read returns 16. `t_dirty_race` and `t_dirty_slots` cover page-state publication and shared / reused pool slots.
 
+### Missing texture-copy objects crashed pass-dump diagnostics
+
+- **Symptom:** a texture-to-texture or buffer-to-texture copy with a missing recorded texture object crashes when its frame has pass-dump diagnostics enabled.
+- **Cause:** `copy_t2t_enc` evaluated its `PD` line reading `c->src->serial` and `c->dst->serial` before checking `!s || !c->dst`, and `copy_b2t` read `c->tex->serial` in its `!t` `PD` line when `c->tex` was `NULL`. With pass-dump off, those `PD` arguments were not evaluated.
+- **Fix:** reject a missing `c->src` or `c->dst` at entry to `copy_t2t_enc`, and a missing `c->tex` at entry to `copy_b2t`, before flushing passes, resolving textures, or logging diagnostics. Valid copies keep the same path.
+- **Found on:** synthetic backend regression ([PR #2158](https://github.com/seedds/nxnative/pull/2158)); no gameplay crash is attributed to this case.
+- **Check:** `t_copy_missing` runs all three missing-object combinations for `copy_t2t_enc` and the missing-target case for `copy_b2t` with `DM_NVN_PASSDUMP=0`, confirms both surviving textures' bytes are preserved, and checks a following valid copy in the same submission.
+
 ### CPU staging recycled before a texture upload
 
 - **Symptom:** a scene's first load draws overbright effects or damaged UI textures, particularly while its pipelines are being built.

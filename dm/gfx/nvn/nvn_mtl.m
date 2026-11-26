@@ -23392,7 +23392,7 @@ uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present cou
 enum { KEEP_SPIN = 140000 };
 // 14 / 11.5 ms: in handheld mode the game's 13.4 ms of GPU at the clock macOS picks fits its frame, and holding the clock higher only heated the fanless Air into slowing its CPU
 // (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
-static double KEEP_HI_MS = 14.0, KEEP_LO_MS = 11.5;
+static double KEEP_HI_MS = 12.0, KEEP_LO_MS = 8.5;
 static _Atomic int g_keep_active;
 static void *gpu_keep_main(void *arg) {
     int mode = (int)(intptr_t)arg; pthread_setname_np("dm-gpu-keep");

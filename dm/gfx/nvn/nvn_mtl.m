@@ -3330,6 +3330,7 @@ uint64_t mtl_sub_commit(void) {
     vc_commit();   // and the texture views of the textures the owner has let go, those evictions among them
     treg_res_check();   // DM_RES_CHECK=1: check live bindless descriptor views and note their allocations for late-retire checks
     treg_finish_submission();   // Late descriptor views retire behind this submission's fence.
+    void dlss_retire_drain(void); dlss_retire_drain();   // finalized DLSS networks' scalers retire behind this submission's fence
     rt_preserve_bound();   // The game may reuse completed command memory; queue bindings must not point into its texture snapshots.
     queue_program_preserve(); // Submitted metadata may retire while these programs remain bound.
     uint64_t fence = ++g_fence;
@@ -20839,11 +20840,11 @@ static void copy_t2t(const p_copy_t2t *c) {
 // vectors at the input's size, inverted depth, with 0x40 for its DLSSAutoExposure). Where MetalFX takes no scaler for the formats, or a depth or motion texture is missing, the input is scaled
 // bilinearly into the output with a red line: the frame stays whole, without the temporal gain
 enum { DLSS_F_DEPTH_INVERTED = 1 << 3, DLSS_F_AUTO_EXPOSURE = 1 << 6 };
-// The networks are named by their serials (hle_nvn.c nvnDlssNetworkInitialize), so one made again in the same memory is another network here. A scaler replaced (new sizes, or its
-// slot taken by another network: nvnDlssNetworkFinalize tells the replay nothing, and Fast Fusion had made 8 networks by its 9th minute) is held until this submission completes
+// The networks are named by their serials (hle_nvn.c nvnDlssNetworkInitialize), so one made again in the same memory is another network here. A scaler retired on
+// nvnDlssNetworkFinalize (mtl_dlss_forget) or evicted when the cache is full (Fast Fusion had made 8 networks by its 9th minute) is held until this submission completes
 // (defer_obj_release): a Metal 4 command buffer does not retain what is encoded into it, and the network's earlier evaluations in the submission still use it. Dropped at once, the
-// commit crashed in -[_MTL4MachineLearningCommandEncoder encodeToCommandQueue:] ("-[AGXG17XFamilyMLContext executable]: unrecognized selector"). A new network takes the slot used
-// least recently: slot 0 was always taken, which could be the network the game was drawing with.
+// commit crashed in -[_MTL4MachineLearningCommandEncoder encodeToCommandQueue:] ("-[AGXG17XFamilyMLContext executable]: unrecognized selector"). When all slots are full, a new
+// entry takes the slot used least recently: slot 0 was always taken, which could be the network the game was drawing with.
 // A scaler is keyed by the textures' sizes, not by the input's: NVN2 reports a range of inputs (hle_nvn.c nvnDlssNetworkBuilderGetOptimalSettings), and a game with a dynamic resolution
 // renders a new size into the same textures as often as each frame. MetalFX's input content properties take that: the scaler's input is the textures' common size, its content scale
 // runs from that size's (the content filling them; no less than the device's least) up to the most the device takes, and each evaluation sets its own content size. Keyed by the input's size, every new size made
@@ -20882,19 +20883,70 @@ static id<MTLRenderPipelineState> dlss_alpha_pso(MTLPixelFormat pf) {
     return ps;
 }
 
-typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; float lo, hi; int fresh, mask; } dlss_scaler;
-static dlss_scaler g_dlss[4];
+// One scaler per network and input box, not one per network: a game with dynamic resolution renders into textures of a few sizes and steps between them every few
+// seconds, and each synchronous build stalls the replay about 80 ms (Xenoblade Chronicles DE, 0400FF500E34A001: 1280x720 to 960x540, 191 builds and 190 frames of
+// about 88 ms in 5 minutes of play). A kept scaler that becomes the network's current one again starts with a reset, as a new one does: its history is from another size.
+// Finalized networks (mtl_dlss_forget) drop all their cached scalers via deferred release on the replay thread so dead networks do not pin GPU memory across slots.
+typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[10]; float lo, hi; int fresh, mask, cur; } dlss_scaler;
+#define DLSS_KEEP 12
+static dlss_scaler g_dlss[DLSS_KEEP];
 static uint64_t g_dlss_use;
 static id<MTL4Compiler> g_dlss_comp;
 static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
+static pthread_mutex_t g_dlss_retire_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t *g_dlss_retire;
+static size_t g_dlss_retire_n, g_dlss_retire_cap;
+static _Atomic size_t g_dlss_retire_pending;
+void mtl_dlss_forget(uint64_t serial) {
+    if (!serial) return;
+    pthread_mutex_lock(&g_dlss_retire_mu);
+    if (g_dlss_retire_n == g_dlss_retire_cap) {
+        size_t ncap = g_dlss_retire_cap ? g_dlss_retire_cap * 2 : 16;
+        uint64_t *p = realloc(g_dlss_retire, ncap * sizeof *p);
+        if (!p) { pthread_mutex_unlock(&g_dlss_retire_mu); return; }
+        g_dlss_retire = p; g_dlss_retire_cap = ncap;
+    }
+    g_dlss_retire[g_dlss_retire_n++] = serial;
+    atomic_store_explicit(&g_dlss_retire_pending, g_dlss_retire_n, memory_order_release);
+    pthread_mutex_unlock(&g_dlss_retire_mu);
+}
+void dlss_retire_drain(void) {
+    if (!atomic_load_explicit(&g_dlss_retire_pending, memory_order_acquire)) return;
+    for (;;) {
+        uint64_t batch[16]; size_t n = 0;
+        pthread_mutex_lock(&g_dlss_retire_mu);
+        n = g_dlss_retire_n < 16 ? g_dlss_retire_n : 16;
+        if (n) {
+            memcpy(batch, g_dlss_retire, n * sizeof *batch);
+            g_dlss_retire_n -= n;
+            if (g_dlss_retire_n) memmove(g_dlss_retire, g_dlss_retire + n, g_dlss_retire_n * sizeof *batch);
+        }
+        atomic_store_explicit(&g_dlss_retire_pending, g_dlss_retire_n, memory_order_release);
+        pthread_mutex_unlock(&g_dlss_retire_mu);
+        if (!n) break;
+        for (size_t k = 0; k < n; k++) for (int i = 0; i < DLSS_KEEP; i++) {
+            if (g_dlss[i].net != batch[k]) continue;
+            dlss_scaler_drop(&g_dlss[i]);
+            g_dlss[i].net = 0; g_dlss[i].used = 0; g_dlss[i].lo = g_dlss[i].hi = 0; g_dlss[i].fresh = g_dlss[i].mask = g_dlss[i].cur = 0;
+            memset(g_dlss[i].key, 0, sizeof g_dlss[i].key);
+        }
+    }
+}
 static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, id<MTLTexture> bias, NSUInteger iw, NSUInteger ih) {
+    dlss_retire_drain();
     NSUInteger bw = MIN(col.width, MIN(dep.width, mot.width)), bh = MIN(col.height, MIN(dep.height, mot.height));   // the input box every texture holds
     if (bias) { bw = MIN(bw, bias.width); bh = MIN(bh, bias.height); }
     NSUInteger key[10] = {col.pixelFormat, dep.pixelFormat, mot.pixelFormat, out.pixelFormat, bias ? bias.pixelFormat : 0, bw, bh, out.width, out.height, c->flags};
     float s_lo = MIN((float)out.width / (float)iw, (float)out.height / (float)ih), s_hi = MAX((float)out.width / (float)iw, (float)out.height / (float)ih);   // this evaluation's scale
-    dlss_scaler *e = NULL, *spare = NULL;
-    for (int i = 0; i < 4 && !e; i++) { if (g_dlss[i].net == c->net) e = &g_dlss[i]; else if (!spare || (spare->net && (!g_dlss[i].net || g_dlss[i].used < spare->used))) spare = &g_dlss[i]; }
-    if (!e) { e = spare; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); }
+    dlss_scaler *e = NULL, *spare = NULL, *prev = NULL;
+    for (int i = 0; i < DLSS_KEEP; i++) {
+        dlss_scaler *s = &g_dlss[i];
+        if (s->net == c->net && s->net && s->cur) prev = s;
+        if (!e && s->net == c->net && s->net && !memcmp(s->key, key, sizeof key)) e = s;
+        else if (!spare || (spare->net && (!s->net || s->used < spare->used))) spare = s;
+    }
+    if (!e) { e = spare; if (e == prev) prev = NULL; e->net = c->net; dlss_scaler_drop(e); memset(e->key, 0, sizeof e->key); e->cur = 0; }
+    if (e != prev) { if (prev) prev->cur = 0; e->cur = 1; e->fresh = 1; }   // back to a kept scaler: its history is another size's
     e->used = ++g_dlss_use;
     if (!memcmp(e->key, key, sizeof key) && (!e->sc || (s_lo >= e->lo && s_hi <= e->hi))) return e->sc ? e : NULL;
     memcpy(e->key, key, sizeof key); dlss_scaler_drop(e); e->fresh = 1;
@@ -20906,6 +20958,12 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
     d.colorTextureFormat = col.pixelFormat; d.depthTextureFormat = dep.pixelFormat; d.motionTextureFormat = mot.pixelFormat; d.outputTextureFormat = out.pixelFormat;
     d.inputWidth = bw; d.inputHeight = bh; d.outputWidth = out.width; d.outputHeight = out.height;
     d.autoExposureEnabled = (c->flags & DLSS_F_AUTO_EXPOSURE) != 0;
+    // Build the final upscaler now, not in the background. With the default (NO), MetalFX hands back an interim upscaler and swaps in the one it compiles behind it; on
+    // Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition (0400FF500E34A001, 2.0.0; M2 Pro, macOS 27.3 26C5035r) that swap failed every run on the 97th
+    // evaluation of the fourth scaler the game's dynamic resolution made in its first second: MPSGraph's ANE region asserted `ANE inference operation failed`
+    // (Code=-19, inferenceCount 96) and aborted; with MTL_ERROR_MODE=nslog the GPU command buffer waiting on that inference timed out instead and macOS revoked GPU
+    // access. Built synchronously, the same boot ran 2,697 evaluations to its time limit, and the frames that make the scalers took no longer
+    d.requiresSynchronousInitialization = YES;
     d.inputContentPropertiesEnabled = YES; d.inputContentMinScale = e->lo; d.inputContentMaxScale = e->hi;
     const int fx = g_dlss_comp && [MTLFXTemporalScalerDescriptor supportsMetal4FX:g_dev];
     e->mask = bias != nil;

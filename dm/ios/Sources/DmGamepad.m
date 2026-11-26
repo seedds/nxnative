@@ -1,6 +1,7 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
-//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
-//   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
+//   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift); the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
+//   The menu button starts at the top centre, dims after three idle seconds and brightens when touched. DM_MENU_BUTTON=off hides it until the setting changes.
+//     Dragging the gear saves its position per game until the setting is toggled.
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -129,13 +130,17 @@ static const CGFloat
     K_RSTICK_R = 60,                                // right stick (not drawn): radius around its centre, the touch-down point
     K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
     K_CLICK_X = 102, K_CLICK_R = 17;                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
+static const NSTimeInterval K_MENU_SHOWN = 3;    // seconds at full opacity after using the gear
+static const CGFloat K_MENU_IDLE_ALPHA = 0.25;
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static NSString *const k_menu_position_key = @"DmMenuPosition";
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 
 @interface DmGamepad : UIView
 - (void)arrange:(DmLayout)layout;
 - (BOOL)menuTakes:(CGPoint)p;
+- (void)menuOpen:(BOOL)open;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
@@ -143,6 +148,13 @@ int dm_opmode(void);   // hle_oe.c: 0 = handheld
 @end
 @implementation DmMenuButton
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e { DmGamepad *pad = (DmGamepad *)self.superview; return [pad menuTakes:[self convertPoint:p toView:pad]]; }
+// The menu's presentation keeps the gear visible while the menu is open.
+- (void)contextMenuInteraction:(UIContextMenuInteraction *)i willDisplayMenuForConfiguration:(UIContextMenuConfiguration *)c animator:(id<UIContextMenuInteractionAnimating>)a {
+    [super contextMenuInteraction:i willDisplayMenuForConfiguration:c animator:a]; [(DmGamepad *)self.superview menuOpen:YES];
+}
+- (void)contextMenuInteraction:(UIContextMenuInteraction *)i willEndForConfiguration:(UIContextMenuConfiguration *)c animator:(id<UIContextMenuInteractionAnimating>)a {
+    [super contextMenuInteraction:i willEndForConfiguration:c animator:a]; [(DmGamepad *)self.superview menuOpen:NO];
+}
 @end
 static __weak DmGamepad *g_view;
 static void pads_start(void);   // Physical controllers, below
@@ -156,6 +168,9 @@ static void pads_start(void);   // Physical controllers, below
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
     DmMenuButton *_menu;                           // opens the in-game menu (GameMenu.swift)
+    BOOL _menuIsOpen, _menuDragging;               // keep the gear visible while it or its menu is in use
+    CGPoint _menuPosition;                        // saved fractions of the safe travel area, independent of the drag preview
+    BOOL _menuMoved;
     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
     unsigned _hapticSticks;
     BOOL _stickShown;                              // the left stick was held at the last refresh
@@ -213,10 +228,20 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         _menu.backgroundColor = k_idle; _menu.layer.borderColor = k_line.CGColor; _menu.layer.borderWidth = 1.5;
         _menu.layer.shadowColor = UIColor.blackColor.CGColor; _menu.layer.shadowOpacity = 0.2; _menu.layer.shadowRadius = 3; _menu.layer.shadowOffset = CGSizeMake(0, 1);
         _menu.tintColor = k_text; _menu.accessibilityLabel = @"Menu";
+        NSString *position = [NSUserDefaults.standardUserDefaults stringForKey:k_menu_position_key];
+        if (position) {
+            _menuPosition = CGPointFromString(position);
+            _menuMoved = YES;
+        }
         _menu.menu = CFBridgingRelease(dm_game_menu()); _menu.showsMenuAsPrimaryAction = YES;
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragMenu:)];
+        pan.maximumNumberOfTouches = 1;
+        [_menu addGestureRecognizer:pan];
         __weak DmGamepad *weakSelf = self;
+        [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf showMenu]; }] forControlEvents:UIControlEventTouchDown];
         [_menu addAction:[UIAction actionWithHandler:^(UIAction *a) { (void)a; [weakSelf reset]; }] forControlEvents:UIControlEventMenuActionTriggered];   // the menu opens: release every key and touch first
         [self addSubview:_menu];
+        [self setMenuMode:getenv("DM_MENU_BUTTON") resetPosition:NO];
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
         int l = saved ? (int)saved.integerValue : DM_GAME_PAD_LAYOUT;
         if (l == 2 && dm_opmode() != 0) l = 0;   // Tap only in handheld mode (env.txt's DM_OPMODE may have changed it)
@@ -250,6 +275,25 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
     if (!_tap || dm_opmode() == 0) return;
     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
 }
+- (void)setMenuMode:(const char *)mode resetPosition:(BOOL)reset {
+    BOOL hidden = mode && !strcmp(mode, "off");
+    if (reset && _menu.hidden != hidden) dm_gamepad_reset_menu_position();
+    _menu.hidden = hidden;
+    [self showMenu];
+}
+- (void)showMenu {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(fadeMenu) object:nil];
+    if (_menu.hidden) return;
+    if (_menu.alpha < 1) [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                                        animations:^{ self->_menu.alpha = 1; } completion:nil];
+    if (!_menuIsOpen && !_menuDragging) [self performSelector:@selector(fadeMenu) withObject:nil afterDelay:K_MENU_SHOWN];
+}
+- (void)fadeMenu {
+    if (_menu.hidden || _menuIsOpen || _menuDragging) return;
+    [UIView animateWithDuration:0.4 delay:0 options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ self->_menu.alpha = K_MENU_IDLE_ALPHA; } completion:nil];
+}
+- (void)menuOpen:(BOOL)open { _menuIsOpen = open; [self showMenu]; }
 - (void)setTouchFeedback:(BOOL)on {
     if (!on) { _touchFeedback = nil; return; }
     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
@@ -314,9 +358,71 @@ static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
 - (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, w = K_PILL_W * u, h = K_PILL_H * u;
     CGPoint c = CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + MAX(K_PILL_Y * u, _layout.separated ? 14 : 0));   // − on the left, + on the right
     return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
-- (CGPoint)menuCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + MAX(K_PILL_Y * self.u, _layout.separated ? 14 : 0)); }
-
+- (CGFloat)menuHitRadius { return MAX(K_MENU_R * self.u * 1.6, 22); }
+- (CGRect)menuTravelArea {
+    CGRect safe = self.safe;
+    if (CGRectIsNull(safe)) return CGRectZero;
+    CGFloat margin = MIN(self.menuHitRadius, MIN(safe.size.width, safe.size.height) / 2);
+    return CGRectInset(safe, margin, margin);
+}
 static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
+- (BOOL)menuPositionLeavesControlsFree:(CGPoint)p {
+    if (_tap || _padOff) return YES;
+    CGFloat radius = self.menuHitRadius;
+    if (dist(p, self.stickHome) <= radius || (_full && dist(p, self.dpadCenter) <= radius + self.dpadR)) return NO;
+    for (int b = B_A; b <= B_Y; b++) if (dist(p, [self facePos:b]) <= radius) return NO;
+    for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) {
+        int b = k_btns[i];
+        if (fullOnly(b) && !_full) continue;
+        CGPoint center;
+        if (isDrop(b)) center = [self dropCenter:b];
+        else if (isClick(b)) center = [self clickCenter:b];
+        else { CGRect r = [self pillRect:b]; center = CGPointMake(CGRectGetMidX(r), CGRectGetMidY(r)); }
+        if (dist(p, center) <= radius) return NO;
+    }
+    return YES;
+}
+- (CGPoint)menuCenter {
+    CGRect area = self.menuTravelArea;
+    if (_menuMoved && !CGRectIsEmpty(area)) {
+        CGPoint p = CGPointMake(area.origin.x + _menuPosition.x * area.size.width,
+                                area.origin.y + _menuPosition.y * area.size.height);
+        if ([self menuPositionLeavesControlsFree:p]) return p;
+    }
+    CGRect s = self.safe;
+    return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + MAX(K_PILL_Y * self.u, _layout.separated ? 14 : 0));
+}
+- (void)resetMenuPosition {
+    _menuMoved = NO;
+    _menu.center = self.menuCenter;
+}
+- (void)dragMenu:(UIPanGestureRecognizer *)pan {
+    UIGestureRecognizerState state = pan.state;
+    _menuDragging = state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged;
+    [self showMenu];
+    CGRect area = self.menuTravelArea;
+    if (state == UIGestureRecognizerStateCancelled || state == UIGestureRecognizerStateFailed || CGRectIsEmpty(area)) {
+        _menu.center = self.menuCenter;
+        return;
+    }
+    CGPoint delta = [pan translationInView:self];
+    [pan setTranslation:CGPointZero inView:self];
+    CGPoint center = _menu.center;
+    CGPoint target = CGPointMake(MIN(CGRectGetMaxX(area), MAX(CGRectGetMinX(area), center.x + delta.x)),
+                                 MIN(CGRectGetMaxY(area), MAX(CGRectGetMinY(area), center.y + delta.y)));
+    if (_menuDragging) {
+        _menu.center = target;
+        return;
+    }
+    if (state == UIGestureRecognizerStateEnded && [self menuPositionLeavesControlsFree:target]) {
+        _menuPosition = CGPointMake((target.x - area.origin.x) / area.size.width,
+                                    (target.y - area.origin.y) / area.size.height);
+        _menuMoved = YES;
+        [NSUserDefaults.standardUserDefaults setObject:NSStringFromCGPoint(_menuPosition) forKey:k_menu_position_key];
+    }
+    _menu.center = self.menuCenter;
+}
+
 - (CGFloat)buttonDistance:(int)b point:(CGPoint)p {
     CGFloat u = self.u;
     if (isDrop(b)) return dist(p, [self dropCenter:b]) / MAX([self dropR:b] * 1.35, _layout.separated ? 22 : 0);
@@ -338,12 +444,13 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     }
     return best;
 }
-- (CGFloat)menuDistance:(CGPoint)p { return dist(p, self.menuCenter) / MAX(K_MENU_R * self.u * 1.6, 22); }
 - (BOOL)menuTakes:(CGPoint)p {   // the menu button takes a touch in its hit circle unless a locked key's target is nearer (the drawn keys are hidden in Tap and with a controller)
-    CGFloat d = [self menuDistance:p]; if (d > 1) return NO;
+    if (_menu.hidden || _menuDragging) return NO;
+    CGFloat distance = dist(p, _menu.center), radius = self.menuHitRadius;
+    if (distance > radius) return NO;
     if (_tap || _padOff || (_layout.separated && !CGRectContainsPoint(_layout.controls, p))) return YES;
     int hit = [self btnAt:p];
-    return hit < 0 || d < [self buttonDistance:hit point:p];
+    return hit < 0 || distance / radius < [self buttonDistance:hit point:p];
 }
 - (uint64_t)faceAt:(CGPoint)p {   // keys under the finger in the diamond (between two keys both count)
     uint64_t m = 0; CGFloat r = self.faceHitR;
@@ -709,7 +816,7 @@ static BOOL pads_slotted(GCController *gone) {
         if (!usable || g_merge) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), usable ? "" : " (no supported gamepad profile: not used)");
     }
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; });   // the touch gamepad hides while any controller is in use
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; [self reset]; [self setNeedsLayout]; });   // recheck the gear when the touch controls return
 }
 @end
 
@@ -815,6 +922,11 @@ UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWi
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
 void dm_gamepad_opmode_changed(void) { [g_view opmodeChanged]; }
 void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
+void dm_gamepad_menu_button(const char *mode) { [g_view setMenuMode:mode resetPosition:YES]; }
+void dm_gamepad_reset_menu_position(void) {
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:k_menu_position_key];
+    [g_view resetMenuPosition];
+}
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }

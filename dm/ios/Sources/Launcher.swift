@@ -147,6 +147,7 @@ private struct LauncherView: View {
         // Rotation turns the screen as soon as it is picked, before Play (front_ios.m dm_rotation_set); the saved pick at once when the screen shows
         .onAppear { if let v = m.values["DM_ROTATION"] { dm_rotation_set(v) } }
         .onChange(of: m.values["DM_ROTATION"]) { _, v in if let v { dm_rotation_set(v) } }
+        .onChange(of: m.values["DM_MENU_BUTTON"]) { _, _ in dm_gamepad_reset_menu_position() }
     }
 
     private func header(icon size: CGFloat) -> some View {
@@ -268,7 +269,7 @@ public func dmShowLauncher(_ viewController: UnsafeMutableRawPointer, _ done: @c
     guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return false }
     let model = LauncherModel(file.settings)
     gameMenuModel = model   // the in-game menu shows and saves the same choices (GameMenu.swift)
-    if ProcessInfo.processInfo.environment["DM_LAUNCHER"] == "0" { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
+    if model.skipsLauncher { fputs("launcher: off (DM_LAUNCHER=0)\n", stderr); model.applySaved(); return false }
     let parent = Unmanaged<UIViewController>.fromOpaque(viewController).takeUnretainedValue()
     var host: UIViewController?
     let view = LauncherView(m: model) {

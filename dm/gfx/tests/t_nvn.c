@@ -2002,6 +2002,40 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&mp);
     }
 
+    {   // STORM 3 records uploads, then reinitializes the texture on the same storage with fewer mips before submitting.
+        enum { LEVEL0_BYTES = 2048, LEVEL1_BYTES = 512, UPLOAD_BYTES = LEVEL0_BYTES + LEVEL1_BYTES };
+        static uint8_t storage[16384] __attribute__((aligned(16384)));
+        static uint8_t transfer[16384] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder pb;
+        NVNmemoryPool texture_pool, transfer_pool;
+        P(nvnMemoryPoolBuilderSetDevice)(&pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage); P(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        P(nvnMemoryPoolInitialize)(&texture_pool, &pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&pb, transfer, sizeof transfer); P(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        P(nvnMemoryPoolInitialize)(&transfer_pool, &pb);
+        for (size_t i = 0; i < UPLOAD_BYTES; i++) transfer[i] = (uint8_t)(1 + (i + i / 97) % 253);
+        NVNtextureBuilder tb;
+        NVNtexture t = {0};
+        P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+        P(nvnTextureBuilderSetSize2D)(&tb, 64, 64); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA_DXT1);
+        P(nvnTextureBuilderSetStorage)(&tb, &texture_pool, 0); P(nvnTextureBuilderSetLevels)(&tb, 4);
+        P(nvnTextureInitialize)(&t, &tb);
+        NVNtextureView mip;
+        NVNcopyRegion region0 = {0, 0, 0, 64, 64, 1}, region1 = {0, 0, 0, 32, 32, 1};
+        P(nvnTextureViewSetDefaults)(&mip); P(nvnTextureViewSetLevels)(&mip, 1, 1);
+        NVNbufferAddress src = (NVNbufferAddress)transfer, dst = src + 8192;
+        STORE_RUN(P(nvnCommandBufferCopyBufferToTexture)(&cb, src, &t, NULL, &region0, 0);
+                  P(nvnCommandBufferCopyBufferToTexture)(&cb, src + LEVEL0_BYTES, &t, &mip, &region1, 0);
+                  P(nvnTextureBuilderSetLevels)(&tb, 2);
+                  P(nvnTextureInitialize)(&t, &tb));
+        STORE_RUN(P(nvnCommandBufferCopyTextureToBuffer)(&cb, &t, NULL, &region0, dst, 0);
+                  P(nvnCommandBufferCopyTextureToBuffer)(&cb, &t, &mip, &region1, dst + LEVEL0_BYTES, 0));
+        EXPECT("a truncated BC1 texture retains the uploads to its first two mips", 0, memcmp(transfer, transfer + 8192, UPLOAD_BYTES) != 0);
+        P(nvnTextureFinalize)(&t);
+        P(nvnMemoryPoolFinalize)(&texture_pool);
+        P(nvnMemoryPoolFinalize)(&transfer_pool);
+    }
+
     // 6c4. The same into 3D textures, slice by slice (GitHub #1856: LEGO Star Wars fills BC6H light-probe volumes a slice at a time): a buffer copy into a BC6H MINIMAL_LAYOUT volume (padded row
     //      and image strides) and into level 1 of an RGBA8 volume with a deeper block (its planes interleave in the block), and a 3D → 3D texture copy, each stored on the GPU; and a 3D
     //      WriteTexels region (written in place on the CPU); each byte-identical to "decode the 3D level → patch its slices → re-encode", with the rest of the pool untouched

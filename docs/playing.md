@@ -30,6 +30,8 @@ Joy-Con 2 and Pro Controller 2 gyro come over Bluetooth LE ([Switch 2 controller
 
 **Shaking.** Shake the iPhone to shake the controller, in games that read its motion: Super Mario Odyssey's motion moves (such as the cap throw on a shake) need it, and Odyssey only takes them in its default docked mode. A light bump does not count; a sharp flick of the phone does.
 
+**Controllers without a gyro (Mac).** In the game window, choose **Controls → Right Stick Motion** or press **⌘⇧G**. With the mode on, player 1's right stick turns the virtual controller. A small push turns it slowly, a full push can flip a maze over, and releasing the stick holds the angle. Turn the mode off to use the right stick for the camera again. The mode is off at launch unless `DM_STICK_MOTION=1` is set.
+
 ## Game language
 
 English by default. Pick another when packing with `--language` (`-l`), by code or by name: `-l ja`, `-l zh-Hans`, `-l French` (`LANGUAGE` in Spyder). It must be one the game has; the script prints the game's languages and stops on one it lacks. To change it without rebuilding, pick another on the settings screen.

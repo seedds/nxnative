@@ -39,3 +39,5 @@ shader_note	Donkey Kong Bananza shaders
 
 # Screen shape (patches.py screen_shape, v458752): the launcher's Picture shape for a screen taller than 16:9 (the iPhone Duo)
 screen_aspect	on
+# the HUD's drop-shadow sprites (placed in normalized 16:9 screen coordinates, outside the UI matrix): the 16:9 band viewport like the rest of the 2D
+band_fs	b015e90e58a7f277

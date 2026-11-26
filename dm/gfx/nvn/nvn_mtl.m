@@ -16863,6 +16863,16 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
         if (sw == 0x100) { v.originY += v.height; v.height = -v.height; }
         else if (sw) RED_ONCE(108, "viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6); }
+      // Screen shape: draws of these fragment shaders (DM_NVN_BAND_FS=key prefix,...; a game's 2D drawn outside its UI matrix, e.g. Donkey Kong Bananza's HUD drop-shadow
+      // sprites, placed by the game in normalized 16:9 screen coordinates; matched by fragment shader: their vertex shader also draws the final full-screen copy) get the
+      // 16:9 band in the middle of a taller viewport, like the rest of the 2D (the band stubs)
+      { static char bvs[8][24]; static int nbvs = -1;
+        if (nbvs < 0) { nbvs = 0; const char *e = getenv("DM_NVN_BAND_FS");
+            if (!e) e = DM_GAME_BAND_FS;   // the game profile's band_fs (applied only to a target taller than 16:9, below)
+            for (const char *q = e; q && *q && nbvs < 8; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) { size_t n = strcspn(q, ","); if (n > 23) n = 23; memcpy(bvs[nbvs], q, n); bvs[nbvs++][n] = 0; } }
+        if (nbvs && pr->sh[1] && v.height != 0) { int hit = 0; for (int i = 0; i < nbvs; i++) hit |= !strncmp(pr->sh[1]->key, bvs[i], strlen(bvs[i]));
+            double r = v.width / fabs(v.height);
+            if (hit && r < 16.0 / 9.0 - 0.01) { double h = v.height * r * 9.0 / 16.0; v.originY += (v.height - h) / 2; v.height = h; } } }
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes

@@ -90,6 +90,43 @@ static void check_friend_ids(void) {
     }
 }
 
+static void check_ble(void) {
+    void (*init)(void) = hook("_ZN2nn9bluetooth13InitializeBleEv");
+    Result (*scan_start)(const void *) = hook("_ZN2nn9bluetooth23StartBleScanSmartDeviceERKNS0_17GattAttributeUuidE");
+    Result (*scan_stop)(void) = hook("_ZN2nn9bluetooth22StopBleScanSmartDeviceEv");
+    int (*scan_res)(void *, int) = hook("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi");
+    int (*conn_list)(void *, int) = hook("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi");
+    Result (*connect)(const void *) = hook("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE");
+    Result (*disconnect)(unsigned) = hook("_ZN2nn9bluetooth24DisconnectFromGattServerEj");
+    Result (*reg_notif)(const void *) = hook("_ZN2nn9bluetooth33RegisterGattOperationNotificationERKNS0_17GattAttributeUuidE");
+    Result (*unreg_notif)(const void *) = hook("_ZN2nn9bluetooth35UnregisterGattOperationNotificationERKNS0_17GattAttributeUuidE");
+    const uint8_t uuid_before[20] = {16, 0, 0, 0, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0, 0x01};
+    uint8_t uuid[20], buf[32], buf_before[32], addr[6] = {1, 2, 3, 4, 5, 6};
+    memcpy(uuid, uuid_before, sizeof uuid);
+    memset(buf_before, 0x5a, sizeof buf_before);
+    memcpy(buf, buf_before, sizeof buf);
+    if (init) init();
+    if (reg_notif && unreg_notif) {
+        CHECK(reg_notif(uuid) == RES_OK, "registering a BLE GATT notification path succeeds offline");
+        CHECK(!memcmp(uuid, uuid_before, sizeof uuid), "registering a GATT notification path leaves the UUID untouched");
+        CHECK(unreg_notif(uuid) == RES_OK, "unregistering a BLE GATT notification path succeeds offline");
+        CHECK(!memcmp(uuid, uuid_before, sizeof uuid), "unregistering a GATT notification path leaves the UUID untouched");
+    }
+    if (scan_start && scan_stop && scan_res) {
+        CHECK(scan_start(uuid) == RES_FAIL, "smart-device BLE scan fails offline");
+        CHECK(scan_stop() == RES_OK, "stopping a BLE scan succeeds offline");
+        CHECK(scan_res(buf, 4) == 0, "BLE scan reports zero results offline");
+        CHECK(!memcmp(buf, buf_before, sizeof buf), "empty BLE scan leaves result buffer untouched");
+    }
+    if (conn_list && connect && disconnect) {
+        CHECK(conn_list(buf, 4) == 0, "BLE connection list is empty offline");
+        CHECK(!memcmp(buf, buf_before, sizeof buf), "empty BLE connection list leaves buffer untouched");
+        CHECK(connect(addr) == RES_FAIL, "BLE GATT connect fails offline");
+        CHECK(disconnect(0) == RES_FAIL, "BLE GATT disconnect fails with no connection");
+        CHECK(disconnect(1) == RES_FAIL, "BLE GATT disconnect fails for any handle offline");
+    }
+}
+
 static void check_network_error(void) {
     void (*show)(Result) = hook("_ZN2nn3err23ShowNetworkServiceErrorENS_6ResultE");
     if (show) {
@@ -102,6 +139,7 @@ static void check_network_error(void) {
 int main(void) {
     check_server_environment();
     check_friend_ids();
+    check_ble();
     CHECK(enters == 0 && leaves == 0, "offline queries open no applet");
     check_network_error();
     CHECK(unexpected == 0, "offline handlers need no event binding or network operation");

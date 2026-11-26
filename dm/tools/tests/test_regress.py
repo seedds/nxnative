@@ -1273,6 +1273,175 @@ class HostAndGL(unittest.TestCase):
                         with self.assertRaises(regress.HarnessError):
                             regress.chain_build_locked(tree, g, NS(jobs=1, pause_lock=None), 'v', 'v1', k_shader, root / 'out_shader')
 
+    def test_mixed_nvn_gl_chain_key_tracks_gl_capture_and_translator_without_changing_pure_nvn(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / ('0' * 16 + '_build')
+            (build / 'patched_v0').mkdir(parents=True)
+            pkg = build / 'shader/pkg'; pkg.mkdir(parents=True)
+            (pkg / 'a.bin').write_bytes(b'nvn-shader')
+            cap = build / 'extract/v0/gl_capture'; cap.mkdir(parents=True)
+            vert = cap / '0123456789abcdef.vert'
+            vert.write_text('#version 300 es\nvoid main() { gl_Position = vec4(0.0); }\n')
+            prof = root / 'profile'; prof.mkdir()
+            tools = root / 'tree/dm/gfx/tools'; tools.mkdir(parents=True)
+            gl_tool = tools / 'gl_shaders.py'; gl_tool.write_text('# v1\n')
+            compiler = root / 'glslangValidator'; compiler.write_bytes(b'glslang-v1')
+
+            g = regress.Game(root, build)
+            g.id, g.kind, g.derived = '0100D2D0190A4000', 'nvn', False
+            tree = NS(path=root / 'tree', py=lambda *args: '["chain", "inputs"]')
+            with patch.object(g, 'profile_dir', return_value=prof), \
+                 patch.dict(os.environ, {}, clear=True), \
+                 patch.object(regress.shutil, 'which', return_value=str(compiler)):
+                pure_before = regress.chain_key(tree, g, 'tools')[2]
+                vert.write_text('#version 300 es\nvoid main() { gl_Position = vec4(1.0); }\n')
+                self.assertEqual(regress.chain_key(tree, g, 'tools')[2], pure_before)
+                (prof / 'gl_capture.tsv').write_text('# comment only\n\n')
+                self.assertEqual(regress.chain_key(tree, g, 'tools')[2], pure_before)
+
+                (prof / 'gl_capture.tsv').write_text('# GL stages\n0123456789abcdef.vert\n')
+                mixed_base = regress.chain_key(tree, g, 'tools')[2]
+                self.assertNotEqual(mixed_base, pure_before)
+
+                # A GL-only edit invalidates the mixed key while NVN stays untouched.
+                vert.write_text('#version 300 es\nvoid main() { gl_Position = vec4(2.0); }\n')
+                mixed_gl_edit = regress.chain_key(tree, g, 'tools')[2]
+                self.assertNotEqual(mixed_gl_edit, mixed_base)
+
+                # Translator and compiler changes invalidate the mixed key.
+                gl_tool.write_text('# v2\n')
+                mixed_tool_edit = regress.chain_key(tree, g, 'tools')[2]
+                self.assertNotEqual(mixed_tool_edit, mixed_gl_edit)
+                compiler.write_bytes(b'glslang-v2')
+                self.assertNotEqual(regress.chain_key(tree, g, 'tools')[2], mixed_tool_edit)
+
+                # Missing gl_capture directory when gl_capture.tsv lists stages fails explicitly.
+                shutil.rmtree(cap)
+                with self.assertRaises(regress.HarnessError):
+                    regress.chain_key(tree, g, 'tools')
+
+    def test_mixed_nvn_gl_build_writes_gl_beside_nvn_and_reports_failures(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); build = root / 'build'; tree = root / 'tree'
+            tools = tree / 'dm/gfx/tools'; tools.mkdir(parents=True)
+            (tree / 'dm/tools').mkdir(parents=True)
+            (tree / 'dm/tools/shader_lib.py').touch()
+            (build / 'shader/pkg').mkdir(parents=True)
+            cap = build / 'extract/v0/gl_capture'; cap.mkdir(parents=True)
+            (cap / 'aaaabbbbccccdddd.vert').write_text('#version 300 es\nvoid main() {}\n')
+            prof = root / 'profile'; prof.mkdir()
+            (prof / 'game.tsv').write_text('name\tMixed\n')
+
+            (tools / 'dmsh_build.py').write_text(textwrap.dedent('''\
+                import json, sys
+                from pathlib import Path
+                out = Path(sys.argv[2]) / 'b-v'
+                out.mkdir(parents=True, exist_ok=True)
+                (out / '_b_build.json').write_text(json.dumps([{'key': '0123456789abcdef', 'st': 'ok', 'err': ''}]))
+                (out / '0123456789abcdef_b.metal').write_text('kernel void main0() {}')
+                (out / '0123456789abcdef_b.metallib').write_bytes(b'nvn-lib')
+                (out / '0123456789abcdef_b.json').write_text('{}')
+            '''))
+            (tools / 'gl_shaders.py').write_text(textwrap.dedent('''\
+                import os, sys
+                from pathlib import Path
+                def one(item, tmp):
+                    mode = os.environ.get('TEST_GL_MODE', 'ok')
+                    if mode == 'fail_stage':
+                        return [('aaaabbbbccccdddd', None, ['vert: unsupported builtin'], None, '/aaaabbbbccccdddd.vert')]
+                    msl = Path(tmp) / 'aaaabbbbccccdddd_v.metal'
+                    msl.write_text('vertex void gl_aaaabbbbccccdddd_v() {}')
+                    rows = [('aaaabbbbccccdddd', 'vert', ['r:-1:0'], str(msl), '/aaaabbbbccccdddd.vert')]
+                    if mode == 'partial_fail':
+                        rows.append(('1111222233334444', None, ['frag: sampler limit'], None, '/1111222233334444.frag'))
+                    return rows
+                def main():
+                    import tempfile
+                    mode = os.environ.get('TEST_GL_MODE', 'ok')
+                    out = Path(sys.argv[-1])
+                    with tempfile.TemporaryDirectory() as tmp:
+                        one((b'src', 'vert', '/aaaabbbbccccdddd.vert'), tmp)
+                    if mode in ('fail_lib', 'fail_stage'):
+                        sys.exit(1)
+                    gl_dir = out / 'gl'; gl_dir.mkdir(parents=True, exist_ok=True)
+                    (gl_dir / 'gl_shaders.metallib').write_bytes(b'gl-lib')
+                    (gl_dir / 'gl_shaders.tsv').write_text('# GL shader ABI 3\\naaaabbbbccccdddd\\tvert\\tr:-1:0\\t/aaaabbbbccccdddd.vert\\n')
+            '''))
+
+            g = NS(id='0100D2D0190A4000', name='Mixed', kind='nvn', folder=root, build=build, ver='v0',
+                   env=lambda t: dict(os.environ), profile_dir=lambda t: prof)
+            regress.game_root(g).mkdir(parents=True, exist_ok=True)
+            a = NS(jobs=1, tools_fp='', pause_lock=None, shader_cache_gb=None)
+            def run(cmd, log, cwd, env, args, what):
+                r = regress.sh(cmd, cwd=cwd, env=env); log.write_text(r.stdout + r.stderr); return r.returncode, 0
+
+            with patch.object(regress, 'interface_check', return_value={'checked': 0, 'bad': []}), \
+                 patch.object(regress, 'run_heavy', side_effect=run), patch.object(regress, 'say'):
+                # Pure NVN (no gl_capture.tsv): existing behavior unchanged, no gl/ directory or build_failed flag.
+                pure_out = root / 'out_pure'
+                pure_m, _ = regress.chain_build_locked(NS(path=tree, id='pure'), g, a, 'v', 'i', 'k-pure', pure_out)
+                self.assertEqual((pure_m['total'], pure_m['ok'], pure_m['failed']), (1, 1, 0))
+                self.assertNotIn('build_failed', pure_m)
+                self.assertFalse((pure_out / 'gl').exists())
+
+                # Mixed NVN+GL: gl/ built beside b-v.img and GL stages included in manifest.
+                (prof / 'gl_capture.tsv').write_text('aaaabbbbccccdddd.vert\n')
+                mixed_out = root / 'out_ok'
+                with patch.dict(os.environ, TEST_GL_MODE='ok'):
+                    ok_m, _ = regress.chain_build_locked(NS(path=tree, id='base'), g, a, 'v', 'i', 'k-ok', mixed_out)
+                self.assertEqual((ok_m['total'], ok_m['ok'], ok_m['failed'], ok_m['build_failed']), (2, 2, 0, False))
+                self.assertIn('0123456789abcdef', ok_m['shaders'])
+                self.assertIn('gl:aaaabbbbccccdddd_vert', ok_m['shaders'])
+                self.assertTrue((mixed_out / 'gl/gl_shaders.metallib').is_file())
+                self.assertTrue((mixed_out / 'gl/gl_shaders.tsv').is_file())
+
+                # Re-hashing an older NVN manifest version preserves supplemental GL entries.
+                stale = json.loads((mixed_out / 'manifest.json').read_text())
+                stale['hashes'] = regress.NVN_HASHES - 1
+                (mixed_out / 'manifest.json').write_text(json.dumps(stale))
+                rehashed, _ = regress.chain_build_locked(NS(path=tree, id='base'), g, a, 'v', 'i', 'k-ok', mixed_out)
+                self.assertIn('gl:aaaabbbbccccdddd_vert', rehashed['shaders'])
+                self.assertIn('0123456789abcdef', rehashed['shaders'])
+
+                # Supplemental GL translation failure is visible in manifest, cmd_check, and report_md.
+                fail_out = root / 'out_fail'
+                with patch.dict(os.environ, TEST_GL_MODE='fail_stage'):
+                    fail_m, _ = regress.chain_build_locked(NS(path=tree, id='cand'), g, a, 'v', 'i', 'k-fail', fail_out)
+                self.assertEqual((fail_m['total'], fail_m['ok'], fail_m['failed'], fail_m['build_failed']), (2, 1, 1, True))
+                self.assertEqual(fail_m['shaders']['gl:aaaabbbbccccdddd_vert']['st'], 'translation failed')
+                self.assertIn('unsupported builtin', fail_m['shaders']['gl:aaaabbbbccccdddd_vert']['err'])
+
+                # Partial GL translation failure (exit 0, library still built) is still visible in manifest.
+                partial_out = root / 'out_partial'
+                with patch.dict(os.environ, TEST_GL_MODE='partial_fail'):
+                    partial_m, _ = regress.chain_build_locked(NS(path=tree, id='partial'), g, a, 'v', 'i', 'k-partial', partial_out)
+                self.assertEqual((partial_m['total'], partial_m['ok'], partial_m['failed'], partial_m['build_failed']), (3, 2, 1, False))
+                self.assertEqual(partial_m['shaders']['gl:1111222233334444_vert']['st'], 'translation failed')
+
+                # Supplemental GL library build failure is reported as a GL failure, not NVN.
+                lib_fail_out = root / 'out_lib_fail'
+                with patch.dict(os.environ, TEST_GL_MODE='fail_lib'):
+                    lib_fail_m, _ = regress.chain_build_locked(NS(path=tree, id='cand2'), g, a, 'v', 'i', 'k-libfail', lib_fail_out)
+                self.assertTrue(lib_fail_m['build_failed'])
+                self.assertEqual(lib_fail_m['shaders']['gl:aaaabbbbccccdddd_vert']['st'], 'library failed')
+
+            with ExitStack() as stack:
+                ca = NS(baseline='base', candidate='cand', no_smoke=True, rewrite=False, quick=False)
+                stack.enter_context(patch.object(regress, 'Tree', return_value=NS(id='tree')))
+                stack.enter_context(patch.object(regress, 'select', return_value=[g]))
+                stack.enter_context(patch.object(regress, 'rewriter_key', return_value='same'))
+                stack.enter_context(patch.object(regress, 'chain_build', side_effect=[(ok_m, mixed_out), (fail_m, fail_out)]))
+                stack.enter_context(patch.object(regress, 'new_report', return_value={'games': {}}))
+                finish = stack.enter_context(patch.object(regress, 'finish', return_value=1))
+                stack.enter_context(patch.object(regress, 'say'))
+                regress.cmd_check(ca)
+                gr = finish.call_args.args[0]['games'][g.id]
+                self.assertEqual(gr['status'], 'NEW-FAIL')
+                self.assertTrue(any('GL shader build failed' in r for r in gr['reasons']), gr['reasons'])
+                self.assertEqual([x['key'] for x in gr['chain']['newly_failing']], ['gl:aaaabbbbccccdddd_vert'])
+                md = regress.report_md({'baseline': None, 'candidate': None, 'command': 'chain', 'mode': 'static', 'status': 'NEW-FAIL', 'machine': {'chip': 'x', 'macos': 'x', 'xcode': 'x'}, 'secs': 1, 'games': {g.id: {'secs': {}, **gr}}})
+                self.assertIn('`gl:aaaabbbbccccdddd_vert`', md)
+
 
 if __name__ == '__main__':
     unittest.main()

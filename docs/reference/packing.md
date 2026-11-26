@@ -644,6 +644,14 @@
 - **Fix:** `finish` sets the window's `animationBehavior` to `.none` before the order-out, and `dm_mac_launcher` calls `CATransaction.flush()` after `run()` returns, before it hands back to `launcher.c`. Neither alone was enough. Check: a copy of the window with a timed Play and a `CGWindowListCopyWindowInfo` probe while the thread then blocks; the window was still listed 2 and 4 s after Play before the fix, and gone 3 times in 3 after it. `test_launcher_storage.py` and `test_nsp_mac_app.py` pass.
 - **Found on:** the Mac app of [Breath of the Wild](../../dm/games/01007EF00011E000/README.md); applies to every Mac app.
 
+### A reused Mac app reports an earlier source commit
+
+- **Symptom:** packing after a checkout-only change reports `reused (inputs unchanged)`, but `Info.plist` still names the earlier `DMCommit`; build-provenance checks reject the app.
+- **Cause:** `pack_app.py` included selected runtime files, options and tools in its reuse key, but not the checkout identity it writes into the bundle. Identical runtime files can belong to different commits, or to clean, dirty and non-Git source states.
+- **Fix:** read source identity once, include it in the reuse key and use that same snapshot for `DMCommit`. An unchanged identity still reuses the complete app. A changed identity repacks and signs the outer bundle through the existing atomic replacement path while reusing unchanged signed data bundles. This does not prove that the source tree stayed unchanged throughout packaging.
+- **Check:** `PackReuse.test_source_identity_invalidates_reuse_and_matches_metadata` calls the real pack entry point with synthetic files and fake external compiler/signing tools. Changed commit, dirty state and missing Git provenance must repack with matching metadata (reusing the signed data bundles); each unchanged state must reuse without compiling or signing. The old key fails this regression.
+- **Found on:** local [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) candidate packaging after a documentation-only commit ([PR #2232](https://github.com/seedds/nxnative/pull/2232)). No game-data or rendering change is needed to reproduce it.
+
 ## External drives
 
 ### A game folder on an exFAT drive reads one update as two, or fails to remove a folder

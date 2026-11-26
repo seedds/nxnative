@@ -23,5 +23,11 @@ sys_resource	0x0
 
 # The renderer sets near depth to zero. Prebuild the same pipeline variant.
 depth_mode	zero
+
+# The Switch renderer requests a two-refresh hold in gameplay even with its
+# 60 fps preference. Pace the Mac and iOS presents at one refresh by default.
+present_interval	display
+fps_target	60
+
 shader_groups	/data/=data /resources/=resources
 shader_note	Alien: Isolation shaders

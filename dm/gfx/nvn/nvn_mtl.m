@@ -7163,6 +7163,8 @@ static NSUInteger g_rp_aw, g_rp_ah; static void rt_dims(NSUInteger *tw, NSUInteg
 static int rpa_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RP_AREA"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_RP_AREA=0: passes on very large targets cover the whole target"); } return v; }
 static int g_rp_whole;   // the pass about to open must cover the whole target (rp_begin)
 static int g_rt_merged;         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
+static uint64_t g_rt_sub_n;
+static int g_rt_sub;            // the game's targets are a leading part of the open pass's (g_rt_super): the pass goes on with the others attached and unwritten (rt_prefix)
 static uint64_t g_rt_merge_n;   // Cumulative continuation count
 // DM_NVN_ENC_LABEL=1: label every render encoder with 'p<index of the render pass within the frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draw count>'; in Instruments (xctrace Game Performance / Metal System Trace)
 // the encoder track and the GPU interval table carry this name directly, and shader_map.tsv maps it back to the shader; off by default (one string allocation per pass)
@@ -7357,7 +7359,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
     sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
-    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_fsp_pass = 0; ts_after(); ms_after();
+    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_rt_sub = 0; g_sm_pass = 0; g_fsp_pass = 0; ts_after(); ms_after();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
@@ -16703,6 +16705,19 @@ static int view_same(const view_t *x, const view_t *y) {
     return 1;
 }
 static const char *g_rt_diff;   // why the last rt_same said no (the pass dump's M line)
+static p_set_rt g_rt_super;   // the open pass's targets while g_rt_sub
+static int rt_same(const p_set_rt *a, const p_set_rt *b);
+static int rt_ncolor(const p_set_rt *a) { int n = a->n; while (n > 0 && !a->color[n - 1]) n--; return n; }
+// b is a leading part of a: b's colour slots are a's first ones (texture and view), the rest of a's are not in b, and the depth / stencil target is the same.
+// Xenoblade Chronicles: Definitive Edition binds its 8-target G-buffer for each character's skinning draw, then the first 5 of them with the same depth for the character's
+// draws, then its shadow map: two passes a character, each loading every target
+static int rt_prefix(const p_set_rt *a, const p_set_rt *b) {
+    int na = rt_ncolor(a), nb = rt_ncolor(b);
+    if (nb < 1 || nb >= na) return 0;
+    p_set_rt x = *a; x.n = nb; for (int k = nb; k < 8; k++) { x.color[k] = NULL; x.has_cview[k] = 0; }
+    return rt_same(&x, b);
+}
+static int rtsub_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RT_SUBSET"); v = !e || atoi(e) != 0; if (!v) MLOG("DM_NVN_RT_SUBSET=0: a leading part of the open pass's targets begins a pass of its own"); } return v; }
 static int rt_same(const p_set_rt *a, const p_set_rt *b) {   // Same set of targets: compare by texture serial and view (not by object pointer: the game may copy texture objects by value)
     int na = a->n, nb = b->n;   // trailing empty colour slots do not change the set
     while (na > 0 && !a->color[na - 1]) na--;
@@ -18827,6 +18842,13 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_samples_fb_left = 1;
     int rt_sampled = g_rt_merged && draw_samples_rt(pr); g_samples_fb_left = 0;
+    if (g_rt_sub && g_enc && !rt_sampled) {   // the pass's other targets: this draw must neither write nor read them
+        int n = rt_ncolor(&R.rt); NvShader *fs = pr ? pr->sh[1] : nil; const char *why = NULL;
+        if (fs && (!fs->rf.color_known || fs->rf.color_mask >> n)) why = "writes past the game's targets";
+        else { p_set_rt keep = R.rt, x = g_rt_super; for (int k = 0; k < n; k++) x.color[k] = NULL; x.depth = NULL; x.has_dview = 0;
+            R.rt = x; if (draw_samples_rt(pr)) why = "reads one of the pass's other targets"; R.rt = keep; }
+        if (why) { PD("M %llu leading-target continuation ends: the draw %s (%s)", g_stat_pass, why, g_dsr_why ?: "-"); rp_end(); }
+    }
     if (rt_sampled) { static int once; if (!once++) MLOG("same-target continuation: a draw in the continued pass samples an attachment; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass samples an attachment (%s); split here", g_stat_pass, g_dsr_why ?: "?"); { static int nw; if (nw++ < 6) MLOG("continued pass split: %s (pass %llu)", g_dsr_why ?: "?", g_stat_pass); } rp_end(); }
     order_draw(pr, g_sm_pass);   // a write after an ordering barrier in the pass
@@ -21354,7 +21376,13 @@ void mtl_exec(const uint8_t *p) {
                 if (g_unb) g_unb = 0;   // targets again: compared with the open pass's below
                 // Do not continue a render pass opened only for a clear; one with fewer depth / stencil attachments can be continued (check the planes before drawing)
                 if (g_enc && R.has_rt && !empty) {
-                    int same = rt_same(&R.rt, r), can_continue = g_enc_mode != 1 && !pend && rtc_on();
+                    int same = rt_same(g_rt_sub ? &g_rt_super : &R.rt, r), can_continue = g_enc_mode != 1 && !pend && rtc_on();
+                    if (!same && can_continue && rtsub_on() && !g_sm_pass && !g_fsp_pass && rt_prefix(g_rt_sub ? &g_rt_super : &R.rt, r)) {
+                        if (!g_rt_sub) g_rt_super = R.rt;
+                        g_rt_sub = 1; g_rt_merged = 1; R.rt = *r; g_rt_sub_n++;
+                        if (g_rt_sub_n == 1) MLOG("leading-target continuation: the game's targets are the first %d of the open pass's; it goes on (first case pass %llu)", rt_ncolor(r), g_stat_pass);
+                        PD("M %llu leading-target continuation: the first %d targets of the pass", g_stat_pass, rt_ncolor(r)); break; }
+                    if (same && g_rt_sub) { g_rt_sub = 0; R.rt = *r; PD("M %llu the pass's own targets again", g_stat_pass); break; }
                     if (same && can_continue) { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("same-target continuation: first case pass %llu", g_stat_pass); PD("M %llu same-target continuation pass", g_stat_pass); R.rt = *r; break; }
                     if (!same && can_continue) { static int nd; if (nd++ < 8) MLOG("same-target continuation refused (%s) pass %llu", g_rt_diff ?: "?", g_stat_pass); PD("M %llu new targets (%s)", g_stat_pass, g_rt_diff ?: "?"); }
                     if (same) { static int nw; if (nw++ < 8) MLOG("same targets, no continuation: enc_mode=%d pend=%d rtc=%d pass %llu", g_enc_mode, pend, rtc_on(), g_stat_pass); }

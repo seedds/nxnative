@@ -1313,8 +1313,10 @@ class LayerShaders(Base):
         logs = self.tmp / 'logs'; logs.mkdir(); runs = []
         def translate(cmd, log, **kw):
             api = Path(cmd[1]).stem.split('_')[0]
-            lib = Path(cmd[-1]) / api / f'{api}_shaders.metallib'
-            lib.parent.mkdir(parents=True); lib.write_bytes(b'library')
+            out = Path(cmd[-1]) / api
+            out.mkdir(parents=True)
+            (out / f'{api}_shaders.metallib').write_bytes(b'library')
+            (out / f'{api}_shaders.tsv').write_text('# table\n')
             Path(log).write_text('macosx: 1\n'); runs.append(api)
         with mock.patch.object(nsp, 'run', side_effect=translate), mock.patch.object(nsp, 'toolchain', return_value=()), \
              mock.patch.object(nsp.shutil, 'which', return_value='/glslangValidator'), \
@@ -1344,8 +1346,10 @@ class LayerShaders(Base):
         self.derive(); g = game.Game(self.pdir)
         logs = self.tmp / 'logs'; logs.mkdir(); runs = []
         def translate(cmd, log, **kw):
-            lib = Path(cmd[-1]) / 'gl/gl_shaders.metallib'
-            lib.parent.mkdir(parents=True, exist_ok=True); lib.write_bytes(b'library')
+            out = Path(cmd[-1]) / 'gl'
+            out.mkdir(parents=True, exist_ok=True)
+            (out / 'gl_shaders.metallib').write_bytes(b'library')
+            (out / 'gl_shaders.tsv').write_text('# GL shader ABI 3\n')
             Path(log).write_text('macosx: 1\n'); runs.append(cmd)
         src = self.tmp / 'gl_src'; (src / 'shaders').mkdir(parents=True)
         (src / 'shaders/a.frag').write_text('#version 330\nvoid main() {}\n')
@@ -1381,6 +1385,59 @@ class LayerShaders(Base):
             nso(self.ex / 'ExeFS/main', BID)
             nsp.build_gl_shaders(sys.executable, REPO, lroots, sh_loose, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=False)
             self.assertEqual(len(runs), 3)
+
+    def test_replacing_packed_dlc_equal_length_shader_rebuilds_registered_build(self):
+        import romfs_image
+        self.derive(); g = game.Game(self.pdir)
+        logs = self.tmp / 'logs'; logs.mkdir(); runs = []
+        def translate(cmd, log, **kw):
+            api = Path(cmd[1]).stem.split('_')[0]
+            out = Path(cmd[-1]) / api
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f'{api}_shaders.metallib').write_bytes(b'library')
+            (out / f'{api}_shaders.tsv').write_text('# table\n')
+            Path(log).write_text('macosx: 1\n'); runs.append(cmd)
+        base_src = self.tmp / 'base_romfs'; (base_src / 'shaders').mkdir(parents=True)
+        (base_src / 'shaders/base.frag').write_text('#version 330\nvoid main(){int b=0;}\n')
+        base_img = self.ex / 'RomFS.img'
+        romfs_image.pack(base_src, base_img)
+        with mock.patch.object(nsp, 'run', side_effect=translate), mock.patch.object(nsp, 'toolchain', return_value=()), \
+             mock.patch.object(nsp.shutil, 'which', return_value='/glslangValidator'), \
+             mock.patch.object(nsp.subprocess, 'run', return_value=mock.Mock(stdout='compiler', stderr='')):
+            cases = (
+                ('gl', nsp.build_gl_shaders, 'shaders/dlc.frag', b'#version 330\nvoid main(){int a=1;}\n', b'#version 330\nvoid main(){int b=2;}\n'),
+                ('vk', nsp.build_vk_shaders, 'shaders/dlc.spv', b'\x03\x02\x23\x07AAAA', b'\x03\x02\x23\x07BBBB'),
+            )
+            for api, build, rel, first, second in cases:
+                self.assertEqual(len(first), len(second))
+                with self.subTest(api=api):
+                    dlc_src = self.tmp / f'{api}_dlc_src'; (dlc_src / 'shaders').mkdir(parents=True)
+                    (dlc_src / rel).write_bytes(first)
+                    dlc_img = self.tmp / f'{api}_aoc/1.img'; dlc_img.parent.mkdir(parents=True)
+                    romfs_image.pack(dlc_src, dlc_img)
+                    sh = self.tmp / f'{api}-dlc-img'
+                    roots = [nsp.rfs.Path(base_img), self.ex / 'ExeFS/main']
+                    def go(dlc_list, build=build, roots=roots, sh=sh):
+                        build(sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=False, dlc_roms=dlc_list)
+                    runs.clear()
+                    go([dlc_img]); self.assertEqual(len(runs), 1)
+                    self.assertIn(dlc_img, runs[-1])
+                    go([dlc_img]); self.assertEqual(len(runs), 1)   # unchanged image reuses
+                    (dlc_src / rel).write_bytes(second)
+                    romfs_image.pack(dlc_src, dlc_img)
+                    go([dlc_img]); self.assertEqual(len(runs), 2)   # equal-length replacement rebuilds once
+                    go([dlc_img]); self.assertEqual(len(runs), 2)   # following unchanged run reuses
+                    moved = dlc_img.with_name('2.img'); dlc_img.rename(moved)
+                    go([moved]); self.assertEqual(len(runs), 3)     # DLC index change invalidates even with identical bytes
+                    go([moved]); self.assertEqual(len(runs), 3)
+                    # Loose DLC directory control: equal-length replacement with fresh mtime also rebuilds once
+                    loose_dlc = self.tmp / f'{api}_aoc_loose/1'; (loose_dlc / 'shaders').mkdir(parents=True)
+                    (loose_dlc / rel).write_bytes(first)
+                    go([loose_dlc]); self.assertEqual(len(runs), 4)
+                    go([loose_dlc]); self.assertEqual(len(runs), 4)
+                    (loose_dlc / rel).write_bytes(second); self.redump(loose_dlc / rel)
+                    go([loose_dlc]); self.assertEqual(len(runs), 5)
+                    go([loose_dlc]); self.assertEqual(len(runs), 5)
 
 
 class MacApp(Base):

@@ -1356,6 +1356,17 @@ def chain_files(repo):   # what the iOS shaders run: not the split's readers (sh
 SPLIT_TABLES = ('shader_facts_manual.tsv', 'shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv')   # the profile tables the split reads or is checked against (derive_profile keys on them too)
 
 
+def dlc_inputs(dlc_roms):
+    """Fingerprint inputs for optional DLC roots: DLC has no registered module build to pin its contents,
+    so include each root's name, entry stats, and (for packed .img files) its file identity even when file sizes stay the same."""
+    out = []
+    for r in dlc_roms:
+        out.extend((('dlc', Path(r).name), ('stat', r)))
+        if os.path.isfile(r):
+            out.append(('dlc-image', romfs_image.file_identity(r)))
+    return out
+
+
 def split_profile_inputs(g):   # shader_split.py's GAME reads, plus the tables the packer checks or writes; renderer settings, notes and translation tables are not extraction inputs
     settings = [(name, g.get(name, '')) for name in ('modules', 'shader_groups', 'shader_note', 'shader_key_skip')]
     tables = [g.table(n) for n in SPLIT_TABLES]
@@ -2700,7 +2711,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
         if not folder.is_dir(): raise BuildError(f'no such GLSLC capture folder (--glslc-play): {folder}')
         play_files.extend(p for p in sorted(folder.glob('*.glslc')) if p.is_file() and re.fullmatch(r'[0-9a-f]{16}\.glslc', p.name))
     if play_files: inputs += ['glslc_play', ('files', play_files)]
-    inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
+    inputs += dlc_inputs(dlc_roms)
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
         host = Path(env['DM_OODLE_HOST'])
@@ -3093,25 +3104,40 @@ def shader_regressions(py, repo, lib_dir, chain, logs):
                      'ALLOW_SHADER_REGRESSIONS = True (--allow-shader-regressions) packs the app without those shaders')
 
 
+def layer_root_inputs(roots, dlc_roms, provisional):
+    """Fingerprint inputs for Vulkan/GL shader roots: pinned base roots (tree unless provisional) plus optional DLC roots."""
+    return [('stat' if provisional else 'tree', r) if rfs.isdir(r) else ('files', [r]) for r in roots] + dlc_inputs(dlc_roms)
+
+
 def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, options=(), mac_out=None):
     """What build_vk_shaders and build_gl_shaders share: dm/gfx/tools/<api>_shaders.py on the roots → sh/<api>/ for the Mac and, unless mac (a Mac-only build), sh/ios/<api>/ for the iPhone.
     Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). Each target checks only its own
-    stamp and output (sh/<api>.key for the Mac, sh/ios/<api>.key for iOS), and a dual-target run verifies both expected outputs before publishing each stamp.
+    stamp and complete outputs (<api>_shaders.metallib and <api>_shaders.tsv; sh/<api>.key for the Mac, sh/ios/<api>.key for iOS), and a dual-target run verifies both expected
+    target outputs before publishing each stamp.
     Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
     mac_out = mac_out or sh
     ios = sh / 'ios'; out = mac_out if mac else ios
     kf, kmac, log = ios / f'{api}.key', mac_out / f'{api}.key', logs / f'{api}_shaders.log'
-    mac_lib, ios_lib = mac_out / api / f'{api}_shaders.metallib', ios / api / f'{api}_shaders.metallib'
-    lib, stamp = (mac_lib, kmac) if mac else (ios_lib, kf)
-    note = reused(stamp, key) if key and lib.is_file() else None
+    def products(d):
+        return (d / api / f'{api}_shaders.metallib', d / api / f'{api}_shaders.tsv')
+    def complete(d):
+        return all(p.is_file() for p in products(d))
+    def require_complete(d, target):
+        missing = [p.name for p in products(d) if not p.is_file()]
+        if missing: raise BuildError(f'no {target} {name} shader output ({", ".join(missing)}) in {d / api}')
+    stamp = kmac if mac else kf
+    note = reused(stamp, key) if key and complete(out) else None
     if note is not None:
         PROG.end(f'{note}, reused (inputs unchanged)'); return out
     PROG.set(step='translating')
     rmtree(kmac); rmtree(mac_out / api)
     if not mac: rmtree(kf); rmtree(ios / api)
     run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, mac_out, *options] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
-    if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else "iOS"} {name} shader library in {lib.parent}')
-    if not mac and not mac_lib.is_file(): raise BuildError(f'no Mac {name} shader library in {mac_lib.parent}')
+    if mac:
+        require_complete(mac_out, 'Mac')
+    else:
+        require_complete(ios, 'iOS')
+        require_complete(mac_out, 'Mac')
     log_text = log.read_text(errors='replace')
     m_mac = re.search(r'macosx: (\d+)', log_text)
     m_ios = re.search(r'iphoneos: (\d+)', log_text)
@@ -3125,28 +3151,28 @@ def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, options=(
     return out
 
 
-def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False):
-    """A Vulkan game's SPIR-V shaders (roots: the RomFS, NSO, and a run-time capture folder) → one Metal library each for the Mac (sh/vk/) and the iPhone (sh/ios/vk/, what build_ipa.sh takes from MSL_IOS;
-    not with mac), replacing the NVN split and chain build (layer_shaders). Reused when the roots (paths and sizes), the tools, the profile and the compilers are as at the last successful run (reuse False: never)"""
+def build_vk_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, dlc_roms=()):
+    """A Vulkan game's SPIR-V shaders (roots: the RomFS, NSO, and a run-time capture folder; dlc_roms: optional DLC roots) → one Metal library each for the Mac (sh/vk/) and the iPhone (sh/ios/vk/, what build_ipa.sh takes from MSL_IOS;
+    not with mac), replacing the NVN split and chain build (layer_shaders). Reused when the roots (paths and sizes), DLC roots, the tools, the profile and the compilers are as at the last successful run (reuse False: never)"""
     PROG.stage('Vulkan shaders', step='checking the inputs')
-    key = fingerprint(*[('stat' if provisional else 'tree', r) if rfs.isdir(r) else ('files', [r]) for r in roots],
+    key = fingerprint(*layer_root_inputs(roots, dlc_roms, provisional),
                       ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env), env=env) if reuse else None
-    return layer_shaders(py, repo, 'vk', 'Vulkan', roots, sh, key, logs, env, mac)
+    return layer_shaders(py, repo, 'vk', 'Vulkan', [*roots, *dlc_roms], sh, key, logs, env, mac)
 
 
 def require_glslang(env):
     if not shutil.which('glslangValidator', path=env['PATH']): raise BuildError('glslangValidator not found (brew install glslang): it compiles an OpenGL game\'s GLSL shaders')
 
 
-def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, fixed=False, mac_out=None):
-    """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
+def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, provisional=False, fixed=False, mac_out=None, dlc_roms=()):
+    """An OpenGL game's GLSL sources (roots: the RomFS, main, a run-time capture folder; dlc_roms: optional DLC roots) → one Metal library each for the Mac (sh/gl/) and the iPhone (sh/ios/gl/, what build_ipa.sh takes from MSL_IOS;
     not with mac), replacing the NVN split and chain build, as build_vk_shaders does for a Vulkan game; glslang (glslangValidator) compiles the GLSL to SPIR-V for spirv-cross"""
     PROG.stage('GL shaders', step='checking the inputs')
     if not fixed: require_glslang(env)
     compiler = ('option', 'fixed-function') if fixed else ('cmd', ['glslangValidator', '--version'])
-    key = fingerprint(*[('stat' if provisional else 'tree', r) if rfs.isdir(r) else ('files', [r]) for r in roots], ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
+    key = fingerprint(*layer_root_inputs(roots, dlc_roms, provisional), ('files', tool_files(repo)), ('files', profile_files(g)), *toolchain(repo, env),
                       compiler, env=env) if reuse else None
-    return layer_shaders(py, repo, 'gl', 'GL', roots, sh, key, logs, env, mac, ('--fixed-function',) if fixed else (), mac_out=mac_out)
+    return layer_shaders(py, repo, 'gl', 'GL', [*roots, *dlc_roms], sh, key, logs, env, mac, ('--fixed-function',) if fixed else (), mac_out=mac_out)
 
 
 class IpaWatch:
@@ -4043,25 +4069,25 @@ def _main(args, cleanup):
     sh = work / 'shader'
     if gfx == 'vulkan':   # the packed version's merged RomFS holds the SPIR-V files the game loads; a capture holds those it generates. A damaged copy (ALLOW_DAMAGED) is keyed by its files' times, as split_shaders keys it
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'vk') if vkcap else None
-        ios = build_vk_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else []), sh, env, logs, g, mac=mac, provisional=bool(provisional or derived or ALLOW_DAMAGED))
+        ios = build_vk_shaders(py, repo, [rfs.source(game), game / 'ExeFS/main'] + ([cap] if cap else []), sh, env, logs, g, mac=mac, provisional=bool(provisional or derived or ALLOW_DAMAGED), dlc_roms=dlc_roms)
     elif gfx == 'gl':   # the GLSL sources in the packed version's archives and in its main (the game compiles them at run time; the host finds each by the hash of its text), and a capture of those it puts together
         cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl') if glcap else None
-        roots = [rfs.source(game), game / 'ExeFS/main'] + dlc_roms + ([cap] if cap else [])
+        roots = [rfs.source(game), game / 'ExeFS/main'] + ([cap] if cap else [])
         fixed, prov = src['gl_fixed'][0], bool(provisional or derived or ALLOW_DAMAGED)
         try:
-            ios = build_gl_shaders(py, repo, roots, sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed)
+            ios = build_gl_shaders(py, repo, roots, sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed, dlc_roms=dlc_roms)
         except BuildError:
             if cap or fixed or not apple_silicon(): raise
             say('offline GLSL files did not translate standalone: capturing run-time GL shaders on the Mac')
             PROG.add(1)
             cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl')
-            ios = build_gl_shaders(py, repo, roots + [cap], sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed)
+            ios = build_gl_shaders(py, repo, roots + [cap], sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed, dlc_roms=dlc_roms)
         else:
             if not cap and not fixed and apple_silicon() and gl_table_only_main(ios / 'gl/gl_shaders.tsv'):
                 say('only embedded main shaders translated offline (no RomFS GLSL translated standalone): capturing run-time GL shaders on the Mac')
                 PROG.add(1)
                 cap = capture_shaders(repo, game, patched, work, env, logs, g, 'gl')
-                ios = build_gl_shaders(py, repo, roots + [cap], sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed)
+                ios = build_gl_shaders(py, repo, roots + [cap], sh, env, logs, g, mac=mac, provisional=prov, fixed=fixed, dlc_roms=dlc_roms)
     else:
         # Decoder-backed archives (Trinity, PKZ, GFPAK, UE3, Frostbite, TT Games DAT, Anvil / Scimitar .forge, legacy Unreal paks):
         # the split decodes them with the packed version's own decoder (Oodle, LZ5), in the Mac host built for the profile.

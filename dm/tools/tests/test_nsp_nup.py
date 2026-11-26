@@ -1057,7 +1057,8 @@ class Main(Base):
             for extra, expected in ((['--aoc-dir', str(source)], [work / 'external-dlc/aoc/1.img']), ([], [])):
                 with self.subTest(extra=extra), self.assertRaises(Stop):
                     nsp.main(nsp.parse_args([str(self.path)] + extra))
-                self.assertEqual(shaders.call_args.args[2][2:], expected)
+                self.assertEqual(len(shaders.call_args.args[2]), 2)
+                self.assertEqual(shaders.call_args.kwargs['dlc_roms'], expected)
 
     def test_app_version_from_a_nup_when_only_the_update_is_extracted(self):
         tid, ver = 0x0400486024DEC000, 131072

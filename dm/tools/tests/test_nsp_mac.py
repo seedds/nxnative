@@ -25,7 +25,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.sh, self.logs, self.ran = self.tmp / 'shader', self.tmp / 'logs', []
-        self.lib_bytes, self.omit_targets, self.fail_partial = b'lib', set(), False
+        self.lib_bytes, self.omit_targets, self.omit_tables, self.fail_partial = b'lib', set(), set(), False
         self.cas_used = [LIVE]   # the cache entries a full dmsh_build.py run lists as used
         self.logs.mkdir()
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_run)):
@@ -41,6 +41,7 @@ class Base(unittest.TestCase):
             for target, o in outs:
                 if target in self.omit_targets: continue
                 (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(self.lib_bytes)
+                if target not in self.omit_tables: (o / api / f'{api}_shaders.tsv').write_text('# table\n')
             log.write_text('macosx: 3 shaders\n' + ('iphoneos: 3 shaders\n' if '--ios' in a else ''))
             if self.fail_partial: raise nsp.BuildError('simulated translator failure after partial write')
         elif tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
@@ -145,6 +146,49 @@ class Layer(Base):
         self.run_layer('vk', 'Vulkan', True, 'K2'); self.assertEqual(len(self.ran), 1)
         self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())   # the iPhone library stays, under its own (older) key
         self.assertEqual(nsp.reused(self.sh / 'ios/vk.key', 'K'), '3 shaders for the Mac and iOS')
+
+    def test_missing_table_triggers_rebuild_and_keeps_targets_independent(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                mac_tsv = self.sh / api / f'{api}_shaders.tsv'
+                ios_tsv = self.sh / f'ios/{api}/{api}_shaders.tsv'
+                self.assertTrue(mac_tsv.is_file() and ios_tsv.is_file())
+                # Deleting Mac's table leaves iOS reusable, while Mac must rebuild and restore the table.
+                mac_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                # Deleting iOS's table leaves Mac reusable, while iOS must rebuild and restore the table.
+                ios_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(ios_tsv.is_file() and mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+
+    def test_omitted_table_cannot_publish_stamps(self):
+        for api, name in self.APIS:
+            for mac, omit, pattern in ((True, {'mac'}, f'no Mac.*{api}_shaders\\.tsv'),
+                                       (False, {'ios'}, f'no iOS.*{api}_shaders\\.tsv'),
+                                       (False, {'mac'}, f'no Mac.*{api}_shaders\\.tsv')):
+                with self.subTest(api=api, mac=mac, omit=sorted(omit)):
+                    shutil.rmtree(self.sh, ignore_errors=True)
+                    self.omit_tables = set(omit)
+                    try:
+                        with self.assertRaisesRegex(nsp.BuildError, pattern):
+                            self.run_layer(api, name, mac, 'A', b'bytes-A')
+                    finally:
+                        self.omit_tables = set()
+                    self.assertFalse((self.sh / f'{api}.key').exists())
+                    self.assertFalse((self.sh / f'ios/{api}.key').exists())
 
 
 class Nvn(Base):

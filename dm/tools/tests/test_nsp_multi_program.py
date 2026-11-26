@@ -242,7 +242,7 @@ class EndToEndBuildOrder(unittest.TestCase):
             (patched / 'main.patched.bin').write_bytes(b'code')
             return g
 
-        def fake_vk_shaders(py, repo, roots, sh, env, logs, g, mac=False, provisional=False):
+        def fake_vk_shaders(py, repo, roots, sh, env, logs, g, mac=False, provisional=False, dlc_roms=()):
             (sh / 'vk').mkdir(parents=True, exist_ok=True)
             (sh / 'vk/k.metallib').write_bytes(b'lib')
             return sh

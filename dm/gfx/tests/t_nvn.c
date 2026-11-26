@@ -1456,6 +1456,30 @@ int main(void) {
         P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
         P(nvnQueueFinish)(&q);
 
+        // An image comes back once the present after its last one has run (hle_nvn.c acq_next_ticket): with two images, acquiring A again waits for B's present, which the
+        // queue holds behind an unsignaled event. Before, A came back when its own earlier present had run, and Xenoblade Chronicles: Definitive Edition overwrote the
+        // constants of the frame the GPU was still drawing
+        {
+            ev_mem[0] = 0;
+            int ia = -1, ib = -1, ic = -1;
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ia); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &win, ia);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ib); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            NVNcommandHandle h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &win, ib);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ic);
+            EXPECT("the image presented before the held one comes back next", ia, ic);
+            EXPECT("its acquire waits for the held present after it (timeout)", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 300000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            NVNsyncWaitResult r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("once the held present has run, the acquire is signaled", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnQueuePresentTexture)(&q, &win, ic);
+            P(nvnQueueFinish)(&q);
+        }
+
         // QueueWaitSync without CPU SyncWait, drained by next acquire
         int qidx0 = -1, qidx1 = -1;
         P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx0);

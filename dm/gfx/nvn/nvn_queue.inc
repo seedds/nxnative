@@ -80,7 +80,7 @@ static nq_receipt *nq_new(void) { nq_receipt *r=calloc(1,sizeof *r); if(!r) die(
 static void nq_put(nq_receipt *r) { if(r && !--r->refs) free(r); }
 static void nq_release_sync_locked(sync_t *s) {
     if (s->fenced == 3) nq_put((nq_receipt *)(uintptr_t)s->fence);
-    else if (s->fenced == 4) { uint64_t tk = nvn_acq_unref_take_ticket(s->fence); if (tk) nq_put((nq_receipt *)(uintptr_t)tk); }
+    else if (s->fenced == 4) { uint64_t nx, tk = nvn_acq_unref_take_ticket(s->fence, &nx); if (tk) nq_put((nq_receipt *)(uintptr_t)tk); if (nx) nq_put((nq_receipt *)(uintptr_t)nx); }
     s->fenced = 0; s->fence = 0;
 }
 static void nq_set_sync(sync_t *s,nq_receipt *r) { nq_release_sync_locked(s); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
@@ -383,6 +383,16 @@ uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int cro
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;
 }
 void nvn_queue_test_hold(int on) { pthread_mutex_lock(&nq_mu); nq_test_held=on; pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu); }
+int nvn_queue_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);
+void nvn_queue_present_ref_locked(uint64_t ticket) { if(ticket) ((nq_receipt *)(uintptr_t)ticket)->refs++; }
+// A present's GPU work done: its job replayed (the receipt published) and the GPU past the fence it ended at. Every submission before the present is in that fence
+int nvn_queue_present_gpu_wait_timeout(uint64_t ticket, uint64_t timeout_ns) {
+    if(!ticket) return 1; nq_receipt *r=(nq_receipt *)(uintptr_t)ticket; uint64_t start=now_ns();
+    if(!nvn_queue_present_wait_timeout(ticket,timeout_ns)) return 0;
+    pthread_mutex_lock(&nq_mu); uint64_t f=r->fence; pthread_mutex_unlock(&nq_mu);
+    uint64_t el=now_ns()-start, rem=timeout_ns==UINT64_MAX?UINT64_MAX:el>=timeout_ns?0:timeout_ns-el;
+    return !f || mtl_wait_acq(f,rem);
+}
 void nvn_queue_present_release(uint64_t ticket) {
     if(!ticket) return; pthread_mutex_lock(&nq_mu); nq_put((nq_receipt *)(uintptr_t)ticket); pthread_mutex_unlock(&nq_mu);
 }

@@ -84,7 +84,7 @@ typedef struct {
     uint32_t omap; uint8_t omap_known;
     // Merge B step 2 (readable-tile version <key>_bf, dmsh_fetch.py): fragment - nfc redirectable samples (the i-th: texture slot fc_reg, interpolated output fc_locn),
     // bitmap fc_mixed of texture slots with mixed use (these slots must not be redirected to read the tile), nfo outputs (each with color number fo_color); vertex - .xy of interpolated output locn is taken as-is from attribute uv_attr[locn] (-1 = no)
-    uint8_t nfc, fc_reg[32], fc_locn[32], nfo, fo_color[4]; uint64_t fc_mixed[4]; int8_t uv_attr[32];   // fc_mixed: a bit per texture slot 0-255 (slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0)
+    uint8_t nfc, fc_reg[32], fc_locn[32], nfo, fo_color[8]; uint64_t fc_mixed[4]; int8_t uv_attr[32];   // fc_mixed: a bit per texture slot 0-255 (slots 128+ are separate texture binds, NVN_SEPTEX_SLOT0)
     // Vertex - .x / .y of interpolated output locn = fma(.x / .y of attribute uv_aff_attr[locn], scale, offset), where scale / offset reference a uniform: (slot << 16) | (vector 0..4095 << 2) | component
     int8_t uv_aff_attr[32]; uint32_t uv_aff[32][4];   // [sx, ox, sy, oy]
     // Projective samples (dmsh_fetch.py 'proj'): fragment - bit i: the i-th redirectable sample reads at in.m_X.xy / in.m_X.w (X = fc_locn[i]); vertex - bit K: interpolated output K is the
@@ -93,6 +93,7 @@ typedef struct {
     // Pixel-position samples (dmsh_fetch.py 'frag_pos'): bit i: the i-th redirectable sample reads at (gl_FragCoord.x * U, gl_FragCoord.y * V), fc_scale[i] = {U, V} as uniform references
     // (slot << 16) | (vector 0..4095 << 2) | component; its fc_locn is 0xff
     uint32_t fc_fpos; uint32_t fc_scale[32][2];
+    uint32_t fc_tiled;   // calls read from the tile only after a barrier with ORDER_FRAGMENTS_TILED (dmsh_fetch.py 'tiled', nvn_mtl.m fb_tile_plan)
     // gmem_map's fixed pointer sources, read before argument-block reuse as well as a fresh encode (nvn_mtl.m gmem_discover).
     uint8_t ngptr; struct { uint8_t reg; uint16_t off; } gptr[64];   // DMSH_GPTR_MAX, checked in nvn_refl.m
     uint8_t *c1;             // c1 constant segment as-is (B): c1_len bytes, malloc'd by nvn_refl_from_json (NULL without one). It was a 4 KB array; Hyrule Warriors: Age of Calamity has 6 KB segments (its soldiers' vertex shaders)

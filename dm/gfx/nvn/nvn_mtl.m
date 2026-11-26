@@ -17280,9 +17280,16 @@ static inline void sh_lists(NvShader *sh) { if (__builtin_expect(__atomic_load_n
 static inline int sh_tex_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->tex_idx; return sh->tex_n; }
 static inline int sh_buf_list(NvShader *sh, const uint8_t **l) { sh_lists(sh); *l = sh->buf_idx; return sh->buf_n; }
 // The texture slots (bit per slot 0-255) whose attachment this draw reads from the tile; 0 = none (then g_fb_tfn and the rest are not this draw's)
+// The game's last fragment-ordering barrier had ORDER_FRAGMENTS_TILED: by NVN's contract for it, the later fragments read the earlier ones' results only at their own position,
+// so a sample of an attachment that the chain could not prove is this pixel's ('tiled' fetch calls, for shaders bf_want.tsv lists) is read from the tile. Xenoblade Chronicles:
+// Definitive Edition's ground and character blend decals (7c3deb5ce82631c6, 2fb171bd248a8982 and others) put 0x14 (ORDER_FRAGMENTS_TILED | INVALIDATE_TEXTURE) before each draw that
+// samples the 5-target G-buffer it writes, and their screen position comes from a projection the chain cannot follow: a snapshot of 4 targets and a pass for every one of those draws.
+// DM_NVN_FB_TILED=0: no tiled reads
+static int g_fb_tiled_bar;
+static int fb_tiled_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_FB_TILED"); v = !e || atoi(e) != 0; if (!v) MLOG("DM_NVN_FB_TILED=0: samples after a tiled barrier that the chain could not prove read a snapshot"); } return v; }
 static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1]; memset(tile, 0, 4 * sizeof *tile);   // the program holds them (no retain and release a draw)
-    if (g_fb_mode != 1 || !vs || !(fs->rf.fc_proj | fs->rf.fc_fpos) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on()) return 0;
+    if (g_fb_mode != 1 || !vs || !(fs->rf.fc_proj | fs->rf.fc_fpos | fs->rf.fc_tiled) || !fs->rf.color_known || !fs->rf.nfo || !fb_tile_on()) return 0;
     fb_pinfo pi; int learn = 0;
     if (g_enc) { fb_pinfo_now(&pi); if (g_sm_pass) return 0; }
     else {   // the draw opens its pass: the formats learned for this program on these targets (fb_early_after)
@@ -17310,7 +17317,7 @@ static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
                 || !sw_tile(t)
                 || MAX(base.width >> lv, 1ul) != W || MAX(base.height >> lv, 1ul) != H || (fs->rf.fc_mixed[b->reg >> 6] >> (b->reg & 63) & 1)) break;
             int any = 0, ok = 1;
-            for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) { if (fs->rf.fc_fpos >> c & 1 ? fpos_proof(fs, c, W, H) : fs->rf.fc_proj >> c & 1 && scr_proof(pr, fs->rf.fc_locn[c], W, H)) any = 1; else ok = 0; }
+            for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) { if (fs->rf.fc_fpos >> c & 1 ? fpos_proof(fs, c, W, H) : fs->rf.fc_tiled >> c & 1 ? g_fb_tiled_bar && fb_tiled_on() && !pr->sh[2] && !pr->sh[3] && !pr->sh[4] : fs->rf.fc_proj >> c & 1 && scr_proof(pr, fs->rf.fc_locn[c], W, H)) any = 1; else ok = 0; }
             if (!ok || !any) break;
             for (int c = 0; c < fs->rf.nfc; c++) if (fs->rf.fc_reg[c] == b->reg) fx[c] = k;
             fbmask |= (uint8_t)(1u << k); tile[b->reg >> 6] |= 1ull << (b->reg & 63);
@@ -17743,6 +17750,7 @@ static void fb_prepare(NvProg *pr) {
                 MLOG("same-pass feedback sampling: snapshot #%llu, %llu draws reused one, %llu read the tile (%llu waited for their pipeline), %llu passes ended before a write to an attachment read directly (frame %llu pass %llu, shader %s %s %d samples attachment %d ser=%llu %lux%lu format %lu)", (unsigned long long)g_fb_count, (unsigned long long)g_fb_reuse, (unsigned long long)g_fb_tile_draws, (unsigned long long)g_fb_tile_wait, (unsigned long long)g_fb_split,
                      (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, texu ? "handle in uniform slot" : image ? "image slot" : "slot", b->reg, k, (unsigned long long)ser, (unsigned long)w, (unsigned long)h, (unsigned long)base.pixelFormat);
             PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d copied into a snapshot; this draw samples the snapshot", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl);
+            if (g_fb_tiled_bar && !fs->rf.fc_tiled && !image && !texu) bf_want_note(fs->key);   // a tile read after the tiled barrier once bf_want.tsv lists it (DM_NVN_BF_WANT)
         } }
     g_fb_wmask |= wm; g_fb_dwrote |= dsw;
     if (g_fb_n) { g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
@@ -21454,6 +21462,7 @@ void mtl_exec(const uint8_t *p) {
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (g_tf_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_tf_bar = 1;   // the next capture of the open capture pass waits for its earlier ones (tf_order)
                 if ((bits & GAME_BARRIER_FULL) && g_mdx_wr != ~0ull && g_mdx_wr != g_vbuf_write_epoch) g_mdx_epoch++;   // a draw may have written a record or count that was copied before it (g_mdx_wr)
+                if (bits & NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) g_fb_tiled_bar = 1; else if (bits & NVN_BARRIER_ORDER_FRAGMENTS_BIT) g_fb_tiled_bar = 0;   // fb_tile_plan's 'tiled' calls
                 if (bits) { g_game_barrier |= bits; g_fb_bar++; g_dsp_game_bar = 1; } break; }   // g_fb_bar: snapshots taken before it are stale (see fb_prepare)
             case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL: state_op(h.op, a); break;
             default: break;

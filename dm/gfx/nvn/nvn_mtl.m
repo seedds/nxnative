@@ -19796,7 +19796,7 @@ static int ubd_conflict_textures(__unsafe_unretained NvShader *sh, int st) {
                   (g_ubdt[st].sh == sh && g_ubdt[st].agen == g_args_gen[st] && g_ubdt[st].gen == g_fbc_gen))) { g_ubdt_hits++; return 0; }
     if (cache) g_ubdt_miss++;
     const uint8_t *texs; int ntexs = sh_tex_list(sh, &texs);
-    if (!ntexs) return 0;   // no texture binding: nothing to look up, and no lock
+    if (!ntexs) { if (cache) { g_ubdt[st].sh = sh; g_ubdt[st].agen = g_args_gen[st]; g_ubdt[st].gen = g_fbc_gen; sh->ubdt_agen = g_args_gen[st]; sh->ubdt_fgen = g_fbc_gen; } return 0; }   // no texture binding: nothing to look up, and no lock; still mark cached so ubd_conflict_sh caches the stage
     int hit = 0, keep = 1; g_ubd_tbuf_seen = 0;
     os_unfair_lock_lock(&g_rmu);
     for (int ti = 0; ti < ntexs && !hit; ti++) {

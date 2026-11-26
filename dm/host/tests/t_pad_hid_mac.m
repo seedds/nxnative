@@ -22,11 +22,14 @@
 @implementation TestDev
 @end
 @interface TestElem : NSObject
-@property uint32_t page, usage, report; @property int output;
+@property uint32_t page, usage, report, reportSize; @property int output;
+@property CFIndex min, max; @property BOOL relative; @property TestElem *parent;
 @end
 @implementation TestElem
 @end
-static TestElem *elem(int output, uint32_t report, uint32_t page, uint32_t usage) { TestElem *e = [TestElem new]; e.output = output; e.report = report; e.page = page; e.usage = usage; return e; }
+static TestElem *elem(int output, uint32_t report, uint32_t page, uint32_t usage) {
+    TestElem *e = [TestElem new]; e.output = output; e.report = report; e.page = page; e.usage = usage; e.max = 1; return e;
+}
 @interface TestValue : NSObject
 @property TestElem *element; @property CFIndex value;
 @end
@@ -59,12 +62,15 @@ static void test_report_cb(IOHIDDeviceRef device, uint8_t *buffer, CFIndex len, 
 static void test_value_cb(IOHIDDeviceRef device, IOHIDValueCallback callback, void *ctx) { TestDev *d = (__bridge id)device; d.valueCallback = callback; d.valueContext = ctx; }
 static IOHIDElementRef test_val_element(IOHIDValueRef v) { return (__bridge IOHIDElementRef)((__bridge TestValue *)v).element; }
 static CFIndex test_val_int(IOHIDValueRef v) { return ((__bridge TestValue *)v).value; }
-static CFIndex test_el_min(IOHIDElementRef e) { (void)e; return 0; }
-static CFIndex test_el_max(IOHIDElementRef e) { (void)e; return 1; }
+static CFIndex test_el_min(IOHIDElementRef e) { return ((__bridge TestElem *)e).min; }
+static CFIndex test_el_max(IOHIDElementRef e) { return ((__bridge TestElem *)e).max; }
 static CFArrayRef test_elements(IOHIDDeviceRef device, CFDictionaryRef match, IOOptionBits o) { (void)match; (void)o; return CFBridgingRetain(((__bridge TestDev *)device).elements ?: @[]); }
 static uint32_t test_el_page(IOHIDElementRef e) { return ((__bridge TestElem *)e).page; }
 static uint32_t test_el_usage(IOHIDElementRef e) { return ((__bridge TestElem *)e).usage; }
 static uint32_t test_el_report(IOHIDElementRef e) { return ((__bridge TestElem *)e).report; }
+static uint32_t test_el_report_size(IOHIDElementRef e) { return ((__bridge TestElem *)e).reportSize; }
+static Boolean test_el_relative(IOHIDElementRef e) { return ((__bridge TestElem *)e).relative ? true : false; }
+static IOHIDElementRef test_el_parent(IOHIDElementRef e) { return (__bridge IOHIDElementRef)((__bridge TestElem *)e).parent; }
 static IOHIDElementType test_el_type(IOHIDElementRef e) { return ((__bridge TestElem *)e).output ? kIOHIDElementTypeOutput : kIOHIDElementTypeInput_Button; }
 static io_service_t test_service(IOHIDDeviceRef device) { return (io_service_t)((__bridge TestDev *)device).entry; }
 static kern_return_t test_entry_id(io_registry_entry_t e, uint64_t *id) { *id = e; return KERN_SUCCESS; }
@@ -117,6 +123,9 @@ static void advance_timers(uint64_t ns) {
 #define IOHIDElementGetUsagePage test_el_page
 #define IOHIDElementGetUsage test_el_usage
 #define IOHIDElementGetReportID test_el_report
+#define IOHIDElementGetReportSize test_el_report_size
+#define IOHIDElementIsRelative test_el_relative
+#define IOHIDElementGetParent test_el_parent
 #define IOHIDElementGetType test_el_type
 #define GCController TestGC
 #define dispatch_time test_dispatch_time
@@ -286,10 +295,76 @@ static void hid_layouts(void) {
     puts("t_pad_hid_mac: Xbox axis matching, Nintendo report precedence and Taiko Drum layout passed");
 }
 
+static void push_ignored_value(TestDev *d, TestElem *element, CFIndex value) {
+    assert(d.valueCallback);
+    TestValue *v = [TestValue new]; v.element = element; v.value = value;
+    int before = reads; d.valueCallback(d.valueContext, kIOReturnSuccess, ref(d), (__bridge IOHIDValueRef)v);
+    assert(reads == before);
+}
+static void hid_composite_and_wrapped(void) {
+    // Composite gamepad (modeled on SHIELD 2015, tested with an unrelated VID:PID to prove no device gate):
+    // report 1 GamePad collection (with sticks under a standard Physical Pointer collection), wrapped -1..0 16-bit axes,
+    // Consumer AC Back inside GamePad, sibling Mouse collection (relative X/Y + mouse click), and sibling standalone Consumer Control collection.
+    TestElem *col_pad = elem(0, 0, kHIDPage_GenericDesktop, kHIDUsage_GD_GamePad);
+    TestElem *col_ptr = elem(0, 0, kHIDPage_GenericDesktop, kHIDUsage_GD_Pointer); col_ptr.parent = col_pad;
+    TestElem *col_mouse = elem(0, 0, kHIDPage_GenericDesktop, kHIDUsage_GD_Mouse);
+    TestElem *col_csmr = elem(0, 0, kHIDPage_Consumer, kHIDUsage_Csmr_ConsumerControl);
+    TestElem *lx = elem(0, 1, 1, 0x30), *ly = elem(0, 1, 1, 0x31), *rx = elem(0, 1, 1, 0x32), *ry = elem(0, 1, 1, 0x35);
+    TestElem *lt = elem(0, 1, 2, 0xC5), *rt = elem(0, 1, 2, 0xC4);
+    lx.parent = ly.parent = col_ptr; rx.parent = ry.parent = lt.parent = rt.parent = col_pad;
+    for (TestElem *a in @[lx, ly, rx, ry, lt, rt]) { a.min = -1; a.max = 0; a.reportSize = 16; }
+    TestElem *start = elem(0, 1, kHIDPage_Button, 12); start.parent = col_pad;
+    TestElem *ac_back = elem(0, 1, kHIDPage_Consumer, kHIDUsage_Csmr_ACBack); ac_back.parent = col_pad;
+    TestElem *ac_home = elem(0, 1, kHIDPage_Consumer, 0x223); ac_home.parent = col_pad;
+    TestElem *rel_in_pad = elem(0, 1, 1, 0x30); rel_in_pad.parent = col_pad; rel_in_pad.relative = YES; rel_in_pad.min = -127; rel_in_pad.max = 127;
+    TestElem *mx = elem(0, 2, 1, 0x30), *my = elem(0, 2, 1, 0x31), *mbtn = elem(0, 2, kHIDPage_Button, 1);
+    mx.parent = my.parent = mbtn.parent = col_mouse; mx.relative = my.relative = YES; mx.min = my.min = -127; mx.max = my.max = 127;
+    TestElem *media_back = elem(0, 3, kHIDPage_Consumer, kHIDUsage_Csmr_ACBack); media_back.parent = col_csmr;
+
+    TestDev *pad = [TestDev new]; pad.name = @"Composite HID Pad"; pad.vid = 0x1234; pad.pid = 0x5678; pad.entry = 120;
+    pad.elements = @[lx, ly, rx, ry, lt, rt, start, ac_back, ac_home, rel_in_pad, mx, my, mbtn, media_back];
+    BOOL saved_supports = g_supports; g_supports = NO;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(pad));
+    hid_pad *hp = find(pad);
+    assert(hp && hp->st.has[PH_X] && hp->st.has[PH_Y] && hp->st.has[PH_Z] && hp->st.has[PH_RZ] && hp->st.has[PH_BRAKE] && hp->st.has[PH_ACCEL]);
+
+    int32_t s[4];
+    push_value(pad, lx, 0x7fff); push_value(pad, ly, -32768); push_value(pad, rx, 0x7fff); push_value(pad, ry, 0x7fff);
+    pad_hid_sticks(&hp->st, s); assert(s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0);
+    push_value(pad, lx, -1); push_value(pad, ly, 0);
+    pad_hid_sticks(&hp->st, s); assert(s[0] == DM_STICK_MAX && s[1] == DM_STICK_MAX);
+    // Relative mouse X/Y, mouse click, relative axis inside GamePad, AC Home and standalone Consumer Control AC Back are all ignored.
+    push_ignored_value(pad, mx, -127); push_ignored_value(pad, my, 127); push_ignored_value(pad, mbtn, 1);
+    push_ignored_value(pad, rel_in_pad, -127); push_ignored_value(pad, ac_home, 1); push_ignored_value(pad, media_back, 1);
+    pad_hid_sticks(&hp->st, s); assert(s[0] == DM_STICK_MAX && s[1] == DM_STICK_MAX && buttons == 0);
+    // Measured trigger sweep on wrapped 16-bit Brake/Accel.
+    static const long sweep[] = {0, 5305, 16397, 26314, 44624, 65535, 20445, 0};
+    for (unsigned i = 0; i < sizeof sweep / sizeof *sweep; i++) {
+        push_value(pad, lt, sweep[i]); assert(!!(buttons & DM_BTN_ZL) == (sweep[i] > 32767));
+        push_value(pad, rt, sweep[i]); assert(!!(buttons & DM_BTN_ZR) == (sweep[i] > 32767));
+    }
+    push_value(pad, ac_back, 1); assert(buttons == DM_BTN_MINUS);
+    push_value(pad, start, 1); assert(buttons == (DM_BTN_PLUS | DM_BTN_MINUS));
+    push_value(pad, ac_back, 0); assert(buttons == DM_BTN_PLUS);
+    push_value(pad, start, 0); assert(buttons == 0);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(pad));
+
+    // A device whose only X/Y are relative (Mouse collection) does not mark left-stick axes present.
+    TestDev *rel_only = [TestDev new]; rel_only.name = @"Relative-only axes"; rel_only.vid = 0x1234; rel_only.pid = 0x5679; rel_only.entry = 121;
+    rel_only.elements = @[mx, my, rel_in_pad];
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(rel_only));
+    hp = find(rel_only); assert(hp && !hp->st.has[PH_X] && !hp->st.has[PH_Y]);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(rel_only));
+    g_supports = saved_supports;
+    assert(!attached && !g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    puts("t_pad_hid_mac: composite mouse filtering, wrapped unsigned axes and Consumer AC Back passed");
+}
+
 int main(void) { @autoreleasepool {
     g_gc = [NSMutableArray new];
     gc_fallback();
     hid_layouts();
+    hid_composite_and_wrapped();
     TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
     // issue #2237: one Pro Controller over Bluetooth, which GameController lists, and a second entry of its model at location 0 that sends nothing
     [g_gc addObject:gc];

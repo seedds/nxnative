@@ -117,16 +117,20 @@ int main(void) {
     snprintf(p, sizeof p, "%s/sub", P); mkd(p); snprintf(p, sizeof p, "%s/empty", P); mkd(p); snprintf(p, sizeof p, "%s_device", P); mkd(p);
     snprintf(p, sizeof p, "%s/a", P); put(p, "hello"); set_mtime(p, 1000000000);
     snprintf(p, sizeof p, "%s/sub/b", P); put(p, "xy"); setxattr(p, FS_GUEST_NAME, "B", 1, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000100);
+    snprintf(p, sizeof p, "%s/sub/.dm-case-1", P); put(p, "alias"); setxattr(p, FS_GUEST_NAME, "CaseFile", 8, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000075);
     snprintf(p, sizeof p, "%s_device/d", P); put(p, "dev"); set_mtime(p, 1000000050);
-    CHECK(!ss_scan(P, &m) && m.files == 3 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 3 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
+    CHECK(!ss_scan(P, &m) && m.files == 4 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 4 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
     snprintf(bundle, sizeof bundle, "%s/pack/save.dmsync", root);
     CHECK(!ss_pack(P, "0100abc", bundle, &m2) && !strcmp(m2.hash, m.hash) && !strcmp(m2.title, "0100ABC"), "pack: the same hash as the scan, the title ID in capitals (%s)", m2.title);
-    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 3 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
+    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 4 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
     snprintf(u, sizeof u, "%s/pack/out", root); mkd(u);
     CHECK(!ss_read(bundle, u, &m2), "unpack");
     snprintf(p, sizeof p, "%s/save/a", u); snprintf(q, sizeof q, "%s/save/sub/b", u);
-    char g[8] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    char g[16] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
     CHECK(same(p, "hello") && same(q, "xy") && gl == 1 && g[0] == 'B', "files and the guest name (hle_fs.c's FS_GUEST_NAME) come back");
+    snprintf(q, sizeof q, "%s/save/sub/.dm-case-1", u);
+    memset(g, 0, sizeof g); gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(same(q, "alias") && gl == 8 && !strcmp(g, "CaseFile"), "a .dm-case-1 alias round-trips its original guest name and contents");
     CHECK(mtime_of(p) == 1000000000, "a file's date comes back (%lld)", (long long)mtime_of(p));
     snprintf(p, sizeof p, "%s/save/empty", u); snprintf(q, sizeof q, "%s/save_device/d", u);
     struct stat st; CHECK(!stat(p, &st) && S_ISDIR(st.st_mode) && same(q, "dev"), "an empty folder and the device save come back");
@@ -450,6 +454,38 @@ int main(void) {
         CHECK(run(W, cloud6, NULL, NULL, "local:none", NULL, READABLE) == 0 && cloud_has(cf6, root, "game.dat", "w3"), "the player's local:none: this device's save is sent");
         unlink(hid); unlink(cf6); put(p, "w4");   // the cloud's file removed for good, and this device saves on
         CHECK(session(W, cloud6, NULL, NULL) == 0 && cloud_has(cf6, root, "game.dat", "w4"), "no front end asks: sent, as before");
+    }
+    printf("(18) conflict cloud backup rotates to newest 10 and keeps user folders\n");
+    {   char K[1200], L[1200], cloud7[1200], cf7[1400], bdir[1300];
+        snprintf(K, sizeof K, "%s/mac9/save", root); snprintf(L, sizeof L, "%s/iphone6/save", root);
+        snprintf(cloud7, sizeof cloud7, "%s/iCloud Drive/Seventh Saves", root); mkd(K); mkd(L); mkd(cloud7);
+        snprintf(cf7, sizeof cf7, "%s/%s/save.dmsync", cloud7, id);
+        snprintf(p, sizeof p, "%s/game.dat", K); put(p, "k0");
+        CHECK(session(K, cloud7, NULL, NULL) == 0 && session(L, cloud7, "game.dat", "l1") == 0, "Mac sends k0 and iPhone advances cloud to l1");
+        CHECK(session(K, NULL, "game.dat", "k1") == 0, "Mac diverges offline with k1");
+        snprintf(bdir, sizeof bdir, "%s-backups", K);
+        for (int i = 1; i <= 10; i++) {
+            char mark[32];
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save", bdir, i); mkd(p);
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save/mark.txt", bdir, i);
+            snprintf(mark, sizeof mark, "old-%02d", i); put(p, mark);
+        }
+        snprintf(p, sizeof p, "%s/player-folder", bdir); mkd(p);
+        snprintf(p, sizeof p, "%s/player-folder/keep.txt", bdir); put(p, "mine");
+        CHECK(run(K, cloud7, NULL, NULL, choice_of("local", cf7), NULL, READABLE) == 0 && cloud_has(cf7, root, "game.dat", "k1"),
+              "local choice backs up cloud save and sends k1");
+        int clouds = 0; DIR *bd = opendir(bdir); struct dirent *be;
+        while (bd && (be = readdir(bd))) {
+            size_t l = strlen(be->d_name);
+            clouds += l > 6 && (!strcmp(be->d_name + l - 6, " cloud") || strstr(be->d_name, " cloud "));
+        }
+        if (bd) closedir(bd);
+        backup_of(K, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.01 cloud", bdir);
+        snprintf(u, sizeof u, "%s/2001-01-01 00.00.02 cloud/save/mark.txt", bdir);
+        char userf[1400]; snprintf(userf, sizeof userf, "%s/player-folder/keep.txt", bdir);
+        CHECK(clouds == 10 && *back && same(q, "l1") && !exists(p) && same(u, "old-02") && same(userf, "mine"),
+              "exactly 10 completed cloud backups stay with l1 published, oldest pruned and user folder intact (%d)", clouds);
     }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }

@@ -27,6 +27,52 @@ static Result request(uint32_t h, uint32_t *m, unsigned cmd) {
     m[4] = 0x49434653; m[5] = 0; m[6] = cmd; m[7] = 0;
     return h_sf_Send(h, m, 0x100);
 }
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int calls, closes, alive;
+    int gate, entered, release;
+} count_svc;
+
+static Result count_answer(sf_req *q) {
+    count_svc *s = (count_svc *)q->ctx;
+    pthread_mutex_lock(&s->mu);
+    int ok = s->alive;
+    s->calls++;
+    uint32_t seq = (uint32_t)s->calls;
+    if (s->gate) {
+        s->entered = 1;
+        pthread_cond_broadcast(&s->cv);
+        while (!s->release) pthread_cond_wait(&s->cv, &s->mu);
+        ok &= s->alive;
+    }
+    pthread_mutex_unlock(&s->mu);
+    memcpy(q->out, &seq, 4);
+    q->out_len = 4;
+    return ok ? RES_OK : RES_FAIL;
+}
+
+static void count_close(void *ctx) {
+    count_svc *s = (count_svc *)ctx;
+    pthread_mutex_lock(&s->mu);
+    s->alive = 0;
+    s->closes++;
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+}
+
+typedef struct {
+    uint32_t h;
+    uint32_t msg[64];
+    Result res;
+} inflight_req;
+
+static void *inflight_worker(void *arg) {
+    inflight_req *r = (inflight_req *)arg;
+    r->res = request(r->h, r->msg, 7);
+    return NULL;
+}
 // IRS commands send a PID and packed arguments. Image-transfer starts copy a handle and the state query receives a B buffer.
 static Result irs_request(uint32_t h, unsigned cmd, uint32_t *m, const uint32_t *body, size_t size, uint32_t copy, void *buf, uint32_t capacity) {
     memset(m, 0, 0x100);
@@ -277,6 +323,62 @@ int main(void) {
     CHECK(request(dup, m, 5) == RES_OK && m[6] == 0x7c4u, "the duplicate answers as the camera");
     CHECK(request(dup, m, 4) == RES_OK && m[6] == RES_OK, "finalizing the camera library: success");
     h_sf_Close(dup); h_sf_Close(cam); h_sf_Close(h);
+
+    // Shared ownership across duplicate handles (closing in both orders), per-slot domain flags, and concurrent close during an in-flight request
+    {
+        // Order 1: duplicate then close original first; duplicate still responds and destructor runs once on final close
+        count_svc s1 = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .alive = 1};
+        uint32_t orig = sf_session("count1", count_answer, &s1, count_close), d1 = 0, d2 = 0, dom_obj = 0;
+        CHECK(orig && h_sf_Dup(&d1, orig) == RES_OK && d1 && d1 != orig, "duplicate counting service (order 1)");
+        CHECK(h_sf_DupEx(&d2, d1, 3) == RES_OK && d2 && d2 != orig && d2 != d1, "DuplicateSessionEx clones duplicate");
+        CHECK(h_sf_ToDomain(&dom_obj, d2) == RES_OK && dom_obj == 1, "convert one duplicate to domain");
+        h_sf_Close(orig);
+        CHECK(s1.closes == 0 && s1.alive == 1, "closing original leaves shared owner alive");
+        CHECK(request(orig, m, 1) == 0xe401u, "closed original handle is rejected");
+        CHECK(request(d1, m, 1) == RES_OK && m[4] == 0x4f434653 && m[6] == RES_OK && m[8] == 1, "non-domain duplicate still responds after original closes");
+        CHECK(domain_request(d2, m, 2, 0, NULL, 0) == RES_OK && m[8] == 0x4f434653 && m[10] == RES_OK && m[12] == 2, "domain duplicate keeps independent domain flag");
+        h_sf_Close(d1);
+        CHECK(s1.closes == 0 && s1.alive == 1, "closing second handle still keeps shared owner alive");
+        CHECK(domain_request(d2, m, 3, 0, NULL, 0) == RES_OK && m[10] == RES_OK && m[12] == 3, "last remaining handle still responds");
+        h_sf_Close(d2);
+        CHECK(s1.closes == 1 && s1.alive == 0 && s1.calls == 3, "destructor runs exactly once after last handle closes (original-first)");
+
+        // Order 2: duplicate then close duplicate first; original still responds and destructor runs once on final close
+        count_svc s2 = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .alive = 1};
+        orig = sf_session("count2", count_answer, &s2, count_close); d1 = 0;
+        CHECK(orig && h_sf_Dup(&d1, orig) == RES_OK && d1 != orig, "duplicate counting service (order 2)");
+        h_sf_Close(d1);
+        CHECK(s2.closes == 0 && s2.alive == 1, "closing duplicate first leaves original alive");
+        CHECK(request(orig, m, 1) == RES_OK && m[6] == RES_OK && m[8] == 1, "original responds after duplicate closes");
+        h_sf_Close(orig);
+        CHECK(s2.closes == 1 && s2.alive == 0 && s2.calls == 1, "destructor runs exactly once after last handle closes (duplicate-first)");
+
+        // In-flight request coordinated with concurrent handle close and slot reuse
+        count_svc s3 = {.mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER, .alive = 1, .gate = 1};
+        uint32_t live = sf_session("count3", count_answer, &s3, count_close);
+        inflight_req req = {.h = live};
+        pthread_t th;
+        CHECK(!pthread_create(&th, NULL, inflight_worker, &req), "start in-flight request thread");
+        pthread_mutex_lock(&s3.mu);
+        while (!s3.entered) pthread_cond_wait(&s3.cv, &s3.mu);
+        pthread_mutex_unlock(&s3.mu);
+
+        h_sf_Close(live);
+        CHECK(sf_slot(live) < 0, "handle slot closes while request is in flight");
+        uint32_t reused = sf_session("reused", NULL, NULL, NULL);
+        CHECK(reused == live, "closed slot can be reused while earlier request is still running");
+        pthread_mutex_lock(&s3.mu);
+        CHECK(s3.closes == 0 && s3.alive == 1, "destructor waits while request holds temporary owner reference");
+        s3.release = 1;
+        pthread_cond_broadcast(&s3.cv);
+        pthread_mutex_unlock(&s3.mu);
+
+        pthread_join(th, NULL);
+        CHECK(req.res == RES_OK && req.msg[4] == 0x4f434653 && req.msg[6] == RES_OK && req.msg[8] == 1,
+              "in-flight request completes reply after handle closed and slot was reused");
+        CHECK(s3.closes == 1 && s3.alive == 0 && s3.calls == 1, "destructor runs exactly once when last in-flight request finishes");
+        h_sf_Close(reused);
+    }
     printf("t_sf: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

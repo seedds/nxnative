@@ -23038,7 +23038,7 @@ static void snap_drain(int strict) {
         if (strict) MDIE("present snapshots: GPU did not drain within 10 s");
     }
 }
-static int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns);
+int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns);
 int mtl_snap_acquire_wait_timeout(uint64_t timeout_ns, uint64_t *waited_ns) {
     if (waited_ns) *waited_ns = 0;
     if (!mtl_snap_on() || atomic_load(&g_present_discard)) return 1;
@@ -23306,7 +23306,7 @@ int mtl_present_texture_ready(uint64_t tk, uint64_t ev) {
     pthread_mutex_unlock(&g_pq_mu);
     return ok;
 }
-static int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns) {
+int mtl_present_wait_timeout(uint64_t tk, uint64_t timeout_ns) {
     uint64_t start = timeout_ns == UINT64_MAX ? 0 : now_ns();
     uint64_t dl = timeout_ns == UINT64_MAX || timeout_ns > UINT64_MAX - start ? UINT64_MAX : start + timeout_ns;
     pthread_mutex_lock(&g_pq_mu);

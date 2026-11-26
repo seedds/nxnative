@@ -49,3 +49,4 @@ sys_resource	0x4000000
 # ---- Shader split (shader_split.py) ----
 shader_groups	/Shaders/=shader /Effect/=effect /Layout/=layout
 shader_note	Fire Emblem Fortune's Weave shaders
+background_run	on

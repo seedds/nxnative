@@ -190,6 +190,10 @@ def header_one(g):
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font must be bfttf or ttf: {sf}')
     ts = g.get('touch_stick', 'float')   # the virtual left stick's first mode (DmGamepad.m, launcher setting DM_TOUCH_STICK): float = centred where the thumb lands, digital = floating + snapped to 8 directions (grid and menu games), fixed = the ring's centre
     if ts not in ('float', 'digital', 'fixed'): sys.exit(f'{g.id}: touch_stick must be float, digital or fixed: {ts}')
+    br = g.get('background_run', 'off')   # the launcher's first value of Keep running in background (DM_BACKGROUND_RUN, front_ios.m bg_run): on = the app stays alive when the player switches away
+    if br not in ('on', 'off'): sys.exit(f'{g.id}: background_run must be on or off: {br}')
+    co = g.get('coop', 'off')   # the launcher's first value of Link Play on this network (DM_COOP, hle_coop_ldn.c): on = auto (host and find hosts on the LAN) from the first start
+    if co not in ('on', 'off'): sys.exit(f'{g.id}: coop must be on or off: {co}')
     pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3),
     if pl not in ('simple', 'full', 'touch'): sys.exit(f'{g.id}: pad_layout must be simple, full or touch: {pl}')
     lr = float(g.get('look_rate', '0'))   # pointer look (hle_hid.c dm_look_add): the camera's turn rate at full right-stick tilt, degrees per second; 0 = off (the pointer is not a look control)
@@ -274,6 +278,8 @@ def header_one(g):
          *([f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}'] if g.get('shared_font', '') else []),   # without the key the host decides by the SDK version (hle_sdk16.c)
          f'#define DM_GAME_PAD_LAYOUT {("simple", "full", "touch").index(pl)}',
          f'#define DM_GAME_TOUCH_STICK "{ts}"',   # the launcher's default for the left-stick setting (settings.tsv)
+         f'#define DM_GAME_BACKGROUND_RUN {int(br == "on")}',   # the launcher's default for Keep running in background (settings.tsv)
+         f'#define DM_GAME_COOP {int(co == "on")}',   # the launcher's default for Link Play on this network (settings.tsv)
          f'#define DM_GAME_LOOK_RATE {lr!r}f',   # pointer look (hle_hid.c)
          f'#define DM_GAME_LOOK_DEAD {ld!r}f',
          f'#define DM_GAME_LOOK_CAM {q(lc)}',

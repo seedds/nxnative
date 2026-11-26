@@ -105,7 +105,7 @@ Shows the frames per second at the top left.
 
 ### Keep running in background
 
-Off by default. On, the app stays alive when you switch to another app or lock the phone: the game is paused and silent meanwhile, and it carries on where it was when you come back. Off, iOS suspends the app and, when it needs the memory, quits it quietly: a game of a few gigabytes is usually the first to go, and you find the launcher screen on your return with everything since the last save lost.
+Off by default, unless the game's profile turns it on (`background_run on`: Fire Emblem, Zelda, Mario Kart and Pokopia do). On, the app stays alive when you switch to another app or lock the phone: the game is paused and silent meanwhile, and it carries on where it was when you come back. Off, iOS suspends the app and, when it needs the memory, quits it quietly: a game of a few gigabytes is usually the first to go, and you find the launcher screen on your return with everything since the last save lost.
 
 - **When to change it:** turn it on if you often switch away mid-game.
 - **Cost:** a little battery while in the background (the audio session is kept playing, muted); iOS can still quit the app under heavy memory pressure, but no longer does so just to make room.

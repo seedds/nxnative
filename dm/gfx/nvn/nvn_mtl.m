@@ -7439,11 +7439,16 @@ static uint64_t g_args_why[10];   // full encodes by cause: no block, program bi
 static uint64_t g_stat_args_enc, g_stat_args_reuse, g_stat_args_patch;   // Argument buffer: new-encode / reuse / patched (only CBUF slots written again) counts
 static uint64_t g_stat_draw, g_stat_pass, g_bw_load, g_bw_store, g_pass_full_rw, g_udc_saved_bytes;   // Bandwidth ledger: attachment load / store bytes, number of full load-store passes
 static uint64_t g_cut_draw0, g_cuts, g_copy_cuts;
-static int g_pass_split_n = -1;
+static int g_pass_split_n = -1, g_pass_split_max_v = -1;
+static uint64_t g_pass_splits, g_split_pass; static int g_split_n;
+uint64_t g_psw[5];   // pass_split_try per draw past DM_NVN_PASS_SPLIT: 0 split, declined because 1 the GPU is busy, 2 no cut ready, 3 a slice-merged pass, 4 the per-pass limit (@psplit_* rows)
 static __attribute__((noinline)) void pass_split_try_slow(void);
 static inline __attribute__((always_inline)) void pass_split_try(void) {
     int n = g_pass_split_n;
-    if (__builtin_expect(n < 0 || (n > 0 && g_stat_draw - g_cut_draw0 >= (uint64_t)n), 0)) pass_split_try_slow();
+    if (__builtin_expect(n < 0 || (n > 0 && g_stat_draw - g_cut_draw0 >= (uint64_t)n), 0)) {
+        if (__builtin_expect(g_pass_split_max_v > 0 && g_split_pass == g_setrt_n && g_split_n >= g_pass_split_max_v, 1)) { g_psw[4]++; return; }
+        pass_split_try_slow();
+    }
 }
 // DM_NVN_PASSDUMP: records pass attachments / samples / presents one by one (textures by serial) for offline data-flow analysis; the pass numbers of P / D / R / S lines agree (= g_stat_pass after the pass is opened)
 // DM_NVN_PASSDUMP=frame number, or start-end (inclusive at both ends)
@@ -8464,6 +8469,7 @@ static void shmap_read(void) {
     uint8_t vc_tf, vc_any; uint64_t vc_vgen;   // vconv_bind memo: keyed by g_vattr_gen and tf!=0
     uint32_t ab_sbw_pgen; uint64_t ab_sbw_rcgen, ab_sbw_drwgen;   // g_args_geo_only: skip unchanged SBUFP slots while submission/rc/drain gens match
     const uint32_t *ab_sblen_cpu; uint64_t ab_sblen_epoch; uint8_t ab_sblen_aid, ab_sblen_ok;   // g_args_geo_only: cached sblen table CPU ptr + epoch + SBLEN aid (ab_sblen_ok: 1 when all sbx bindings are SBUFP)
+    uint64_t fb_c_pass, fb_c_setrt, fb_c_agen, fb_c_fgen, fb_c_spass; uint8_t fb_c_cmask, fb_c_has_depth;   // per-shader fb_prepare fast cache (replaces single-entry g_fb_fast)
     __unsafe_unretained id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; const uint8_t *ab_cpu; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen, ab_gen, ab_ugen;   // ab_gen / ab_ugen: the stage's binding generations it was written at (g_args_gen); ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)   // ab_cpu: the block's CPU address, so a patch copies it with no -contents (which ARC wraps in a retain and autorelease of the buffer: returns an inner pointer)
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
@@ -17021,11 +17027,6 @@ static int encode_args_full(__unsafe_unretained id<MTLCommandEncoder> en, __unsa
         int use_ix = cb_patch_ix_on();
         if (use_ix && !sh->ab_gnp) ab_gix_build(sh);
         uint32_t *sblen = NULL;
-        if (sh->rf.sblen) {
-            __unsafe_unretained id<MTLBuffer> sb; arena_at sat = arena_take_u(DMSH_SBLEN_SLOTS * 8u, &sb); (void)sb;
-            sblen = (uint32_t *)(void *)sat.cpu; memcpy(sblen, sh->ab_sblen_cpu, DMSH_SBLEN_SLOTS * 8u);
-            p[sh->ab_sblen_aid] = sat.gpu; za_check(sat.gpu, "argument block address slot", sh->ab_sblen_aid);
-        }
         int cnt = (use_ix && sh->ab_gnp != 0xff) ? sh->ab_gnp - 1 : sh->rf.nb;
         const uint8_t *ix = (use_ix && sh->ab_gnp != 0xff) ? sh->ab_gix : NULL;
         for (int j = 0; j < cnt; j++) { const nvn_rbind *b = &sh->rf.b[ix ? ix[j] : j]; __unsafe_unretained id<MTLBuffer> use;
@@ -17037,6 +17038,11 @@ static int encode_args_full(__unsafe_unretained id<MTLCommandEncoder> en, __unsa
                 int reg = b->reg;
                 if (b->kind == NVN_RB_UBOP && keep_ok && reg < 16 && g_ubo_sgen[nvn_stage][reg] <= kept_ugen) continue;
                 if (b->kind == NVN_RB_SBUFP && ssbo_same_env && reg < 16 && g_ssbo_sgen[nvn_stage][reg] <= kept_gen) continue;
+                if (sh->rf.sblen && b->sbx && !sblen) {
+                    __unsafe_unretained id<MTLBuffer> sb; arena_at sat = arena_take_u(DMSH_SBLEN_SLOTS * 8u, &sb); (void)sb;
+                    sblen = (uint32_t *)(void *)sat.cpu; memcpy(sblen, sh->ab_sblen_cpu, DMSH_SBLEN_SLOTS * 8u);
+                    p[sh->ab_sblen_aid] = sat.gpu; za_check(sat.gpu, "argument block address slot", sh->ab_sblen_aid);
+                }
                 const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL; void *mb; uint64_t mo = 0, gpu = 0;
                 static struct { uint64_t gen; pc_ent pc; } g_sbm[NVN_RESOURCE_STAGES][16];
                 if (u && u->addr) {
@@ -19094,24 +19100,23 @@ static inline void fbc_keep(const NvShader *fs) {
 }
 void mtl_fbc_stats(uint64_t *hits, uint64_t *miss) { *hits = g_fbc_hits; *miss = g_fbc_miss; }   // hle_nvn.c's feedback-scan line
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
-static struct { const NvShader *fs; uint64_t pass, setrt_n, agen, fgen, stat_pass; uint32_t cmask; uint8_t has_depth; } g_fb_fast;
 static __attribute__((noinline)) void fb_prepare_slow(__unsafe_unretained NvProg *pr);
 static inline __attribute__((always_inline)) void fb_prepare(__unsafe_unretained NvProg *pr) {
     if (__builtin_expect(!dp_on() && draw_memo_on() && fbc_on() && pr && pc_tp() == g_pc_rep_tp, 1)) {
         __unsafe_unretained NvShader *fs = pr->sh[1];
-        if (__builtin_expect(fs && g_fb_fast.fs == fs && g_enc &&
-            g_fb_fast.pass == g_pass.serial && g_fb_fast.setrt_n == g_setrt_n &&
-            g_fb_fast.agen == g_args_gen[1] && g_fb_fast.fgen == g_fbc_gen &&
-            g_fb_fast.stat_pass == g_stat_pass && !(g_fb_rmask | g_fb_dread | g_fb_rebind), 1)) {
+        if (__builtin_expect(fs && g_enc &&
+            fs->fb_c_pass == g_pass.serial && fs->fb_c_setrt == g_setrt_n &&
+            fs->fb_c_agen == g_args_gen[1] && fs->fb_c_fgen == g_fbc_gen &&
+            fs->fb_c_spass == g_stat_pass && !(g_fb_rmask | g_fb_dread | g_fb_rebind), 1)) {
             g_draw_seq++; g_fb_n = 0;
-            if (__builtin_expect((g_fb_fast.cmask & ~g_fb_wmask) != 0, 0)) {
+            if (__builtin_expect((fs->fb_c_cmask & ~g_fb_wmask) != 0, 0)) {
                 uint32_t chm = S.chmask.mask;
                 chm = (chm | (chm >> 1)) & 0x55555555u; chm = (chm | (chm >> 2)) & 0x11111111u;
                 chm = (chm | (chm >> 3)) & 0x03030303u; chm = (chm | (chm >> 6)) & 0x000f000fu;
-                g_fb_wmask |= g_fb_fast.cmask & ((chm | (chm >> 12)) & 0xffu) & (fs->rf.color_known ? fs->rf.color_mask : 0xffu);
+                g_fb_wmask |= fs->fb_c_cmask & ((chm | (chm >> 12)) & 0xffu) & (fs->rf.color_known ? fs->rf.color_mask : 0xffu);
             }
             uint32_t dsw_want = (uint32_t)((S.ds.dt && S.ds.dw) ? FB_DS_DEPTH : 0) | (S.ds.st ? FB_DS_STENCIL : 0);
-            if (__builtin_expect(g_fb_fast.has_depth && (dsw_want & ~g_fb_dwrote) != 0, 0)) {
+            if (__builtin_expect(fs->fb_c_has_depth && (dsw_want & ~g_fb_dwrote) != 0, 0)) {
                 if (!(g_fb_dwrote & FB_DS_DEPTH) && S.ds.dt && S.ds.dw) g_fb_dwrote |= FB_DS_DEPTH;
                 if (!(g_fb_dwrote & FB_DS_STENCIL) && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) &&
                     (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP ||
@@ -19274,10 +19279,10 @@ static __attribute__((noinline)) void fb_prepare_slow(__unsafe_unretained NvProg
         g_fbsc.fs == fs && g_fbsc.pass == g_pass.serial && g_fbsc.setrt_n == g_setrt_n && g_setrt_n &&
         !(fs->rf.pool || fs->rf.dyn) &&
         (!R.rt.depth || (!fs->rf.bindless && g_fbdc.fs == fs && g_fbdc.agen == g_args_gen[1] && g_fbdc.gen == g_fbc_gen && g_fbdc.dser == g_fbsc.dser))) {
-        g_fb_fast.fs = fs; g_fb_fast.pass = g_pass.serial; g_fb_fast.setrt_n = g_setrt_n;
-        g_fb_fast.agen = g_args_gen[1]; g_fb_fast.fgen = g_fbc_gen; g_fb_fast.stat_pass = g_fb_pass;
-        g_fb_fast.cmask = g_fbsc.cmask; g_fb_fast.has_depth = R.rt.depth != NULL;
-    } else g_fb_fast.fs = NULL;
+        fs->fb_c_pass = g_pass.serial; fs->fb_c_setrt = g_setrt_n;
+        fs->fb_c_agen = g_args_gen[1]; fs->fb_c_fgen = g_fbc_gen; fs->fb_c_spass = g_fb_pass;
+        fs->fb_c_cmask = (uint8_t)g_fbsc.cmask; fs->fb_c_has_depth = R.rt.depth != NULL;
+    } else fs->fb_c_pass = 0;
     if (ntile) { g_fb_tseq = g_draw_seq; g_fb_tile_draws++;
         if (g_fb_tile_draws == 1 || g_fb_tile_draws == 1000 || g_fb_tile_draws % 100000 == 0)
             MLOG("same-pass feedback sampling: draw #%llu reads its attachments from the tile, %llu snapshots so far (frame %llu, shader %s, attachments %#x)", (unsigned long long)g_fb_tile_draws, (unsigned long long)g_fb_count,
@@ -22949,10 +22954,8 @@ static void sub_cut(void) {
 // costs a store and a load of the attachments, so it is taken only while the GPU would otherwise wait
 // A split is taken only when sub_cut will commit after it (sub_cut_ready): otherwise the pass would be
 // stored and loaded for nothing (DM_NVN_CUT=0, or above DM_NVN_PASS_SPLIT)
-static uint64_t g_pass_splits, g_split_pass; static int g_split_n;
-uint64_t g_psw[5];   // pass_split_try per draw past DM_NVN_PASS_SPLIT: 0 split, declined because 1 the GPU is busy, 2 no cut ready, 3 a slice-merged pass, 4 the per-pass limit (@psplit_* rows)   // g_split_n: splits of the pass g_split_pass so far
 static int pass_split_draws(void) { if (g_pass_split_n < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT"); g_pass_split_n = e ? atoi(e) : 256; } return g_pass_split_n; }
-static int pass_split_max(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT_MAX"); v = e ? atoi(e) : DM_GAME_PASS_SPLIT_MAX; } return v; }   // per NVN pass: each split stores and loads its attachments (default the profile's pass_split_max, else 2; 0 = no limit)
+static int pass_split_max(void) { if (g_pass_split_max_v < 0) { const char *e = getenv("DM_NVN_PASS_SPLIT_MAX"); g_pass_split_max_v = e ? atoi(e) : DM_GAME_PASS_SPLIT_MAX; } return g_pass_split_max_v; }   // per NVN pass: each split stores and loads its attachments (default the profile's pass_split_max, else 2; 0 = no limit)
 static __attribute__((noinline)) void pass_split_try_slow(void) {
     int n = pass_split_draws();
     if (n <= 0 || !g_enc || g_stat_draw - g_cut_draw0 < (uint64_t)n) return;

@@ -1609,7 +1609,7 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKc", "fsp-srv; rom → host RomFS directory (over
 // OpenDataStorageByProgramIndex): any program can mount another's RomFS. A Switch 2 Edition of a Switch 1 game is one application of two programs, and the Switch 2 program's own
 // RomFS holds a few files: Super Mario Bros. Wonder's mounts the Switch 1 program's, index 0, as content: and its upgrade add-on as aocup: (issue/PR #2692).
 // The other programs' RomFS images are <index>.img in DM_ROMFS_PROGRAMS, by default the folder romfs_programs beside DM_ROMFS (scripts/pack_nup.py writes them, the app carries them
-// beside its RomFS); an index with no image there gets this program's own RomFS (its own index, or a build that has only this program's)
+// beside its RomFS). The current program's index uses DM_ROMFS directly. For other indices, keep the fallback for builds with only this program's image.
 static int program_romfs(int idx, char *out, size_t n) {
     char b[1024], dir[1100]; const char *e = getenv("DM_ROMFS_PROGRAMS");
     if (e && *e) snprintf(dir, sizeof dir, "%s", e);
@@ -1623,6 +1623,7 @@ static int program_romfs(int idx, char *out, size_t n) {
     return idx >= 0 && snprintf(out, n, "%s/%d.img", dir, idx) < (int)n && !stat(out, &st) && S_ISREG(st.st_mode);
 }
 HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom of the program with this index → its RomFS image (romfs_programs/<index>.img beside DM_ROMFS), else this program's", Result, h_fs_MountRomIdx, const char *name, int idx, void *cache, size_t sz) {
+    if (idx == (int)(DM_GAME_PROGRAM_ID & 0xfff)) return h_fs_MountRom(name, cache, sz);
     char img[1200];
     if (program_romfs(idx, img, sizeof img)) { dm_thread_service_request(); return mount(name, img, 1); }   // mount_ex logs it
     if (idx) LOG("[RED] fs::MountRom(%s, program index %d): no RomFS image of program %d beside this program's (romfs_programs/%d.img): this program's own", name, idx, idx, idx);

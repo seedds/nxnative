@@ -64,6 +64,13 @@ void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+void *mtl_nvn_event(void);
+void mtl_wait_gl_event(void *event, uint64_t value);
+void *dm_gl_event(void);
+void *dm_gl_retain_texture_2d(uint32_t name);
+void *dm_gl_sync_publish(uint64_t serial, int from_nvn);
+int dm_gl_sync_serial(const void *sync, uint64_t *serial, int *from_nvn);
+int dm_gl_wait_serial(uint64_t serial, uint64_t timeout_ns);
 int mtl_depth_bounds_hw(void);   // the depth bounds test is enabled (DM_NVN_DEPTH_BOUNDS != 0) and the GPU supports it (Apple10 and later), asked once with one log line
 uint64_t mtl_ext_tex(void *tex);
 // The producer is done with one (a swap chain destroyed, a window surface replaced) and has waited for its presents' tickets (mtl_present_wait): the serial goes now, and the
@@ -74,4 +81,6 @@ void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c)
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_set_fstep_fine(int on);                   // late frames at a 30 fps cap's hold 2 are shown on the 60 Hz link at frame latency 2 (hle_nvn.c fstep_tick)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
+int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check (copy == 0 checks ticket only)
+int mtl_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);   // bounded ticket wait: 1 ready, 0 timed out
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait

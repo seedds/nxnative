@@ -246,6 +246,14 @@ For a replaced DSP renderer the size query keeps the service's work-buffer contr
 - **Found on:** [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md): reported on 1.0.0 in [PR #190](https://github.com/seedds/nxnative/pull/190); the 1.3.0 bring-up passed that transition before this fix.
 - **Check:** `t_audio_spsc` covers a partially consumed buffer, queue wraparound, release notification, repeated Stop and buffers queued before Start, then runs its 100,000-buffer producer/consumer stress test.
 
+### Flushing an AudioOut at the end of a movie
+
+- **Symptom:** a null read in `nn::audio::FlushAudioOutBuffers` at `sdk+0x9a3e4` after the title movie stops its audio output.
+- **Cause:** the host opens and owns the AudioOut. The unhooked SDK function looks it up in the SDK's own service-session table and dereferences the null result.
+- **Fix:** implement `FlushAudioOutBuffers` on the host output. A started output with pending PCM pauses its consumer, returns the queued buffers in order, drops any staged PCM and resumes playback in the same state. It returns whether PCM was flushed and signals the release event when descriptors are returned. A stopped output keeps its buffers for the next Start.
+- **Found on:** [Devil May Cry 3 Special Edition 1.0.1](../../dm/games/01007B600D5BC000/README.md), SDK 8.2.0. The movie teardown calls Stop, Flush, then Close.
+- **Check:** `t_audio_spsc` verifies the return value, release order and signal, staged PCM, and the playback state. The Mac build reaches the title menu with the fix.
+
 ### RemoteIO's default I/O buffer duration
 
 - **Symptom:** crackling on iOS only.

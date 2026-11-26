@@ -22,7 +22,7 @@
 #   r:<slot>:<count>                             the argument buffer's Metal buffer slot (-1 when absent), and number of argument IDs
 #   b:<id>:<size>                                the default uniform block: its argument ID and size in bytes
 #   n:<name>=<id>:<size>                         a named uniform block (DOOM 3's matrices_ubo): its argument ID and size in bytes
-#   t:<name>=<texture id>:<sampler id>:<type>[:<unit>]  a combined sampler (-1 sampler ID if MSL omits it; optional initial unit from explicit layout(binding))
+#   t:<name>=<texture id>:<sampler id>:<type>[:<unit>[:<count>]]  a combined sampler (-1 for absent sampler ID or implicit unit; count is for arrays)
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
 # Usage: gl_shaders.py <input path>... <out dir> [--ios <dir>]   (input paths: the RomFS, the main NSO, capture folders)
@@ -36,7 +36,7 @@ from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross bui
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
 VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
-TABLE_ABI = '# GL shader ABI 2'   # direct-slot tables cannot be consumed by the argument-buffer host
+TABLE_ABI = '# GL shader ABI 3'   # sampler arrays extend the argument-buffer table
 
 def red(msg): sys.exit('[RED] ' + msg)
 
@@ -112,7 +112,8 @@ def sources(roots):
 # NVIDIA's GLSL compiler accepts more than the GLSL ES 3.20 specification, and glslang does not; these fix-ups run on the preprocessed text (glslang -E, so macros are expanded):
 #   · the GLSL ES 1.0 texture functions (89 of Digimon's fragment shaders call textureCube; with -V glslang reads textureCube as Vulkan's texture type, so a macro cannot rename it);
 #   · a redeclaration of gl_Position as a plain output (the built-in sprite shader of main declares `out float4 vPosition;` with vPosition defined as gl_Position);
-#   · textureOffset with an offset that is not a constant (the built-in FXAA shader): Metal's sample offsets are constants too, so it becomes texture at P + offset / level 0 size;
+#   · a texel offset that is not a constant (the built-in FXAA shader's textureOffset, FF7's textureLodOffset): Metal's sample offsets are constants too, so non-constant calls are
+#     routed to overloaded helper functions that apply P + offset / the level's size (variable_offsets);
 #   · built-ins redeclared as plain inputs and outputs, which DOOM 3's renderer writes into every GLSL 1.50 shader it generates (`out vec4 gl_Position;`, `in vec4 gl_FragCoord;`,
 #     `out float gl_FragDepth;`): the declarations go, the built-ins stay; `out vec4 gl_FragColor;` becomes a plain output of the shader's own (Vulkan GLSL has no gl_FragColor);
 #   · the compatibility colour declared as a plain varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader (DOOM 3): NVIDIA links the two
@@ -180,14 +181,173 @@ def fixups(t, stage, renamed=None):
     else:
         t = own_name(t, r'^[ \t]*in\s+vec4\s+gl_Color\s*;', 'gl_Color', 'dm_Color', 'in vec4 dm_Color;')
         t = own_name(t, r'^[ \t]*out\s+vec4\s+gl_FragColor\s*;', 'gl_FragColor', 'dm_FragColor', 'out vec4 dm_FragColor;')
-    out, i = [], 0
-    for m in re.finditer(r'\btextureOffset\s*\(', t):
-        if m.start() < i: continue
-        args, end = call_args(t, m.end() - 1)
-        if len(args) == 3 and re.search(r'[A-Za-z_]\w*', re.sub(r'\b[iu]?vec[234]\b', '', args[2])):   # an offset with a variable in it
-            s_, p_, o_ = (x.strip() for x in args)
-            out.append(t[i:m.start()] + f'texture({s_}, ({p_}) + vec2({o_}) / vec2(textureSize({s_}, 0)))'); i = end
-    return ''.join(out) + t[i:]
+    return variable_offsets(t, stage)
+
+# All GLSL texture functions taking a texel offset: {name: {arg_count: offset_arg_index}}.
+# texelFetchOffset takes 4 args normally (s, P, lod, offset) and 3 on desktop sampler2DRect (s, P, offset).
+OFFSET_ARGS = {
+    'textureOffset': {3: 2, 4: 2},
+    'textureLodOffset': {4: 3},
+    'textureGradOffset': {5: 4},
+    'texelFetchOffset': {3: 2, 4: 3},
+    'textureProjOffset': {3: 2, 4: 2},
+    'textureProjLodOffset': {4: 3},
+    'textureProjGradOffset': {5: 4},
+}
+OFFSET_RE = re.compile(r'\b(' + '|'.join(OFFSET_ARGS) + r')\s*\(')
+CONST_DECL = re.compile(r'\bconst\s+(?:(?:highp|mediump|lowp)\s+)?\w+\s+([^;{}]+);')
+NON_CONST_DECL = re.compile(r'\b(?:(?:highp|mediump|lowp)\s+)?(?:[iu]?vec[234]|int|uint|float|bool)\s+([^;{}()]+)')
+
+def split_top(s):
+    """Split s on top-level commas (outside parentheses and brackets)."""
+    depth, out, start = 0, [], 0
+    for k, c in enumerate(s):
+        if c in '([': depth += 1
+        elif c in ')]' and depth: depth -= 1
+        elif c == ',' and depth == 0: out.append(s[start:k]); start = k + 1
+    out.append(s[start:])
+    return out
+
+def const_offset(o, consts):
+    """Whether a texel offset is a constant expression: no name in it but a vector constructor or a compile-time const name (a literal's suffix, as in 1u, is no name)."""
+    return not any(n not in consts for n in re.findall(r'\b[A-Za-z_]\w*', re.sub(r'\b[iu]?vec[234]\b', '', o)))
+
+def const_names(decls):
+    """Names declared `const` with compile-time constant initializers and not also declared non-const or as a parameter anywhere in decls."""
+    candidates, spans = {}, []
+    for m in CONST_DECL.finditer(decls):
+        items = split_top(m[1])
+        parsed = []
+        for item in items:
+            dm = re.match(r'\s*([A-Za-z_]\w*)\s*=(.+)$', item, re.S)
+            if dm: parsed.append((dm[1], dm[2]))
+        if parsed and len(parsed) == len(items):
+            spans.append(m.span())
+            for name, init in parsed: candidates.setdefault(name, []).append(init)
+    if not candidates: return set()
+    # Strip matched const-variable statements and exclude any candidate name also declared non-const or as a const parameter.
+    rest, pos = [], 0
+    for a, b in spans: rest.append(decls[pos:a]); pos = b
+    rest.append(decls[pos:])
+    shadowed = set()
+    for m in NON_CONST_DECL.finditer(''.join(rest)):
+        for item in split_top(m[1]):
+            dm = re.match(r'\s*([A-Za-z_]\w*)', item)
+            if dm and dm[1] in candidates: shadowed.add(dm[1])
+    consts, changed = set(), True
+    while changed:
+        changed = False
+        for name, inits in candidates.items():
+            if name in consts or name in shadowed: continue
+            if all(const_offset(expr, consts) for expr in inits):
+                consts.add(name); changed = True
+    return consts
+
+def offset_helpers(used, stage, desktop, prefix):
+    """Generate overloaded GLSL helper functions for the offset families in `used`. Letting glslang resolve overloads covers every sampler declaration shape (arrays, structs,
+    comma lists, parameters), projective vec3/vec4 variants, desktop 1D/Rect samplers, and single-evaluation of P/lod/offset without regex type inference."""
+    lines = []
+    def add(sig, body): lines.append(f'{sig} {{ return {body}; }}')
+    tri = (('', 'vec4'), ('i', 'ivec4'), ('u', 'uvec4'))
+    # (sampler, ret, p, off, grad, fetch_p, coord(sz), fetch_expr, projs, has_lod, has_bias, lod_one)
+    specs = []
+    for sp, rt in tri:
+        specs += [
+            (f'{sp}sampler2D', rt, 'vec2', 'ivec2', 'vec2', 'ivec2',
+             lambda sz: f'p + vec2(o) / vec2({sz})', 'p + o',
+             (('vec3', lambda sz: f'p.xy / p.z + vec2(o) / vec2({sz})'),
+              ('vec4', lambda sz: f'p.xy / p.w + vec2(o) / vec2({sz})')), True, True, 'ivec2(1)'),
+            (f'{sp}sampler2DArray', rt, 'vec3', 'ivec2', 'vec2', 'ivec3',
+             lambda sz: f'vec3(p.xy + vec2(o) / vec2({sz}.xy), p.z)', 'p + ivec3(o, 0)', (), True, True, 'ivec3(1)'),
+            (f'{sp}sampler3D', rt, 'vec3', 'ivec3', 'vec3', 'ivec3',
+             lambda sz: f'p + vec3(o) / vec3({sz})', 'p + o',
+             (('vec4', lambda sz: f'p.xyz / p.w + vec3(o) / vec3({sz})'),), True, True, 'ivec3(1)'),
+        ]
+    specs += [
+        ('sampler2DShadow', 'float', 'vec3', 'ivec2', 'vec2', None,
+         lambda sz: f'vec3(p.xy + vec2(o) / vec2({sz}), p.z)', None,
+         (('vec4', lambda sz: f'vec3(p.xy / p.w + vec2(o) / vec2({sz}), p.z / p.w)'),), True, True, 'ivec2(1)'),
+        ('sampler2DArrayShadow', 'float', 'vec4', 'ivec2', 'vec2', None,
+         lambda sz: f'vec4(p.xy + vec2(o) / vec2({sz}.xy), p.zw)', None, (), False, False, 'ivec3(1)'),
+    ]
+    if desktop:
+        for sp, rt in tri:
+            specs += [
+                (f'{sp}sampler1D', rt, 'float', 'int', 'float', 'int',
+                 lambda sz: f'p + float(o) / float({sz})', 'p + o',
+                 (('vec2', lambda sz: f'p.x / p.y + float(o) / float({sz})'),
+                  ('vec4', lambda sz: f'p.x / p.w + float(o) / float({sz})')), True, True, '1'),
+                (f'{sp}sampler1DArray', rt, 'vec2', 'int', 'float', 'ivec2',
+                 lambda sz: f'vec2(p.x + float(o) / float({sz}.x), p.y)', 'p + ivec2(o, 0)', (), True, True, 'ivec2(1)'),
+                (f'{sp}sampler2DRect', rt, 'vec2', 'ivec2', 'vec2', 'ivec2',
+                 lambda _sz: 'p + vec2(o)', 'p + o',
+                 (('vec3', lambda _sz: 'p.xy / p.z + vec2(o)'),
+                  ('vec4', lambda _sz: 'p.xy / p.w + vec2(o)')), False, False, None),
+            ]
+        specs += [
+            ('sampler1DShadow', 'float', 'vec3', 'int', 'float', None,
+             lambda sz: f'vec3(p.x + float(o) / float({sz}), p.yz)', None,
+             (('vec4', lambda sz: f'vec3(p.x / p.w + float(o) / float({sz}), p.y / p.w, p.z / p.w)'),), True, True, '1'),
+            ('sampler1DArrayShadow', 'float', 'vec3', 'int', 'float', None,
+             lambda sz: f'vec3(p.x + float(o) / float({sz}.x), p.yz)', None, (), True, True, 'ivec2(1)'),
+            ('sampler2DRectShadow', 'float', 'vec3', 'ivec2', 'vec2', None,
+             lambda _sz: 'vec3(p.xy + vec2(o), p.z)', None,
+             (('vec4', lambda _sz: 'vec3(p.xy / p.w + vec2(o), p.z / p.w)'),), False, False, None),
+        ]
+    for sam, rt, pt, ot, gt, ft, coord, fexpr, projs, has_lod, has_bias, lod_one in specs:
+        sz0 = 'textureSize(s, 0)'
+        szl = f'max(textureSize(s, max(int(l), 0)), {lod_one})' if lod_one else sz0
+        if 'textureOffset' in used:
+            add(f'highp {rt} {prefix}textureOffset(highp {sam} s, highp {pt} p, highp {ot} o)', f'texture(s, {coord(sz0)})')
+            if stage == 'frag' and has_bias:
+                add(f'highp {rt} {prefix}textureOffset(highp {sam} s, highp {pt} p, highp {ot} o, highp float b)', f'texture(s, {coord(sz0)}, b)')
+        if 'textureLodOffset' in used and has_lod:
+            add(f'highp {rt} {prefix}textureLodOffset(highp {sam} s, highp {pt} p, highp float l, highp {ot} o)', f'textureLod(s, {coord(szl)}, l)')
+        if 'textureGradOffset' in used:
+            add(f'highp {rt} {prefix}textureGradOffset(highp {sam} s, highp {pt} p, highp {gt} dx, highp {gt} dy, highp {ot} o)', f'textureGrad(s, {coord(sz0)}, dx, dy)')
+        if 'texelFetchOffset' in used and ft is not None:
+            if '2DRect' in sam:
+                add(f'highp {rt} {prefix}texelFetchOffset(highp {sam} s, highp {ft} p, highp {ot} o)', f'texelFetch(s, {fexpr})')
+            else:
+                add(f'highp {rt} {prefix}texelFetchOffset(highp {sam} s, highp {ft} p, highp int l, highp {ot} o)', f'texelFetch(s, {fexpr}, l)')
+        for ppt, pcoord in projs:
+            if 'textureProjOffset' in used:
+                add(f'highp {rt} {prefix}textureProjOffset(highp {sam} s, highp {ppt} p, highp {ot} o)', f'texture(s, {pcoord(sz0)})')
+                if stage == 'frag' and has_bias:
+                    add(f'highp {rt} {prefix}textureProjOffset(highp {sam} s, highp {ppt} p, highp {ot} o, highp float b)', f'texture(s, {pcoord(sz0)}, b)')
+            if 'textureProjLodOffset' in used and has_lod:
+                add(f'highp {rt} {prefix}textureProjLodOffset(highp {sam} s, highp {ppt} p, highp float l, highp {ot} o)', f'textureLod(s, {pcoord(szl)}, l)')
+            if 'textureProjGradOffset' in used:
+                add(f'highp {rt} {prefix}textureProjGradOffset(highp {sam} s, highp {ppt} p, highp {gt} dx, highp {gt} dy, highp {ot} o)', f'textureGrad(s, {pcoord(sz0)}, dx, dy)')
+    return '\n'.join(lines)
+
+def variable_offsets(t, stage='frag'):
+    """Lower non-constant texel offsets, which NVIDIA's compiler takes and GLSL/glslang reject ("'texel offset' : argument must be compile-time constant"), by routing each
+    such call to an injected overloaded helper. Compile-time constant offsets stay untouched so the sampler applies them at each mip level natively. Replacing only the call
+    name lets one flat scan handle nested offset calls automatically."""
+    if not OFFSET_RE.search(t): return t
+    consts = const_names(t)
+    prefix = 'dm_var_'
+    while prefix in t: prefix += 'x_'
+    out, used, i = [], set(), 0
+    for m in OFFSET_RE.finditer(t):
+        fn = m[1]
+        args, _ = call_args(t, m.end() - 1)
+        at = OFFSET_ARGS[fn].get(len(args))
+        if at is None or const_offset(args[at], consts): continue
+        used.add(fn)
+        out.append(t[i:m.start()] + prefix + fn)
+        i = m.start() + len(fn)
+    if not used: return t
+    rewritten = ''.join(out) + t[i:]
+    ver = re.search(r'^\s*#\s*version\s+(\d+)([^\r\n]*)', rewritten, re.M)
+    desktop = bool(ver and not re.match(r'[ \t]+es\b', ver[2]) and int(ver[1]) not in (100, 300, 310, 320))
+    helpers = offset_helpers(used, stage, desktop, prefix)
+    lines = rewritten.splitlines()
+    at = 0
+    while at < len(lines) and (not lines[at].strip() or lines[at].lstrip().startswith(('#version', '#extension', '#line', '#pragma'))):
+        at += 1
+    return '\n'.join((*lines[:at], helpers, *lines[at:])) + ('\n' if rewritten.endswith('\n') else '')
 
 def glsl_type(t, refl):
     return refl['types'][t]['name'] if t in refl.get('types', {}) else t
@@ -346,6 +506,9 @@ def translate(src, stage, key, tmp):
     r = subprocess.run(['glslangValidator', '-E', '-S', stage, g + '.in'], capture_output=True, text=True)
     if r.returncode: return 'glslang -E: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     pre = r.stdout[r.stdout.find('#version'):]   # warnings come first
+    # Vulkan SPIR-V requires GLSL ES 3.10. Expand macros under the game's
+    # original version before raising the version used by the compiler.
+    pre = re.sub(r'^#version[ \t]+300[ \t]+es\b', '#version 310 es', pre, count=1)
     if legacy: pre = strip_legacy_precision(pre, desktop=desktop_legacy)
     if desktop_legacy: pre = legacy_desktop_io(pre, stage)
     fixed = fixups(pre, stage, renamed)
@@ -357,9 +520,11 @@ def translate(src, stage, key, tmp):
     refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
-    for k in ('textures', 'ubos'):
-        for r in refl.get(k, []):
-            if r.get('array'): return f'{"sampler" if k == "textures" else "uniform block"} array {r["name"]}'
+    for u in refl.get('ubos', []):
+        if u.get('array'): return f'uniform block array {u["name"]}'
+    for t in refl.get('textures', []):
+        if 'array' in t and (len(t['array']) != 1 or not 0 < t['array'][0] <= 96):
+            return f'unsupported sampler array shape for {t["name"]}'
     textures, buffers = argument_names(spv)
     cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-argument-buffer-tier', '1',
            '--msl-texture-buffer-native', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
@@ -372,7 +537,8 @@ def translate(src, stage, key, tmp):
     m = re.sub(r'\bfast::(min|max|clamp)\(', r'precise::\1(', m)   # a NaN operand gives the other one, as on the Switch's GPU (vk_shaders.py PRECISE)
     open(msl, 'w').write(m)
     ids = {n: int(i) for n, i in re.findall(r'\b(\w+)\s+\[\[id\((\d+)\)\]\]', m)}
-    f = [f'r:{0 if ids else -1}:{max(ids.values(), default=-1) + 1}']
+    nargs = max(ids.values(), default=-1) + 1
+    f = []
     if stage == 'vert':
         for v in refl.get('inputs', []): f.append(f'a:{v["name"]}={v["location"]}:{v["type"]}')
     else:
@@ -394,9 +560,13 @@ def translate(src, stage, key, tmp):
     for t in refl.get('textures', []):
         name = textures[t['name']]
         if name not in ids: continue
-        unit = bindings.get(t['name'], 0)
-        suffix = f':{unit}' if unit else ''
-        f.append(f't:{t["name"]}={ids[name]}:{ids.get(name + "Smplr", -1)}:{t["type"]}{suffix}')
+        unit = bindings.get(t['name'])
+        tex, samp = ids[name], ids.get(name + 'Smplr', -1)
+        count = t.get('array', [0])[0]
+        nargs = max(nargs, max(tex, samp) + (count or 1))
+        suffix = f':{unit if unit is not None else -1}:{count}' if count else (f':{unit}' if unit else '')
+        f.append(f't:{t["name"]}={tex}:{samp}:{t["type"]}{suffix}')
+    f.insert(0, f'r:{0 if nargs else -1}:{nargs}')
     return msl, game_names(f, renamed)
 
 def one(item, tmp):

@@ -1,4 +1,4 @@
-// Raw HID gamepads (pad_hid.h, GitHub issue #637): the default map and DM_HID_MAP, the Xbox 360 layout of virtual pads (issue #2465), the HORI Taiko Drum layout, report 0x3F's map, raw sticks and Nintendo's descriptor (PR #989), hat directions, axis scaling, the stick dead zone and analog triggers
+// Raw HID gamepads (pad_hid.h, GitHub issue #637): the default map and DM_HID_MAP, the Xbox 360 layout of virtual pads (issue #2465), the Switch wired HID layout, report 0x3F's map, raw sticks and Nintendo's descriptor (PR #989), hat directions, axis scaling, the stick dead zone and analog triggers
 #include <stdio.h>
 #include "../pad_hid.h"
 
@@ -55,6 +55,43 @@ int main(void) {
     h.hat = pad_hid_hat(4, 1, 8); CHECK(pad_hid_buttons(&h) == (DM_BTN_DOWN | DM_BTN_RIGHT));
     CHECK(pad_hid_axis_of(1, 0x30) == PH_X && pad_hid_axis_of(1, 0x35) == PH_RZ && pad_hid_axis_of(2, 0xC5) == PH_BRAKE && pad_hid_axis_of(1, 0x39) == -1);
     CHECK(pad_hid_norm(0, 0, 65535) == -1 && pad_hid_norm(65535, 0, 65535) == 1 && pad_hid_norm(5, 3, 3) == 0);
+    // Wrapped unsigned ranges (Logical Max encoded as signed -1, exposed as -1..0 or 0..-1) recover their unsigned bits by report width.
+    CHECK(fabsf(pad_hid_norm_bits(0x7fff, -1, 0, 16)) < 0.001f);
+    CHECK(pad_hid_norm_bits(-32768, -1, 0, 16) > 0 && pad_hid_norm_bits(-32768, -1, 0, 16) < 0.001f);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 16) == -1 && pad_hid_norm_bits(-1, -1, 0, 16) == 1 && pad_hid_norm_bits(65535, -1, 0, 16) == 1);
+    CHECK(pad_hid_norm_bits(0, 0, -1, 16) == -1 && pad_hid_norm_bits(65535, 0, -1, 16) == 1);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 8) == -1 && fabsf(pad_hid_norm_bits(127, -1, 0, 8)) < 0.01f && pad_hid_norm_bits(-1, -1, 0, 8) == 1);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 1) == 1 && pad_hid_norm_bits(0, -1, 0, 0) == 1 && pad_hid_norm_bits(0, -1, 0, 32) == 1);
+    CHECK(pad_hid_norm_bits(127, 0, 254, 16) == 0 && pad_hid_norm_bits(0, -32768, 32767, 16) > 0);
+    // Replay the measured SHIELD 2015 16-bit trigger sweep and stick extremes through pad_hid_norm_bits.
+    { static const long sweep[] = {0, 5305, 16397, 26314, 44624, 65535, 20445, 0};
+      pad_hid sh; int32_t ss[4];
+      pad_hid_init(&sh, NULL, PAD_HID_DEFAULT);
+      static const int axes[4] = {PH_X, PH_Y, PH_Z, PH_RZ};
+      for (int i = 0; i < 4; i++) { sh.has[axes[i]] = 1; sh.axis[axes[i]] = pad_hid_norm_bits(0x7fff, -1, 0, 16); }
+      pad_hid_sticks(&sh, ss);
+      CHECK(ss[0] == 0 && ss[1] == 0 && ss[2] == 0 && ss[3] == 0);
+      for (int i = 0; i < 4; i++) {
+          int a = axes[i];
+          sh.axis[a] = pad_hid_norm_bits(-1, -1, 0, 16); pad_hid_sticks(&sh, ss);
+          CHECK(ss[i] == (i % 2 ? -DM_STICK_MAX : DM_STICK_MAX));
+          sh.axis[a] = pad_hid_norm_bits(0, -1, 0, 16); pad_hid_sticks(&sh, ss);
+          CHECK(ss[i] == (i % 2 ? DM_STICK_MAX : -DM_STICK_MAX));
+          sh.axis[a] = pad_hid_norm_bits(0x7fff, -1, 0, 16);
+      }
+      for (int a = PH_BRAKE; a <= PH_ACCEL; a++) {
+          sh.has[a] = 1;
+          for (unsigned i = 0; i < sizeof sweep / sizeof *sweep; i++) {
+              sh.axis[a] = pad_hid_norm_bits(sweep[i], -1, 0, 16);
+              uint64_t bit = a == PH_BRAKE ? DM_BTN_ZL : DM_BTN_ZR;
+              CHECK(!!(pad_hid_buttons(&sh) & bit) == (sweep[i] > 32767));
+          }
+      }
+      sh.ac_back = 1; CHECK(pad_hid_buttons(&sh) == DM_BTN_MINUS);
+      sh.buttons = 1u << 11; CHECK(pad_hid_buttons(&sh) == (DM_BTN_PLUS | DM_BTN_MINUS));
+      sh.ac_back = 0; CHECK(pad_hid_buttons(&sh) == DM_BTN_PLUS);
+      sh.buttons = 0; sh.ac_back = 1; CHECK(pad_hid_nin_buttons(&sh, 0, 0) == 0);   // full report 0x30 ignores simple-mode ac_back
+    }
     h.has[PH_X] = h.has[PH_Y] = h.has[PH_Z] = h.has[PH_RZ] = 1;
     h.axis[PH_X] = 1; h.axis[PH_Y] = -1; h.axis[PH_Z] = 0.05f; h.axis[PH_RZ] = 0.04f;
     pad_hid_sticks(&h, s);
@@ -94,16 +131,23 @@ int main(void) {
     CHECK(s[2] == -DM_STICK_MAX && abs(s[3]) < 2);                                          // the right stick from Rx / Ry
     CHECK(pad_hid_buttons(&h) == DM_BTN_ZL);                                                // left trigger down, right one up
     pad_hid_init(&h, "A=1,B=2", PAD_HID_X360); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
-    // The Taiko Drum map needs both halves of its USB ID. Nintendo report 0x3F takes precedence.
-    uint8_t taiko[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RZ] = 1};
-    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x00f0, taiko) == PAD_HID_TAIKO);
-    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x011c, taiko) == PAD_HID_DEFAULT);
-    CHECK(pad_hid_layout_for(0, 0x2dc8, 0x00f0, taiko) == PAD_HID_DEFAULT);
-    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0f0d, 0x00f0, taiko) == PAD_HID_NINTENDO);
-    pad_hid_init(&h, NULL, PAD_HID_TAIKO);
+    // The Switch wired HID map needs both halves of each verified USB ID. Nintendo report 0x3F takes precedence.
+    uint8_t wired[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RZ] = 1};
+    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x00f0, wired) == PAD_HID_SWITCH_WIRED);
+    CHECK(pad_hid_layout_for(0, 0x0f0d, 0x011c, wired) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(0, 0x2dc8, 0x00f0, wired) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0f0d, 0x00f0, wired) == PAD_HID_NINTENDO);
+    pad_hid_init(&h, NULL, PAD_HID_SWITCH_WIRED);
     { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_LS, DM_BTN_RS, 0, 0};
       for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
-    pad_hid_init(&h, "A=1,Y=3", PAD_HID_TAIKO); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    pad_hid_init(&h, "A=1,Y=3", PAD_HID_SWITCH_WIRED); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    // PDP's Wired Fight Pad Pro for Switch (0e6f:0185, GitHub issue #3290) uses the same layout: its reporter measured usages 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R. Non-Switch PDP IDs keep the default.
+    CHECK(pad_hid_layout_for(0, 0x0e6f, 0x0185, wired) == PAD_HID_SWITCH_WIRED);
+    CHECK(pad_hid_layout_for(0, 0x0e6f, 0x02a8, wired) == PAD_HID_DEFAULT);
+    CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0e6f, 0x0185, wired) == PAD_HID_NINTENDO);
+    pad_hid_init(&h, NULL, pad_hid_layout_for(0, 0x0e6f, 0x0185, wired));
+    { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R};
+      for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
     // identical pads: a model is read here only with two or more pads and more than GameController lists, after the wait, and stops at once
     CHECK(pad_dupes_want(1, 0, 0, 1) == 0); CHECK(pad_dupes_want(2, 2, 1, 0) == 0); CHECK(pad_dupes_want(3, 3, 0, 1) == 0);
     CHECK(pad_dupes_want(2, 1, 0, 0) == -1); CHECK(pad_dupes_want(2, 1, 0, 1) == 1); CHECK(pad_dupes_want(2, 0, 0, 1) == 1);

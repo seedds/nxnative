@@ -16,9 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno, track_metadata;
+static int fail_stage_write_after, stage_write_seen, stage_write_fd = -1, fail_stage_publish;
+static const char *fail_xattr_suffix;
+static int fail_xattr_errno;
 static int closes, metadata_fd;
 static _Atomic int renames, unlinks;
 static FILE *metadata;
@@ -97,6 +102,9 @@ static int test_rename(const char *from, const char *to) {
     return r;
 }
 static int test_renamex_np(const char *from, const char *to, unsigned flags) {
+    if (fail_stage_publish && strstr(from, "/.cloud-stage.")) {
+        fail_stage_publish = 0; errno = EIO; return -1;
+    }
     if (faulted(2, from, to)) return -1;
     if (race_hold_ms > 0 && ends(to, "/save.dmsync")) {
         if (atomic_fetch_add(&rename_in_flight, 1) > 0) rename_overlap = 1;
@@ -108,6 +116,29 @@ static int test_renamex_np(const char *from, const char *to, unsigned flags) {
     if (!r) crash_point();
     return r;
 }
+static int test_open(const char *path, int oflag, ...) {
+    mode_t mode = 0;
+    if (oflag & O_CREAT) {
+        va_list ap; va_start(ap, oflag);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    int fd = (oflag & O_CREAT) ? open(path, oflag, mode) : open(path, oflag);
+    if (fd >= 0 && (oflag & O_CREAT) && fail_stage_write_after > 0 && strstr(path, "/.cloud-stage.")) {
+        if (++stage_write_seen == fail_stage_write_after) stage_write_fd = fd;
+    }
+    return fd;
+}
+static ssize_t test_write(int fd, const void *buf, size_t n) {
+    if (stage_write_fd >= 0 && fd == stage_write_fd) {
+        stage_write_fd = -1; errno = ENOSPC; return -1;
+    }
+    return write(fd, buf, n);
+}
+static ssize_t test_getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options) {
+    if (fail_xattr_suffix && ends(path, fail_xattr_suffix)) { errno = fail_xattr_errno; return -1; }
+    return getxattr(path, name, value, size, position, options);
+}
 static int test_unlink(const char *path) {
     unlinks++;
     int r = unlink(path);
@@ -118,6 +149,9 @@ static int test_unlink(const char *path) {
 #define fprintf test_fprintf
 #define fclose test_fclose
 #define flock test_flock
+#define open test_open
+#define write test_write
+#define getxattr test_getxattr
 #define rename test_rename
 #define unlink test_unlink
 #define renamex_np test_renamex_np
@@ -126,6 +160,9 @@ static int test_unlink(const char *path) {
 #undef fprintf
 #undef fclose
 #undef flock
+#undef open
+#undef write
+#undef getxattr
 #undef rename
 #undef unlink
 #undef renamex_np
@@ -484,6 +521,213 @@ static void concurrent_send_cases(const char *folder) {
 
     rm_tree(root);
 }
+static int read_file_bytes(const char *path, uint8_t **out, size_t *len) {
+    struct stat st;
+    if (stat(path, &st) || !S_ISREG(st.st_mode)) return -1;
+    size_t n = (size_t)st.st_size;
+    uint8_t *buf = malloc(n ? n : 1);
+    if (!buf) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f || (n && fread(buf, 1, n, f) != n)) { if (f) fclose(f); free(buf); return -1; }
+    fclose(f);
+    *out = buf; *len = n;
+    return 0;
+}
+static int has_cloud_stage(const char *save) {
+    char dir[PATH_MAX], **v; size_t n; int found = 0;
+    snprintf(dir, sizeof dir, "%s-backups", save);
+    if (names_of(dir, &v, &n)) return 0;
+    for (size_t i = 0; i < n; i++) if (!strncmp(v[i], CLOUD_STAGE_PREFIX, sizeof CLOUD_STAGE_PREFIX - 1)) found = 1;
+    free_names(v, n);
+    return found;
+}
+// Run one full conflict mount+flush in a child process so each attempt has a clean sender thread and process state
+static int conflict_mount_child(const char *save, const char *title, const char *cloud_dir, const char *choice,
+                                int write_fail_after, int publish_fail) {
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid < 0) abort();
+    if (!pid) {
+        setenv("DM_SAVE_SYNC", cloud_dir, 1);
+        setenv("DM_SAVE_SYNC_CHOICE", choice, 1);
+        fail_stage_write_after = write_fail_after;
+        stage_write_seen = 0;
+        stage_write_fd = -1;
+        fail_stage_publish = publish_fail;
+        int mr = mount_once(save, title);
+        int flushed = mr == 0 ? save_sync_flush(5000) : 0;
+        _exit(mr != 0 ? 2 : flushed ? 0 : 1);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0 || !WIFEXITED(st)) return 99;
+    return WEXITSTATUS(st);
+}
+static int verify_seeded_backups(const char *save, int first, int last) {
+    char p[PATH_MAX], expect[64];
+    for (int i = first; i <= last; i++) {
+        snprintf(p, sizeof p, "%s-backups/2020-01-%02d 00.00.00 cloud/save/mark.txt", save, i);
+        snprintf(expect, sizeof expect, "seeded-cloud-%02d", i);
+        if (!is(p, expect)) return 0;
+    }
+    return 1;
+}
+static void conflict_cloud_backup_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    const char *name = "conflict cloud backup";
+    char root[PATH_MAX], cloud_dir[PATH_MAX], title_dir[PATH_MAX], cf[PATH_MAX];
+    char orig[PATH_MAX], local[PATH_MAX], remote[PATH_MAX], backups[PATH_MAX], p[PATH_MAX], choice[64], base[SS_HASH + 1];
+    ss_meta mo, ml, mr;
+    snprintf(root, sizeof root, "%s/cloud-backup", folder);
+    snprintf(cloud_dir, sizeof cloud_dir, "%s/cloud", root);
+    snprintf(title_dir, sizeof title_dir, "%s/%s", cloud_dir, TID);
+    snprintf(cf, sizeof cf, "%s/save.dmsync", title_dir);
+    snprintf(orig, sizeof orig, "%s/orig/save", root);
+    snprintf(local, sizeof local, "%s/local/save", root);
+    snprintf(remote, sizeof remote, "%s/remote/save", root);
+    snprintf(backups, sizeof backups, "%s-backups", local);
+    rm_tree(root); mkdirs(title_dir); mkdirs(orig); mkdirs(local); mkdirs(remote);
+
+    // Base save, then both sides diverge (conflict) with a multi-file cloud archive so restore fails mid-way
+    snprintf(p, sizeof p, "%s/a", orig); put(p, "base-a");
+    CHECK(!ss_scan(orig, &mo), "scan base save");
+    snprintf(p, sizeof p, "%s/a", local); put(p, "local-a");
+    write_base(local, mo.hash);
+    CHECK(!ss_scan(local, &ml), "scan local save");
+    snprintf(p, sizeof p, "%s/a", remote); put(p, "cloud-a");
+    snprintf(p, sizeof p, "%s/b", remote); put(p, "cloud-b");
+    CHECK(!ss_pack(remote, TID, cf, &mr), "pack competing cloud save");
+    snprintf(choice, sizeof choice, "local:%s", mr.hash);
+
+    uint8_t *cloud_before = NULL; size_t cloud_before_len = 0;
+    CHECK(!read_file_bytes(cf, &cloud_before, &cloud_before_len), "snapshot initial cloud archive bytes");
+
+    // Seed 10 recognizable completed cloud backups plus a user-created folder
+    for (int i = 1; i <= KEEP_BACKUPS; i++) {
+        char val[64];
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 cloud/save", backups, i); mkdirs(p);
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 cloud/save/mark.txt", backups, i);
+        snprintf(val, sizeof val, "seeded-cloud-%02d", i);
+        put(p, val);
+    }
+    snprintf(p, sizeof p, "%s/my-manual-backup", backups); mkdirs(p);
+    snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups); put(p, "keep-me");
+
+    // Attempt 1 & 2: inject a mid-restore write failure (second file), then a publish rename failure; repeat to prove no rotation happens
+    for (int attempt = 0; attempt < 2; attempt++) {
+        int rc = conflict_mount_child(local, TID, cloud_dir, choice, attempt == 0 ? 2 : 0, attempt == 1 ? 1 : 0);
+        CHECK(rc == 1, "failed conflict backup does not send local save");
+        CHECK(count_cloud_backups(local) == KEEP_BACKUPS, "all ten previous cloud backups remain after failed restore");
+        CHECK(verify_seeded_backups(local, 1, KEEP_BACKUPS), "every prior backup keeps its exact name and contents");
+        CHECK(!has_cloud_stage(local), "failed conflict backup cleans up its staging folder");
+        snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups);
+        CHECK(is(p, "keep-me"), "user-created folder survives failed restore");
+        read_base(local, base);
+        CHECK(!strcmp(base, mo.hash), "sync base does not advance when conflict backup fails");
+        uint8_t *cloud_now = NULL; size_t cloud_now_len = 0;
+        CHECK(!read_file_bytes(cf, &cloud_now, &cloud_now_len) && cloud_now_len == cloud_before_len && !memcmp(cloud_now, cloud_before, cloud_before_len),
+              "cloud archive bytes remain identical after failed restore");
+        free(cloud_now);
+    }
+
+    // Seed an interrupted leftover staging folder and verify the next mount sweeps it without touching backups or user folders
+    snprintf(p, sizeof p, "%s/%s99999-0/save", backups, CLOUD_STAGE_PREFIX); mkdirs(p);
+    snprintf(p, sizeof p, "%s/%s99999-0/save/partial", backups, CLOUD_STAGE_PREFIX); put(p, "interrupted");
+    CHECK(has_cloud_stage(local), "seeded interrupted staging folder exists before next mount");
+    CHECK(conflict_mount_child(local, TID, cloud_dir, choice, 1, 0) == 1, "third failed restore cleans up interrupted staging too");
+    CHECK(!has_cloud_stage(local), "next mount removes leftover owned staging folder");
+    CHECK(count_cloud_backups(local) == KEEP_BACKUPS && verify_seeded_backups(local, 1, KEEP_BACKUPS),
+          "interrupted staging cleanup leaves all ten prior backups intact");
+    snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups);
+    CHECK(is(p, "keep-me"), "interrupted staging cleanup leaves user-created folder intact");
+
+    // Allow success: publish new cloud backup, prune oldest to KEEP_BACKUPS, advance base and upload local save
+    CHECK(conflict_mount_child(local, TID, cloud_dir, choice, 0, 0) == 0, "conflict backup succeeds and uploads local save");
+    CHECK(!has_cloud_stage(local), "no staging folder remains after successful backup");
+    CHECK(count_cloud_backups(local) == KEEP_BACKUPS, "exactly ten completed cloud backups remain after rotation");
+    snprintf(p, sizeof p, "%s/2020-01-01 00.00.00 cloud", backups);
+    CHECK(access(p, F_OK) == -1 && errno == ENOENT, "oldest seeded cloud backup was rotated out");
+    CHECK(verify_seeded_backups(local, 2, KEEP_BACKUPS), "newest nine seeded cloud backups remain intact");
+    snprintf(p, sizeof p, "%s/my-manual-backup/note.txt", backups);
+    CHECK(is(p, "keep-me"), "user-created folder survives rotation");
+    // Locate the newly published cloud backup and verify both restored files
+    char **v; size_t n; int found_new = 0;
+    CHECK(!names_of(backups, &v, &n), "list backup directory after rotation");
+    for (size_t i = 0; i < n; i++) {
+        if (!is_backup(v[i], "cloud") || !strncmp(v[i], "2020-01-", 8)) continue;
+        char pa[PATH_MAX], pb[PATH_MAX];
+        snprintf(pa, sizeof pa, "%s/%s/save/a", backups, v[i]);
+        snprintf(pb, sizeof pb, "%s/%s/save/b", backups, v[i]);
+        if (is(pa, "cloud-a") && is(pb, "cloud-b")) found_new++;
+    }
+    free_names(v, n);
+    CHECK(found_new == 1, "newly published cloud backup contains the complete restored cloud save");
+    read_base(local, base);
+    CHECK(!strcmp(base, ml.hash), "sync base advances to the uploaded local save");
+    CHECK(cloud_file_is(cf, root, "local-a"), "cloud archive now holds the local save");
+
+    free(cloud_before);
+    rm_tree(root);
+}
+static void xattr_failure_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    const char *name = "guest-name getxattr failures";
+    char root[PATH_MAX], cloud_dir[PATH_MAX], title_dir[PATH_MAX], cf[PATH_MAX];
+    char orig[PATH_MAX], local[PATH_MAX], out[PATH_MAX], unpacked[PATH_MAX], p[PATH_MAX], base[SS_HASH + 1];
+    ss_meta mo, ml, mr;
+    snprintf(root, sizeof root, "%s/xattr-fail", folder);
+    snprintf(cloud_dir, sizeof cloud_dir, "%s/cloud", root);
+    snprintf(title_dir, sizeof title_dir, "%s/%s", cloud_dir, TID);
+    snprintf(cf, sizeof cf, "%s/save.dmsync", title_dir);
+    snprintf(orig, sizeof orig, "%s/orig/save", root);
+    snprintf(local, sizeof local, "%s/local/save", root);
+    snprintf(out, sizeof out, "%s/packed.dmsync", root);
+    snprintf(unpacked, sizeof unpacked, "%s/unpacked", root);
+    rm_tree(root); mkdirs(title_dir); mkdirs(orig); mkdirs(local);
+
+    snprintf(p, sizeof p, "%s/plain", orig); put(p, "previous-cloud");
+    CHECK(!ss_pack(orig, TID, cf, &mo), "pack previous cloud save");
+    uint8_t *cloud_before = NULL; size_t cloud_before_len = 0;
+    CHECK(!read_file_bytes(cf, &cloud_before, &cloud_before_len), "snapshot previous cloud bytes");
+
+    snprintf(p, sizeof p, "%s/plain", local); put(p, "ordinary-file");
+    snprintf(p, sizeof p, "%s/.dm-case-1", local); put(p, "alias-content");
+    CHECK(!setxattr(p, GUEST_NAME, "Plain", 5, 0, XATTR_NOFOLLOW), "attach guest-name xattr to .dm-case-1 alias");
+    write_base(local, mo.hash);
+
+    // Ordinary file lacks GUEST_NAME (ENOATTR) and succeeds alongside the attributed alias
+    CHECK(!ss_scan(local, &ml) && ml.files == 2, "scan succeeds with ENOATTR on ordinary file and readable alias xattr");
+
+    // Inject EIO reading the alias xattr (with cleanup_errno set to verify error preservation through ss_pack cleanup)
+    fail_xattr_suffix = "/.dm-case-1";
+    fail_xattr_errno = EIO;
+    cleanup_errno = EBUSY;
+    CHECK(ss_scan(local, &mr) == -1 && errno == EIO, "ss_scan propagates EIO from getxattr");
+    CHECK(ss_pack(local, TID, out, &mr) == -1 && errno == EIO, "ss_pack propagates EIO from getxattr through cleanup");
+    CHECK(access(out, F_OK) == -1 && errno == ENOENT, "failed ss_pack leaves no partial archive");
+    CHECK(send_save(local, TID, cf) == 0, "send_save refuses to upload when getxattr fails");
+    read_base(local, base);
+    CHECK(!strcmp(base, mo.hash), "previous sync base is unchanged after getxattr failure");
+    uint8_t *cloud_now = NULL; size_t cloud_now_len = 0;
+    CHECK(!read_file_bytes(cf, &cloud_now, &cloud_now_len) && cloud_now_len == cloud_before_len && !memcmp(cloud_now, cloud_before, cloud_before_len),
+          "previous cloud bytes are identical after getxattr failure");
+    free(cloud_now);
+
+    // Clear fault: send succeeds and the attributed alias round-trips its original guest name and contents
+    fail_xattr_suffix = NULL;
+    fail_xattr_errno = 0;
+    cleanup_errno = 0;
+    CHECK(send_save(local, TID, cf) == 1, "send_save succeeds once getxattr is readable");
+    mkdirs(unpacked);
+    CHECK(!ss_read(cf, unpacked, &mr) && !strcmp(mr.hash, ml.hash), "uploaded archive unpacks with matching hash");
+    snprintf(p, sizeof p, "%s/save/plain", unpacked);
+    CHECK(is(p, "ordinary-file"), "ordinary file round-trips");
+    snprintf(p, sizeof p, "%s/save/.dm-case-1", unpacked);
+    char g[16] = {0}; ssize_t gl = getxattr(p, GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(is(p, "alias-content") && gl == 5 && !strcmp(g, "Plain"), "attributed .dm-case-1 alias round-trips guest name and contents");
+
+    free(cloud_before);
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -517,6 +761,8 @@ int main(void) {
     }
     fetch_cases(folder);
     concurrent_send_cases(folder);
+    conflict_cloud_backup_cases(folder);
+    xattr_failure_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

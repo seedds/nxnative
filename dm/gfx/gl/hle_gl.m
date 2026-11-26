@@ -53,24 +53,80 @@ typedef void *EGLDisplay, *EGLConfig, *EGLContext, *EGLSurface; typedef int32_t 
 // GL: one GL function, registered in the host's import table for both direct imports and eglGetProcAddress. GLB: the same, run on the thread's big host stack
 // (hle_bigstack.c, register arguments only) for the functions that call into Metal: a game thread's stack can be small. EGL uses the same import table and big-stack entry.
 // GLboolean and other arguments narrower than 32 bits are taken as uint32_t and truncated here (hle.h: Switch callers do not extend them)
-#define GL(name, ret, ...)                                                                       \
-    static ret h_##name(__VA_ARGS__);                                                            \
-    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name}); \
+// Serialize entry to the GL encoder and select the calling thread's EGL state.
+// Stack arguments use the guest ABI. GL_SPLIT_STACK names the few calls with
+// arguments beyond x0–x7 that pack them before entering the big host stack.
+static void gl_enter(void) __attribute__((used));
+static void gl_leave(void) __attribute__((used));
+static void gl_wait_begin(void);
+static void gl_wait_end(void);
+__asm__(
+    ".text\n.p2align 2\n_dm_gl_call:\n"
+    "    sub sp, sp, #0xf0\n"
+    "    stp x29, x30, [sp, #0xe0]\n"
+    "    add x29, sp, #0xe0\n"
+    "    stp x0, x1, [sp, #0x40]\n"
+    "    stp x2, x3, [sp, #0x50]\n"
+    "    stp x4, x5, [sp, #0x60]\n"
+    "    stp x6, x7, [sp, #0x70]\n"
+    "    stp x8, x16, [sp, #0x80]\n"
+    "    stp d0, d1, [sp, #0x90]\n"
+    "    stp d2, d3, [sp, #0xa0]\n"
+    "    stp d4, d5, [sp, #0xb0]\n"
+    "    stp d6, d7, [sp, #0xc0]\n"
+    "    cbz x17, 1f\n"
+    "    add x9, sp, #0xf0\n"
+    "    mov x10, sp\n"
+    "2:  ldr x11, [x9], #8\n"
+    "    str x11, [x10], #8\n"
+    "    subs x17, x17, #8\n"
+    "    b.ne 2b\n"
+    "1:  bl _gl_enter\n"
+    "    ldp x0, x1, [sp, #0x40]\n"
+    "    ldp x2, x3, [sp, #0x50]\n"
+    "    ldp x4, x5, [sp, #0x60]\n"
+    "    ldp x6, x7, [sp, #0x70]\n"
+    "    ldp x8, x16, [sp, #0x80]\n"
+    "    ldp d0, d1, [sp, #0x90]\n"
+    "    ldp d2, d3, [sp, #0xa0]\n"
+    "    ldp d4, d5, [sp, #0xb0]\n"
+    "    ldp d6, d7, [sp, #0xc0]\n"
+    "    blr x16\n"
+    "    str x0, [sp, #0x40]\n"
+    "    str d0, [sp, #0x90]\n"
+    "    bl _gl_leave\n"
+    "    ldr x0, [sp, #0x40]\n"
+    "    ldr d0, [sp, #0x90]\n"
+    "    ldp x29, x30, [sp, #0xe0]\n"
+    "    add sp, sp, #0xf0\n"
+    "    ret\n");
+
+#define GL_STRING_INNER(x) #x
+#define GL_STRING(x) GL_STRING_INNER(x)
+#define GL_GUARD(fn, stack)                                                                     \
+    extern const char fn##_ctx[];                                                              \
+    __asm__(".text\n.p2align 2\n_" #fn "_ctx:\n"                                             \
+            "    adrp x16, _" #fn "@PAGE\n    add x16, x16, _" #fn "@PAGEOFF\n"                 \
+            "    mov x17, #" GL_STRING(stack) "\n    b _dm_gl_call\n")
+#define GL_SPLIT_STACK(name, ret, stack, ...)                                                    \
+    static ret h_##name(__VA_ARGS__) __attribute__((used));                                     \
+    GL_GUARD(h_##name, stack);                                                                 \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_ctx});                    \
     static ret h_##name(__VA_ARGS__)
-#define BIGSTUB(fn)                                                                              \
-    extern const char fn##_bs[];                                                                 \
-    __asm__(".text\n.p2align 2\n.globl _" #fn "_bs\n.private_extern _" #fn "_bs\n_" #fn "_bs:\n" \
-            "    adrp x16, _" #fn "@PAGE\n    add x16, x16, _" #fn "@PAGEOFF\n    b _dm_bigstack_enter\n")
-#define GLB(name, ret, ...)                                                                      \
-    static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
-    BIGSTUB(h_##name);                                                                           \
-    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_bs}); \
+#define GL(name, ret, ...) GL_SPLIT_STACK(name, ret, 0, __VA_ARGS__)
+#define BIGSTUB_AS(entry, fn)                                                                  \
+    extern const char entry[];                                                                \
+    __asm__(".text\n.p2align 2\n.globl _" #entry "\n.private_extern _" #entry "\n_" #entry ":\n" \
+            "    adrp x16, _" #fn "@PAGE\n    add x16, x16, _" #fn "@PAGEOFF\n"                 \
+            "    b _dm_bigstack_enter\n")
+#define BIGSTUB(fn) BIGSTUB_AS(fn##_bs, fn)
+#define GLB(name, ret, ...)                                                                     \
+    static ret h_##name(__VA_ARGS__) __attribute__((used));                                     \
+    GL_GUARD(h_##name, 0);                                                                     \
+    BIGSTUB_AS(h_##name##_bs, h_##name##_ctx);                                                   \
+    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_bs});                     \
     static ret h_##name(__VA_ARGS__)
-#define EGL(name, ret, ...)                                                                      \
-    static ret h_##name(__VA_ARGS__) __attribute__((used));                                      \
-    BIGSTUB(h_##name);                                                                           \
-    DM_REGISTER("swhle", hle_ent, e_##name, {#name, (void *)h_##name##_bs}); \
-    static ret h_##name(__VA_ARGS__)
+#define EGL(name, ret, ...) GLB(name, ret, __VA_ARGS__)
 
 // ---------- GL enums ----------
 enum {
@@ -131,7 +187,8 @@ enum {
     GL_READ_FRAMEBUFFER = 0x8ca8, GL_DRAW_FRAMEBUFFER, GL_READ_FRAMEBUFFER_BINDING, GL_RENDERBUFFER_SAMPLES, GL_FRAMEBUFFER_COMPLETE = 0x8cd5, GL_MAX_COLOR_ATTACHMENTS = 0x8cdf,
     GL_RENDERBUFFER_WIDTH = 0x8d42, GL_RENDERBUFFER_HEIGHT, GL_RENDERBUFFER_INTERNAL_FORMAT, GL_FRAMEBUFFER_SRGB = 0x8db9, GL_SAMPLER_2D_ARRAY = 0x8dc1,
     GL_UNSIGNED_INT_VEC2 = 0x8dc6, GL_UNSIGNED_INT_VEC3, GL_UNSIGNED_INT_VEC4, GL_TEXTURE_SWIZZLE_R = 0x8e42, GL_TEXTURE_SWIZZLE_A = 0x8e45, GL_TEXTURE_SWIZZLE_RGBA = 0x8e46,
-    GL_ALREADY_SIGNALED = 0x911a, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED, GL_CONTEXT_PROFILE_MASK = 0x9126,
+    GL_OBJECT_TYPE = 0x9112, GL_SYNC_CONDITION, GL_SYNC_STATUS, GL_SYNC_FLAGS, GL_SYNC_FENCE, GL_SYNC_GPU_COMMANDS_COMPLETE, GL_UNSIGNALED, GL_SIGNALED,
+    GL_ALREADY_SIGNALED, GL_TIMEOUT_EXPIRED, GL_CONDITION_SATISFIED, GL_CONTEXT_PROFILE_MASK = 0x9126,
 };
 #define GL_MAP_INVALIDATE_BUFFER_BIT 0x8
 #define GL_SYNC_FLUSH_COMMANDS_BIT 0x1
@@ -175,15 +232,14 @@ static int is_samp(int t) { return t >= T_SAMP2D && t < T_OTHER; }
 static int is_intt(int t) { return t >= T_INT && t <= T_BOOL; }
 typedef struct { char name[48]; uint8_t slot, type; } shattr;                         // a vertex input
 typedef struct { char name[48]; uint16_t off, count, stride; uint8_t type; } shuni;   // a default block member (count 0 = not an array)
-typedef struct { char name[48]; uint16_t slot; uint8_t type; int sampler; uint8_t unit; } shsamp;   // a combined sampler: texture/sampler argument IDs and optional layout(binding) unit
+typedef struct { char name[48]; uint16_t slot, count; uint8_t type; int sampler, unit; } shsamp;   // combined sampler, count 0 for scalar, unit -1 for implicit binding
 typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;               // a named uniform block: its argument ID and size
 typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
 static int sh_read_abi(FILE *f) {
-    const char abi[] = "# GL shader ABI 2\n";
-    char line[sizeof abi];
-    return fgets(line, sizeof line, f) && !strcmp(line, abi);
+    char line[sizeof "# GL shader ABI 3\n"];
+    return fgets(line, sizeof line, f) && (!strcmp(line, "# GL shader ABI 2\n") || !strcmp(line, "# GL shader ABI 3\n"));
 }
 static void sh_free(shinfo *s) { free(s->a); free(s->u); free(s->t); free(s->b); }
 static int sh_read_row(char *line, shinfo *s) {
@@ -207,11 +263,15 @@ static int sh_read_row(char *line, shinfo *s) {
         } else if (t[0] == 'u' && (unsigned)s->nu < (unsigned)nu && sscanf(t, "u:%63[^=]=%u:%31[^:]:%u:%u", nm, &a1, ty, &a2, &a3) == 5) {
             shuni *x = &s->u[s->nu++]; strlcpy(x->name, nm, sizeof x->name); x->off = a1; x->type = tcode(ty); x->count = a2; x->stride = a3;
         } else if (t[0] == 't' && (unsigned)s->nt < (unsigned)nt) {
-            unsigned unit = 0; int end4 = 0, end5 = 0;
-            int n = sscanf(t, "t:%63[^=]=%u:%d:%31[^:]%n:%u%n", nm, &a1, &sa, ty, &end4, &unit, &end5);
-            if ((n == 4 && !t[end4]) || (n == 5 && !t[end5])) {
-                if (a1 >= (unsigned)s->nargs || sa < -1 || sa >= s->nargs || unit >= NUNITS) { bad = 1; continue; }
-                shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->sampler = sa; x->type = tcode(ty); x->unit = (uint8_t)unit;
+            unsigned count = 0; int unit = -1, end4 = 0, end5 = 0, end6 = 0;
+            int n = sscanf(t, "t:%63[^=]=%u:%d:%31[^:]%n:%d%n:%u%n", nm, &a1, &sa, ty, &end4, &unit, &end5, &count, &end6);
+            if ((n == 4 && !t[end4]) || (n == 5 && !t[end5]) || (n == 6 && !t[end6])) {
+                unsigned span = count ? count : 1;
+                if (span > NUNITS || a1 >= (unsigned)s->nargs || span > (unsigned)s->nargs - a1 ||
+                    sa < -1 || (sa >= 0 && sa > s->nargs - (int)span) || unit < -1 || unit >= NUNITS ||
+                    (unit >= 0 && unit + (int)span > NUNITS)) { bad = 1; continue; }
+                shsamp *x = &s->t[s->nt++]; strlcpy(x->name, nm, sizeof x->name);
+                x->slot = a1; x->sampler = sa; x->type = tcode(ty); x->unit = unit; x->count = count;
             }
         } else if (t[0] == 'b' && sscanf(t, "b:%u:%u", &a1, &a2) == 2) {
             if (a1 >= (unsigned)s->nargs) { bad = 1; continue; } s->ub_slot = a1; s->ub_size = a2;
@@ -292,7 +352,6 @@ static void dev_init_once(void) {
         g_util = host_msl_lib(g_dev, nil, "gl_util", &err);   // dm/gfx/msl/gl_util.metal: a quad that clears what a scissored or masked glClear covers (a render pass can only clear its attachments whole)
         if (!g_util) GLOG("[RED] the layer's own shaders do not compile: %s", err.localizedDescription.UTF8String);
         sh_load();
-        mtl_set_origin_lower_left(1);   // the window image is stored bottom row first; the present flips it
         GLOG("Metal device %s; %d shader table entries", g_dev.name.UTF8String, g_nsh);
     }
 }
@@ -342,7 +401,10 @@ static uint64_t cb_commit(void) {
     uint64_t s = g_serial++;
     [cb encodeSignalEvent:g_ev value:s];
     [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
-        if (c.status == MTLCommandBufferStatusError) { static int n; if (n++ < 10) GLOG("[RED] command buffer %llu failed: %s", (unsigned long long)s, c.error.localizedDescription.UTF8String); }
+        if (c.status == MTLCommandBufferStatusError) {
+            static int n; if (n++ < 10) GLOG("[RED] command buffer %llu failed: %s", (unsigned long long)s, c.error.localizedDescription.UTF8String);
+            if (g_ev.signaledValue < s) g_ev.signaledValue = s;
+        }
         uint64_t d = atomic_load(&g_done); while (d < s && !atomic_compare_exchange_weak(&g_done, &d, s)) {}
     }];
     cb_commit_one(cb);
@@ -402,7 +464,7 @@ static rb_t *rb_of(GLuint n) { return n && n < g_nrbs ? g_rbs[n] : NULL; }
 
 typedef struct { int kind; GLuint name; int level, face; } att_t;   // kind 0 none, 1 texture, 2 renderbuffer; face: a cube face, an array layer or a 3D slice
 // The draw table maps output locations to attachments (+1, with 0 for GL_NONE).
-typedef struct { att_t col[NGL_COLORS], depth, stencil; uint64_t gen; uint8_t draw[NGL_COLORS], read; } fb_t;
+typedef struct { att_t col[NGL_COLORS], depth, stencil; uint64_t gen; uint8_t draw[NGL_COLORS], read, bound; } fb_t;
 NAMES(fb_t, g_fbs, g_nfbs, g_capfbs)
 static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 
@@ -423,7 +485,10 @@ static vao_t g_vao0;   // the default vertex array (GL core has none, the compat
 
 // refs: the programs it is attached to; deleted: glDeleteShader flagged it while attached (it keeps its name and goes with its last attachment, as in GL)
 typedef struct { GLenum type; char *src; size_t len; char key[17]; const shinfo *si; __strong id<MTLFunction> fn; int compiled, refs, deleted; } shader_t;
-typedef struct { char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2]; int slot[2], sampler[2]; int unit; } puni_t;   // [0] vertex, [1] fragment
+typedef struct {
+    char name[48]; uint8_t type; uint16_t count; int32_t off[2]; uint16_t stride[2];
+    int slot[2], sampler[2]; uint16_t samp_count[2]; GLint unit, *array_units;
+} puni_t;   // [0] vertex, [1] fragment
 typedef struct {
     uint32_t vf[16]; uint16_t stride[16]; uint8_t div[16];
     uint32_t cpf[NGL_COLORS], dpf, spf;
@@ -475,7 +540,7 @@ static int sp_check(GLuint n, int prog, const char *fn) {
 typedef struct { GLenum func, fail, zfail, pass; GLint ref; GLuint mask, wmask; } stface_t;
 #define STFACE0 {0x207 /* ALWAYS */, GL_KEEP, GL_KEEP, GL_KEEP, 0, 0xffffffff, 0xffffffff}
 #define NUBO 72   // uniform buffer binding points, GL 4.5's minimum GL_MAX_UNIFORM_BUFFER_BINDINGS
-static struct {
+typedef struct {
     GLuint array_buf, uniform_buf, texture_buf, rb, fb, read_fb, prog, vao; int unit;
     struct { GLuint buf; GLintptr off; GLsizeiptr size; } ubo[NUBO];   // glBindBufferRange / Base (size 0: the whole buffer)
     struct { GLuint t2d, tcube, t3d, t2da, tbuf, samp; } units[NUNITS];   // samp: the sampler object bound to the unit (glBindSampler), 0 for the texture's own parameters
@@ -490,12 +555,14 @@ static struct {
     int unpack_align, unpack_row, pack_align, unpack_swap;
     uint32_t palette[256]; int npalette, color_table, index_shift, index_offset;
     int swap_interval;
-} S = {.cmask = {0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf}, .default_draw = 1, .default_read = 1,
-       .dmask = 1, .dfunc = 0x201, .cull_face = GL_BACK, .front = GL_CCW, .bsrc = 1, .bdst = 0, .bsa = 1, .bda = 0, .eqc = GL_FUNC_ADD, .eqa = GL_FUNC_ADD,
-       .st = {STFACE0, STFACE0}, .clear_d = 1, .unpack_align = 4, .pack_align = 4,
-       .swap_interval = 1, .psize = 1, .sample_mask = UINT32_MAX,
-       .va = {{0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1},
-              {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}}};
+} gl_state;
+#define GL_STATE_DEFAULT { .cmask = {0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf}, .default_draw = 1, .default_read = 1, \
+       .dmask = 1, .dfunc = 0x201, .cull_face = GL_BACK, .front = GL_CCW, .bsrc = 1, .bdst = 0, .bsa = 1, .bda = 0, .eqc = GL_FUNC_ADD, .eqa = GL_FUNC_ADD, \
+       .st = {STFACE0, STFACE0}, .clear_d = 1, .unpack_align = 4, .pack_align = 4, \
+       .swap_interval = 1, .psize = 1, .sample_mask = UINT32_MAX, \
+       .va = {{0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, \
+              {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}}}
+static gl_state S = GL_STATE_DEFAULT;
 static vao_t *cur_vao(void) { return S.vao && S.vao < g_nvaos && g_vaos[S.vao] ? g_vaos[S.vao] : &g_vao0; }
 static GLuint *unit_slot(int unit, GLenum target) {   // a unit's binding of a texture target (a cube face names the cube); NULL for a target this layer does not have
     if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) target = GL_TEXTURE_CUBE_MAP;
@@ -854,6 +921,13 @@ static int tex_make(tex_t *t, int rt) {
     OLOG("texture %ux%u %s, %d levels%s", t->w, t->h, m->name, lv, faces == 6 ? ", cube" : "");
     return 1;
 }
+void *dm_gl_retain_texture_2d(uint32_t name) {
+    gl_enter();
+    tex_t *t = tex_of(name);
+    id<MTLTexture> texture = t && t->target == GL_TEXTURE_2D && tex_make(t, 0) ? t->tex : nil;
+    gl_leave();
+    return (__bridge_retained void *)texture;
+}
 // Write one level's (or a part's) bytes into a made texture, in command order: a CPU write when no command buffer that may still read it is pending,
 // else a blit from transient memory (in this frame's command buffer, after ending its render pass, when this frame used it; in a command buffer of its own otherwise).
 // face: the cube face or array layer; z: the slice of a 3D texture
@@ -1200,12 +1274,12 @@ static struct {
     uint8_t atest; GLenum afunc; float aref;      // GL_ALPHA_TEST, glAlphaFunc
 } F;
 static void m_ident(float *m) { memset(m, 0, 64); m[0] = m[5] = m[10] = m[15] = 1; }
-static void ff_init(void) {
-    memset(&F, 0, sizeof F);
-    F.mode = GL_MODELVIEW; F.afunc = GL_NEVER + 7;
-    for (int k = 0; k < 4; k++) F.color[k] = 1;
-    m_ident(F.modelview.m[0]); m_ident(F.projection.m[0]);
-    for (int u = 0; u < FF_UNITS; u++) { m_ident(F.texture[u].m[0]); F.env[u] = GL_MODULATE; }
+static void ff_init(__typeof__(F) *f) {
+    memset(f, 0, sizeof *f);
+    f->mode = GL_MODELVIEW; f->afunc = GL_NEVER + 7;
+    for (int k = 0; k < 4; k++) f->color[k] = 1;
+    m_ident(f->modelview.m[0]); m_ident(f->projection.m[0]);
+    for (int u = 0; u < FF_UNITS; u++) { m_ident(f->texture[u].m[0]); f->env[u] = GL_MODULATE; }
 }
 static ff_stack *ff_matrix(void) {
     if (F.mode == GL_MODELVIEW) return &F.modelview;
@@ -1226,6 +1300,19 @@ typedef struct { int32_t tex, env, has_c, has_a, atest, afunc; float aref, pad; 
 static prog_t g_ffp; static shinfo g_ffsi[2];
 static shattr g_ffa[3] = {{"gl_Vertex", 0, T_VEC4}, {"gl_Color", 3, T_VEC4}, {"gl_MultiTexCoord0", 8, T_VEC4}};
 static int g_ctx_fixed, g_ctx_profile = 1;
+typedef struct {
+    int major, minor;
+    const char *version, *glsl;
+} gl_es_version;
+static const gl_es_version g_es_versions[] = {
+    {1, 0, "OpenGL ES-CM 1.0", NULL},
+    {1, 1, "OpenGL ES-CM 1.1", NULL},
+    {2, 0, "OpenGL ES 2.0", "OpenGL ES GLSL ES 1.00"},
+    {3, 0, "OpenGL ES 3.0", "OpenGL ES GLSL ES 3.00"},
+    {3, 1, "OpenGL ES 3.1", "OpenGL ES GLSL ES 3.10"},
+    {3, 2, "OpenGL ES 3.2", "OpenGL ES GLSL ES 3.20"},
+};
+static const gl_es_version *g_ctx_es;
 static const float g_ff_va0[4] = {0, 0, 0, 1};
 static const float *ff_current(int attr) { return attr == 3 ? F.color : g_ff_va0; }   // what a disabled array reads
 static int ff_texture_complete(const tex_t *t, GLint minf) {
@@ -1361,30 +1448,33 @@ static void bind_uniforms_textures(prog_t *p) {
     for (int i = 0; i < p->nu; i++) {
         puni_t *u = &p->u[i];
         if (!is_samp(u->type)) continue;
-        int unit = u->unit < 0 || u->unit >= NUNITS ? 0 : u->unit;
-        GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D :
-                        u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : u->type == T_SAMPBUF ? GL_TEXTURE_BUFFER : GL_TEXTURE_2D;
-        tex_t *t = tex_of(*unit_slot(unit, target));
-        id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
-        if (target == GL_TEXTURE_BUFFER) tx = texture_buffer(t);
-        else if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t, S.units[unit].samp); t->use = g_serial; }
-        if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 :
-                      u->type == T_SAMP2DARR ? g_arr0 : u->type == T_USAMP2D ? g_uint0 : g_tex0;
-        static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
-        if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
-            static uint32_t seen_p[64]; static int seen_u[64], nseen;
-            int dup = 0; for (int k = 0; k < nseen; k++) if (seen_p[k] == p->serial && seen_u[k] == unit) dup = 1;
-            if (!dup && nseen < 64) { seen_p[nseen] = p->serial; seen_u[nseen++] = unit;
-                GLOG("program %u sampler %s (unit %d) has no texture: drawing the 1x1 black placeholder", p->serial, u->name, unit); } }
-        for (int st = 0; st < 2; st++) {
-            if (u->slot[st] < 0) continue;
-            [p->ae[st] setTexture:tx atIndex:u->slot[st]];
-            if (u->sampler[st] >= 0 && sm) {
-                [p->ae[st] setSamplerState:sm atIndex:u->sampler[st]];
-                if (!g_cb_samplers) g_cb_samplers = [NSMutableSet new];
-                [g_cb_samplers addObject:sm];
+        for (int k = 0; k < (u->count ? u->count : 1); k++) {
+            int unit = u->count ? u->array_units[k] : u->unit;
+            if (unit < 0 || unit >= NUNITS) unit = 0;
+            GLenum target = u->type == T_SAMPCUBE ? GL_TEXTURE_CUBE_MAP : u->type == T_SAMP3D ? GL_TEXTURE_3D :
+                            u->type == T_SAMP2DARR ? GL_TEXTURE_2D_ARRAY : u->type == T_SAMPBUF ? GL_TEXTURE_BUFFER : GL_TEXTURE_2D;
+            tex_t *t = tex_of(*unit_slot(unit, target));
+            id<MTLTexture> tx = nil; id<MTLSamplerState> sm = g_samp0;
+            if (target == GL_TEXTURE_BUFFER) tx = texture_buffer(t);
+            else if (t && (t->made || tex_make(t, 0)) && t->tex) { tx = t->tex; sm = tex_sampler(t, S.units[unit].samp); t->use = g_serial; }
+            if (!tx) tx = u->type == T_SAMPCUBE ? g_cube0 : u->type == T_SAMP3D ? g_tex3d0 :
+                          u->type == T_SAMP2DARR ? g_arr0 : u->type == T_USAMP2D ? g_uint0 : g_tex0;
+            static int dl = -1; if (dl < 0) dl = getenv("DM_GL_DRAWLOG") != NULL;
+            if (dl && tx == g_tex0 && t == NULL) {   // a sampler with no texture: the layer draws the 1x1 black placeholder
+                static uint32_t seen_p[64]; static int seen_u[64], nseen;
+                int dup = 0; for (int k = 0; k < nseen; k++) if (seen_p[k] == p->serial && seen_u[k] == unit) dup = 1;
+                if (!dup && nseen < 64) { seen_p[nseen] = p->serial; seen_u[nseen++] = unit;
+                    GLOG("program %u sampler %s (unit %d) has no texture: drawing the 1x1 black placeholder", p->serial, u->name, unit); } }
+            for (int st = 0; st < 2; st++) {
+                if (k >= u->samp_count[st]) continue;
+                [p->ae[st] setTexture:tx atIndex:u->slot[st] + k];
+                if (u->sampler[st] >= 0 && sm) {
+                    [p->ae[st] setSamplerState:sm atIndex:u->sampler[st] + k];
+                    if (!g_cb_samplers) g_cb_samplers = [NSMutableSet new];
+                    [g_cb_samplers addObject:sm];
+                }
+                [e useResource:tx usage:MTLResourceUsageRead stages:st ? MTLRenderStageFragment : MTLRenderStageVertex];
             }
-            [e useResource:tx usage:MTLResourceUsageRead stages:st ? MTLRenderStageFragment : MTLRenderStageVertex];
         }
     }
 }
@@ -1911,8 +2001,10 @@ GL(glGetString, const char *, GLenum n) {
     switch (n) {
         case GL_VENDOR: return "NVIDIA Corporation";
         case GL_RENDERER: return "NVIDIA Tegra X1 (nvgpu)/integrated (Metal)";
-        case GL_VERSION: return "4.5.0 NVIDIA 349.00";
-        case GL_SHADING_LANGUAGE_VERSION: return "4.50 NVIDIA";
+        case GL_VERSION: return g_ctx_es ? g_ctx_es->version : "4.5.0 NVIDIA 349.00";
+        case GL_SHADING_LANGUAGE_VERSION:
+            if (g_ctx_es && !g_ctx_es->glsl) { gl_error(GL_INVALID_ENUM); return NULL; }
+            return g_ctx_es ? g_ctx_es->glsl : "4.50 NVIDIA";
         case GL_EXTENSIONS: {   // the compatibility profile's one string
             static char all[1024]; if (!all[0]) for (int i = 0; i < NEXTS; i++) { strlcat(all, g_exts[i], sizeof all); strlcat(all, " ", sizeof all); }
             return all;
@@ -1921,11 +2013,41 @@ GL(glGetString, const char *, GLenum n) {
     RED1("glGetString(%#x) not implemented", n); return "";
 }
 GL(glGetStringi, const char *, GLenum n, GLuint i) { return n == GL_EXTENSIONS && i < (GLuint)NEXTS ? g_exts[i] : NULL; }
+static const uint8_t g_format_bits[F_N][6] = {
+    [F_RGBA8] = {8, 8, 8, 8}, [F_BGRA8] = {8, 8, 8, 8}, [F_SRGBA8] = {8, 8, 8, 8}, [F_R8] = {8}, [F_RG8] = {8, 8},
+    [F_RGBA16F] = {16, 16, 16, 16}, [F_RGBA32F] = {32, 32, 32, 32}, [F_R16F] = {16}, [F_RG16F] = {16, 16},
+    [F_R32F] = {32}, [F_RG32F] = {32, 32}, [F_RG11B10F] = {11, 11, 10}, [F_RGB10A2] = {10, 10, 10, 2}, [F_RGBA16] = {16, 16, 16, 16},
+    [F_D16] = {0, 0, 0, 0, 16}, [F_D32F] = {0, 0, 0, 0, 32}, [F_D32FS8] = {0, 0, 0, 0, 32, 8}, [F_S8] = {0, 0, 0, 0, 0, 8},
+    [F_R16UI] = {16}, [F_RG32UI] = {32, 32}, [F_RGBA32UI] = {32, 32, 32, 32},
+};
+static int attachment_format(const att_t *a) {
+    if (a->kind == 1) {
+        tex_t *t = tex_of(a->name);
+        if (t && (t->w || t->made)) return t->fmt;
+    } else if (a->kind == 2) {
+        rb_t *r = rb_of(a->name);
+        if (r && r->w) return r->fmt;
+    }
+    return -1;
+}
+
+static GLint framebuffer_component_bits(unsigned component) {
+    static const uint8_t window_bits[] = {WIN_COLOR_BITS, WIN_COLOR_BITS, WIN_COLOR_BITS, WIN_COLOR_BITS, WIN_DEPTH_BITS, WIN_STENCIL_BITS};
+    if (!S.fb) return window_bits[component];
+    const fb_t *fb = fb_of(S.fb);
+    if (!fb) return 0;
+    const att_t *a = component < 4 ? &fb->col[0] : component == 4 ? &fb->depth : &fb->stencil;
+    int format = attachment_format(a);
+    return format >= 0 ? g_format_bits[format][component] : 0;
+}
 GL(glGetIntegerv, void, GLenum p, GLint *v) {
     switch (p) {
         case GL_NUM_EXTENSIONS: *v = NEXTS; return;
-        case GL_MAJOR_VERSION: *v = 4; return;
-        case GL_MINOR_VERSION: *v = 5; return;
+        case 0x8dfa: *v = 1; return;   // SHADER_COMPILER: GLSL sources are translated to Metal
+        case 0xd52: case 0xd53: case 0xd54: case 0xd55: case 0xd56: case 0xd57:
+            *v = framebuffer_component_bits(p - 0xd52); return;   // RED_BITS through STENCIL_BITS
+        case GL_MAJOR_VERSION: *v = g_ctx_es ? g_ctx_es->major : 4; return;
+        case GL_MINOR_VERSION: *v = g_ctx_es ? g_ctx_es->minor : 5; return;
         case GL_CONTEXT_PROFILE_MASK: *v = g_ctx_profile; return;
         case GL_CONTEXT_FLAGS: *v = 0; return;
         case GL_MAX_TEXTURE_SIZE: case GL_MAX_RENDERBUFFER_SIZE: case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *v = 16384; return;
@@ -2082,14 +2204,50 @@ GL(glFlushMappedBufferRange, void, GLenum target, GLintptr off, GLsizeiptr len) 
 // buffers at the end of a frame and waits for the fence three frames later, before it writes that third again
 // A sync is a name, as in GL: a value this layer handed out and has not deleted, which the set of live syncs answers without reading through the value (glIsSync; DOOM 3 asks before it
 // waits on or deletes one). A value that never was a sync, or one deleted already, is GL_INVALID_VALUE and is neither written nor freed (OpenGL 4.6, section 4.1). Read through, a
-// GLsync that NVN's nvnSyncCreateGLSync (not implemented) left unwritten was freed as if it were a block of ours: libmalloc's abort at boot (GitHub issue #2835)
-typedef struct { uint64_t serial; } sync_t;
+// GLsync left unwritten by the old NVN export path was freed as if it were a block of ours (GitHub issue #2835).
+typedef struct { uint64_t serial; int from_nvn; } sync_t;
 static CFMutableSetRef g_syncs;   // the live syncs, by address (no retain callbacks)
+static void sync_free(const void *s, void *ctx) { (void)ctx; free((void *)s); }
 static int sync_live(const void *s) { return s && g_syncs && CFSetContainsValue(g_syncs, s); }
-GL(glFenceSync, void *, GLenum cond, GLbitfield flags) {
-    (void)cond; (void)flags; sync_t *s = zalloc(sizeof *s); s->serial = g_serial;
+static void *sync_new(uint64_t serial, int from_nvn) {
+    sync_t *s = zalloc(sizeof *s);
+    s->serial = serial; s->from_nvn = from_nvn;
     if (!g_syncs) g_syncs = CFSetCreateMutable(NULL, 0, NULL);
-    CFSetAddValue(g_syncs, s); return s;
+    CFSetAddValue(g_syncs, s);
+    return s;
+}
+void *dm_gl_event(void) { return (__bridge void *)g_ev; }
+void *dm_gl_sync_publish(uint64_t serial, int from_nvn) {
+    gl_enter();
+    void *s = g_ev ? sync_new(serial, from_nvn) : NULL;
+    gl_leave();
+    return s;
+}
+int dm_gl_sync_serial(const void *sync, uint64_t *serial, int *from_nvn) {
+    gl_enter();
+    int valid = sync_live(sync);
+    if (valid) {
+        const sync_t *s = sync;
+        *serial = s->serial; *from_nvn = s->from_nvn;
+        if (!*from_nvn && *serial == g_serial) {
+            dm_gfx_enter(); cb_commit(); dm_gfx_leave();
+        }
+    }
+    gl_leave();
+    return valid;
+}
+static int sync_wait(id<MTLSharedEvent> event, uint64_t serial, uint64_t timeout_ns) {
+    if (event.signaledValue >= serial) return 1;
+    if (!timeout_ns || !event) return 0;
+    uint64_t ms = timeout_ns / 1000000;
+    return [event waitUntilSignaledValue:serial timeoutMS:ms ? ms : 1];
+}
+int dm_gl_wait_serial(uint64_t serial, uint64_t timeout_ns) { return sync_wait(g_ev, serial, timeout_ns); }
+GLB(glFenceSync, void *, GLenum cond, GLbitfield flags) {
+    (void)cond; (void)flags;
+    if (g_pend_clear.bits) clears_flush();
+    if (g_q) cb_get();
+    return sync_new(g_serial, 0);
 }
 GL(glDeleteSync, void, void *s) {   // frees the set's own entry, a block glFenceSync made, never what the caller passed
     const void *own = NULL; if (!s) return;
@@ -2097,21 +2255,54 @@ GL(glDeleteSync, void, void *s) {   // frees the set's own entry, a block glFenc
     CFSetRemoveValue(g_syncs, own); free((void *)own);
 }
 GL(glIsSync, uint32_t, void *s) { return sync_live(s); }
-GL(glWaitSync, void, void *s, GLbitfield flags, uint64_t timeout) { (void)s; (void)flags; (void)timeout; }   // a GPU-side wait: the command buffers run in order
+GL(glGetSynciv, void, void *sy, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
+    if (!sync_live(sy) || count < 0) { gl_error(GL_INVALID_VALUE); return; }
+    const sync_t *s = sy;
+    GLint value;
+    switch (pname) {
+        case GL_OBJECT_TYPE: value = GL_SYNC_FENCE; break;
+        case GL_SYNC_CONDITION: value = GL_SYNC_GPU_COMMANDS_COMPLETE; break;
+        case GL_SYNC_FLAGS: value = 0; break;
+        case GL_SYNC_STATUS: {
+            id<MTLSharedEvent> event = s->from_nvn ? (__bridge id<MTLSharedEvent>)mtl_nvn_event() : g_ev;
+            value = event.signaledValue >= s->serial ? GL_SIGNALED : GL_UNSIGNALED;
+            break;
+        }
+        default: gl_error(GL_INVALID_ENUM); return;
+    }
+    if (count) *values = value;
+    if (length) *length = count ? 1 : 0;
+}
+GLB(glWaitSync, void, void *sy, GLbitfield flags, uint64_t timeout) {
+    if (!sync_live(sy) || flags || timeout != UINT64_MAX) { gl_error(GL_INVALID_VALUE); return; }
+    const sync_t *s = sy;
+    // Native GL fences already order work on this queue. Imported NVN fences
+    // use the NVN queue's timeline and must precede the next GL encoder.
+    if (!s->from_nvn) return;
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)mtl_nvn_event();
+    if (event.signaledValue >= s->serial) return;
+    if (g_pend_clear.bits) clears_flush();
+    pass_end();
+    [cb_get() encodeWaitForEvent:event value:s->serial];
+}
 // glMemoryBarrier orders shader writes (images, storage buffers, transform feedback) and the GPU's writes to persistently mapped buffers against what reads
 // them next. Nothing here writes from a shader, the buffers are shared memory, and the command buffers run in order: there is nothing to wait for
 GL(glMemoryBarrier, void, GLbitfield barriers) { (void)barriers; }
 GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     sync_t *s = sy;
     if (!sync_live(s)) { gl_error(GL_INVALID_VALUE); return 0x911d; }   // WAIT_FAILED: no sync object
-    if (g_ev.signaledValue >= s->serial) return GL_ALREADY_SIGNALED;
-    if (s->serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
+    id<MTLSharedEvent> event = s->from_nvn ? (__bridge id<MTLSharedEvent>)mtl_nvn_event() : g_ev;
+    uint64_t serial = s->serial;
+    if (event.signaledValue >= serial) return GL_ALREADY_SIGNALED;
+    if (!s->from_nvn && serial >= g_serial) {   // its command buffer is still being recorded: commit it now (as GL_SYNC_FLUSH_COMMANDS_BIT asks; without it the wait could never end)
         if (!timeout_ns && !(flags & GL_SYNC_FLUSH_COMMANDS_BIT)) return GL_TIMEOUT_EXPIRED;
         dm_gfx_enter(); cb_commit(); dm_gfx_leave();
     }
     if (!timeout_ns) return GL_TIMEOUT_EXPIRED;
-    uint64_t ms = timeout_ns / 1000000;
-    return [g_ev waitUntilSignaledValue:s->serial timeoutMS:ms ? ms : 1] ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
+    gl_wait_begin();
+    int ready = sync_wait(event, serial, timeout_ns);
+    gl_wait_end();
+    return ready ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
 GL(glGenVertexArrays, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_vaos, &g_nvaos, &g_capvaos, sizeof(vao_t)); }
 GL(glDeleteVertexArrays, void, GLsizei n, const GLuint *v) { for (GLsizei i = 0; i < n; i++) if (v[i] && v[i] < g_nvaos && g_vaos[v[i]]) { free(g_vaos[v[i]]); g_vaos[v[i]] = NULL; if (S.vao == v[i]) S.vao = 0; } }
@@ -2410,10 +2601,10 @@ static void teximg_impl(const teximg_args *a) {
         tex_image(a->target, a->level, a->ifmt, f, cv, a->w, a->h, 1, a->pixels || a->compressed ? conv : (free(conv), (void *)NULL), pitch);
     }
 }
-GL(glTexImage2D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
+GL_SPLIT_STACK(glTexImage2D, void, 8, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
     (void)border; teximg_args a = {target, level, ifmt, 0, 0, w, h, format, type, pixels, 0, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
-GL(glTexSubImage2D, void, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels) {
+GL_SPLIT_STACK(glTexSubImage2D, void, 8, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels) {
     teximg_args a = {target, level, 0, x, y, w, h, format, type, pixels, 0, 1, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
 GL(glCompressedTexImage2D, void, GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border, GLsizei size, const void *data) {
@@ -2569,10 +2760,10 @@ static void tex3d_impl(const tex3d_args *a) {
         free(conv);
     }
 }
-GL(glTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t type, const void *pixels) {
+GL_SPLIT_STACK(glTexSubImage3D, void, 24, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t type, const void *pixels) {
     tex3d_args a = {target, level, x, y, z, w, h, d, (GLenum)format, (GLenum)type, pixels}; ((void (*)(const tex3d_args *))(const void *)tex3d_impl_bs)(&a);
 }
-GL(glTexImage3D, void, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format, uint64_t type, const void *pixels) {
+GL_SPLIT_STACK(glTexImage3D, void, 16, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLsizei d, GLint border, GLenum format, uint64_t type, const void *pixels) {
     (void)border;
     if (level) { RED1("glTexImage3D of level %d not implemented", level); return; }
     tex_storage(target, 1, (GLenum)ifmt, w, h, d);
@@ -2639,14 +2830,14 @@ static void compressed_impl(const compressed_args *a) {
     }
 }
 static void compressed_call(compressed_args a) { ((void (*)(const compressed_args *))(const void *)compressed_impl_bs)(&a); }
-GL(glCompressedTexImage3D, void, GLenum target, GLint level, GLenum format, GLsizei w, GLsizei h, GLsizei d, GLint border, GLsizei size, const void *data) {
+GL_SPLIT_STACK(glCompressedTexImage3D, void, 8, GLenum target, GLint level, GLenum format, GLsizei w, GLsizei h, GLsizei d, GLint border, GLsizei size, const void *data) {
     compressed_call((compressed_args){target, format, level, 0, 0, 0, border, w, h, d, size, data, 0, 3});
 }
-GL(glCompressedTexSubImage3D, void, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t size, const void *data) {
+GL_SPLIT_STACK(glCompressedTexSubImage3D, void, 24, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t size, const void *data) {
     compressed_call((compressed_args){target, (GLenum)format, level, x, y, z, 0, w, h, d, (GLsizei)size, data, 1, 3});
 }
 // DOOM 3 streams its DXT images a part at a time (glCompressedTexSubImage2DARB)
-GL(glCompressedTexSubImage2D, void, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLsizei size, const void *data) {
+GL_SPLIT_STACK(glCompressedTexSubImage2D, void, 8, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLsizei size, const void *data) {
     compressed_call((compressed_args){target, format, level, x, y, 0, 0, w, h, 1, size, data, 1, 2});
 }
 // Mipmaps from level 0, in command order (after the draws that rendered level 0 this frame): a texture of one level gets its full chain first, level 0 copied over
@@ -2695,12 +2886,14 @@ GLB(glBindFramebuffer, void, GLenum target, GLuint f) {
         name_at((void ***)&g_fbs, &g_nfbs, &g_capfbs, f, sizeof(fb_t));
         fb_init(f);
     }
+    if (f) fb_of(f)->bound = 1;
     if (target != GL_DRAW_FRAMEBUFFER) S.read_fb = f;   // GL_FRAMEBUFFER binds both
     if (target == GL_READ_FRAMEBUFFER || f == S.fb) return;
     { static int on = -1; if (on < 0) on = getenv("DM_GL_FBLOG") != NULL; if (on) { uint32_t bw, bh; fb_size(f, &bw, &bh); GLOG("bind framebuffer %u %ux%u (was %u) after %llu draws", f, bw, bh, S.fb, (unsigned long long)g_n_draw); } }
     if (g_pend_clear.bits && g_pend_clear.fb == S.fb) clears_flush();
     S.fb = f;   // the pass ends at the next draw or clear into another framebuffer (pass_ensure)
 }
+GL(glIsFramebuffer, uint32_t, GLuint f) { fb_t *fb = fb_of(f); return fb && fb->bound; }
 GL(glCheckFramebufferStatus, GLenum, GLenum target) { (void)target; return GL_FRAMEBUFFER_COMPLETE; }
 static int color_index(GLuint fb, GLenum buffer) {
     if (!buffer) return 0;   // GL_NONE
@@ -2750,6 +2943,8 @@ GL(glGetRenderbufferParameteriv, void, GLenum target, GLenum p, GLint *v) {
         case GL_RENDERBUFFER_SAMPLES: *v = 0; return;
         case GL_RENDERBUFFER_WIDTH: *v = r ? (GLint)r->w : 0; return;
         case GL_RENDERBUFFER_HEIGHT: *v = r ? (GLint)r->h : 0; return;
+        case 0x8d50: case 0x8d51: case 0x8d52: case 0x8d53: case 0x8d54: case 0x8d55:
+            *v = r && r->w ? g_format_bits[r->fmt][p - 0x8d50] : 0; return;   // RED_SIZE through STENCIL_SIZE
     }
     RED1("glGetRenderbufferParameteriv(%#x) not implemented", p); *v = 0;
 }
@@ -2814,19 +3009,12 @@ GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum attachment
         if (a->kind == 1) { tex_t *t = tex_of(a->name); if (t) { kind = 0x1702; format = t->fmt; } }   // TEXTURE
         else if (a->kind == 2) { rb_t *r = rb_of(a->name); if (r) { kind = GL_RENDERBUFFER; format = r->fmt; } }
     }
-    static const uint8_t bits[F_N][6] = {
-        [F_RGBA8] = {8, 8, 8, 8}, [F_BGRA8] = {8, 8, 8, 8}, [F_SRGBA8] = {8, 8, 8, 8}, [F_R8] = {8}, [F_RG8] = {8, 8},
-        [F_RGBA16F] = {16, 16, 16, 16}, [F_RGBA32F] = {32, 32, 32, 32}, [F_R16F] = {16}, [F_RG16F] = {16, 16},
-        [F_R32F] = {32}, [F_RG32F] = {32, 32}, [F_RG11B10F] = {11, 11, 10}, [F_RGB10A2] = {10, 10, 10, 2}, [F_RGBA16] = {16, 16, 16, 16},
-        [F_D16] = {0, 0, 0, 0, 16}, [F_D32F] = {0, 0, 0, 0, 32}, [F_D32FS8] = {0, 0, 0, 0, 32, 8}, [F_S8] = {0, 0, 0, 0, 0, 8},
-        [F_R16UI] = {16}, [F_RG32UI] = {32, 32}, [F_RGBA32UI] = {32, 32, 32, 32},
-    };
     if (p == 0x8cd0) { *v = kind; return; }   // OBJECT_TYPE
     if (p == 0x8cd1 && a) { *v = kind ? (GLint)a->name : 0; return; }   // OBJECT_NAME
     if (p == 0x8cd2 && kind == 0x1702) { *v = a->level; return; }   // TEXTURE_LEVEL
     if (format < 0) { gl_error(GL_INVALID_OPERATION); return; }
     if (p >= 0x8212 && p <= 0x8217) {   // RED_SIZE through STENCIL_SIZE
-        *v = !fb && p == 0x8216 && attachment == GL_DEPTH ? WIN_DEPTH_BITS : bits[format][p - 0x8212];
+        *v = !fb && p == 0x8216 && attachment == GL_DEPTH ? WIN_DEPTH_BITS : g_format_bits[format][p - 0x8212];
         return;
     }
     if (p == 0x8210) { *v = format == F_SRGBA8 ? 0x8c40 : GL_LINEAR; return; }   // COLOR_ENCODING, SRGB
@@ -2882,7 +3070,7 @@ static void blit_impl(const blit_args *a) {
         [b endEncoding]; g_n_blit++;
     }
 }
-GL(glBlitFramebuffer, void, GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, uint64_t mask, uint64_t filter) {
+GL_SPLIT_STACK(glBlitFramebuffer, void, 16, GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, uint64_t mask, uint64_t filter) {
     (void)filter; blit_args a = {{sx0, sy0, sx1, sy1}, {dx0, dy0, dx1, dy1}, (GLbitfield)mask}; ((void (*)(const blit_args *))(const void *)blit_impl_bs)(&a);
 }
 GL(glResolveMultisampleFramebufferAPPLE, void, void) { RED1("glResolveMultisampleFramebufferAPPLE not implemented"); }
@@ -2966,7 +3154,7 @@ static void copy_image_impl(const copy_image_args *a) {
         [b endEncoding]; g_n_blit++;
     }
 }
-GL(glCopyImageSubData, void, GLuint sn, GLenum st, GLint sl, GLint sx, GLint sy, GLint sz, GLuint dn, GLenum dt,
+GL_SPLIT_STACK(glCopyImageSubData, void, 56, GLuint sn, GLenum st, GLint sl, GLint sx, GLint sy, GLint sz, GLuint dn, GLenum dt,
    int64_t dl, int64_t dx, int64_t dy, int64_t dz, int64_t w, int64_t h, int64_t d) {
     // The guest ABI uses 8-byte slots for integer arguments on the stack.
     copy_image_args a = {{sn, st, sl, sx, sy, sz}, {dn, dt, (GLint)dl, (GLint)dx, (GLint)dy, (GLint)dz}, (GLsizei)w, (GLsizei)h, (GLsizei)d};
@@ -3011,7 +3199,7 @@ BIGSTUB(copy_slice_impl);
 static void copy_slice_impl(const copy_slice_args *a) {
     @autoreleasepool { tex_copy(a->target, a->lv, a->xo, a->yo, a->zo, a->x, a->y, a->w, a->h); }
 }
-GL(glCopyTexSubImage3D, void, GLenum target, GLint lv, GLint xo, GLint yo, GLint zo, GLint x, GLint y, GLsizei w, GLsizei h) {
+GL_SPLIT_STACK(glCopyTexSubImage3D, void, 8, GLenum target, GLint lv, GLint xo, GLint yo, GLint zo, GLint x, GLint y, GLsizei w, GLsizei h) {
     if (target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY) { gl_error(GL_INVALID_ENUM); return; }
     copy_slice_args a = {target, lv, xo, yo, zo, x, y, w, h};
     ((void (*)(const copy_slice_args *))(const void *)copy_slice_impl_bs)(&a);
@@ -3258,6 +3446,7 @@ GL(glCreateShader, GLuint, GLenum type) {
 GL(glCreateProgram, GLuint, void) {
     GLuint n = name_new((void ***)&g_sps, &g_nsps, &g_capsps, sizeof(sp_t)); g_sps[n]->is_prog = 1; return n;
 }
+GL(glIsProgram, uint32_t, GLuint pr) { return prog_of(pr) != NULL; }
 GL(glShaderSource, void, GLuint sh, GLsizei count, const GLchar *const *str, const GLint *len) {
     if (!SP_CHECK(sh, 0)) return;
     if (count < 0) { gl_error(GL_INVALID_VALUE); return; }
@@ -3269,6 +3458,8 @@ GL(glShaderSource, void, GLuint sh, GLsizei count, const GLchar *const *str, con
     s->len = strnlen(s->src, s->len);   // the source ends at its first NUL (gl_shaders.py hashes the same text)
     s->compiled = 0;
 }
+// The game can release the GL compiler after linking. The host owns no persistent GLSL compiler.
+GL(glReleaseShaderCompiler, void, void) {}
 GLB(glCompileShader, void, GLuint sh) {
     if (!SP_CHECK(sh, 0)) return;
     shader_t *s = shader_of(sh); if (!s->src) return;
@@ -3337,6 +3528,7 @@ GL(glDetachShader, void, GLuint pr, GLuint sh) {
     if (p->vs == sh) shader_release(&p->vs); else if (p->fs == sh) shader_release(&p->fs); else gl_error(GL_INVALID_OPERATION);   // not attached to it
 }
 static void prog_clear(prog_t *p) {
+    for (int i = 0; i < p->nu; i++) free(p->u[i].array_units);
     p->validated = 0; p->validation_log[0] = 0;
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
     free(p->pc); p->pc = NULL; p->npc = p->cappc = 0;
@@ -3370,10 +3562,25 @@ GLB(glLinkProgram, void, GLuint pr) {
             const char *nm = i < si->nu ? si->u[i].name : si->t[i - si->nu].name;
             puni_t *u = NULL;
             for (int j = 0; j < p->nu; j++) if (!strcmp(p->u[j].name, nm)) u = &p->u[j];
-            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; u->sampler[0] = u->sampler[1] = -1; }
+            if (!u) { u = &p->u[p->nu++]; strlcpy(u->name, nm, sizeof u->name); u->off[0] = u->off[1] = -1; u->slot[0] = u->slot[1] = -1; u->sampler[0] = u->sampler[1] = -1; u->unit = -1; }
             if (i < si->nu) { const shuni *m = &si->u[i]; u->type = m->type; u->count = m->count; u->off[st] = m->off; u->stride[st] = m->stride; }
-            else { const shsamp *m = &si->t[i - si->nu]; u->type = m->type; u->slot[st] = m->slot; u->sampler[st] = m->sampler; if (m->unit) u->unit = m->unit; }
+            else {
+                const shsamp *m = &si->t[i - si->nu];
+                u->type = m->type; u->slot[st] = m->slot; u->sampler[st] = m->sampler;
+                u->samp_count[st] = m->count ? m->count : 1;
+                if (m->count > u->count) u->count = m->count;
+                if (m->unit >= 0) u->unit = m->unit;
+            }
         }
+    }
+    for (int i = 0; i < p->nu; i++) {
+        puni_t *u = &p->u[i];
+        if (!is_samp(u->type)) continue;
+        if (u->count) {
+            u->array_units = zalloc(u->count * sizeof *u->array_units);
+            if (u->unit >= 0) for (int k = 0; k < u->count; k++) u->array_units[k] = u->unit + k;
+        }
+        if (u->unit < 0) u->unit = 0;
     }
     // the game's attribute indices: glBindAttribLocation's for the inputs it names, the input's own number for the others (or the lowest index no binding took)
     const shinfo *vi = p->si[0]; uint32_t taken = 0;
@@ -3414,9 +3621,13 @@ GL(glValidateProgram, void, GLuint pr) {
     uint8_t types[NUNITS] = {0}; int counts[2] = {0};
     for (int i = 0; !why && i < p->nu; i++) {
         const puni_t *u = &p->u[i]; if (!is_samp(u->type)) continue;
-        if (u->unit < 0 || u->unit >= NUNITS) why = "sampler unit is outside GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS";
-        else if (types[u->unit] && types[u->unit] != u->type) why = "samplers of different types use the same texture unit";
-        else { types[u->unit] = u->type; for (int st = 0; st < 2; st++) counts[st] += u->slot[st] >= 0; }
+        for (int k = 0; !why && k < (u->count ? u->count : 1); k++) {
+            int unit = u->count ? u->array_units[k] : u->unit;
+            if (unit < 0 || unit >= NUNITS) why = "sampler unit is outside GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS";
+            else if (types[unit] && types[unit] != u->type) why = "samplers of different types use the same texture unit";
+            else types[unit] = u->type;
+        }
+        for (int st = 0; st < 2; st++) counts[st] += u->samp_count[st];
     }
     if (!why && (counts[0] > 16 || counts[1] > 32 || counts[0] + counts[1] > NUNITS)) why = "active samplers exceed the texture image unit limits";
     if (why) strlcpy(p->validation_log, why, sizeof p->validation_log); else p->validated = 1;
@@ -3447,17 +3658,19 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
 static void prog_free(GLuint pr) {   // the program goes, and its attachments with it
     prog_t *p = &g_sps[pr]->p; prog_clear(p); shader_release(&p->vs); shader_release(&p->fs); free(g_sps[pr]); g_sps[pr] = NULL;
 }
+static int program_current(GLuint name);
 // As in GL, the current program deleted stays in use, its draws going on, until another is made current
 GL(glDeleteProgram, void, GLuint pr) {
     if (!pr || !SP_CHECK(pr, 1)) return;   // 0 is silently ignored
     prog_t *p = prog_of(pr);
-    OLOG("DeleteProgram %u%s", pr, S.prog == pr ? " (current: flagged)" : "");
-    if (S.prog == pr) p->deleted = 1; else prog_free(pr);
+    int in_use = program_current(pr);
+    OLOG("DeleteProgram %u%s", pr, in_use ? " (current: flagged)" : "");
+    if (in_use) p->deleted = 1; else prog_free(pr);
 }
 GL(glUseProgram, void, GLuint pr) {
     if (pr && !SP_CHECK(pr, 1)) return;   // an error leaves the current program as it is
     GLuint old = S.prog; S.prog = pr;
-    prog_t *o = prog_of(old); if (old != pr && o && o->deleted) prog_free(old);
+    prog_t *o = prog_of(old); if (old != pr && o && o->deleted && !program_current(old)) prog_free(old);
 }
 GL(glGetAttribLocation, GLint, GLuint pr, const GLchar *name) {
     if (!SP_CHECK(pr, 1)) return -1;
@@ -3556,9 +3769,16 @@ static void uni_write(GLint loc, GLsizei count, const void *v, int comps, int is
     int el, i = uni_of(p, loc, &el);
     if (i < 0 || count <= 0) return;
     puni_t *u = &p->u[i];
-    if (is_samp(u->type)) { if (is_int) u->unit = *(const GLint *)v; return; }
     int n = u->count ? u->count : 1, rows = cols ? comps / cols : comps, size = cols ? cols * 16 : 16;
-    if (el + count > n) count = n - el;
+    if (el >= n) return;
+    if (count > n - el) count = n - el;
+    if (is_samp(u->type)) {
+        if (is_int && comps == 1) {
+            GLint *units = u->count ? u->array_units : &u->unit;
+            memcpy(units + el, v, count * sizeof *units);
+        }
+        return;
+    }
     for (int st = 0; st < 2; st++) {
         if (u->off[st] < 0) continue;
         int stride = u->stride[st] ? u->stride[st] : size;
@@ -3620,7 +3840,12 @@ static void uni_read(GLuint pr, GLint loc, void *out, int as_int) {
     int el, i = uni_of(p, loc, &el);
     if (i < 0) return;
     const puni_t *u = &p->u[i];
-    if (is_samp(u->type)) { if (as_int) *(GLint *)out = u->unit; else *(GLfloat *)out = (GLfloat)u->unit; return; }
+    if (el >= (u->count ? u->count : 1)) return;
+    if (is_samp(u->type)) {
+        GLint unit = u->count ? u->array_units[el] : u->unit;
+        if (as_int) *(GLint *)out = unit; else *(GLfloat *)out = (GLfloat)unit;
+        return;
+    }
     int st = u->off[0] >= 0 ? 0 : 1; if (u->off[st] < 0) return;
     int cols = u->type == T_MAT4 ? 4 : u->type == T_MAT3 ? 3 : u->type == T_MAT2 ? 2 : 0, rows = cols ? cols : tcomps(u->type);
     const uint8_t *d = p->ub[st] + u->off[st] + (size_t)el * (u->stride[st] ? u->stride[st] : cols ? cols * 16 : 16);
@@ -3669,28 +3894,43 @@ static void frame_end(void) {
 EGL(eglGetDisplay, EGLDisplay, void *native) { (void)native; dev_init(); return (EGLDisplay)&g_egl; }
 EGL(eglInitialize, EGLBoolean, EGLDisplay d, EGLint *major, EGLint *minor) { (void)d; dev_init(); g_egl.init = 1; if (major) *major = 1; if (minor) *minor = 5; return EGL_TRUE; }
 EGL(eglTerminate, EGLBoolean, EGLDisplay d) { (void)d; return EGL_TRUE; }
-// SDL binds 0 (its API before it has chosen one) when it makes the window again (Balatro's love.window.setMode): nothing to change
-EGL(eglBindAPI, EGLBoolean, EGLenum api) { if (api && api != 0x30a2) RED1("eglBindAPI(%#x): only desktop OpenGL (0x30a2) is implemented", api); return EGL_TRUE; }
-// One configuration: RGBA8, depth 24 (32F here), stencil 8, a window surface, desktop OpenGL; it matches the game's attributes
+enum { EGL_OPENGL_ES_API = 0x30a0, EGL_OPENGL_API = 0x30a2, EGL_RENDERABLE_TYPE = 0x3040,
+       EGL_GL_BIT = 0x8, EGL_ES_BITS = 0x45 };
+static __thread EGLint t_egl_error = 0x3000;
+static __thread EGLenum t_egl_api;
+static const EGLConfig gl_config = (EGLConfig)(uintptr_t)1, es_config = (EGLConfig)(uintptr_t)2;
+EGL(eglBindAPI, EGLBoolean, EGLenum api) {
+    if (api == 0) return EGL_TRUE;   // SDL can rebind before choosing its API
+    if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API) { t_egl_error = 0x300c; return EGL_FALSE; }
+    t_egl_api = api;
+    return EGL_TRUE;
+}
+// Both client APIs use the same colour and depth/stencil formats. Keep the
+// requested API with the config for loaders that do not call eglBindAPI.
 EGL(eglChooseConfig, EGLBoolean, EGLDisplay d, const EGLint *attr, EGLConfig *cfg, EGLint n, EGLint *num) {
-    (void)d; (void)attr;
-    if (cfg && n > 0) cfg[0] = (EGLConfig)(uintptr_t)1;
+    (void)d;
+    EGLint renderable = 0;
+    for (int i = 0; attr && attr[i] != 0x3038; i += 2)
+        if (attr[i] == EGL_RENDERABLE_TYPE && attr[i + 1] != -1) renderable = attr[i + 1];
+    EGLConfig chosen = es_config;
+    if ((renderable & EGL_GL_BIT) || (!(renderable & EGL_ES_BITS) && t_egl_api != EGL_OPENGL_ES_API)) chosen = gl_config;
+    if (cfg && n > 0) cfg[0] = chosen;
     if (num) *num = 1;
     return EGL_TRUE;
 }
 // The one configuration's attributes (SDL reads them back after eglChooseConfig): what eglChooseConfig says it is
 EGL(eglGetConfigAttrib, EGLBoolean, EGLDisplay d, EGLConfig cfg, EGLint attr, EGLint *v) {
-    (void)d; (void)cfg;
+    (void)d;
     switch (attr) {
         case 0x3020: *v = 4 * WIN_COLOR_BITS; break;   // BUFFER_SIZE
         case 0x3021: case 0x3022: case 0x3023: case 0x3024: *v = WIN_COLOR_BITS; break;   // ALPHA / BLUE / GREEN / RED_SIZE
         case 0x3025: *v = WIN_DEPTH_BITS; break;   // DEPTH_SIZE
         case 0x3026: *v = WIN_STENCIL_BITS; break;   // STENCIL_SIZE
-        case 0x3028: *v = 1; break;   // CONFIG_ID
+        case 0x3028: *v = cfg == es_config ? 2 : 1; break;   // CONFIG_ID
         case 0x3031: case 0x3032: *v = 0; break;   // SAMPLES, SAMPLE_BUFFERS
         case 0x302e: *v = 0; break;   // NATIVE_VISUAL_ID
         case 0x3033: *v = 0x5; break;   // SURFACE_TYPE: PBUFFER | WINDOW
-        case 0x3040: case 0x3042: *v = 0x8; break;   // RENDERABLE_TYPE, CONFORMANT: OPENGL_BIT
+        case EGL_RENDERABLE_TYPE: case 0x3042: *v = cfg == es_config ? EGL_ES_BITS : EGL_GL_BIT; break;
         case 0x3027: *v = 0x3038; break;   // CONFIG_CAVEAT: NONE
         default: RED1("eglGetConfigAttrib(%#x) not implemented (0)", attr); *v = 0; break;
     }
@@ -3698,18 +3938,174 @@ EGL(eglGetConfigAttrib, EGLBoolean, EGLDisplay d, EGLConfig cfg, EGLint attr, EG
 }
 EGL(eglQueryString, const char *, EGLDisplay d, EGLint name) {
     (void)d;
-    switch (name) { case 0x3053: return "NVIDIA"; case 0x3054: return "1.5"; case 0x3055: return "EGL_KHR_create_context"; case 0x308d: return "OpenGL"; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
+    switch (name) { case 0x3053: return "NVIDIA"; case 0x3054: return "1.5"; case 0x3055: return "EGL_KHR_create_context"; case 0x308d: return "OpenGL OpenGL_ES"; }   // VENDOR, VERSION, EXTENSIONS, CLIENT_APIS
     return NULL;
 }
-static __thread EGLint t_egl_error = 0x3000;   // SUCCESS: EGL errors belong to the calling thread and clear when read
 EGL(eglGetError, EGLint, void) { EGLint e = t_egl_error; t_egl_error = 0x3000; return e; }
-EGL(eglQueryAPI, EGLenum, void) { return 0x30a2; }   // OPENGL_API
+EGL(eglQueryAPI, EGLenum, void) { return t_egl_api ? t_egl_api : EGL_OPENGL_ES_API; }
 EGL(eglWaitNative, EGLBoolean, EGLint engine) { (void)engine; return EGL_TRUE; }
 EGL(eglWaitGL, EGLBoolean, void) { return EGL_TRUE; }
-EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext c) { (void)d; (void)c; return EGL_TRUE; }
+// Context-local container names and bindings. Textures, renderbuffers,
+// buffers, programs, samplers and syncs live in the share group.
+#define GL_LOCAL_TABLES(X) \
+    X(g_fbs) X(g_nfbs) X(g_capfbs) X(g_vaos) X(g_nvaos) X(g_capvaos) \
+    X(g_queries) X(g_nqueries) X(g_capqueries)
+#define GL_SHARED_TABLES(X) \
+    X(g_texs) X(g_ntexs) X(g_captexs) X(g_bufs) X(g_nbufs) X(g_capbufs) \
+    X(g_sos) X(g_nsos) X(g_capsos) X(g_rbs) X(g_nrbs) X(g_caprbs) \
+    X(g_sps) X(g_nsps) X(g_capsps) X(g_syncs)
+#define GL_FIELD(name) __typeof__(name) name;
+typedef struct {
+    GL_SHARED_TABLES(GL_FIELD)
+    unsigned users;
+} gl_share;
+typedef struct gl_context {
+    GL_LOCAL_TABLES(GL_FIELD)
+    gl_state state;
+    __typeof__(F) fixed;
+    vao_t vao0;
+    gl_query_t *active_query[3];
+    GLenum error;
+    int use_fixed, profile, sized, destroyed;
+    const gl_es_version *es;
+    EGLContext handle;
+    EGLSurface draw, read;
+    pthread_t owner;
+    gl_share *share;
+    struct gl_context *next;
+} gl_context;
+#undef GL_FIELD
+
+static gl_share g_default_share;
+static gl_context g_default_context = {
+    .state = GL_STATE_DEFAULT, .profile = 1, .share = &g_default_share,
+};
+static gl_context *g_contexts, *g_loaded_context = &g_default_context;
+static __thread struct { EGLDisplay dpy; gl_context *ctx; EGLSurface draw, read; } t_cur;
+static pthread_mutex_t g_gl_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread unsigned t_gl_depth;
+static pthread_key_t g_cur_key;
+static pthread_once_t g_cur_once = PTHREAD_ONCE_INIT;
+static int g_cur_key_ok;
+static int program_current(GLuint name) {
+    if (S.prog == name) return 1;
+    for (gl_context *c = g_contexts; c; c = c->next)
+        if (c != g_loaded_context && c->share == g_loaded_context->share && c->state.prog == name) return 1;
+    return 0;
+}
+
+static void context_flush_impl(void) __attribute__((used));
+BIGSTUB(context_flush_impl);
+static void context_flush_impl(void) {
+    if (g_pend_clear.bits) clears_flush();
+    dm_gfx_enter(); cb_commit(); dm_gfx_leave();
+}
+static void context_flush(void) {
+    // Even a state-only GL call can switch contexts with work still pending.
+    if (g_pend_clear.bits || g_cb) ((void (*)(void))(const void *)context_flush_impl_bs)();
+}
+static void context_activate(gl_context *next) {
+    gl_context *old = g_loaded_context;
+    if (old == next) return;
+    context_flush();
+    old->state = S; S = next->state;
+    old->fixed = F; F = next->fixed;
+    old->vao0 = g_vao0; g_vao0 = next->vao0;
+    old->error = g_gl_error; g_gl_error = next->error;
+    memcpy(old->active_query, g_active_query, sizeof g_active_query);
+    memcpy(g_active_query, next->active_query, sizeof g_active_query);
+#define GL_SWAP_LOCAL(name) old->name = name; name = next->name;
+    GL_LOCAL_TABLES(GL_SWAP_LOCAL)
+#undef GL_SWAP_LOCAL
+    if (old->share != next->share) {
+#define GL_SWAP_SHARED(name) old->share->name = name; name = next->share->name;
+        GL_SHARED_TABLES(GL_SWAP_SHARED)
+#undef GL_SWAP_SHARED
+    }
+    g_ctx_fixed = next->use_fixed;
+    g_ctx_profile = next->profile;
+    g_ctx_es = next->es;
+    g_loaded_context = next;
+}
+static void gl_enter(void) {
+    if (t_gl_depth++ != 0) return;
+    pthread_mutex_lock(&g_gl_mu);
+    context_activate(t_cur.ctx ? t_cur.ctx : &g_default_context);
+}
+static void gl_leave(void) {
+    if (--t_gl_depth == 0) pthread_mutex_unlock(&g_gl_mu);
+}
+// A client wait may depend on another context submitting work. It has
+// already taken a snapshot of the event and value it needs.
+static void gl_wait_begin(void) {
+    if (t_gl_depth == 1) pthread_mutex_unlock(&g_gl_mu);
+}
+static void gl_wait_end(void) {
+    if (t_gl_depth != 1) return;
+    pthread_mutex_lock(&g_gl_mu);
+    context_activate(t_cur.ctx ? t_cur.ctx : &g_default_context);
+}
+static gl_context *context_find(EGLContext handle) {
+    for (gl_context *c = g_contexts; c; c = c->next)
+        if (c->handle == handle && !c->destroyed) return c;
+    return NULL;
+}
+static void context_free(gl_context *c) {
+    gl_context *keep = g_loaded_context == c ? &g_default_context : g_loaded_context;
+    context_activate(c);
+    h_glUseProgram(0);
+    for (uint32_t i = 1; i < g_nfbs; i++) free(g_fbs[i]);
+    for (uint32_t i = 1; i < g_nvaos; i++) free(g_vaos[i]);
+    for (uint32_t i = 1; i < g_nqueries; i++) if (g_queries[i]) query_free(g_queries[i]);
+    free(g_fbs); free(g_vaos); free(g_queries);
+    g_fbs = NULL; g_vaos = NULL; g_queries = NULL;
+    g_nfbs = g_nvaos = g_nqueries = 0;
+    gl_share *share = c->share;
+    int last = --share->users == 0;
+    if (last) {
+        for (GLuint i = 1; i < g_nsps; i++) if (prog_of(i)) prog_free(i);
+        for (GLuint i = 1; i < g_nsps; i++) if (shader_of(i)) shader_free(i);
+        for (GLuint i = 1; i < g_ntexs; i++) h_glDeleteTextures(1, &i);
+        for (GLuint i = 1; i < g_nrbs; i++) h_glDeleteRenderbuffers(1, &i);
+        for (GLuint i = 1; i < g_nbufs; i++) h_glDeleteBuffers(1, &i);
+        for (GLuint i = 1; i < g_nsos; i++) free(g_sos[i]);
+        free(g_sps); free(g_texs); free(g_rbs); free(g_bufs); free(g_sos);
+        if (g_syncs) {
+            CFSetApplyFunction(g_syncs, sync_free, NULL);
+            CFRelease(g_syncs);
+        }
+    }
+    context_activate(keep);
+    gl_context **link = &g_contexts;
+    while (*link != c) link = &(*link)->next;
+    *link = c->next;
+    if (last) free(share);
+    free(c);
+}
+static void context_release(gl_context *c) {
+    if (!c) return;
+    c->owner = NULL;
+    c->draw = c->read = NULL;
+    if (g_loaded_context == c) context_flush();
+    if (c->destroyed) context_free(c);
+}
+static void cur_release(void *binding) {
+    pthread_mutex_lock(&g_gl_mu);
+    context_release(binding);
+    pthread_mutex_unlock(&g_gl_mu);
+}
+static void cur_key_init(void) { g_cur_key_ok = pthread_key_create(&g_cur_key, cur_release) == 0; }
+EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext handle) {
+    (void)d;
+    gl_context *c = context_find(handle);
+    if (!c) { t_egl_error = 0x3006; return EGL_FALSE; }
+    c->destroyed = 1;
+    if (!c->owner) context_free(c);
+    return EGL_TRUE;
+}
 EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLint *attr) { (void)d; (void)cfg; (void)attr; RED1("eglCreatePbufferSurface: drawing into it is not implemented"); return (EGLSurface)(uintptr_t)4; }
 EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attr) {
-    (void)d; (void)cfg;
+    (void)d;
     int major = 1, minor = 0, profile = 1, flags = 0;
     for (int i = 0; attr && i < 32 && attr[i] != 0x3038; i += 2) {
         if (attr[i] == 0x3098) major = attr[i + 1];
@@ -3717,14 +4113,32 @@ EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share,
         else if (attr[i] == 0x30fc) flags = attr[i + 1];
         else if (attr[i] == 0x30fd) profile = attr[i + 1];
     }
-    if (share) RED1("shared EGL contexts are not implemented (one context)");
     // 3.1 removed fixed function. A forward-compatible 3.0 context also omits it; profile selection starts at 3.2.
     int compat = (major > 3 || (major == 3 && minor >= 2)) && profile == 2;
-    g_ctx_fixed = major < 3 || (major == 3 && minor == 0 && !(flags & 2)) || compat;
-    g_ctx_profile = g_ctx_fixed ? 2 : 1;
-    if (g_ctx_fixed) ff_init();
-    GLOG("EGL context: OpenGL %d.%d%s", major, minor, g_ctx_fixed ? " (with fixed function)" : "");
-    return (EGLContext)(uintptr_t)2;
+    gl_context *parent = share ? context_find(share) : NULL;
+    if (share && !parent) { t_egl_error = 0x3006; return NULL; }
+    int use_es = t_egl_api ? t_egl_api == EGL_OPENGL_ES_API : cfg ? cfg == es_config : parent && parent->es;
+    if (parent && !!parent->es != use_es) { t_egl_error = 0x3009; return NULL; }
+    const gl_es_version *es = NULL;
+    if (use_es) {
+        for (unsigned i = 0; i < sizeof g_es_versions / sizeof *g_es_versions; i++)
+            if (g_es_versions[i].major == major && g_es_versions[i].minor == minor) { es = &g_es_versions[i]; break; }
+        if (!es) { t_egl_error = 0x3009; return NULL; }
+    }
+    gl_context *c = zalloc(sizeof *c);
+    c->share = parent ? parent->share : zalloc(sizeof *c->share);
+    c->share->users++;
+    c->state = (gl_state)GL_STATE_DEFAULT;
+    c->es = es;
+    c->use_fixed = es ? major == 1 : major < 3 || (major == 3 && minor == 0 && !(flags & 2)) || compat;
+    c->profile = c->use_fixed ? 2 : 1;
+    // Initialize the compatibility matrices and current values in the new context.
+    if (c->use_fixed) ff_init(&c->fixed);
+    static uintptr_t next_handle = 2;
+    c->handle = (EGLContext)next_handle++;
+    c->next = g_contexts; g_contexts = c;
+    GLOG("EGL context: OpenGL%s %d.%d%s%s", es ? " ES" : "", major, minor, c->use_fixed ? " (with fixed function)" : "", parent ? ", shared" : "");
+    return c->handle;
 }
 EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, const EGLint *attr) {
     (void)d; (void)cfg; (void)win; (void)attr; dev_init();
@@ -3736,33 +4150,37 @@ EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, 
     return (EGLSurface)(uintptr_t)3;
 }
 EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface s) { (void)d; (void)s; return EGL_TRUE; }
-// The one context has one owner. A conflicting bind fails without changing either thread's binding; an explicit release or thread exit permits a transfer.
-static __thread struct { EGLDisplay dpy; EGLContext ctx; EGLSurface draw, read; } t_cur;
-static pthread_mutex_t g_cur_mu = PTHREAD_MUTEX_INITIALIZER;
-static void *g_cur_owner;
-static pthread_key_t g_cur_key;
-static pthread_once_t g_cur_once = PTHREAD_ONCE_INIT;
-static int g_cur_key_ok;
-static void cur_release(void *binding) { pthread_mutex_lock(&g_cur_mu); if (g_cur_owner == binding) g_cur_owner = NULL; pthread_mutex_unlock(&g_cur_mu); }
-static void cur_key_init(void) { g_cur_key_ok = pthread_key_create(&g_cur_key, cur_release) == 0; }
-EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c) {
-    static pthread_t th; static int known, sized;
+EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext handle) {
     pthread_once(&g_cur_once, cur_key_init);
     if (!g_cur_key_ok) { t_egl_error = 0x3003; return EGL_FALSE; }   // BAD_ALLOC
-    pthread_mutex_lock(&g_cur_mu);
-    if (c && g_cur_owner && g_cur_owner != &t_cur) { pthread_mutex_unlock(&g_cur_mu); t_egl_error = 0x3002; return EGL_FALSE; }   // BAD_ACCESS
+    gl_context *c = handle ? context_find(handle) : NULL;
+    if (handle && !c) { t_egl_error = 0x3006; return EGL_FALSE; }    // BAD_CONTEXT
+    if (c && c->owner && c != t_cur.ctx) { t_egl_error = 0x3002; return EGL_FALSE; }   // BAD_ACCESS
+    if (c && (dr || rd)) {
+        for (gl_context *other = g_contexts; other; other = other->next) {
+            if (!other->owner || other == c || other == t_cur.ctx) continue;
+            if ((dr && (dr == other->draw || dr == other->read)) || (rd && (rd == other->draw || rd == other->read))) {
+                t_egl_error = 0x3002; return EGL_FALSE;
+            }
+        }
+    }
+    if (pthread_setspecific(g_cur_key, c)) { t_egl_error = 0x3003; return EGL_FALSE; }
+    if (t_cur.ctx != c) context_release(t_cur.ctx);
+    t_cur.ctx = c;
+    t_cur.dpy = c ? d : NULL; t_cur.draw = c ? dr : NULL; t_cur.read = c ? rd : NULL;
+    context_activate(c ? c : &g_default_context);
     if (c) {
-        if (pthread_setspecific(g_cur_key, &t_cur)) { pthread_mutex_unlock(&g_cur_mu); t_egl_error = 0x3003; return EGL_FALSE; }
-        g_cur_owner = &t_cur; t_cur.dpy = d; t_cur.ctx = c; t_cur.draw = dr; t_cur.read = rd;
-    } else { if (g_cur_owner == &t_cur) g_cur_owner = NULL; pthread_setspecific(g_cur_key, NULL); memset(&t_cur, 0, sizeof t_cur); }
-    if (c && dr) { pthread_t me = pthread_self(); if (!known || !pthread_equal(th, me)) { th = me; known = 1; OLOG("context current on a new thread"); } }
-    // a context's viewport and scissor box start as its first drawable's size (LÖVE reads them back at start)
-    if (c && dr && !sized && g_win.made) { sized = 1; if (!S.vp[2] && !S.vp[3]) { S.vp[2] = S.sc[2] = g_win.w; S.vp[3] = S.sc[3] = g_win.h; } }
-    pthread_mutex_unlock(&g_cur_mu);
+        c->owner = pthread_self();
+        c->draw = dr; c->read = rd;
+        if (dr && !c->sized && g_win.made) {
+            c->sized = 1;
+            S.vp[2] = S.sc[2] = g_win.w; S.vp[3] = S.sc[3] = g_win.h;
+        }
+    }
     return EGL_TRUE;
 }
-EGL(eglReleaseThread, EGLBoolean, void) { if (t_cur.ctx) h_eglMakeCurrent(NULL, NULL, NULL, NULL); t_egl_error = 0x3000; return EGL_TRUE; }
-EGL(eglGetCurrentContext, EGLContext, void) { return t_cur.ctx; }
+EGL(eglReleaseThread, EGLBoolean, void) { if (t_cur.ctx) h_eglMakeCurrent(NULL, NULL, NULL, NULL); t_egl_api = 0; t_egl_error = 0x3000; return EGL_TRUE; }
+EGL(eglGetCurrentContext, EGLContext, void) { return t_cur.ctx ? t_cur.ctx->handle : NULL; }
 EGL(eglGetCurrentDisplay, EGLDisplay, void) { return t_cur.dpy; }
 EGL(eglGetCurrentSurface, EGLSurface, EGLint which) { return which == 0x3059 ? t_cur.draw : which == 0x305a ? t_cur.read : NULL; }   // DRAW, READ
 EGL(eglSwapInterval, EGLBoolean, EGLDisplay d, EGLint n) { (void)d; if (n != S.swap_interval) { GLOG("swap interval %d", n); S.swap_interval = n; } return EGL_TRUE; }
@@ -3800,6 +4218,7 @@ EGL(eglSwapBuffers, EGLBoolean, EGLDisplay d, EGLSurface s) {
         if (g_pend_clear.bits) clears_flush();
         uint64_t v = cb_commit();
         int vs = S.swap_interval < 1 ? 1 : S.swap_interval > 4 ? 4 : S.swap_interval;
+        mtl_set_origin_lower_left(1);   // the window image is stored bottom row first
         int k = g_win.cur;
         g_win.ticket[k] = mtl_present_ext(g_win.serial[k], vs / 60.0, (__bridge void *)g_ev, v, NULL);
         g_win.cur = (k + 1) % NWIN;

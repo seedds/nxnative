@@ -40,6 +40,8 @@ class ReadImage(unittest.TestCase):
         actual = sorted((p.relative_to(self.src).as_posix(), p.is_dir(), p.stat().st_size if p.is_file() else 0) for p in self.src.rglob('*'))
         virtual = sorted((p.relative_to(self.virtual).as_posix(), p.is_dir(), p.stat().st_size if p.is_file() else 0) for p in self.virtual.rglob('*'))
         self.assertEqual(virtual, actual)
+        self.assertEqual([p.relative_to(self.virtual).as_posix() for p in sorted(self.virtual.rglob('*.vert'))],
+                         [p.relative_to(self.src).as_posix() for p in sorted(self.src.rglob('*.vert'))])
         self.assertFalse((self.virtual / 'missing').exists())
         with self.assertRaises(FileNotFoundError): (self.virtual / 'missing').read_bytes()
         with self.assertRaises(OSError): (self.virtual / 'data/archive').open('wb')

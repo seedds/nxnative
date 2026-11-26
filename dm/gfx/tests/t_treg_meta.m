@@ -119,6 +119,39 @@ int main(void) { @autoreleasepool {
     CHECK("unregistered ID returns 0 and NULL view", r0 == 0 && tv == NULL);
     os_unfair_lock_unlock(&g_rmu);
 
+    // 8. Compressed resolution-family member caches view_fam/view_fam_wh, tracks size switches via treg_fam_valid, and clears on treg_drop_views
+    void *fmem = NULL; posix_memalign(&fmem, 16384, 16 << 20); memset(fmem, 0, 16 << 20);
+    pool_t fpool = {.magic = MAGIC('P', 'O', 'O', 'L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED | NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem = fmem, .size = 16 << 20};
+    mtl_pool_add(fpool.mem, fpool.size);
+    tex_t fs = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 99610, .pool = &fpool, .mem = fpool.mem};
+    fs.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA16F, .flags = NVN_TEXTURE_FLAGS_COMPRESSIBLE, .width = 256, .height = 128, .depth = 1, .levels = 1, .samples = 1};
+    nvn_tex_layout(&fs.d, &fs.L);
+    tex_t fb = fs; fb.serial = 99611; fb.d.width = 512; fb.d.height = 256; nvn_tex_layout(&fb.d, &fb.L);
+    mtl_tex_init(&fs); mtl_tex_init(&fb);
+    mtl_reg_tex(107, &fs, NULL); mtl_reg_tex(108, &fb, NULL);
+    os_unfair_lock_lock(&g_rmu);
+    void *sv = NULL, *bv = NULL;
+    uint64_t rs = tex_fast_rid_meta(107, &sv, NULL, NULL), rb2 = tex_fast_rid_meta(108, &bv, NULL, NULL);
+    id<MTLTexture> so = (__bridge id<MTLTexture>)sv, bo = (__bridge id<MTLTexture>)bv;
+    CHECK("family members resolve via tex_fast_rid_meta", rs != 0 && rb2 != 0 && so && bo);
+    CHECK("non-family texture caches NULL view_fam", g_treg[102].view_fam == NULL && g_treg[102].view_fam_wh == 0);
+    if (!fam_nocomp()) {
+        NvImageHeap *fo = fam_owner(so, NULL);
+        CHECK("compressed family caches view_fam and packed geometry", fo != NULL && g_treg[107].view_fam == (__bridge void *)fo && g_treg[108].view_fam == (__bridge void *)fo
+              && g_treg[107].view_fam_wh == ((256ull << 32) | 128ull) && g_treg[108].view_fam_wh == ((512ull << 32) | 256ull));
+        CHECK("neither size is valid before first write", !treg_fam_valid(107, so) && !treg_fam_valid(108, bo));
+        fam_set_valid(fo, (256ull << 32) | 128ull);
+        CHECK("treg_fam_valid tracks active small size", treg_fam_valid(107, so) && !treg_fam_valid(108, bo));
+        fam_set_valid(fo, (512ull << 32) | 256ull);
+        CHECK("treg_fam_valid tracks active big size", !treg_fam_valid(107, so) && treg_fam_valid(108, bo));
+    }
+    treg_drop_views(&g_treg[107]);
+    CHECK("treg_drop_views clears view_fam and view_fam_wh", g_treg[107].view_fam == NULL && g_treg[107].view_fam_wh == 0);
+    os_unfair_lock_unlock(&g_rmu);
+    mtl_reg_tex_gone(107); mtl_reg_tex_gone(108);
+    mtl_tex_release(&fs); mtl_tex_release(&fb);
+    mtl_alias_drop_pool(&fpool); mtl_pool_del(fpool.mem); free(fmem);
+
     mtl_pool_del(bmem);
     mtl_drain();
     munmap(bmem, bsz);

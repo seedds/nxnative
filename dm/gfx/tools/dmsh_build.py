@@ -13,7 +13,7 @@
 # Final summary: success / failure counts and the distribution of reasons; distribution of driver segment read offsets (those outside the range the replay layer can fill are listed separately);
 # a [RED] line per shader that built but lost something (shader_regressions.report_losses), which does not change the exit status
 import atexit, errno, inspect, multiprocessing, os, re, sys, json, mmap, struct, hashlib, shutil, subprocess, tempfile, time, collections, threading, concurrent.futures as cf
-import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
+import dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_metalwa, dmsh_abi as abi   # abi: the driver segment layout and the binding kinds the host shares (dm/gfx/nvn/dmsh_abi.h)
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 HOME = os.path.expanduser('~')
 dm_dir, out = sys.argv[1:3]; want = set(sys.argv[3:]); cache_root = out
@@ -193,18 +193,27 @@ def publish_library(label, on_progress=None):
     without unpacking loose files back onto the full drive; otherwise the staged outputs go back into the folder, which works as it is, and a folder restore that fails too removes what it
     wrote and stops the build"""
     d = label_dir(label); image = shader_lib.image_of(d); prefix = f'{STAGE}/{label}/'
-    files = {}
+    files, share = {}, {}
     old = OLD_IMAGE.get(label)
     if old is not None:
-        for p in old.iterdir():
-            m = OUT_KEY.match(p.name)
-            if (m and owned_output(m.group(1))) or (p.name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
-            files[p.name] = str(p)
-    staged = STORE.names(prefix)
-    for n in staged: files[n[len(prefix):]] = (lambda n=n: STORE.get(n))
+        old_img = romfs.Image(old)
+        for name, k in old_img.children(0):
+            m = OUT_KEY.match(name)
+            if (m and owned_output(m.group(1))) or (name == dmsh_chain.STAMP and STAMP_BEFORE != INPUTS): continue
+            files[name] = str(old / name)
+            share[name] = ('old', *old_img.entry(k)[:2])
+    staged = STORE.blob_ids(prefix)
+    for n, blob in staged.items():
+        short = n[len(prefix):]
+        files[short] = (lambda n=n: STORE.get(n))
+        share[short] = ('blob', blob)
     for n in os.listdir(d):
-        if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)): files[n] = os.path.join(d, n)
-    try: shader_lib.write(files, image, on_progress=on_progress) if on_progress else shader_lib.write(files, image)
+        if not n.startswith('.') and '.tmp' not in n and os.path.isfile(os.path.join(d, n)):
+            files[n] = os.path.join(d, n)
+            share.pop(n, None)
+    try:
+        if on_progress: shader_lib.write(files, image, on_progress=on_progress, share=share or None)
+        else: shader_lib.write(files, image, share=share or None)
     except (OSError, ValueError) as e:
         cache_full = getattr(STORE, 'full', False)
         def stop(why, err2=None):
@@ -647,7 +656,7 @@ RULES = []   # MSL rewrite rules attached by shader name (function, applicabilit
 # dmsh_side.py is in it: dmsh_entry's fs_uint writes main0's shared body (shared_body).
 # dmsh_fetch.py is not, but for screen_varyings (raster_facts), nor are the other side libraries' modules: they are made again from the restored MSL on every build (ps_libraries;
 # test_dmsh_code_fp.py checks this list).
-CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, abi) + ((ios_metal,) if IOSOUT else ()))
+CODE_FP = hashlib.sha256(source_without_rule_bodies() + b''.join(b'\0' + dmsh_chain.code_form(open(m.__file__, 'r').read()) for m in (dmsh_chain, dmsh_geometry, dmsh_tess, dmsh_atomic, dmsh_wide, dmsh_meshstage, dmsh_rewrite, dmsh_reflect, dmsh_entry, dmsh_ampere, dmsh_side, dmsh_rt, dmsh_rt_build, dmsh_rt_compile, dmsh_metalwa, abi) + ((ios_metal,) if IOSOUT else ()))
                          + b'\0' + inspect.getsource(dmsh_fetch.screen_varyings).encode()
                          + b'\0abi\0' + repr(sorted(abi.VALUES.items())).encode()).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
@@ -818,7 +827,7 @@ def geometry_finish(key, w, j, c1):
         dmsh_geometry.flatten_sets(spv)
         r = subprocess.run([SPIRV_CROSS, *XC, spv], capture_output=True, text=True)
         if r.returncode: return 'geometry MSL failed', r.stderr.strip()[:160], None
-        try: selected = dmsh_rewrite.uniform_tests(dmsh_rewrite.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout)))))   # precise, a tested bit 0's mask (bit0_mask), bounded uniform reads as selects (dmsh_rewrite.select_guards), tested words as volatile loads (uniform_tests), as finish makes them
+        try: selected = dmsh_metalwa.apply(dmsh_rewrite.uniform_tests(dmsh_rewrite.select_guards(dmsh_rewrite.bit0_mask(dmsh_rewrite.precise(dmsh_atomic.check_msl(r.stdout))))))[0]   # precise, bit0_mask, select_guards, uniform_tests, and Metal compiler workarounds (dmsh_metalwa), as finish makes them
         except ValueError as e: return 'geometry MSL failed', str(e)[:160], None
         plain = dmsh_geometry.topology_pointer(dmsh_reflect.pool_arrays(selected))
         src = dmsh_geometry.capture_input(plain)
@@ -941,6 +950,11 @@ def finish(key, w, j, c1):
             src, tess = dmsh_tess.hull(src, os.path.join(w, key + '.spv')) if j['stage'] == 'hs' else dmsh_tess.domain(src, os.path.join(w, key + '.spv'), j.get('tess_mode'))
             open(msl, 'w').write(src)
         except ValueError as e: tess = {'unsupported': str(e)[:160]}
+    if j['stage'] not in ('vs', 'ds'):   # Metal GPU compiler workarounds (KK3 ballots behind DMSH_MWA_FC, KK9 loop breaks), before mesh wrapping, compute_loops and shared_body
+        try:
+            t = dmsh_metalwa.apply(src)[0]
+            if t != src: src = t; open(msl, 'w').write(src)
+        except ValueError as e: return 'metal workaround rewrite failed', str(e)[:160], None
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
         if mesh.get('refused'): return 'mesh stage failed', mesh['refused'], None
         # outputs its paired pixel shaders read but its SPHs do not enable get (0,0,0,1), as vs_pad gives a vertex shader's (Ocarina of Time's foliage meshes); each output as wide as they read

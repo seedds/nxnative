@@ -41,21 +41,32 @@ def library(groups, hash_size=20):
     return b + struct.pack(f'<I{n}I', n, *range(n))
 
 
-def container(root, name, chunks, encrypted=False, compressed=False, version=8, directory=b''):
-    """A minimal TOC with each chunk in a separate 4 KB block. Oodle's test stand-in is zlib."""
+def container(root, name, chunks, encrypted=False, compressed=False, version=8, directory=b'', part_size=0):
+    """A minimal TOC with each chunk in a separate 4 KB block. Oodle's test stand-in is zlib.
+    With part_size > 0, splits UCAS bytes across <name>.ucas and numbered <name>_s<k>.ucas partitions."""
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    head = bytearray(144); head[:16] = uepak.TOC_MAGIC; head[16] = version
-    struct.pack_into('<9I', head, 20, 144, len(chunks), len(chunks), 12, int(compressed), 32, 4096, len(directory), 1)
-    head[80] = (2 if encrypted else 0) | (8 if directory else 0)
     ids, ranges, blocks, data = bytearray(), bytearray(), bytearray(), bytearray()
     for i, (gid, raw) in enumerate(chunks):
         stored = zlib.compress(raw) if compressed else raw
+        if part_size and len(data) % part_size + len(stored) > part_size:
+            data += bytes(part_size - len(data) % part_size)
         ids += gid; ranges += (i * 4096).to_bytes(5, 'big') + len(raw).to_bytes(5, 'big')
         blocks += len(data).to_bytes(5, 'little') + len(stored).to_bytes(3, 'little') + len(raw).to_bytes(3, 'little') + bytes([int(compressed)])
         data += stored
+    nparts = max(1, (len(data) + part_size - 1) // part_size) if part_size else 1
+    head = bytearray(144); head[:16] = uepak.TOC_MAGIC; head[16] = version
+    struct.pack_into('<9I', head, 20, 144, len(chunks), len(chunks), 12, int(compressed), 32, 4096, len(directory), nparts)
+    head[80] = (2 if encrypted else 0) | (8 if directory else 0)
+    if nparts > 1:
+        struct.pack_into('<Q', head, 88, part_size)
     path.write_bytes(head + ids + ranges + blocks + (b'Oodle' + bytes(27) if compressed else b'') + directory)
-    path.with_suffix('.ucas').write_bytes(data)
+    if nparts == 1:
+        path.with_suffix('.ucas').write_bytes(data)
+    else:
+        for k in range(nparts):
+            part = path.with_name(path.stem + ('.ucas' if not k else f'_s{k}.ucas'))
+            part.write_bytes(data[k * part_size:(k + 1) * part_size])
     return path
 
 
@@ -130,6 +141,16 @@ class IoStore(unittest.TestCase):
         out = self.root / 'finished'; self.assertEqual(uepak.finish(str(self.work), str(out)), [entries[0]['name']])
         self.assertEqual((out / entries[0]['name']).read_bytes(), (self.work / 'archives' / entries[0]['name']).read_bytes())
         self.assertEqual(json.loads((self.work / 'job.json').read_text())['records'], [])
+
+    def test_numbered_ucas_partitions_match_header_helper(self):
+        raw = b'LSLG-partitioned-shader-payload'
+        toc_path = container(self.romfs, 'Split.utoc', [(LIB, library([(GROUP, raw, raw)])), (GROUP, raw)], part_size=128)
+        toc = uepak.Toc(str(toc_path))
+        self.assertGreater(toc.parts, 1)
+        self.assertEqual(uepak.toc_ucas_paths(toc_path), toc.ucas_paths())
+        entries, records = self.run_job()
+        self.assertEqual((len(entries), records), (1, 0))
+        self.assertEqual(self.shaders(entries[0]), [raw])
 
     def test_a_library_of_8_byte_hashes_is_read_like_one_of_sha1s(self):   # Godzilla: Destroy All Monsters Melee Remastered, Unreal 4.27 with xxHash64 shader hashes
         raw = b'LSLG-eight-byte-hashes'

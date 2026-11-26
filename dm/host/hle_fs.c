@@ -23,6 +23,9 @@
 #define RES_PATH_NOT_FOUND 0x202u      // fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs module 2, description 2
 #define RES_RENAME_OTHER_FS 0x2F2402u  // fs module 2, description 6034: ResultRenameToOtherFileSystem
+#define RES_INVALID_SIZE      0x2F5C02u // fs module 2, description 6062: ResultInvalidSize
+#define RES_EXT_SIZE_TOO_LARGE 0x2F6402u // fs module 2, description 6066: ResultExtensionSizeTooLarge
+#define RES_EXT_SIZE_INVALID  0x2F6602u // fs module 2, description 6067: ResultExtensionSizeInvalid
 enum { MODE_READ = 1, MODE_WRITE = 2, MODE_APPEND = 4 };
 enum { ENT_DIR = 0, ENT_FILE = 1 };
 enum { DIRMODE_DIR = 1, DIRMODE_FILE = 2 };
@@ -830,14 +833,169 @@ HLE_FORCE("_ZN2nn2fs18DeleteCacheStorageEi", "fsp-srv; cache storage → deletes
     char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); unlink(cache_size_path(index, b, sizeof b)); return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKc", "fsp-srv; cache storage 0 → host directory (SDK 11 one-argument form, Monster Hunter Rise)", Result, h_fs_MountCache0, const char *name) { return h_fs_MountCache(name, 0); }
-// Save data size (Monster Hunter Rise, SDK 11): the save directory has no size of its own, so it reports 256 MB of data and journal, more than a game asks for; extending succeeds without doing anything
-HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSize, int64_t *size, int64_t *journal, const void *uid) {
-    (void)uid; if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+// PR #2846's stable per-user paths. Unknown UIDs never fall back to player 1.
+// Additional users are local: the current cloud-sync format holds only the
+// primary account and device save. Each directory has its own existing transaction.
+static int user_save_dir(char *dd, size_t cap, const char *save, int user) {
+    size_t n = strlen(save); while (n > 1 && save[n - 1] == '/') n--;
+    if (!n || n >= cap) return -1;
+    memcpy(dd, save, n); dd[n] = 0;
+    if (user > 0) {
+        int len = snprintf(dd + n, cap - n, "_user%d", user + 1);
+        if (len < 0 || (size_t)len >= cap - n) return -1;
+    }
+    return 0;
 }
-// The largest save data the game may extend to (Octopath Traveler 0, SDK 19: Unreal's save system asks before its first save, about 13 minutes in; the SDK's version read the fsp-srv
-// object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc), the size of a cache storage and the free space of a mount: the same 256 MB the save data size reports, more than a game asks for
-HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size: 256 MB data + 256 MB journal", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
-    if (size) *size = 256 << 20; if (journal) *journal = 256 << 20; return RES_OK;
+// Default fallback when neither an ExtendSaveData record nor control.nacp names a save size:
+// 256 MB data and 16 MB journal (not equal: games such as Little Busters! Converted Edition compute
+// usable save space as size - journal, which evaluated to 0 MB when both were 256 MB).
+#define SAVE_FALLBACK_SIZE    ((int64_t)(256 << 20))
+#define SAVE_FALLBACK_JOURNAL ((int64_t)(16 << 20))
+#define SAVE_EXT_UNIT         ((int64_t)(1 << 20))   // nn::fs::SaveDataExtensionUnitSize (1 MiB)
+static int nacp_size_pair(off_t off, int64_t *size, int64_t *journal) {
+    int64_t c[2] = {0, 0}; char p[1100];
+    int r = dm_control_read(off, c, sizeof c, p, sizeof p);
+    if (r == -2) LOG("[RED] control data: %s is too short", p);
+    if (r || c[0] <= 0 || c[1] < 0) return -1;
+    *size = c[0]; *journal = c[1]; return 0;
+}
+// Maximum save size declared by control.nacp (0x3148/0x3150 account, 0x3158/0x3160 device).
+// Returns 1 for an explicit max (clamped >= base so a partial NACP never puts max below base),
+// 0 for the base NACP size when max is 0 (non-extendable beyond base), or -1 when NACP declares neither.
+static int save_size_nacp_max(int device, int64_t *size, int64_t *journal) {
+    int64_t bs = 0, bj = 0, ms = 0, mj = 0;
+    int have_base = !nacp_size_pair(device ? 0x3090 : 0x3080, &bs, &bj);
+    int have_max = !nacp_size_pair(device ? 0x3158 : 0x3148, &ms, &mj);
+    if (!have_base && !have_max) return -1;
+    if (have_max) {
+        *size = have_base && bs > ms ? bs : ms;
+        *journal = have_base && bj > mj ? bj : mj;
+        return 1;
+    }
+    *size = bs; *journal = bj;
+    return 0;
+}
+static int save_size_path(char *out, size_t cap, int device, int user) {
+    const char *d = getenv("DM_SAVE");
+    if (!d || !*d) return -1;
+    char dd[1024];
+    if (user_save_dir(dd, sizeof dd, d, device ? 0 : user)) return -1;
+    int len = snprintf(out, cap, "%s%s.size", dd, device ? "_device" : "");
+    return len < 0 || (size_t)len >= cap ? -1 : 0;
+}
+static int save_size_read_locked(const char *p, int64_t *size, int64_t *journal) {
+    FILE *f = fopen(p, "r");
+    long long s = 0, j = 0; char extra = 0;
+    int ok = f && fscanf(f, "%lld %lld %c", &s, &j, &extra) == 2 && s > 0 && j >= 0 && !ferror(f);
+    if (f) fclose(f);
+    if (!ok) return -1;
+    *size = (int64_t)s; *journal = (int64_t)j; return 0;
+}
+static int save_size_put_locked(const char *p, int device, int64_t size, int64_t journal) {
+    char t[1200];
+    if (snprintf(t, sizeof t, "%s.tmp", p) >= (int)sizeof t) {
+        LOG("[RED] fs %s save: size record path is too long (%s)", device ? "device" : "account", p);
+        return -1;
+    }
+    FILE *f = fopen(t, "w"); int bad = 0, err = 0;
+    if (!f || fprintf(f, "%lld %lld\n", (long long)size, (long long)journal) < 0 || fflush(f) || fsync(fileno(f))) {
+        bad = 1; err = errno;
+    }
+    if (f && fclose(f) && !bad) { bad = 1; err = errno; }
+    if (!bad && rename(t, p)) { bad = 1; err = errno; }
+    if (bad) {
+        LOG("[RED] fs %s save: cannot record its size in %s (%s)", device ? "device" : "account", p, strerror(err));
+        unlink(t);
+        return -1;
+    }
+    return 0;
+}
+// Current save size under g_lock: at least control.nacp's base (or fallback 256 MB / 16 MB),
+// grown monotonically by any valid .size record beside DM_SAVE.
+static void save_size_current_locked(const char *p, int device, int64_t *size, int64_t *journal, const char **from) {
+    int64_t bs = 0, bj = 0, rs = 0, rj = 0;
+    int have_base = !nacp_size_pair(device ? 0x3090 : 0x3080, &bs, &bj);
+    if (!have_base) { bs = SAVE_FALLBACK_SIZE; bj = SAVE_FALLBACK_JOURNAL; }
+    int have_rec = p && !save_size_read_locked(p, &rs, &rj);
+    if (have_rec && (rs > bs || rj > bj || (rs == bs && rj == bj))) {
+        *size = rs > bs ? rs : bs;
+        *journal = rj > bj ? rj : bj;
+        if (from) *from = "its record";
+    } else {
+        *size = bs; *journal = bj;
+        if (from) *from = have_base ? "the control data" : "no record and no control data: 256 MB / 16 MB";
+    }
+}
+static Result save_size_get(int64_t *size, int64_t *journal, int device, int user) {
+    char p[1100]; const char *path = save_size_path(p, sizeof p, device, user) ? NULL : p;
+    int64_t s = 0, j = 0; const char *from = NULL;
+    pthread_mutex_lock(&g_lock);
+    save_size_current_locked(path, device, &s, &j, &from);
+    pthread_mutex_unlock(&g_lock);
+    if (size) *size = s;
+    if (journal) *journal = j;
+    LOG("fs %s save data size: %lld bytes, journal %lld (%s)", device ? "device" : "account", (long long)s, (long long)j, from);
+    return RES_OK;
+}
+// Follows Horizon's ExtendApplicationSaveData + ExtendSaveDataIfNeeded:
+// checks NACP max bounds (ResultExtensionSizeTooLarge), grows monotonically per dimension
+// without shrinking (so e.g. journal=0 keeps the current journal), requires 1 MiB alignment on
+// each growing dimension (ResultExtensionSizeInvalid), and fails if persisting the record fails.
+static Result save_size_extend(int device, int user, int64_t size, int64_t journal) {
+    if (size < 0 || journal < 0) return RES_INVALID_SIZE;
+    char p[1100];
+    if (save_size_path(p, sizeof p, device, user)) {
+        LOG("[RED] fs extend %s save data: DM_SAVE is unset or too long, cannot record size", device ? "device" : "account");
+        return RES_FAIL;
+    }
+    int64_t max_s = 0, max_j = 0;
+    if (save_size_nacp_max(device, &max_s, &max_j) >= 0 && (size > max_s || journal > max_j)) {
+        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)",
+            device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
+        return RES_EXT_SIZE_TOO_LARGE;
+    }
+    pthread_mutex_lock(&g_lock);
+    int64_t cur_s = 0, cur_j = 0;
+    save_size_current_locked(p, device, &cur_s, &cur_j, NULL);
+    if (size <= cur_s && journal <= cur_j) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data to %lld bytes (journal %lld): already %lld / %lld",
+            device ? "device" : "account", (long long)size, (long long)journal, (long long)cur_s, (long long)cur_j);
+        return RES_OK;
+    }
+    if ((size > cur_s && size % SAVE_EXT_UNIT) || (journal > cur_j && journal % SAVE_EXT_UNIT)) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data to %lld bytes (journal %lld): not aligned to 1 MiB",
+            device ? "device" : "account", (long long)size, (long long)journal);
+        return RES_EXT_SIZE_INVALID;
+    }
+    int64_t new_s = size > cur_s ? size : cur_s;
+    int64_t new_j = journal > cur_j ? journal : cur_j;
+    int bad = save_size_put_locked(p, device, new_s, new_j);
+    pthread_mutex_unlock(&g_lock);
+    if (bad) return RES_FAIL;
+    LOG("fs extend %s save data to %lld bytes (journal %lld)", device ? "device" : "account", (long long)new_s, (long long)new_j);
+    return RES_OK;
+}
+// Save data size (Monster Hunter Rise, SDK 11; Little Busters! Converted Edition, SDK 8): an extended size recorded by ExtendSaveData, else the application's control data
+// (UserAccountSaveDataSize / UserAccountSaveDataJournalSize, s64 at 0x3080 / 0x3088), else 256 MB data + 16 MB journal
+HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save data size from ExtendSaveData record or control.nacp", Result, h_fs_SaveSize, int64_t *size, int64_t *journal, const void *uid) {
+    int user = dm_account_user(uid);
+    if (user < 0) return RES_TARGET_NOT_FOUND;
+    return save_size_get(size, journal, 0, user);
+}
+// The largest account save data the game may extend to (Octopath Traveler 0, SDK 19: Unreal's save system asks before its first save, about 13 minutes in; the SDK's version read the
+// fsp-srv object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc): UserAccountSaveDataSizeMax / JournalSizeMax (s64 at 0x3148 / 0x3150, clamped >= base), else
+// UserAccountSaveDataSize / JournalSize (0x3080 / 0x3088) when the title declares no separate max, else 256 MB data + 16 MB journal
+HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size from control.nacp", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
+    int64_t s = 0, j = 0;
+    int m = save_size_nacp_max(0, &s, &j);
+    const char *from = m == 1 ? "the control data's max" : m == 0 ? "the control data's base size" : "no control data: 256 MB / 16 MB";
+    if (m < 0) { s = SAVE_FALLBACK_SIZE; j = SAVE_FALLBACK_JOURNAL; }
+    if (size) *size = s;
+    if (journal) *journal = j;
+    LOG("fs save data size max: %lld bytes, journal %lld (%s)", (long long)s, (long long)j, from);
+    return RES_OK;
 }
 // The application's control data (control.nacp: nn::ns::ApplicationControlProperty, 0x4000 bytes, little-endian), which Horizon serves the SDK from the installed title: DM_CONTROL_NACP, else
 // control.nacp beside the RomFS (the NSP script's extraction folder <version>/{RomFS,control.nacp}, the Mac app's Resources). 0 = len bytes read at off
@@ -874,8 +1032,10 @@ HLE_FORCE("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", "fsp-srv; cache storage size:
 HLE_FORCE("_ZN2nn2fs16GetFreeSpaceSizeEPlPKc", "fsp-srv; free space of a mount: 256 MB (the host directory has no size limit of its own)", Result, h_fs_FreeSpace, int64_t *out, const char *path) {
     (void)path; if (out) *out = 256 << 20; return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend save data: the host directory has no size limit", Result, h_fs_ExtendSave, const void *uid, int64_t size, int64_t journal) {
-    (void)uid; LOG("fs extend save data to %lld bytes (journal %lld): nothing to do", (long long)size, (long long)journal); return RES_OK;
+HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend save data: record the new size beside DM_SAVE", Result, h_fs_ExtendSave, const void *uid, int64_t size, int64_t journal) {
+    int user = dm_account_user(uid);
+    if (user < 0) return RES_TARGET_NOT_FOUND;
+    return save_size_extend(0, user, size, journal);
 }
 HLE_FORCE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", "fsp-srv; the save directory is created at mount time", Result, h_fs_EnsureSave, const void *uid) { (void)uid; return RES_OK; }
 // Another application's save data (Tears of the Kingdom asks by application ID and would mount it read-only): the host keeps only this game's own save, which exists once mounted
@@ -895,19 +1055,6 @@ HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv; this gam
 // start tries again
 static void save_sync_or_stop(const char *dd) {
     if (save_sync_mount(dd, DM_GAME_ID)) die("this game's save %s is not whole after a pull of the cloud's save that could not be undone: not mounted (the [save-sync] lines above say where this device's save is kept; the next start tries again)", dd);
-}
-// PR #2846's stable per-user paths. Unknown UIDs never fall back to player 1.
-// Additional users are local: the current cloud-sync format holds only the
-// primary account and device save. Each directory has its own existing transaction.
-static int user_save_dir(char *dd, size_t cap, const char *save, int user) {
-    size_t n = strlen(save); while (n > 1 && save[n - 1] == '/') n--;
-    if (!n || n >= cap) return -1;
-    memcpy(dd, save, n); dd[n] = 0;
-    if (user > 0) {
-        int len = snprintf(dd + n, cap - n, "_user%d", user + 1);
-        if (len < 0 || (size_t)len >= cap - n) return -1;
-    }
-    return 0;
 }
 static Result mount_own_save_ro(const char *name, int user) {
     const char *d = getenv("DM_SAVE");
@@ -951,8 +1098,8 @@ HLE_FORCE("_ZN2nn2fs19MountDeviceSaveDataEPKc", "fsp-srv; device save data → t
     strlcat(dd, "_device", sizeof dd);
     return mount_ex(name, dd, 0, 1);
 }
-HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv; device save data size: 256 MB data + 256 MB journal", Result, h_fs_DeviceSaveSize, int64_t *size, int64_t *journal) { return h_fs_SaveSize(size, journal, NULL); }
-HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv; extend device save data: the host directory has no size limit", Result, h_fs_ExtendDeviceSave, int64_t size, int64_t journal) { return h_fs_ExtendSave(NULL, size, journal); }
+HLE_FORCE("_ZN2nn2fs21GetDeviceSaveDataSizeEPlS1_", "fsp-srv; device save data size from ExtendDeviceSaveData record or control.nacp", Result, h_fs_DeviceSaveSize, int64_t *size, int64_t *journal) { return save_size_get(size, journal, 1, 0); }
+HLE_FORCE("_ZN2nn2fs20ExtendDeviceSaveDataEll", "fsp-srv; extend device save data: record the new size beside DM_SAVE", Result, h_fs_ExtendDeviceSave, int64_t size, int64_t journal) { return save_size_extend(1, 0, size, journal); }
 // The restore flag marks save data the system restored from a backup (cloud save data backup), which a game may check once and then clear with the commit option below; the host never restores
 HLE_FORCE("_ZN2nn2fs22GetSaveDataRestoreFlagEPbPKc", "fsp-srv; save data restored from a backup: never", Result, h_fs_RestoreFlag, uint8_t *out, const char *name) { (void)name; *out = 0; return RES_OK; }
 static _Atomic uint64_t g_save_commits;   // number of successful commits (used by the front end when going to background to wait for "the game's current save has been committed")
@@ -1222,7 +1369,13 @@ HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftrunc
 }
 HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_DeleteFile, const char *path) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs10DeleteFileEPKc", Result (*)(const char *), path);
-    HP_ACCESS(path, 0, 1); RW(); return unlink(hp) ? save_path_error("unlink", path) : RES_OK; }
+    HP_ACCESS(path, 0, 1); RW();
+    if (!unlink(hp)) return RES_OK;
+    // A directory is not a file to Horizon (save data keeps them in separate tables): DeleteFile finds no file there, answers PathNotFound and changes nothing. Apple's unlink(2)
+    // gives EPERM for a directory (Linux EISDIR), which save_path_error would take for the host's error and so refuse the save's next commit
+    int e = errno; struct stat st;
+    if ((e == EPERM || e == EISDIR) && !lstat(hp, &st) && S_ISDIR(st.st_mode)) { if (g_flag.fs) LOG("fs unlink of a directory, not found as a file: %s", path); return RES_PATH_NOT_FOUND; }
+    errno = e; return save_path_error("unlink", path); }
 HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { dm_thread_service_request();
     SDK_PATH(path, "_ZN2nn2fs15CreateDirectoryEPKc", Result (*)(const char *), path);
     int mi; int64_t k; if (img_path(path, &mi, &k)) return k >= 0 ? RES_PATH_EXISTS : RES_FAIL;
@@ -1456,7 +1609,7 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKc", "fsp-srv; rom → host RomFS directory (over
 // OpenDataStorageByProgramIndex): any program can mount another's RomFS. A Switch 2 Edition of a Switch 1 game is one application of two programs, and the Switch 2 program's own
 // RomFS holds a few files: Super Mario Bros. Wonder's mounts the Switch 1 program's, index 0, as content: and its upgrade add-on as aocup: (issue/PR #2692).
 // The other programs' RomFS images are <index>.img in DM_ROMFS_PROGRAMS, by default the folder romfs_programs beside DM_ROMFS (scripts/pack_nup.py writes them, the app carries them
-// beside its RomFS); an index with no image there gets this program's own RomFS (its own index, or a build that has only this program's)
+// beside its RomFS). The current program's index uses DM_ROMFS directly. For other indices, keep the fallback for builds with only this program's image.
 static int program_romfs(int idx, char *out, size_t n) {
     char b[1024], dir[1100]; const char *e = getenv("DM_ROMFS_PROGRAMS");
     if (e && *e) snprintf(dir, sizeof dir, "%s", e);
@@ -1470,6 +1623,7 @@ static int program_romfs(int idx, char *out, size_t n) {
     return idx >= 0 && snprintf(out, n, "%s/%d.img", dir, idx) < (int)n && !stat(out, &st) && S_ISREG(st.st_mode);
 }
 HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "fsp-srv; rom of the program with this index → its RomFS image (romfs_programs/<index>.img beside DM_ROMFS), else this program's", Result, h_fs_MountRomIdx, const char *name, int idx, void *cache, size_t sz) {
+    if (idx == (int)(DM_GAME_PROGRAM_ID & 0xfff)) return h_fs_MountRom(name, cache, sz);
     char img[1200];
     if (program_romfs(idx, img, sizeof img)) { dm_thread_service_request(); return mount(name, img, 1); }   // mount_ex logs it
     if (idx) LOG("[RED] fs::MountRom(%s, program index %d): no RomFS image of program %d beside this program's (romfs_programs/%d.img): this program's own", name, idx, idx, idx);

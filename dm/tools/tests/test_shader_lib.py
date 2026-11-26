@@ -220,6 +220,86 @@ class AppSubset(Base):
         with self.assertRaises(ValueError): shader_lib.subset(self.lib, self.root / 'app.img')
 
 
+class SharedPayloads(Base):
+    def test_share_keys_dedup_mixed_sources_and_skip_alias_loaders(self):
+        payload = b'same compiled shader' * 100
+        source = self.root / 'source.metallib'; source.write_bytes(payload)
+        calls, events = [], []
+        def load(name):
+            def read(): calls.append(name); return payload
+            return read
+        files = {
+            'a_b.metallib': load('a_b.metallib'),
+            'b_b.metallib': source,
+            'c_b.metallib': load('c_b.metallib'),
+            'd_b.metallib': payload,
+            'e_b.metallib': payload,   # unshared (None)
+            'f_b.metallib': b'unique',
+        }
+        share = {'a_b.metallib': 'k1', 'b_b.metallib': 'k1', 'c_b.metallib': 'k1', 'd_b.metallib': 'k1', 'e_b.metallib': None, 'f_b.metallib': 'k2'}
+        shader_lib.write(files, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)), share=share)
+        image = romfs.Image(self.image)
+        ranges = [image.entry(image.find(n))[:2] for n in ('a_b.metallib', 'b_b.metallib', 'c_b.metallib', 'd_b.metallib')]
+        self.assertEqual(len(set(ranges)), 1, 'entries sharing a key must share one payload range')
+        self.assertNotEqual(image.entry(image.find('e_b.metallib'))[:2], ranges[0])
+        self.assertNotEqual(image.entry(image.find('f_b.metallib'))[:2], ranges[0])
+        self.assertEqual(calls, ['a_b.metallib'], 'only the first sorted entry for a share key is loaded')
+        self.assertEqual([(d, t) for d, t, _ in events], [(i, len(files)) for i in range(len(files) + 1)])
+        for name in files:
+            want = b'unique' if name == 'f_b.metallib' else payload
+            self.assertEqual((romfs.Path(self.image) / name).read_bytes(), want)
+
+    def test_empty_shared_files_and_failed_first_entry(self):
+        shader_lib.write({'a': b'', 'b': b''}, str(self.image), share={'a': 1, 'b': 1})
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('a'))[:2], image.entry(image.find('b'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'b').read_bytes(), b'')
+        before = self.image.read_bytes()
+        def boom(): raise OSError(errno.EIO, 'read failed')
+        with self.assertRaises(OSError):
+            shader_lib.write({'a': boom, 'b': lambda: b'never'}, str(self.image), share={'a': 1, 'b': 1})
+        self.assertEqual(self.image.read_bytes(), before)
+
+    def test_pack_preserves_sharing_across_partial_update_and_leave_out(self):
+        shader_lib.write(
+            {'a_b.metallib': b'same', 'b_b.metallib': b'same', 'c_b.metallib': b'same', 'k_bp.metallib': b'pull', 'inputs.tsv': b'game\t0100\ninputs\tabc\n'},
+            str(self.image),
+            share={'a_b.metallib': 1, 'b_b.metallib': 1, 'c_b.metallib': 1},
+        )
+        self.folder(stamp=False, a_b__metallib=b'updated')
+        self.assertTrue(self.pack())
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('b_b.metallib'))[:2], image.entry(image.find('c_b.metallib'))[:2])
+        self.assertNotEqual(image.entry(image.find('a_b.metallib'))[:2], image.entry(image.find('b_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'a_b.metallib').read_bytes(), b'updated')
+        self.assertEqual((romfs.Path(self.image) / 'b_b.metallib').read_bytes(), b'same')
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True))
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('b_b.metallib'))[:2], image.entry(image.find('c_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'c_b.metallib').read_bytes(), b'same')
+
+    def test_subset_preserves_shared_payloads_without_rereading_duplicates(self):
+        payload = b'shared' * 500
+        shader_lib.write(
+            {'a_b.metallib': payload, 'b_b.metallib': payload, 'c_b.metal': payload, 'inputs.tsv': b'game\t0100\ninputs\tabc\n'},
+            str(self.image),
+            share={'a_b.metallib': 1, 'b_b.metallib': 1, 'c_b.metal': 1},
+        )
+        app = self.root / 'app.img'
+        real_open = romfs.open
+        opened = []
+        def count_open(path, *args, **kwargs):
+            opened.append(os.path.basename(str(path)))
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(shader_lib.romfs, 'open', side_effect=count_open):
+            self.assertEqual(shader_lib.subset(self.lib, app), 3)
+        self.assertEqual(opened.count('b_b.metallib'), 0, 'duplicate entry in source image must not be opened again')
+        self.assertEqual(opened.count('a_b.metallib'), 1)
+        image = romfs.Image(app)
+        self.assertEqual(image.entry(image.find('a_b.metallib'))[:2], image.entry(image.find('b_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(app) / 'b_b.metallib').read_bytes(), payload)
+
+
 class HostReader(Base):
     def reader(self):
         exe = self.root / 'msl_read'; src = self.root / 'msl_read.c'; src.write_text(READER)
@@ -236,6 +316,14 @@ class HostReader(Base):
         got = subprocess.run([self.reader(), self.image, *asked], capture_output=True, check=True).stdout
         want = b''.join(names[n] + b'\n' if n in names else b'missing\n' for n in asked)
         self.assertEqual(got, want)
+
+    def test_the_host_maps_shared_payloads_by_every_name(self):
+        names = {f'{i:016x}_b.metallib': b'shared shader' for i in range(12)}
+        shader_lib.write(names, str(self.image), share={n: 'shared' for n in names})
+        image = romfs.Image(self.image)
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1)
+        got = subprocess.run([self.reader(), self.image, *names], capture_output=True, check=True).stdout
+        self.assertEqual(got, b'shared shader\n' * len(names))
 
     def test_the_host_refuses_a_cut_copy(self):
         self.folder(k_b__metallib=b'lib' * 100); self.pack()

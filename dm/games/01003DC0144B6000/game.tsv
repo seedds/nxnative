@@ -31,6 +31,10 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x1000000
 
+# ---- Frame rate ----
+# Unity's internal calls identify the limiter, and the host paces presents at the target.
+fps_target	60
+
 # ---- Shader split ----
 shader_groups	/Data/=data
 shader_note	Outer Wilds shaders

@@ -8,7 +8,9 @@ It is not an emulator: the game's own code runs directly on the Apple chip, with
 
 ## Games
 
-The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues. You can also browse the community [Game Compatibility List](https://heyflorin.github.io/nx-game-list/) ([source](https://github.com/heyflorin/nx-game-list)) to filter games by platform and status or check your own games folder against the expected updates.
+Browse the community [Game Compatibility List](https://heyflorin.github.io/nx-game-list/) ([source](https://github.com/heyflorin/nx-game-list)) to filter games by platform and status or check your own games folder against the expected updates.
+
+The full [tested games table](dm/games/README.md#games) includes original Switch games, tested builds, engines and graphics APIs. Each game's note records its tested platforms, progress and known issues.
 
 These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup` file or a dump folder](#switch-2-games):
 
@@ -28,6 +30,8 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Star Fox](dm/games/0400E88025B1A000/README.md)
 - [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](dm/games/040015100B514001/README.md)
 - [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
+- [Xenoblade Chronicles 2 – Nintendo Switch 2 Edition](dm/games/0400E95004038001/README.md)
+- [Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](dm/games/0400453019AA8001/README.md)
 - [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
 
 ## Community front ends

@@ -1,9 +1,11 @@
-// NVIDIA's float to normalized conversion through the replay: a pixel shader that writes 256 colours (half steps of 8, 16, 10 and 2 bits, where NVIDIA's colour unit and Apple's
-// differ, then the edges; dmsh_rewrite.py blend_zero's guard in it, from test_dmsh_blend_zero.py --fixture-rop) drawn into RGBA8, RGBA16 and RGB10A2 normalized targets with blending
-// off, with MAX, and with an ADD of ONE and ZERO (a blended sum: rounded after the blend, out of the shader's reach), and the targets read back. Where the stored value is the
-// colour's conversion, it is NVIDIA's: the float32 product rounded to nearest even. The ADD row, and every row with DM_NVN_ROP_ROUND=0, show Apple's conversion as it is: the
-// exact product rounded to nearest (Sonic Frontiers' flags 66.5 / 255: 66 against 67). rop_word's cases are checked on the state alone. A merged pass's draw (output 0 drawn to
-// attachment 1) is drawn and read back too, with the words bz_bind bound.
+// NVIDIA's float to normalized and 16-bit float conversion through the replay: a pixel shader that writes 256 colours (half steps of 8, 16, 10 and 2 bits, where NVIDIA's colour unit
+// and Apple's differ, then normalized and F16 edges; dmsh_rewrite.py blend_zero's guard in it, from test_dmsh_blend_zero.py --fixture-rop) drawn into RGBA8, RGBA16, RGB10A2 and
+// RGBA16F targets with blending off, with MAX, and with an ADD of ONE and ZERO (a blended sum: rounded after the blend, out of the shader's reach), and the targets read back. Where
+// the stored value is the colour's conversion, normalized targets store NVIDIA's float32 product rounded to nearest even, and RGBA16F stores the half toward zero (clamping finite
+// overflow to +-65504) via hardware when rop_f16_probe detects RTZ or via dm_rop (DMSH_ROUND_F16) when not (or under DM_NVN_ROP_F16=1). The ADD row, and every row with
+// DM_NVN_ROP_ROUND=0, show Apple's conversion as it is: the exact product rounded to nearest for normalized targets (Sonic Frontiers' flags 66.5 / 255: 66 against 67) and the GPU's own
+// half conversion for RGBA16F. rop_word's cases and FN_OFF_BLEND specialization are checked on the state alone. A merged pass's draw (output 0 drawn to attachment 1) is drawn and read
+// back too, with the words bz_bind bound.
 // make GAME=<id> check_t_rop_round (./t_rop_round <dir>)
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -15,6 +17,13 @@ static int checks, failed;
 #define CHECK(c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); } } while (0)
 static unsigned nvidia_unorm(float x, unsigned s) { if (x != x) return 0; x = fminf(fmaxf(x, 0.f), 1.f); volatile float p = x * (float)s; return (unsigned)rintf(p); }   // float32 product, nearest even
 static unsigned apple_unorm(float x, unsigned s) { if (x != x) return 0; x = fminf(fmaxf(x, 0.f), 1.f); return (unsigned)rint((double)x * s); }   // exact in a double (24 + 17 bits)
+static uint16_t half_rtne(float x) { _Float16 h = (_Float16)x; uint16_t b; memcpy(&b, &h, 2); return b; }   // the compiler's conversion: nearest even
+static uint16_t half_rtz(float x) {   // NVIDIA's conversion into a 16-bit float target: toward zero, the largest finite half past 65504, NaN and Inf kept
+    if (x != x || isinf(x)) return half_rtne(x);
+    uint16_t b = half_rtne(x); _Float16 h; memcpy(&h, &b, 2);
+    if (isinf((float)h)) return (b & 0x8000u) | 0x7bffu;
+    return fabsf((float)h) > fabsf(x) ? b - 1 : b;
+}
 enum { O = NVN_BLEND_FUNC_ONE, Z = NVN_BLEND_FUNC_ZERO, ADD = NVN_BLEND_EQUATION_ADD, MAX = NVN_BLEND_EQUATION_MAX, MIN = NVN_BLEND_EQUATION_MIN };
 // rows of every target: blending off, MAX on colour and alpha, a sum of ONE and ZERO
 static const struct { int on, eq; int rounds; } rows[] = {{0, ADD, 1}, {1, MAX, 1}, {1, ADD, 0}};
@@ -23,6 +32,7 @@ static const struct { int nvn; MTLPixelFormat mtl; unsigned bpp; uint32_t cls; }
     {NVN_FORMAT_RGBA8, MTLPixelFormatRGBA8Unorm, 4, DMSH_ROUND_8},
     {NVN_FORMAT_RGBA16, MTLPixelFormatRGBA16Unorm, 8, DMSH_ROUND_16},
     {NVN_FORMAT_RGB10A2, MTLPixelFormatRGB10A2Unorm, 4, DMSH_ROUND_10_2},
+    {NVN_FORMAT_RGBA16F, MTLPixelFormatRGBA16Float, 8, DMSH_ROUND_F16},
 };
 enum { NFMT = sizeof fmts / sizeof *fmts };
 static void stored(int f, const uint8_t *px, unsigned out[4], unsigned sc[4]) {
@@ -81,7 +91,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc != 2) return 2;
     setenv("DM_MSL_DIR", argv[1], 1);
     mtl_init(); g_msl_dir = @(argv[1]);
-    int on = rop_on();
+    int on = rop_on(), f16 = rop_f16_need();
+    uint32_t f16_cls = f16 ? DMSH_ROUND_F16 : 0u;
     NSError *error = nil; NSString *source = [NSString stringWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/rop.metal"] encoding:NSUTF8StringEncoding error:&error];
     if (!source) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); abort(); }
     NSData *vals = [NSData dataWithContentsOfFile:[g_msl_dir stringByAppendingString:@"/rop.bin"]];
@@ -129,8 +140,22 @@ int main(int argc, char **argv) { @autoreleasepool {
     }
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull)); CHECK(!mtl_last_commit_error());
     for (int f = 0; f < NFMT; f++) {
-        int differ = 0, flags_seen = 0;
+        int differ = 0, flags_seen = 0, f16_edge_seen = 0;
         for (int r = 0; r < NROWS; r++) for (int x = 0; x < W; x++) {
+            if (fmts[f].cls == DMSH_ROUND_F16) {   // NVIDIA's RTZ where guarded (or on RTZ hardware); the GPU's own otherwise
+                uint16_t h[4]; memcpy(h, (const uint8_t *)pixels[f].contents + (r * W + x) * fmts[f].bpp, 8);
+                uint16_t z = half_rtz(v[x]), n = half_rtne(v[x]);
+                if (r == 0) differ += z != n;
+                if (rows[r].on && rows[r].eq == MAX && !(v[x] > 0.f)) z = n = 0;   // MAX over the clear's 0 keeps 0 for a negative, -Inf or NaN colour
+                int must_rtz = (on && f16 && rows[r].rounds) || g_rop_f16_hw_rtz;
+                for (int c = 0; c < 4; c++) {
+                    int ok = must_rtz ? h[c] == z : (h[c] == z || h[c] == n);
+                    if (!ok) fprintf(stderr, "RGBA16F row %d x %d (%.9g) channel %d: got %#x, want %#x (toward zero) or %#x (nearest)\n", r, x, v[x], c, h[c], z, n);
+                    CHECK(ok);
+                }
+                if (r == 0 && (v[x] == 70000.0f || v[x] == -70000.0f || v[x] == 3.0517578125e-05f)) f16_edge_seen++;
+                continue;
+            }
             unsigned got[4], sc[4]; stored(f, (const uint8_t *)pixels[f].contents + (r * W + x) * fmts[f].bpp, got, sc);
             for (int c = 0; c < 4; c++) {
                 unsigned nv = nvidia_unorm(v[x], sc[c]), ap = apple_unorm(v[x], sc[c]), want = on && rows[r].rounds ? nv : ap;
@@ -143,14 +168,16 @@ int main(int argc, char **argv) { @autoreleasepool {
         }
         CHECK(differ > 20);   // the colours reach the cases where the two differ
         if (f == 0) CHECK(flags_seen);
+        if (fmts[f].cls == DMSH_ROUND_F16) CHECK(f16_edge_seen == 3);   // subnormal + +-overflow reached the GPU
     }
     // the word on the state alone: by target format, blend state, logic operation and a merged pass's mapping
     memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); memset(&S.color, 0, sizeof S.color); S.color.logic_op = NVN_LOGIC_OP_COPY;
     for (int i = 0; i < 8; i++) S.blend[i] = state(0);
-    static const struct { MTLPixelFormat f; uint32_t cls; } cases[] = {
+    const struct { MTLPixelFormat f; uint32_t cls; } cases[] = {
         {MTLPixelFormatRGBA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatBGRA8Unorm, DMSH_ROUND_8}, {MTLPixelFormatR8Unorm, DMSH_ROUND_8}, {MTLPixelFormatRG8Unorm, DMSH_ROUND_8},
         {MTLPixelFormatRGBA16Unorm, DMSH_ROUND_16}, {MTLPixelFormatR16Unorm, DMSH_ROUND_16}, {MTLPixelFormatRGB10A2Unorm, DMSH_ROUND_10_2}, {MTLPixelFormatBGR10A2Unorm, DMSH_ROUND_10_2},
-        {MTLPixelFormatRGBA8Unorm_sRGB, 0}, {MTLPixelFormatRGBA8Snorm, 0}, {MTLPixelFormatRGBA16Float, 0}, {MTLPixelFormatRGBA8Uint, 0}, {MTLPixelFormatB5G6R5Unorm, 0},
+        {MTLPixelFormatRGBA16Float, f16_cls}, {MTLPixelFormatRG16Float, f16_cls}, {MTLPixelFormatR16Float, f16_cls},
+        {MTLPixelFormatRGBA8Unorm_sRGB, 0}, {MTLPixelFormatRGBA8Snorm, 0}, {MTLPixelFormatRGBA32Float, 0}, {MTLPixelFormatRG11B10Float, 0}, {MTLPixelFormatRGBA8Uint, 0}, {MTLPixelFormatB5G6R5Unorm, 0},
     };
     for (size_t k = 0; k < sizeof cases / sizeof *cases; k++) {
         g_pass.cfmt[0] = cases[k].f; g_pass.cfmt[3] = cases[k].f;
@@ -164,11 +191,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     S.color.logic_op = NVN_LOGIC_OP_COPY; S.color.blend_en = 0;
     static const uint8_t lmap[8] = {0xff, 2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};   // physical target 1 is output 2
     g_pass.cfmt[0] = 0; g_pass.cfmt[1] = MTLPixelFormatRGBA16Unorm; CHECK(rop_word(lmap) == (on ? (uint32_t)DMSH_ROUND_16 << (2 * DMSH_BLEND_ROUND_BITS) : 0u));
-    // pso_blend_live / pso_off must read k->cfmt (not g_pass.cfmt): a normalized target gets blend_live even if g_pass is float/empty, and a float target compiles dm_blend0 out
-    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA16Float;
+    // pso_blend_live / pso_off must read k->cfmt (not g_pass.cfmt): a normalized target gets blend_live even if g_pass is float/empty, and RGBA16Float keeps FN_OFF_BLEND when hardware already does RTZ
+    {   memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = MTLPixelFormatRGBA32Float;
         pso_key k = {.cfmt = {MTLPixelFormatRGBA8Unorm}, .blend_en = 0, .chmask = 0xf};
         CHECK(pso_blend_live(&k, ps, 0) == (on ? 1 : 0));
         CHECK(pso_off(&k, ps, 0) == (on ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));
+        pso_key kf = {.cfmt = {MTLPixelFormatRGBA16Float}, .blend_en = 0, .chmask = 0xf};
+        CHECK(pso_blend_live(&kf, ps, 0) == (on && f16 ? 1 : 0));
+        CHECK(pso_off(&kf, ps, 0) == (on && f16 ? FN_OFF_BORDER : (FN_OFF_BORDER | FN_OFF_BLEND)));
         // Force FN_OFF_BLEND with rop_word = DMSH_ROUND_8 bound: dm_rop is compiled out, so Sonic Frontiers' 66.5/255 stores Apple's 67 instead of NVIDIA's 66
         MTLRenderPipelineDescriptor *d = pso_desc(&k, pr->sh[0], ps, nil, 0);
         NSError *be = nil; id<MTLRenderPipelineState> off_ps = pso_build(d, FN_OFF_BORDER | FN_OFF_BLEND, &be);

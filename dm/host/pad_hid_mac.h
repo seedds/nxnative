@@ -67,22 +67,45 @@ static int hidpad_player(const hid_pad *d);   // front_mac.m: its player, -1 bef
 static int hidpad_is_pro(const hid_pad *d) { return d->vid == 0x057e && d->pid == 0x2009; }
 // Whether its buttons and sticks come from report 0x30 (pro_m, pro_s) rather than its elements (st): a twin Pro Controller, or a pad of Nintendo's protocol in full mode
 static int hidpad_full(const hid_pad *d) { return (d->twin && hidpad_is_pro(d)) || d->full; }
+enum { HIDPAD_COL_PAD = 1, HIDPAD_COL_OTHER = 2, HIDPAD_COL_CONSUMER = 4 };
+// Ancestor collections of an element: GamePad / Joystick / MultiAxisController vs Mouse / Keyboard / Keypad vs Consumer Control.
+// Physical Pointer collections are not marked OTHER because standard HID gamepad descriptors group absolute sticks under Usage (Pointer).
+static int hidpad_collection_flags(IOHIDElementRef e) {
+    int f = 0;
+    for (IOHIDElementRef p = IOHIDElementGetParent(e); p; p = IOHIDElementGetParent(p)) {
+        uint32_t page = IOHIDElementGetUsagePage(p), usage = IOHIDElementGetUsage(p);
+        if (page == kHIDPage_GenericDesktop) {
+            if (usage == kHIDUsage_GD_GamePad || usage == kHIDUsage_GD_Joystick || usage == kHIDUsage_GD_MultiAxisController) f |= HIDPAD_COL_PAD;
+            else if (usage == kHIDUsage_GD_Mouse || usage == kHIDUsage_GD_Keyboard || usage == kHIDUsage_GD_Keypad) f |= HIDPAD_COL_OTHER;
+        } else if (page == kHIDPage_Consumer && usage == kHIDUsage_Csmr_ConsumerControl) f |= HIDPAD_COL_CONSUMER;
+    }
+    return f;
+}
+static int hidpad_skip_collection(int col) { return (col & HIDPAD_COL_OTHER) && !(col & HIDPAD_COL_PAD); }
+static int hidpad_accept_consumer(int col) { return (col & HIDPAD_COL_PAD) || !(col & HIDPAD_COL_CONSUMER); }
 static void hidpad_value(void *ctx, IOReturn result, void *sender, IOHIDValueRef v) {
     (void)sender;
     hid_pad *d = ctx; if (result != kIOReturnSuccess || d->full) return;   // full: report 0x3F's elements are not sent any more
     IOHIDElementRef e = IOHIDValueGetElement(v);
+    int col = hidpad_collection_flags(e);
+    if (hidpad_skip_collection(col)) return;
     uint32_t page = IOHIDElementGetUsagePage(e), usage = IOHIDElementGetUsage(e);
     CFIndex x = IOHIDValueGetIntegerValue(v), min = IOHIDElementGetLogicalMin(e), max = IOHIDElementGetLogicalMax(e);
     if (page == kHIDPage_Button && usage >= 1 && usage <= 32) {
         uint32_t bit = 1u << (usage - 1), was = d->st.buttons & bit;
         d->st.buttons = x ? d->st.buttons | bit : d->st.buttons & ~bit;
         if (g_hidpad_log && x && !was) LOG("[hid] %s: button usage %u", d->name, usage);
+    } else if (page == kHIDPage_Consumer && usage == kHIDUsage_Csmr_ACBack && hidpad_accept_consumer(col)) {
+        uint8_t was = d->st.ac_back;
+        d->st.ac_back = x != 0;
+        if (g_hidpad_log && x && !was) LOG("[hid] %s: consumer AC Back (0x%x)", d->name, usage);
     } else if (page == kHIDPage_GenericDesktop && usage == kHIDUsage_GD_Hatswitch) {
         d->st.hat = pad_hid_hat(x, min, max);
     } else {
+        if (IOHIDElementIsRelative(e)) return;
         int a = pad_hid_axis_of(page, usage); if (a < 0) return;
         a = pad_hid_axis_for(d->st.layout, a);
-        float n = pad_hid_norm(x, min, max);
+        float n = pad_hid_norm_bits(x, min, max, IOHIDElementGetReportSize(e));
         d->st.axis[a] = d->st.layout == PAD_HID_NINTENDO ? pad_hid_raw_axis(&d->st, a, n) : n;
     }
     hidpad_read(d);
@@ -300,8 +323,8 @@ static void hidpad_use(hid_pad *d) {
         if (!d->proto) LOG("controller '%s' (HID, %04x:%04x): buttons in Nintendo's report 0x3F: read with its numbering", d->name, d->vid, d->pid);
     } else if (d->st.layout == PAD_HID_X360)
         LOG("controller '%s' (HID, %04x:%04x): Xbox 360 layout (Z / Rz triggers, Rx / Ry right stick)", d->name, d->vid, d->pid);
-    else if (d->st.layout == PAD_HID_TAIKO)
-        LOG("controller '%s' (HID, %04x:%04x): HORI Taiko Drum layout (1 Y, 2 B, 3 A, 4 X)", d->name, d->vid, d->pid);
+    else if (d->st.layout == PAD_HID_SWITCH_WIRED)
+        LOG("controller '%s' (HID, %04x:%04x): Switch wired HID layout (1 Y, 2 B, 3 A, 4 X)", d->name, d->vid, d->pid);
     else if (d->vid != PAD_HID_DEFAULT_VENDOR && !getenv("DM_HID_MAP"))
         LOG("controller '%s' (HID, %04x:%04x): buttons use 8BitDo's numbering; if they are in the wrong places, DM_HID_LOG=1 logs each button's number for a DM_HID_MAP", d->name, d->vid, d->pid);
 }
@@ -325,8 +348,12 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     NSArray *els = CFBridgingRelease(IOHIDDeviceCopyMatchingElements(hid, NULL, kIOHIDOptionsTypeNone));
     uint8_t has[PH_AXES] = {0};
     for (id o in els) {
-        IOHIDElementRef e = (__bridge IOHIDElementRef)o; uint32_t page = IOHIDElementGetUsagePage(e);
-        int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
+        IOHIDElementRef e = (__bridge IOHIDElementRef)o;
+        if (hidpad_skip_collection(hidpad_collection_flags(e))) continue;
+        uint32_t page = IOHIDElementGetUsagePage(e);
+        if (!IOHIDElementIsRelative(e)) {
+            int a = pad_hid_axis_of(page, IOHIDElementGetUsage(e)); if (a >= 0) has[a] = 1;
+        }
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
     enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has);

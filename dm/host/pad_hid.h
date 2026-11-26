@@ -3,12 +3,14 @@
 // Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y). The default map is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X,
 // 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels); DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
 // Sticks: X / Y left, Z / Rz right (Rx / Ry on a device without Z); analog triggers (Brake / Accelerator) press ZL / ZR past half.
+// Wrapped unsigned axes (Logical Max encoded as signed -1, exposed by IOHID as -1..0 on multi-bit fields) recover their unsigned range from the field's bit width (pad_hid_norm_bits).
+// Consumer AC Back (0x0C:0x224) inside a gamepad collection maps to Minus alongside button usages (ac_back).
 // Nintendo's report descriptor (a Pro Controller clone of another vendor, such as a PowerA NANO, GitHub PR #989) is told by its reports, not its name or vendor (pad_hid_nin_bit):
 // a pad that declares the console's protocol is driven by it (pad_hid_mac.h: the handshake into report 0x30, read as pad_pro.h reads a Pro Controller); its simple report 0x3F,
 // which such a pad sends until then or when it does not answer, has its own button numbering (pad_hid_nin_map) and carries the sticks raw (pad_hid_raw_axis).
 // Steam Link's virtual Xbox 360 pad, GamePad-N (045e:028e, GitHub issue #2465), delivers Xbox button usages and six Generic Desktop axes:
 // X / Y left stick, Rx / Ry right stick, Z / Rz the two triggers (pad_hid_axis_for). Select that layout only for the matching ID and axes.
-// HORI's Taiko Drum for Switch (0f0d:00f0, PR #3061) reports buttons in the console's order (pad_hid_taiko_map).
+// HORI's Taiko Drum for Switch (0f0d:00f0, PR #3061) and PDP's Wired Fight Pad Pro for Switch (0e6f:0185, GitHub issue #3290) report buttons in the Switch wired HID order (pad_hid_switch_wired_map).
 #pragma once
 #include <math.h>
 #include <stdint.h>
@@ -19,10 +21,11 @@
 
 #define PAD_HID_DEFAULT_VENDOR 0x2DC8   // 8BitDo, whose numbering the default map is (another vendor's pad gets a log line saying so, pad_hid_mac.h)
 enum { PH_X, PH_Y, PH_Z, PH_RX, PH_RY, PH_RZ, PH_BRAKE, PH_ACCEL, PH_AXES };
-enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360, PAD_HID_TAIKO };
+enum pad_hid_layout { PAD_HID_DEFAULT, PAD_HID_NINTENDO, PAD_HID_X360, PAD_HID_SWITCH_WIRED };
 typedef struct {
     uint32_t buttons;          // bit u - 1: HID button usage u held (usages 1..32)
     int hat;                   // -1 centered, 0 up, then clockwise to 7 up-left
+    uint8_t ac_back;           // Consumer AC Back (0x0C:0x224) held -> Minus
     float axis[PH_AXES];       // -1..1 (a trigger rests at -1)
     uint8_t has[PH_AXES];      // the device has the axis
     uint8_t map[16];           // Switch button bit (dm_input.h order) -> HID button usage, 0 none
@@ -49,15 +52,16 @@ static const uint8_t pad_hid_nin_map[16] = {2, 1, 4, 3, 11, 12, 5, 6, 7, 8, 10, 
 // Xbox 360 usages as macOS delivers Steam Link's virtual pad's values (measured one button at a time; not the descriptor's own order): 1 A (bottom), 2 B (right), 3 X (left),
 // 4 Y (top), 5 / 6 LB / RB, 7 / 8 stick clicks, 9 start, 10 back, and the d-pad as buttons 12 up, 13 down, 14 left, 15 right; the triggers are axes
 static const uint8_t pad_hid_x360_map[16] = {2, 1, 4, 3, 7, 8, 5, 6, 0, 0, 9, 10, 14, 12, 15, 13};
-// Taiko Drum usages: 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture
-static const uint8_t pad_hid_taiko_map[16] = {3, 2, 4, 1, 11, 12, 5, 6, 7, 8, 10, 9};
+// Switch wired HID usages: 1 Y, 2 B, 3 A, 4 X, 5 / 6 L / R, 7 / 8 ZL / ZR, 9 minus, 10 plus, 11 / 12 stick clicks, 13 Home, 14 Capture (distinct from report 0x3F's 1 B, 2 A, 3 Y, 4 X)
+static const uint8_t pad_hid_switch_wired_map[16] = {3, 2, 4, 1, 11, 12, 5, 6, 7, 8, 10, 9};
 
 // has records the descriptor's axes before applying any layout. A virtual pad can reuse the Xbox ID with dedicated Brake / Accelerator usages.
 static enum pad_hid_layout pad_hid_layout_for(int nin, int vid, int pid, const uint8_t has[PH_AXES]) {
     if (nin & PAD_NIN_SIMPLE) return PAD_HID_NINTENDO;
     if (vid == 0x045e && pid == 0x028e && has[PH_X] && has[PH_Y] && has[PH_RX] && has[PH_RY] &&
         has[PH_Z] && has[PH_RZ] && !has[PH_BRAKE] && !has[PH_ACCEL]) return PAD_HID_X360;
-    if (vid == 0x0f0d && pid == 0x00f0) return PAD_HID_TAIKO;   // the PS4-mode HORI Fighting Stick Alpha also declares 14 button usages
+    if (vid == 0x0f0d && pid == 0x00f0) return PAD_HID_SWITCH_WIRED;   // the PS4-mode HORI Fighting Stick Alpha also declares 14 button usages
+    if (vid == 0x0e6f && pid == 0x0185) return PAD_HID_SWITCH_WIRED;   // PDP Wired Fight Pad Pro (#3290): reporter measured 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R; matched by verified ID as other PDP pads differ
     return PAD_HID_DEFAULT;
 }
 
@@ -74,7 +78,7 @@ static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout
     switch (layout) {
     case PAD_HID_NINTENDO: button_map = pad_hid_nin_map; break;
     case PAD_HID_X360: button_map = pad_hid_x360_map; break;
-    case PAD_HID_TAIKO: button_map = pad_hid_taiko_map; break;
+    case PAD_HID_SWITCH_WIRED: button_map = pad_hid_switch_wired_map; break;
     case PAD_HID_DEFAULT: break;
     }
     memset(h, 0, sizeof *h); h->hat = -1; h->layout = layout;
@@ -99,6 +103,15 @@ static int pad_hid_axis_for(enum pad_hid_layout layout, int axis) {
     return axis;
 }
 static float pad_hid_norm(long v, long min, long max) { return max > min ? (float)(2.0 * (v - min) / (max - min) - 1) : 0; }
+// Some HID descriptors encode an unsigned Logical Maximum (such as 0xFFFF for 16-bit axes) as signed -1, which IOHIDFamily swaps to -1..0.
+// Recover the unsigned value over the element's report bit width for any multi-bit axis with that wrapped range.
+static float pad_hid_norm_bits(long v, long min, long max, uint32_t bits) {
+    if (bits > 1 && bits < 32 && ((min == -1 && max == 0) || (min == 0 && max == -1))) {
+        uint32_t mask = (1u << bits) - 1u;
+        return pad_hid_norm((long)((uint32_t)v & mask), 0, (long)mask);
+    }
+    return pad_hid_norm(v, min, max);
+}
 // A raw axis (-1..1, report 0x3F) measured from its rest, a full deflection reaching 1: report 0x3F carries the sticks uncalibrated, off centre and short of the axis's range
 // (a PowerA NANO's rest 9 and 11% off centre, its reach about 0.78 of the axis from there: a full push read 61 to 74%). The first value is the rest, unless it is too far out to
 // be one (a stick held while the pad connects: the axis's middle stands in). Each side's reach starts at PAD_HID_RAW_REACH and only grows. Report 0x30 has the pad's own
@@ -139,6 +152,7 @@ static uint64_t pad_hid_buttons(const pad_hid *h) {
     static const uint64_t hat[8] = {DM_BTN_UP, DM_BTN_UP | DM_BTN_RIGHT, DM_BTN_RIGHT, DM_BTN_RIGHT | DM_BTN_DOWN, DM_BTN_DOWN, DM_BTN_DOWN | DM_BTN_LEFT, DM_BTN_LEFT, DM_BTN_LEFT | DM_BTN_UP};
     uint64_t m = pad_hid_map_buttons(h, h->buttons);
     if (h->hat >= 0 && h->hat < 8) m |= hat[h->hat];
+    if (h->ac_back) m |= DM_BTN_MINUS;
     if (h->has[PH_BRAKE] && h->axis[PH_BRAKE] > 0) m |= DM_BTN_ZL;
     if (h->has[PH_ACCEL] && h->axis[PH_ACCEL] > 0) m |= DM_BTN_ZR;
     return m;

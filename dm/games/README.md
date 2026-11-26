@@ -9,7 +9,7 @@ Each game the port knows has a folder `dm/games/<id>/`, named after the base gam
 - **`shader_seen.tsv`** (optional): shader keys a game's Mac runs asked for. The NSP script's `--seen-shaders` builds a partial library of only those, and it stops for a profile without this table ([Building selected Mac shaders](../../docs/development.md#building-selected-mac-shaders)). No other tool reads it, and it is not a shader input.
 - **`bench.tsv`** (optional): benchmark routes for `scripts/bench.py` ([A benchmark on the Mac](../../docs/development.md#a-benchmark-on-the-mac)): a name, the scripted input (`DM_KEYS`), the measured window and a description, one route per line.
 - **`vk_capture.tsv`** (a Vulkan game that generates its shaders at run time, Super Mario Galaxy): the keys of the SPIR-V modules it generates.
-- **`gl_capture.tsv`** (an OpenGL game that puts its GLSL together at run time, Balatro): the files (`<key>.vert` / `<key>.frag`) of the shaders it compiles. A game whose renderer makes each shader only on first use (DOOM 3, id Tech 4's BFG renderer) has the capture run call the renderer's own finders for every render program (`dm/gfx/tools/idtech4_programs.py`).
+- **`gl_capture.tsv`** (a game that builds GLSL at run time, such as Balatro or Naruto Storm Connections): the files (`<key>.vert` / `<key>.frag`) of the shaders it compiles. For a game that presents through NVN, this table also requests the GL library beside the NVN libraries. A game whose renderer makes each shader only on first use (DOOM 3, id Tech 4's BFG renderer) has the capture run call the renderer's own finders for every render program (`dm/gfx/tools/idtech4_programs.py`).
 - **`bf_want.tsv`**.
 - **`validated.tsv`** (optional): the chain this game was last green on, written by `scripts/regress.py check --record` (or `baseline --record`) when its comparison status is `PASS` or `CHANGED` and every tested boot run succeeds. A boot failure shared with the baseline still prevents recording. `quick` / `full` rows (the latest of each), `mode<TAB>chain=<DMSH_CHAIN> commit=<short SHA>[+dirty] date=<UTC day> machine=<model> macos=<version>`; a red result leaves the rows as they were. A build using a derived profile does not validate the repository profile. `regress.py list` shows it and whether that chain is the current one. It holds no game data; commit it with the pull request.
 - **`geo_mesh.tsv`** (optional): vertex / geometry shader pairs drawn with a passthrough geometry shader, by hand, for pairs that neither `geo_pairs.tsv` (the split's shader variations) nor the prewarm list's `G` rows name: a game whose stages are separate programs (NieR:Automata); `dmsh_build.py` builds a mesh library for each pair of both (`dmsh_mesh.py`), and the host draws such a pair's triangle lists as mesh draws ([Passthrough geometry shaders drawn by the vertex shader](../../docs/reference/shaders.md#passthrough-geometry-shaders-drawn-by-the-vertex-shader)). A pair in neither takes the compute path, and the pipeline record names it as a `G` row.
@@ -93,6 +93,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [DARK SOULS: REMASTERED](01004AB00A260000/README.md) | `01004AB00A260000` | 1.0.3 | 4.5.0 | FromSoftware's engine | NVN | [60 fps mode](01004AB00A260000/README.md#frame-rate) |
 | [DAVE THE DIVER](010097F018538000/README.md) | `010097F018538000` | 1.0.6.1267 | 20.5.29 | Unity 6000.0.52f1 IL2CPP, FMOD | NVN | — |
 | [Dead Cells](0100646009FBE000/README.md) | `0100646009FBE000` | 1.25.0 | 13.3.5 | Heaps / HashLink (HL/C) | NVN | — |
+| [Devil May Cry 3 Special Edition](01007B600D5BC000/README.md) | `01007B600D5BC000` | 1.0.1 | 8.2.0 | Capcom's DMC3 engine, FMOD | NVN | — |
 | [Diablo II: Resurrected](0100726014352000/README.md) | `0100726014352000` | 1.0.34.0 | 11.4.3 | Blizzard's D2R engine, FMOD | NVN | [60 fps mode](0100726014352000/README.md#what-it-needs) |
 | [Diablo III: Eternal Collection](01001B300B9BE000/README.md) | `01001B300B9BE000` | 2.7.7.92380 | 8.2.0 | Blizzard's engine, FMOD | NVN | — |
 | [Digimon Story Cyber Sleuth: Complete Edition](010014E00DB56000/README.md) | `010014E00DB56000` | 1.0.3 | 6.4.0 | Media.Vision MVGL | OpenGL | — |
@@ -138,6 +139,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Hyrule Warriors: Age of Calamity](01002B00111A2000/README.md) | `01002B00111A2000` | 1.3.0 | 9.6.0 | Koei Tecmo's KTGL | NVN | 60 fps target |
 | [Hyrule Warriors: Age of Imprisonment](04003F40232DE000/README.md) | `04003F40232DE000` | v196608 (Switch 2) | 20.5.15 (Ounce) | Koei Tecmo's KTGL | NVN2 | — |
 | [Hyrule Warriors: Definitive Edition](0100AE00096EA000/README.md) | `0100AE00096EA000` | 1.0.1 | 3.5.1 | Koei Tecmo's KTGL | NVN | — |
+| [Iconoclasts](0100BC60099FE000/README.md) | `0100BC60099FE000` | 1.15p | 5.3.0 | its own engine | NVN | — |
 | [It Takes Two](010092A0172E4000/README.md) | `010092A0172E4000` | 1.0.3 | 13.3.5 | Unreal Engine 4 (Hazelight, AngelScript), Wwise | NVN | 60 fps target |
 | [Kirby Air Riders](040077201BE50000/README.md) | `040077201BE50000` | v458752 (Switch 2) | 20.5.26 (Ounce) | Its own engine (`phx`, `Aurora`) | NVN2 | — |
 | [Kirby and the Forgotten Land](01004D300C5AE000/README.md) | `01004D300C5AE000` | 1.1.0 | 11.4.0 | HAL Laboratory's engine (NintendoWare) | NVN | — |
@@ -166,6 +168,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN | 60 fps target |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN | [60 fps mode](010051701FB46000/README.md#frame-rate) |
 | [Mortal Kombat 11](0100F2200C984000/README.md) | `0100F2200C984000` | 1.0.26 | 9.3.1 | NetherRealm's Unreal Engine 3, Wwise, Havok | NVN | — |
+| [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](0100D2D0190A4000/README.md) | `0100D2D0190A4000` | 1.7.1 | 14.3.0 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [Mac VS Battle](0100D2D0190A4000/README.md#mac-gameplay) |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN | 60 fps target |
 | [NieR:Automata The End of YoRHa Edition](010056B015FE8000/README.md) | `010056B015FE8000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN | 60 fps target |
 | [NieR:Automata The End of YoRHa Edition, Asian release](0100B8E016F76000/README.md) | `0100B8E016F76000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN | 60 fps target |
@@ -180,7 +183,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 | — |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN | — |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN | — |
-| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | — |
+| [Outer Wilds](01003DC0144B6000/README.md) | `01003DC0144B6000` | 1.1.15.1027 | 14.3.0 | Unity 2019.4.40f1 IL2CPP, FMOD | NVN | [60 fps target](01003DC0144B6000/README.md#frame-rate) |
 | [Overcooked! All You Can Eat](0100F28011892000/README.md) | `0100F28011892000` | 1.0.12 | 10.4.1 | Unity 2019.4.11f1 IL2CPP, FMOD | NVN | 60 fps target |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN | — |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN | 60 fps target |
@@ -268,14 +271,17 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Unicorn Overlord](010069401ADB8000/README.md) | `010069401ADB8000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN | — |
 | [Unicorn Overlord, Asian release](010054B01AD92000/README.md) | `010054B01AD92000` | 1.05 | 16.2.4 | Vanillaware's engine | NVN | — |
 | [UnMetal](01008F4014A74000/README.md) | `01008F4014A74000` | 1.2.0 | 14.3.0 | Unepic Fran's own engine (`arcadix`) | OpenGL | — |
+| [Volcano Princess](01007CB025C58000/README.md) | `01007CB025C58000` | 1.0.2 | 21.4.7 | Unity 6000.4.7f1 IL2CPP, FMOD | NVN | — |
 | [Warhammer Survivors](0100CAA026246000/README.md) | `0100CAA026246000` | 1.0.0 (base) | 21.4.7 | Unity 6000.0.74f1 IL2CPP, FMOD | NVN | — |
 | [Well Dweller](0100217023F6C000/README.md) | `0100217023F6C000` | 1.0.0 | 22.2.0 | GameMaker Studio 2 (its runner) | OpenGL | — |
 | [XCOM 2 Collection](0100D0B00FB74000/README.md) | `0100D0B00FB74000` | 1.0.3 (`v131072`) | 9.3.1 | Unreal Engine 3, Wwise | NVN | Mac |
 | [Xenoblade Chronicles: Definitive Edition](0100FF500E34A000/README.md) | `0100FF500E34A000` | 1.1.2 | 9.3.1 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2](0100E95004038000/README.md) | `0100E95004038000` | 2.1.0 | 3.5.0 | Monolith's engine | NVN | — |
 | [Xenoblade Chronicles 2, Japanese/Asian release](0100F3400332C000/README.md) | `0100F3400332C000` | 3.0.0 | 3.5.0 | Monolith's engine | NVN | Native 720p, bounded DRS |
+| [Xenoblade Chronicles 2 – Nintendo Switch 2 Edition](0400E95004038001/README.md) | `0400E95004038001` | 3.0.1 (Switch 2) | 21.4.4 (Ounce) | Monolith's engine | NVN2 | — |
 | [Xenoblade Chronicles 3](010074F013262000/README.md) | `010074F013262000` | 2.2.1 | 12.3.9 | Monolith's engine | NVN | Native 720p, bounded DRS |
 | [Xenoblade Chronicles X: Definitive Edition](0100453019AA8000/README.md) | `0100453019AA8000` | 1.0.1 | 19.3.2 | Monolith's engine | NVN | 60 fps target |
+| [Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](0400453019AA8001/README.md) | `0400453019AA8001` | 2.0.0 (Switch 2) | 20.5.14 (Ounce) | Monolith's engine | NVN2 | Mac |
 | [Yoshi and the Mysterious Book](0400245021D2C000/README.md) | `0400245021D2C000` | 1.0.2 (Switch 2) | 20.5.15 (Ounce) | Unreal Engine 5.4.4 | NVN2 | — |
 | [Yoshi's Crafted World](01006000040C2000/README.md) | `01006000040C2000` | 1.0.1 | 4.4.1 | Unreal Engine 4.18 era (Good-Feel) | NVN | — |
 

@@ -1,5 +1,6 @@
 """NSP script with a NUP container (scripts/pack_nup.py): the container is read and checked, its versions and DLC packed into what the script's later steps read, its control data saved,
 and the script asks for no keys. The NUPs are written here (SPEC v1, https://github.com/a55uka/nup). The run stops at the prerequisite check; no game files, keys or Xcode needed."""
+import errno
 import hashlib
 import importlib.util
 import json
@@ -1112,6 +1113,90 @@ class Main(Base):
                      mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'say'), mock.patch.object(nsp.PROG, 'say') as red:
                     self.assertEqual(nsp.cli(argv), 1)
                 self.assertRegex(red.call_args.args[0], r'^\[RED\] .*no romfs/')
+
+
+class WriterErrors(Base):
+    def test_copy_failure_closes_mmap_and_preserves_original_error(self):
+        tree = {
+            'exefs': {'main': b'code', 'main.npdm': npdm(TID)},
+            'romfs': {'stored.bin': b'short-stored-entry', 'compressed.bin': b'zstd-entry-' * 40},
+        }
+        write_nup(self.path, [(0, TID, 0, tree, META)])
+
+        class EnospcSink:
+            def write(self, data):
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        for member, expected_codec in ((b'stored.bin', 0), (b'compressed.bin', 1)):
+            with self.subTest(member=member):
+                holder = {}
+                with self.assertRaises(OSError) as ctx:
+                    with pack_nup.Nup(self.path) as n:
+                        holder['n'] = n
+                        idx = n.child(n.packages[0].romfs, member)
+                        self.assertIsNotNone(idx)
+                        self.assertEqual(n.files[idx][5], expected_codec)
+                        n.copy(idx, EnospcSink())
+                self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+                self.assertTrue(holder['n'].mm.closed)
+
+        # Corrupted zstd payload also closes the mapping and propagates pack_nup.Error (not BufferError)
+        raw = bytearray(self.path.read_bytes())
+        with pack_nup.Nup(self.path) as n:
+            idx = n.child(n.packages[0].romfs, b'compressed.bin')
+            eoff = n.files[idx][3]
+        raw[eoff:eoff + 4] = b'\xff\xff\xff\xff'
+        bad_nup = self.dir / 'bad_zstd.nup'
+        bad_nup.write_bytes(raw)
+        holder = {}
+        with self.assertRaises(pack_nup.Error):
+            with pack_nup.Nup(bad_nup) as n:
+                holder['n'] = n
+                n.copy(idx, EnospcSink())
+        self.assertTrue(holder['n'].mm.closed)
+
+    def test_top_level_pack_enospc_preserves_previous_image_and_reports_oserror(self):
+        # First pack a finished image
+        v1 = {'exefs': {'main': b'code', 'main.npdm': npdm(TID)}, 'romfs': {'stored.bin': b'first-image', 'z.bin': b'a' * 300}}
+        v2 = {'exefs': {'main': b'code', 'main.npdm': npdm(TID)}, 'romfs': {'stored.bin': b'second-image', 'z.bin': b'b' * 300}}
+        write_nup(self.path, [(0, TID, 0, v1, META)])
+        work = self.dir / 'work'
+        with mock.patch.object(sys, 'argv', ['pack_nup.py', str(self.path), '--work-dir', str(work)]):
+            pack_nup.main()
+        img = work / 'extract/v0/RomFS.img'
+        previous = img.read_bytes()
+
+        # Replace NUP with updated RomFS and fail writing RomFS.img.part with ENOSPC
+        write_nup(self.path, [(0, TID, 0, v2, META)])
+        real_open = open
+
+        class FailingWriter:
+            def __init__(self, f):
+                self._f = f
+                self._writes = 0
+            def write(self, data):
+                self._writes += 1
+                if self._writes >= 2:
+                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+                return self._f.write(data)
+            def __enter__(self): return self
+            def __exit__(self, *a): return self._f.__exit__(*a)
+            def __getattr__(self, name): return getattr(self._f, name)
+
+        def patched_open(file, mode='r', *a, **kw):
+            f = real_open(file, mode, *a, **kw)
+            if 'w' in mode and os.fspath(file).endswith('RomFS.img.part'):
+                return FailingWriter(f)
+            return f
+
+        with mock.patch.object(romfs_image, 'open', side_effect=patched_open, create=True), \
+             mock.patch.object(sys, 'argv', ['pack_nup.py', str(self.path), '--work-dir', str(work)]):
+            with self.assertRaises(SystemExit) as ctx:
+                pack_nup.main()
+        self.assertIn('[RED]', str(ctx.exception))
+        self.assertIn(os.strerror(errno.ENOSPC), str(ctx.exception))
+        self.assertEqual(img.read_bytes(), previous)
+        self.assertFalse(Path(str(img) + '.part').exists())
 
 
 if __name__ == '__main__':

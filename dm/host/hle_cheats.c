@@ -2,7 +2,7 @@
 // atmosphere/contents/<title ID>/cheats/<build ID>.txt, loaded by the first 16 hex digits (8 bytes) of the main NSO's
 // build ID (dm_main_build(), from the rewriter's fixups header). The Mac front end shows them in the window's Cheats menu
 // and panel (front_mac.m); toggles are remembered per build in <build>.enabled in the cheats folder and restored at the next launch.
-// The host applies the enabled cheats once per presented frame (hle_nvn.c dump_frame -> dm_cheats_present) and at a fixed
+// The host applies the enabled cheats once per presented frame (hle_os.c dm_guest_frame_tick -> dm_cheats_present) and at a fixed
 // ~60 Hz from its own thread when the game is not presenting (window minimized, graphics suspended, start-up).
 // The cheat VM follows the reference implementation (Atmosphère stratosphere/dmnt/source/cheat/impl/dmnt_cheat_vm.cpp and
 // docs/features/cheats.md; the semantics are written down in docs/reference/cheats.md) in word order, conditions, loops
@@ -996,7 +996,7 @@ static void cheats_pass(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
-// Per presented frame (hle_nvn.c dump_frame): apply the cheats and note the present, so the idle thread stands down
+// Per presented frame (hle_os.c dm_guest_frame_tick): apply the cheats and note the present, so the idle thread stands down
 // (brief: once per presented frame; the idle thread only when it is not presenting)
 void dm_cheats_present(void) {
     atomic_store(&g_present_ns, now_ns());
@@ -1039,7 +1039,7 @@ static void cheat_key(const cheat_t *c, char *out, size_t n) {
 static void flag_file(char *out, size_t n, const char *what) { snprintf(out, n, "%s/.cheats-%s-%s", g_dir, what, g_tid); }
 
 // The state files (<build>.enabled, the safe-mode flag) are written from one serial dispatch queue, never on the thread
-// that asked: a "set" cheat fires inside a pass on the presenting thread (hle_nvn.c dump_frame), where an fopen on the
+// that asked: a "set" cheat fires inside a pass on the presenting thread (hle_os.c dm_guest_frame_tick), where an fopen on the
 // cheats folder (a slow or external volume) would hold the frame. What to write is captured under g_lock by the caller
 // and handed to the queue, which writes in the order it was asked, so the files end as a synchronous write would have
 // left them. files_drain waits for everything queued: before the engine reads <build>.enabled back (states_load) and at

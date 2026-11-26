@@ -150,9 +150,11 @@ $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 .PHONY: nro
 nro: $(B)/t_nro
 	$(B)/t_nro
-# the cheat engine (hle_cheats.c, compiled into the test with stubs for the loader, the heap and the keys)
-$(B)/t_cheats: t_cheats.c ../hle_cheats.c ../code_write.h ../dm.h ../dm_input.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c
+# the cheat engine (hle_cheats.c, compiled with real hle_os.c so dm_guest_frame_tick -> dm_cheats_present resolves as in the host)
+$(B)/t_cheats_os.o: ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Dnow_ns=hle_os_real_now_ns -I.. $(GINC) -c $< -o $@
+$(B)/t_cheats: t_cheats.c $(B)/t_cheats_os.o ../hle_cheats.c ../code_write.h ../dm.h ../dm_input.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c $(B)/t_cheats_os.o
 .PHONY: cheats
 cheats: $(B)/t_cheats
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats

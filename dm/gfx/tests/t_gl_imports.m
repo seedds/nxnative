@@ -23,6 +23,8 @@ void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
 uint64_t svc_dispatch(int n, uint64_t *r, uint64_t a) { (void)n; (void)r; (void)a; return 0; }
+static _Atomic int g_gl_frame_ticks;
+void dm_guest_frame_tick(void) { atomic_fetch_add(&g_gl_frame_ticks, 1); }
 uint64_t unimpl_stubs[4096];
 static const char *wrap_kind;
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)name; wrap_kind = kind; return fn; }
@@ -1708,7 +1710,12 @@ int main(int argc, char **argv) {
     test_active_attributes();
     test_fate_calls();
     test_fixed_function(!cpu);
-    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding(); }
+    if (!cpu) {
+        test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding();
+        int gl_ticks0 = atomic_load(&g_gl_frame_ticks);
+        assert(h_eglSwapBuffers(NULL, NULL) == EGL_TRUE && h_eglSwapBuffers(NULL, NULL) == EGL_TRUE);
+        assert(atomic_load(&g_gl_frame_ticks) == gl_ticks0 + 2);
+    }
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

@@ -35,6 +35,7 @@ typedef struct {
     const void *pkg_data;                // TextureBuilderSetPackagedTextureData: copied into the storage at TextureInitialize (13 Sentinels)
     uint8_t set_swz : 1, stencil : 1; uint16_t swz;   // TextureBuilderSetSwizzle: r | g << 3 | b << 6 | a << 9 (NVN and Metal channel enums have the same values: 0 zero 1 one 2 R 3 G 4 B 5 A);
                                          // stencil: TextureBuilderSetDepthStencilMode STENCIL (the texture reads the stencil of its depth-stencil storage, as a stencil-mode view does)
+    uint32_t gl_name;
 } tex_builder_t;                                                                             FITS(tex_builder_t, NVNtextureBuilder);
 // Field order packed to 0x80: newer SDKs (SMBW, NVN 55) allocate NVNtexture as 0x80 bytes (allocated from main 0x978c3c, initialized at 0x978cd4);
 // the former 0x88 wrote past the object's end and corrupted the adjacent heap block's free list. has_layout sits in the alignment gap after d, layout and serial fill up to 0x80.
@@ -65,6 +66,7 @@ _Static_assert(__builtin_offsetof(samp_t, p) == 8 && sizeof(samp_par) == 40, "sa
 typedef struct prog_t { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial: table key for the replay layer's resolved result
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;   /* fenced 1: physical, 2: acquire, 3: owned logical receipt, 4: owned deferred acquire wait */ FITS(sync_t, NVNsync);
+enum { NVN_SYNC_GL = 5 };   // the GL layer's shared-event serial
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int64_t off; } ev_t; FITS(ev_t, NVNevent);   // pool / off: EventGetMemoryPool / Offset
 
@@ -72,7 +74,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, follow; void *pending_acq; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t; follow: see nvn_pace_follow; pending_acq: deferred acquire wait not yet consumed
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4], offscreen; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, follow; void *pending_acq; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t; follow: see nvn_pace_follow; pending_acq: deferred acquire wait not yet consumed
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory
@@ -343,7 +345,8 @@ int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void); int mtl_snap_acquir
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped
 // Texture release (at Finalize)
 void mtl_tex_init(const tex_t *t);      // TextureInitialize: the serial belongs to a live texture object until mtl_tex_release
-void mtl_tex_release(tex_t *t);
+int mtl_tex_init_gl(tex_t *t, uint32_t name);
+int mtl_tex_release(tex_t *t);         // → 0 when the texture lives on (a copy's Finalize: the object it was initialized in still holds it), else 1
 void mtl_tex_pin(uint64_t serial);
 void mtl_tex_unpin(uint64_t serial);
 void mtl_pkg_stats(uint64_t *uploads, uint64_t *reuploads);

@@ -88,7 +88,7 @@ bench = load_module('bench', REPO / 'scripts/bench.py')
 shader_regressions = load_module('shader_regressions', REPO / 'dm/gfx/tools/shader_regressions.py')
 usage = load_module('usage', REPO / 'dm/tools/usage.py')   # usage manifests and change impact (regress.py usage / impact)
 run_saves = load_module('run_saves', REPO / 'dm/tools/run_saves.py')   # cloud saves off in every run (run_env)
-proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a heavy job in a process group of its own, stopped whole (run_heavy)
+proc_group = load_module('proc_group', REPO / 'dm/tools/proc_group.py')   # a job in a process group of its own, stopped whole (run_heavy, modules_for)
 tree_tar = load_module('tree_tar', REPO / 'dm/tools/tree_tar.py')   # a work folder's quiet folders as one file each, and an old revision's compile cache
 shader_cache = load_module('shader_cache', REPO / 'dm/tools/shader_cache.py')   # the per-game regression compile cache, with read-only reuse of the player's
 shader_lib = load_module('shader_lib', REPO / 'dm/tools/shader_lib.py')   # a chain build's libraries as one file, read in place
@@ -845,20 +845,40 @@ def modules_for(tree, g, rewrite, jobs):
     shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
     if has_nro: shutil.copyfile(nro, tmp / 'nro.tsv')
     say(f'  {g.id}: rewriting {len(src)} modules with the rewriter of {tree.id}')
-    procs, todo = {}, list(src)
+    groups, todo, stop_sig = {}, list(src), signal.SIGTERM
     try:
-        while todo or procs:
-            while todo and len(procs) < jobs:
+        while todo or groups:
+            while todo and len(groups) < jobs:
                 m = todo.pop(0); f = open(tmp / f'rewrite_{m}.log', 'w')
-                procs[m] = (subprocess.Popen([sys.executable, str(tree.path / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=mods, stdout=f, stderr=subprocess.STDOUT), f)
-            for m in [m for m, (p, _) in procs.items() if p.poll() is not None]:
-                p, f = procs.pop(m); f.close()
-                if p.returncode: raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {tmp / f"rewrite_{m}.log"})')
-            time.sleep(0.2)
+                try:
+                    grp = proc_group.Group([sys.executable, str(tree.path / 'dm/tools/patch_nso.py'), str(src[m]), str(tmp), m], env=mods, stdout=f, stderr=subprocess.STDOUT)
+                except BaseException:
+                    f.close(); raise
+                groups[m] = (grp, f)
+            for m in [m for m, (grp, _) in groups.items() if grp.p.poll() is not None]:
+                grp, f = groups[m]
+                if grp.p.returncode:
+                    raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {tmp / f"rewrite_{m}.log"})')
+                groups.pop(m)
+                try:
+                    rc = grp.finish()
+                    if grp.stragglers:
+                        msg = f'[RED] patch_nso.py exited, but {proc_group.describe(grp.stragglers)} still ran {grp.drain:g} s later and was stopped: what it writes may be incomplete\n'
+                        os.write(f.fileno(), msg.encode())
+                except BaseException:
+                    groups[m] = (grp, f); raise
+                finally:
+                    if m not in groups: f.close()
+                if rc or grp.stragglers:
+                    raise HarnessError(f'{g.id}: patch_nso.py of {tree.id} failed on {m} (see {tmp / f"rewrite_{m}.log"})')
+            if todo or groups: time.sleep(0.2)
+    except KeyboardInterrupt:
+        stop_sig = signal.SIGINT; raise
     finally:
-        for p, f in procs.values():
-            if p.poll() is None: p.terminate(); p.wait()
-            f.close()
+        try:
+            proc_group.stop_all([grp for grp, _ in groups.values()], stop_sig)
+        finally:
+            for _, f in groups.values(): f.close()
     (tmp / '.done').write_text('')
     if dst.exists():
         if modules_complete(dst, src, has_nro):
@@ -876,25 +896,6 @@ def modules_for(tree, g, rewrite, jobs):
 
 
 # ---------------------------------------------------------------- the measuring lock and the Mac's load
-
-def pid_alive(pid):
-    try: os.kill(pid, 0); return True
-    except ProcessLookupError: return False
-    except PermissionError: return True
-
-
-def own_tree():
-    me, kids = os.getpid(), set()
-    r = sh(['ps', '-axo', 'pid=,ppid='])
-    par = collections.defaultdict(list)
-    for ln in r.stdout.splitlines():
-        a = ln.split()
-        if len(a) == 2: par[int(a[1])].append(int(a[0]))
-    todo = [me]
-    while todo:
-        p = todo.pop(); kids.add(p); todo += par.get(p, [])
-    return kids
-
 
 def heavy_jobs():   # other builds now running: not this process's, not stopped, not another regress.py's (whose builds pause while the measuring lock is held)
     r = sh(['ps', '-axo', 'pid=,ppid=,stat=,%cpu=,command=']); out = []; rows = {}

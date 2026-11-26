@@ -161,7 +161,12 @@ static class P {
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null ? source.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : source.OpenStorage(NcaSectionType.Data, level));
+        // An update that changes only code can carry a data section that is a patch with an empty AES-CTR-Ex table (Pokémon Legends: Z-A 1.0.1: one relocation entry, no
+        // encryption entries); LibHac 0.19 refuses to open it (ResultFsInvalidArgument, 2002-6001, from Aes128CtrExStorage). When its IVFC hash data is also the base's,
+        // the patched RomFS is the base RomFS byte for byte, so read that.
+        bool sameData = baseProg != null && updProg != null && PatchKeepsData(baseProg, updProg);
+        if (sameData) Console.WriteLine("the update's data section is a patch that changes nothing (empty AES-CTR-Ex table, the base's IVFC hash): the base game's RomFS is read");
+        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null && !sameData ? source.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : source.OpenStorage(NcaSectionType.Data, level));
         Func<IFileSystem> romfs = () => Romfs(IntegrityCheckLevel.ErrorOnInvalid);
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => Romfs(IntegrityCheckLevel.IgnoreOnInvalid);
@@ -259,6 +264,25 @@ static class P {
         string fw = rev < Firmware.Length ? $"firmware {Firmware[rev]}" : $"a firmware after {Firmware[^1]}";
         throw new KeysMissing($"{file}{more}: prod.keys has no {key} (master key {rev:x2}, which came with {fw}): the keys are older than the game; " +
                               $"dump prod.keys again from a console on {fw}{(rev < Firmware.Length ? " or later" : "")}");
+    }
+
+    // The update's data section is a RomFS AesCtrEx patch whose AES-CTR-Ex table is empty and whose IVFC hash data (header, levels, salt, master hash) is the base data section's.
+    internal static bool PatchKeepsData(Nca baseNca, Nca upd) {
+        int bi = Nca.GetSectionIndexFromType(NcaSectionType.Data, baseNca.Header.ContentType), ui = Nca.GetSectionIndexFromType(NcaSectionType.Data, upd.Header.ContentType);
+        if (!baseNca.SectionExists(bi) || !upd.SectionExists(ui)) return false;
+        // GetFsHeader verifies each FS header's SHA-256 hash against the NCA header.
+        var bf = baseNca.GetFsHeader(bi); var uf = upd.GetFsHeader(ui);
+        if (!uf.IsPatchSection() || bf.FormatType != NcaFormatType.Romfs || uf.FormatType != NcaFormatType.Romfs) return false;
+        if (bf.HashType != NcaHashType.Ivfc || uf.HashType != NcaHashType.Ivfc || uf.EncryptionType != NcaEncryptionType.AesCtrEx) return false;
+        if (bf.ExistsSparseLayer() || uf.ExistsSparseLayer() || bf.ExistsCompressionLayer() || uf.ExistsCompressionLayer()) return false;
+        ReadOnlySpan<byte> enc = uf.GetPatchInfo().EncryptionTreeHeader;
+        if (!enc[..4].SequenceEqual("BKTR"u8) || BinaryPrimitives.ReadInt32LittleEndian(enc[8..12]) != 0) return false;
+        if (baseNca.Header.FormatVersion != NcaVersion.Nca3 && baseNca.Header.FormatVersion != NcaVersion.Nca2) return false;
+        if (upd.Header.FormatVersion != NcaVersion.Nca3 && upd.Header.FormatVersion != NcaVersion.Nca2) return false;
+        Span<byte> bh = stackalloc byte[0x200], uh = stackalloc byte[0x200];
+        using (var s = baseNca.OpenDecryptedHeaderStorage()) s.Read(0x400 + 0x200 * bi, bh).ThrowIfFailure();
+        using (var s = upd.OpenDecryptedHeaderStorage()) s.Read(0x400 + 0x200 * ui, uh).ThrowIfFailure();
+        return bh.Slice(0x08, 4).SequenceEqual("IVFC"u8) && bh.Slice(0x08, 0xF8).SequenceEqual(uh.Slice(0x08, 0xF8));
     }
 
     static bool Sparse(Nca n) {

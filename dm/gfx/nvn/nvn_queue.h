@@ -15,6 +15,7 @@ void nvn_queue_finish(queue_t *q);
 void nvn_queue_forget(queue_t *q);
 void nvn_sync_release(sync_t *s);
 void nvn_sync_set_acq(sync_t *s, uint64_t handle);
+void nvn_sync_set_acq_fence(sync_t *s, uint64_t fence);
 uint64_t nvn_sync_ref_acq(const sync_t *s);
 int nvn_sync_wait(const sync_t *s, uint64_t timeout);
 void nvn_event_publish(volatile uint32_t *word, unsigned mode, uint32_t value);

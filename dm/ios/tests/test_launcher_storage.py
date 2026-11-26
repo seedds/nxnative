@@ -40,6 +40,7 @@ class LauncherStorageTests(unittest.TestCase):
             r = subprocess.run([str(exe), str(tmp / 'launcher.json'), str(tmp / 'launcher_mac.json')], capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertIn('launcher storage: 0 failed', r.stdout)
+            self.assertNotIn('launcher: save sync:', r.stderr)
 
 
 if __name__ == '__main__':

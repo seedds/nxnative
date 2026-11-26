@@ -229,7 +229,7 @@ static pso_key make_key(unsigned tag) {
 
 typedef struct { pso_key k; NvShader *vs, *fs; pthread_mutex_t mu; pthread_cond_t cv; int done, result; } kick_job;
 static void *kick_job_main(void *arg) {
-    kick_job *j = arg; int result = pso_pend_kick(&j->k, j->vs, j->fs);
+    kick_job *j = arg; int result = pso_pend_kick(&j->k, j->vs, j->fs, nil);
     pthread_mutex_lock(&j->mu); j->result = result; j->done = 1; pthread_cond_broadcast(&j->cv); pthread_mutex_unlock(&j->mu);
     return NULL;
 }
@@ -245,9 +245,9 @@ static void test_two_active_exact_take_and_release(void) {
     GateDevice *dev = [[GateDevice alloc] initBlockingThrough:2 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
     pso_key a = make_key(1), b = make_key(2), c = make_key(3), wrong_attachment = a;
     wrong_attachment.cfmt[0] = MTLPixelFormatBGRA8Unorm;
-    EXPECT_EQ("first prediction admitted", 1, pso_pend_kick(&a, test_vs, test_fs));
+    EXPECT_EQ("first prediction admitted", 1, pso_pend_kick(&a, test_vs, test_fs, nil));
     if (![dev waitForEntered:1 timeoutMs:5000]) { EXPECT_TRUE("first worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
-    EXPECT_EQ("second prediction admitted", 1, pso_pend_kick(&b, test_vs, test_fs));
+    EXPECT_EQ("second prediction admitted", 1, pso_pend_kick(&b, test_vs, test_fs, nil));
     if (![dev waitForEntered:2 timeoutMs:5000]) { EXPECT_TRUE("second worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
     EXPECT_EQ("two compilation slots are outstanding", 2, queue_active_count());
     kick_job job = {.k = c, .vs = test_vs, .fs = test_fs}; pthread_mutex_init(&job.mu, NULL); pthread_cond_init(&job.cv, NULL);
@@ -288,13 +288,13 @@ static void test_next_draws_pass_the_guess_limit(void) {
     reset_queue();
     GateDevice *dev = [[GateDevice alloc] initBlockingThrough:4 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
     pso_key a = make_key(600), b = make_key(601), c = make_key(602), d = make_key(603), guess = make_key(604);
-    EXPECT_EQ("first guess admitted", 1, pso_pend_kick(&a, test_vs, test_fs));
-    EXPECT_EQ("second guess admitted", 1, pso_pend_kick(&b, test_vs, test_fs));
+    EXPECT_EQ("first guess admitted", 1, pso_pend_kick(&a, test_vs, test_fs, nil));
+    EXPECT_EQ("second guess admitted", 1, pso_pend_kick(&b, test_vs, test_fs, nil));
     if (![dev waitForEntered:2 timeoutMs:5000]) { EXPECT_TRUE("guess workers entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
     EXPECT_EQ("a later draw is admitted at the guess limit", 1, pso_pend_kick_next(&c, test_vs, test_fs));
     EXPECT_EQ("another later draw is admitted", 1, pso_pend_kick_next(&d, test_vs, test_fs));
     EXPECT_TRUE("the later draws compile beside the guesses", [dev waitForEntered:4 timeoutMs:5000]);
-    EXPECT_EQ("a guess is still refused while builds run", 0, pso_pend_kick(&guess, test_vs, test_fs));
+    EXPECT_EQ("a guess is still refused while builds run", 0, pso_pend_kick(&guess, test_vs, test_fs, nil));
     EXPECT_EQ("a later draw already in the table is not admitted twice", 0, pso_pend_kick_next(&c, test_vs, test_fs));
     [dev releaseAll];
     EXPECT_TRUE("later draws complete", pending_done(&c, 5000) && pending_done(&d, 5000));
@@ -306,9 +306,9 @@ static void test_full_table_reclaims_done_not_running(void) {
     reset_queue();
     GateDevice *dev = [[GateDevice alloc] initBlockingThrough:2 nilCall:0]; g_dev = (id<MTLDevice>)(id)dev;
     pso_key oldest = make_key(4), running = make_key(5);
-    EXPECT_EQ("oldest slot admitted", 1, pso_pend_kick(&oldest, test_vs, test_fs));
+    EXPECT_EQ("oldest slot admitted", 1, pso_pend_kick(&oldest, test_vs, test_fs, nil));
     if (![dev waitForEntered:1 timeoutMs:5000]) { EXPECT_TRUE("oldest worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
-    EXPECT_EQ("running slot admitted", 1, pso_pend_kick(&running, test_vs, test_fs));
+    EXPECT_EQ("running slot admitted", 1, pso_pend_kick(&running, test_vs, test_fs, nil));
     if (![dev waitForEntered:2 timeoutMs:5000]) { EXPECT_TRUE("running worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
     int oldest_slot = queue_index(&oldest), running_slot = queue_index(&running);
     [dev releaseThrough:1];
@@ -317,7 +317,7 @@ static void test_full_table_reclaims_done_not_running(void) {
     int filled = 0;
     for (int i = 0; i < PSO_PEND_MAX - 2; i++) {
         pso_key k = make_key((unsigned)(10 + i));
-        if (pso_pend_kick(&k, test_vs, test_fs) != 1 || !pending_done(&k, 5000)) break;
+        if (pso_pend_kick(&k, test_vs, test_fs, nil) != 1 || !pending_done(&k, 5000)) break;
         filled++;
     }
     EXPECT_EQ("completed entries fill all remaining slots", PSO_PEND_MAX - 2, filled);
@@ -325,7 +325,7 @@ static void test_full_table_reclaims_done_not_running(void) {
     EXPECT_EQ("one existing worker remains active in full table", 1, queue_active_count());
 
     pso_key newest = make_key(500);
-    EXPECT_EQ("full table admits by reclaiming a completed entry", 1, pso_pend_kick(&newest, test_vs, test_fs));
+    EXPECT_EQ("full table admits by reclaiming a completed entry", 1, pso_pend_kick(&newest, test_vs, test_fs, nil));
     EXPECT_TRUE("overflow compilation completes", pending_done(&newest, 5000));
     EXPECT_EQ("oldest completed key was reclaimed", -1, queue_index(&oldest));
     EXPECT_EQ("new key reused oldest completed slot", oldest_slot, queue_index(&newest));
@@ -386,13 +386,13 @@ static void test_interleaved_prediction_budgets(void) {
         EXPECT_TRUE("older guess finishes and is taken", pending_done(&k, 5000) && pso_pend_take(&k) != nil);
     }
     pso_key b = make_key(702), a = make_key(703), c = make_key(704), demand = make_key(705);
-    EXPECT_EQ("newer prediction has a separate budget", 1, pso_pend_kick_budget(&b, test_vs, test_fs, 1, newer));
+    EXPECT_EQ("newer prediction has a separate budget", 1, pso_pend_kick(&b, test_vs, test_fs, newer));
     EXPECT_TRUE("newer guess finishes", pending_done(&b, 5000));
     EXPECT_EQ("interleaved older worker cannot replenish its budget", 0, pso_pend_kick_d(&a, pso_desc(&a, test_vs, test_fs, nil, 0), 1, older));
     EXPECT_EQ("duplicate admission does not spend the newer budget", 0, pso_pend_kick_d(&b, pso_desc(&b, test_vs, test_fs, nil, 0), 1, newer));
     EXPECT_EQ("submitter and worker share the newer budget", 1, pso_pend_kick_d(&c, pso_desc(&c, test_vs, test_fs, nil, 0), 1, newer));
     EXPECT_TRUE("second newer guess finishes", pending_done(&c, 5000));
-    EXPECT_EQ("submitter cannot exceed the worker's budget", 0, pso_pend_kick_budget(&a, test_vs, test_fs, 1, newer));
+    EXPECT_EQ("submitter cannot exceed the worker's budget", 0, pso_pend_kick(&a, test_vs, test_fs, newer));
     EXPECT_EQ("a later draw remains outside the guess budget", 1, pso_pend_kick_d(&demand, pso_desc(&demand, test_vs, test_fs, nil, 0), 2, older));
     EXPECT_TRUE("later draw finishes", pending_done(&demand, 5000));
     EXPECT_EQ("older prediction spent exactly two guesses", 2, older->admitted);
@@ -447,7 +447,7 @@ static void test_nil_prediction_falls_back_then_predicts(void) {
     NvProg *demand = [NvProg new]; demand->sh[0] = vs1; demand->sh[1] = fs1;
     NvProg *predicted = [NvProg new]; predicted->sh[0] = vs2; predicted->sh[1] = fs2;
     pso_key demand_key; pso_key_fill(&demand_key, vs1, fs1, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
-    EXPECT_EQ("speculative version admitted", 1, pso_pend_kick(&demand_key, vs1, fs1));
+    EXPECT_EQ("speculative version admitted", 1, pso_pend_kick(&demand_key, vs1, fs1, nil));
     if (![dev waitForEntered:1 timeoutMs:5000]) { EXPECT_TRUE("speculative worker entered fake compiler", 0); [dev releaseAll]; drain_queue(5000); reset_queue(); return; }
     [dev releaseThrough:1];
     EXPECT_TRUE("fake compiler can complete speculative job with nil", pending_done(&demand_key, 5000));

@@ -86,6 +86,7 @@ static void nq_release_sync_locked(sync_t *s) {
 static void nq_set_sync(sync_t *s,nq_receipt *r) { nq_release_sync_locked(s); r->refs++; s->fence=(uintptr_t)r; s->fenced=3; }
 void nvn_sync_release(sync_t *s) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); pthread_mutex_unlock(&nq_mu); }
 void nvn_sync_set_acq(sync_t *s, uint64_t handle) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); s->fence = handle; s->fenced = 4; pthread_mutex_unlock(&nq_mu); }
+void nvn_sync_set_acq_fence(sync_t *s, uint64_t fence) { pthread_mutex_lock(&nq_mu); nq_release_sync_locked(s); s->fence = fence; s->fenced = 2; pthread_mutex_unlock(&nq_mu); }
 uint64_t nvn_sync_ref_acq(const sync_t *s) {
     pthread_mutex_lock(&nq_mu);
     uint64_t h = s->fenced == 4 ? s->fence : 0;
@@ -103,6 +104,21 @@ static int nq_predicate(uint32_t current,unsigned mode,uint32_t target) { return
 static int nq_sync_encoded(const sync_t *s,uint64_t *fence) {
     if(s->fenced==3) { nq_receipt *r=(nq_receipt *)(uintptr_t)s->fence; if(!r->published) return 0; *fence=r->fence; return 1; }
     if(!s->fenced) return 0; *fence=s->fence; return 1;
+}
+static int nvn_sync_gpu_point(const sync_t *s, uint64_t *serial, int *from_nvn) {
+    if (!s) return 0;
+    pthread_mutex_lock(&nq_mu);
+    unsigned kind = s->magic == MAGIC('S', 'Y', 'N', 'C') ? s->fenced : 0;
+    nq_receipt *receipt = kind == 3 ? (nq_receipt *)(uintptr_t)s->fence : NULL;
+    if (receipt) {
+        receipt->refs++;
+        while (!receipt->published) pthread_cond_wait(&nq_cv, &nq_mu);
+        *serial = receipt->fence;
+        nq_put(receipt);
+    } else if (kind == 1 || kind == NVN_SYNC_GL) *serial = s->fence;
+    *from_nvn = kind != NVN_SYNC_GL;
+    pthread_mutex_unlock(&nq_mu);
+    return kind == 1 || kind == 3 || kind == NVN_SYNC_GL;
 }
 void nvn_queue_gpu_progress(void) {
     pthread_mutex_lock(&nq_mu); uint64_t done=mtl_completed_fence(); nq_event_write **p=&nq_event_writes;
@@ -198,24 +214,31 @@ static void *nq_worker(void *unused) {
         // Round-robin ready queues: a continually fed independent producer cannot starve another queue.
         if(q->next) { nq_queue **link=&nq_queues; while(*link!=q) link=&(*link)->next; *link=q->next; nq_queue *tail=nq_queues; while(tail->next) tail=tail->next; tail->next=q; q->next=NULL; }
         uint64_t wait_phys=0, wait_copy=0;
+        int gl_fence = n->kind == NQ_SYNC && n->wait_kind == NVN_SYNC_GL;
+        int wait_gl = gl_fence && !dm_gl_wait_serial(n->wait_fence, 0);
         if(n->kind==NQ_SYNC || n->kind==NQ_EVENT) {
             if(n->kind==NQ_SYNC && n->wait_present && n->receipt) { wait_phys=n->receipt->present; wait_copy=n->receipt->copy; }
             uint64_t f=n->wait_present ? n->wait_fence : (n->receipt ? n->receipt->fence : n->wait_fence);
-            if(f>q->physical) q->physical=f;
+            if(!gl_fence && f>q->physical) q->physical=f;
         }
         if((n->kind==NQ_SYNC || n->kind==NQ_EVENT) && n->wait_since) q->wait_passed=guest_ns();   // the GPU could not start what follows before this either
         if(n->kind==NQ_FENCE) nq_publish(n->receipt,q->physical);
         pthread_mutex_unlock(&nq_mu);
         if(wait_phys || wait_copy) mtl_present_wait_texture(wait_phys,wait_copy);
         uint64_t fence=0, present=0, copy=0;
-        if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT) {
+        if(n->kind==NQ_COMMANDS || n->kind==NQ_PRESENT || wait_gl) {
             nvn_rt_tick(rt);
             dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush();
             dm_host_work++; mtl_prepare(); dm_host_work--;
             gfx_enter(); nq_cost cost=nq_cost_begin();
             if(frame!=j->frame) { frame=j->frame; mtl_set_frame(frame); }
             mtl_queue_activate(q->serial); mtl_set_queue_origin_lower_left(q->origin);
-            if(n->kind==NQ_COMMANDS) {
+            if (wait_gl) {
+                mtl_wait_gl_event(dm_gl_event(), n->wait_fence);
+                mtl_sub_begin();
+                mtl_exec_rest(NULL, 0);
+                fence = mtl_sub_commit();
+            } else if(n->kind==NQ_COMMANDS) {
                 uint64_t handle=(uintptr_t)n->bytes;
                 nvn_cap_submit(1,&handle);
                 mtl_sub_begin(); mtl_sub_ready(j->submitted>q->wait_passed?j->submitted:q->wait_passed); nvn_ft_poll();

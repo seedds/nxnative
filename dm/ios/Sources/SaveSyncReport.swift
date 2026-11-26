@@ -7,6 +7,12 @@ struct SaveSyncReport {
     /// How long the cloud's file may take to come (an iCloud download) before the launcher says it did not; the player can play without it meanwhile
     static let waitMs: Int32 = 60000
 
+    /// Whether a resolved cloud-saves folder turns sync on (mirrors save_sync.c cloud_path: nil, empty, or "0" is off).
+    static func syncEnabled(_ folder: String?) -> Bool {
+        guard let folder, !folder.isEmpty, folder != "0" else { return false }
+        return true
+    }
+
     var sync = false, conflict = false, sameTitle = true
     var cloud = 0   // 1 read, 0 no save there, -1 not read in time
     var localHash = "", cloudHash = "", cloudDevice = ""

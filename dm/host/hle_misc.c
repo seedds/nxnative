@@ -11,22 +11,21 @@
 //   DM_AOC_OWNED=0: always none (test switch, for runs without the DLC).
 // Room for every index the scan accepts (1..2000): Super Smash Bros. Ultimate has 99 DLC, and a cap below the folder count dropped whichever readdir returned last (fighters among them).
 static int g_aoc[2000], g_naoc = -1;
-static int aoc_int_cmp(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 static void aoc_load(void) {
     if (g_naoc >= 0) return;
     g_naoc = 0;
     const char *e = getenv("DM_AOC_OWNED"), *dir = getenv("DM_AOC_DIR"); const char *why = "no DM_AOC_DIR";
     if (e && !strcmp(e, "0")) why = "DM_AOC_OWNED=0";
     else if (dir && *dir) {
+        // A legacy directory and its replacement image (N and N.img) report the same DLC once. Mark a seen-set over 1..2000 as readdir returns entries so >2000 combined entries never drop unique indices, then emit g_aoc in ascending order.
+        static unsigned char seen[2001]; memset(seen, 0, sizeof seen);
         why = dir; DIR *d = opendir(dir); struct dirent *ent;
-        while (d && (ent = readdir(d)) && g_naoc < (int)(sizeof g_aoc / sizeof *g_aoc)) {
+        while (d && (ent = readdir(d))) {
             char *end; long i = strtol(ent->d_name, &end, 10);
-            if (ent->d_name[0] >= '1' && ent->d_name[0] <= '9' && (!*end || !strcmp(end, ".img")) && i <= 2000) g_aoc[g_naoc++] = (int)i;
+            if (ent->d_name[0] >= '1' && ent->d_name[0] <= '9' && (!*end || !strcmp(end, ".img")) && i >= 1 && i <= 2000) seen[i] = 1;
         }
         if (d) closedir(d);
-        qsort(g_aoc, g_naoc, sizeof *g_aoc, aoc_int_cmp);
-        int unique = 0; for (int i = 0; i < g_naoc; i++) if (!i || g_aoc[i] != g_aoc[i - 1]) g_aoc[unique++] = g_aoc[i];
-        g_naoc = unique;   // a legacy directory and its replacement image report the same DLC once
+        for (int i = 1; i <= 2000; i++) if (seen[i]) g_aoc[g_naoc++] = i;
     }
     static char list[2000 * 5 + 1]; list[0] = 0; for (int i = 0; i < g_naoc; i++) snprintf(list + strlen(list), sizeof list - strlen(list), "%s%d", i ? "," : "", g_aoc[i]);
     LOG("aoc: reporting %d add-on contents {%s} (%s)", g_naoc, list, why);
@@ -309,8 +308,13 @@ HLE_FORCE("_ZN2nn4chat21FinalizeVirtualCameraEPNS0_17VirtualCameraTypeE", "GameC
 HLE_FORCE("_ZN2nn4chat19EnableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera enabled: nothing to show it to", Result, h_chat_VcamOn, void *cam) { (void)cam; return RES_OK; }
 HLE_FORCE("_ZN2nn4chat20DisableVirtualCameraEPNS0_17VirtualCameraTypeE", "GameChat virtual camera disabled", Result, h_chat_VcamOff, void *cam) { (void)cam; return RES_OK; }
 HLE_FORCE("_ZN2nn4chat43SetVirtualCameraContainPhotographedContentsEPNS0_17VirtualCameraTypeEb", "GameChat virtual camera flag: kept nowhere", void, h_chat_VcamPhoto, void *cam, unsigned on) { (void)cam; (void)on; }
-HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: none", uint64_t, h_chat_VcamWindow, const void *cam) {
-    (void)cam; static int once; if (!once++) LOG("chat: GetVirtualCameraNativeWindowHandle: no window (0)"); return 0;
+// The virtual camera's window: a Switch 2 game that initializes GameChat's virtual camera passes this handle straight to NVN window creation (Star Fox main+0xba540a0: 0 sends its
+// window thread into vi::CreateLayer and onto the main display). Return the host's off-screen native window, whose NVN windows drop their frames and do not pace the game (dm_native_window_offscreen, hle_nvn.c)
+static char g_vcam_native;
+int dm_native_window_offscreen(const void *native) { return native == &g_vcam_native; }
+HLE_FORCE("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE", "GameChat virtual camera window: an off-screen one (nobody receives it)", uint64_t, h_chat_VcamWindow,
+          const void *cam) {
+    (void)cam; return (uint64_t)(uintptr_t)&g_vcam_native;
 }
 HLE_FORCE("_ZN2nn4chat25StartLocalCameraStreamingEv", "GameChat local camera streaming: no camera, nothing streams", Result, h_chat_LocalStart, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4chat24StopLocalCameraStreamingEv", "GameChat local camera streaming stopped", Result, h_chat_LocalStop, void) { return RES_OK; }

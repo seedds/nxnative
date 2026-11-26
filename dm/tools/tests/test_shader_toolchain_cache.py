@@ -249,6 +249,48 @@ class ShaderCache(unittest.TestCase):
         self.ns['publish_library']('mac')
         self.assertEqual(sorted(p.name for p in shader_lib.view(out).iterdir()), sorted([key + '_b.json', key + '_b.metallib', 'inputs.tsv']))
 
+    def test_first_build_preserves_deduplication_from_staging_to_image(self):
+        out = Path(self.ns['out']); payload = b'compiled library' * 1024
+        names = [f'{i:016x}_b.metallib' for i in range(12)]
+        for name in names:
+            (out / name).write_bytes(payload)
+            self.ns['commit'](name.split('_')[0])
+        store = self.ns['STORE']
+        self.assertEqual(store.db.execute('SELECT count(*) FROM blob').fetchone()[0], 1)
+        real_get, gets = store.get, []
+        def counted_get(name): gets.append(name); return real_get(name)
+        with mock.patch.object(store, 'get', side_effect=counted_get):
+            self.ns['publish_library']('mac')
+        self.assertEqual(len(gets), 1, 'duplicate staged blobs must not be fetched more than once')
+        image = romfs.Image(shader_lib.image_of(str(out)))
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1,
+                         'publishing must not expand one staged blob into a copy per shader key')
+        for name in names: self.assertEqual((shader_lib.view(out) / name).read_bytes(), payload)
+        self.assertFalse(out.exists())
+        self.assertEqual(store.names('stage/'), set())
+
+    def test_disk_override_and_partial_build_keep_remaining_sharing(self):
+        out = Path(self.ns['out']); payload = b'compiled library' * 256
+        a, b, c = '1' * 16, '2' * 16, '3' * 16
+        for key in (a, b, c):
+            (out / f'{key}_b.metallib').write_bytes(payload)
+            self.ns['commit'](key)
+        (out / f'{a}_b.metallib').write_bytes(b'disk override')
+        self.ns['publish_library']('mac')
+        img_path = shader_lib.image_of(str(out))
+        image = romfs.Image(img_path)
+        self.assertEqual(image.entry(image.find(f'{b}_b.metallib'))[:2], image.entry(image.find(f'{c}_b.metallib'))[:2])
+        self.assertNotEqual(image.entry(image.find(f'{a}_b.metallib'))[:2], image.entry(image.find(f'{b}_b.metallib'))[:2])
+        self.assertEqual((shader_lib.view(out) / f'{a}_b.metallib').read_bytes(), b'disk override')
+        out.mkdir()
+        self.ns.update(want={a}, OLD_IMAGE={'mac': romfs.Path(img_path)}, STAMP_BEFORE='inputs', INPUTS='inputs')
+        (out / f'{a}_b.metallib').write_bytes(b'rebuilt a'); self.ns['commit'](a)
+        self.ns['publish_library']('mac')
+        image = romfs.Image(img_path)
+        self.assertEqual(image.entry(image.find(f'{b}_b.metallib'))[:2], image.entry(image.find(f'{c}_b.metallib'))[:2])
+        self.assertEqual((shader_lib.view(out) / f'{a}_b.metallib').read_bytes(), b'rebuilt a')
+        self.assertEqual((shader_lib.view(out) / f'{b}_b.metallib').read_bytes(), payload)
+
     def test_partial_build_keeps_the_image_less_the_keys_it_builds(self):
         out, built, kept = Path(self.ns['out']), '1' * 16, '2' * 16
         shader_lib.write({built + '_b.metal': b'old', built + '_bf.metallib': b'old variant', kept + '_b.metal': b'kept', 'inputs.tsv': b'game\tid\ninputs\told\n'},

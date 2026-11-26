@@ -313,6 +313,14 @@ def copy_msl(msl, msls, dst, clone):
     dst.mkdir(parents=True); copy(msls, dst, clone)
 
 
+def supplemental_gl(msl, tables):
+    if not is_chain_library(msl) or not (Path(tables) / 'gl_capture.tsv').is_file(): return []
+    gl = Path(msl).parent / 'gl'
+    files = [gl / 'gl_shaders.metallib', gl / 'gl_shaders.tsv']
+    if not all(p.is_file() for p in files): raise SystemExit(f'no supplemental GL shader library and table at {gl}')
+    return files
+
+
 def selected_inputs(a):
     """Resolve once: these same lists supply both the reuse key and the copies."""
     for name in ('patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso'):
@@ -436,6 +444,8 @@ def pack(a):
         for name in ('out', 'host', 'patched', 'romfs', 'msl', 'tables', 'font', 'aoc', 'pso', 'pso_pairs', 'env_file', 'settings', 'icon', 'html', 'control_nacp'):
             if getattr(a, name): setattr(a, name, str(Path(getattr(a, name)).resolve()))
         mods, msls, pso, tables, pairs, fonts, files = selected_inputs(a)
+        gls = supplemental_gl(a.msl, a.tables)
+        files += gls
         runtime_python = getattr(a, 'runtime_python', None)
         runtime = []
         if runtime_python:
@@ -456,7 +466,8 @@ def pack(a):
             n, patched, prom, pmsl, ptab, phtml = row.split('\t')
             pa = argparse.Namespace(**{**vars(a), 'patched': patched, 'romfs': prom, 'msl': pmsl, 'tables': ptab, 'pso': None, 'pso_pairs': None, 'aoc': None, 'marker': None})
             pmods, pmsls, _, ptables, _, _, pfiles = selected_inputs(pa)
-            programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables)); files += pfiles
+            pgls = supplemental_gl(pmsl, ptab)
+            programs.append((n, Path(prom), Path(pmsl), Path(phtml), pmods, pmsls, ptables, pgls)); files += pfiles + pgls
         clang = Path(run(['xcrun', '--find', 'clang']).strip()).resolve()
         swiftc = Path(run(['xcrun', '--find', 'swiftc']).strip())   # not resolved: the driver is a link to swift-frontend, which acts by its name
         sdk = Path(run(['xcrun', '--sdk', 'macosx', '--show-sdk-path']).strip()).resolve()
@@ -498,7 +509,7 @@ def pack(a):
     romfs, msl, aoc = Path(a.romfs), Path(a.msl), Path(a.aoc) if a.aoc else None
     # each source is probed on its own, as they may lie on different volumes; cp -c copies what it cannot clone, so a probe decides only the free-space check and the step line
     sib = romfs.parent / PROGRAM_ROMFS   # the RomFS of the application's other programs, beside this one's where the host mounts them by program index (hle_fs.c; scripts/pack_nup.py)
-    trees, lists = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None}, {'mods': mods, 'msl': msls, 'pso': pso}
+    trees, lists = {'romfs': romfs, 'aoc': aoc, 'programs': sib if sib.is_dir() else None}, {'mods': mods, 'msl': msls, 'gl': gls, 'pso': pso}
     clone = {k: bool(d) and can_clone(d, res) for k, d in trees.items()} | {k: bool(ps) and can_clone(ps[0], res) for k, ps in lists.items()}
     if is_chain_library(msl): clone['msl'] = False   # copy_msl writes it, which the free-space check below counts
     need = sum(tree_bytes(d) for k, d in trees.items() if d and not clone[k]) + sum(p.stat().st_size for k, ps in lists.items() if not clone[k] for p in ps)
@@ -538,13 +549,15 @@ def pack(a):
             whole = pool.submit(digest, image) if image else None
             d.mkdir(parents=True); copy_msl(msl, msls, d / msl_dst.name, clone['msl'])
             if whole: read[str(image)] = whole.result()
-        for n, _, pmsl, _, _, pmsls, _ in programs:
+        if gls: copy_msl(gls[0].parent, gls, d / 'gl', clone['gl'])
+        for n, _, pmsl, _, _, pmsls, _, pgls in programs:
             program_dir = d / f'p{n}'
             program_dir.mkdir()
             copy_msl(pmsl, pmsls, program_dir / shader_lib.name_of(pmsl), can_clone(pmsls[0], res))
+            if pgls: copy_msl(pgls[0].parent, pgls, program_dir / 'gl', can_clone(pgls[0], res))
     lib_code = [digest(Path(shader_lib.__file__)), digest(Path(rfs.__file__))]   # what writes a chain library's one file
-    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls]) for n, _, pmsl, _, _, pmsls, _ in programs]
-    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls], program_lib_keys], fill_msl)
+    program_lib_keys = [(n, shader_lib.name_of(pmsl), [took[str(p)] for p in pmsls + pgls]) for n, _, pmsl, _, _, pmsls, _, pgls in programs]
+    place('ShaderLibraries', 'msl', 'shader libraries', [lib_code, msl_dst.name, [took[str(p)] for p in msls + gls], program_lib_keys], fill_msl)
     if aoc: place('AddOnContent', 'aoc', 'add-on content', inventory(aoc), lambda d: copy([aoc], d, clone['aoc']))
     if pso: place('PipelineArchive', 'pso', 'pipeline archive', [took[str(p)] for p in pso], lambda d: (d.mkdir(parents=True), copy(pso, d, clone['pso'])))
     rtop = 'romfs.img' if romfs.is_file() else 'romfs'
@@ -556,7 +569,7 @@ def pack(a):
     if programs:
         rows = ['# The programs of this game (dm/mac/pack_app.py; hle_oe.c DM_PROGRAMS)',
                 '\t'.join(['0', 'exe=@C@/MacOS/dmhost', 'arg=@R@/dm', 'cwd=@S@', f'DM_ROMFS=@R@/{rtop}', 'DM_MSL_DIR=@R@/msl'] + (['DM_NVN_SHMAP=@R@/dm/shader_map.tsv'] if (dm / 'shader_map.tsv').is_file() else []) + (['DM_PSO_BUNDLE=@R@/pso'] if pso else []))]
-        for n, prom, pmsl, phtml, pmods, _, ptables in programs:
+        for n, prom, pmsl, phtml, pmods, _, ptables, _ in programs:
             pdm, ptop = dm / f'p{n}', f'p{n}/{"romfs.img" if prom.is_file() else "romfs"}'
             pdm.mkdir(parents=True); copy(pmods, pdm, can_clone(pmods[0], res)); copy(ptables, pdm, False)
             place(f'GameData{n}', ptop, f'program {n} game files', inventory(prom), lambda d, prom=prom: copy([prom], d, can_clone(prom, res)))

@@ -23,13 +23,17 @@ private func save_sync_report(_ save: UnsafePointer<CChar>, _ title: UnsafePoint
 enum SaveCheck {
     enum Outcome { case play(String?), retry, cancel }
 
+    /// The folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "" or "0" = off.
+    static func effectiveFolder(defaults: UserDefaults = .standard) -> String {
+        getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (defaults.string(forKey: "cloudSaves.folder") ?? "")
+    }
+
     /// Blocks while the cloud's file comes (SaveSyncReport.waitMs at most): call it off the main thread. nil: no report (sync is then left to the host as before)
-    static func report() -> SaveSyncReport? {
+    static func report(folder: String? = nil) -> SaveSyncReport? {
         // getenv, not ProcessInfo.environment: launcher.c sets DM_SAVE and applies the env files in this process before the window
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no DMTitleID\n", stderr); return nil }
-        // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "0" = off
-        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        let folder = folder ?? effectiveFolder()
         var buf = [CChar](repeating: 0, count: 1024)
         let r = (folder.isEmpty ? "0" : folder).withCString { save_sync_report(save, id, $0, SaveSyncReport.waitMs, &buf, buf.count) }
         let line = String(cString: buf)
@@ -99,14 +103,16 @@ enum SaveCheck {
     }
 
     /// With the window off: the check and its question before the game, the app in front only while it asks. false: the player quit
-    static func withoutWindow() -> Bool {
+    static func withoutWindow(defaults: UserDefaults = .standard) -> Bool {
+        let folder = effectiveFolder(defaults: defaults)
+        guard SaveSyncReport.syncEnabled(folder) else { return true }
         final class Box: @unchecked Sendable { let lock = NSLock(); var report: SaveSyncReport?; var waiting = false }
         let app = NSApplication.shared
         defer { app.setActivationPolicy(.prohibited) }
         while true {
             let box = Box(), sem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .userInitiated).async {
-                let r = report()
+                let r = report(folder: folder)
                 box.lock.lock(); box.report = r; box.lock.unlock()
                 sem.signal()
                 DispatchQueue.main.async { if box.waiting { app.abortModal() } }   // runs inside the waiting alert's modal loop, if there is one
@@ -208,10 +214,12 @@ struct LauncherView: View {
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
+        let folder = SaveCheck.effectiveFolder()
+        guard SaveSyncReport.syncEnabled(folder) else { done(true); return }
         check += 1; checking = true
         let mine = check
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = SaveCheck.report()
+            let r = SaveCheck.report(folder: folder)
             DispatchQueue.main.async {
                 guard checking, check == mine else { return }   // the player played without it
                 checking = false

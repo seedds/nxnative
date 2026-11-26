@@ -15,6 +15,7 @@
 #import <GameController/GameController.h>
 #include "dm.h"
 #include "front_role.h"
+#include "front_mac_present.h"
 #include "dm_input.h"
 #include "front.h"
 #include "hle.h"
@@ -85,6 +86,31 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
     hdr_menu_screen();    // the HDR menu's greyed-out items follow the screen
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
+// Workaround for a macOS Direct-to-Display scanout artifact (GitHub issue #1821: a flickering purple/pink horizontal
+// band across the top of the picture in native fullscreen on mirrored HDMI displays on M4 Pro / M5 Pro). Setting
+// g_layer.opaque = NO opts the layer into WindowServer compositing while keeping native fullscreen. Scoped to
+// fullscreen on a mirrored display by default; DM_MAC_COMPOSITED=1 / 0 overrides both. Main thread only
+static void layer_opaque_sync(NSScreen *screen, int fullscreen) {
+    if (!g_layer) return;
+    static int mode = -2, applied = -1;
+    if (mode == -2) {
+        const char *e = getenv("DM_MAC_COMPOSITED");
+        mode = front_mac_composited_mode(e);
+        if (e && *e && mode == FRONT_MAC_COMP_AUTO && strcmp(e, "auto"))
+            LOG("[RED] DM_MAC_COMPOSITED=%s: 1, 0 or auto; using auto", e);
+    }
+    CGDirectDisplayID id = screen ? [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : (g_screen_id ? g_screen_id : CGMainDisplayID());
+    int mirrored = id != kCGNullDirectDisplay && CGDisplayIsInMirrorSet(id) != 0;
+    int op = front_mac_layer_opaque(mode, fullscreen, mirrored);
+    int first = applied < 0;
+    if (op == applied) return;
+    applied = op;
+    g_layer.opaque = op ? YES : NO;
+    const char *why = front_mac_layer_opaque_why(mode, fullscreen, mirrored);
+    if (!op) LOG("front end: Metal layer non-opaque (%s%s)", why, mode == FRONT_MAC_COMP_AUTO ? "; DM_MAC_COMPOSITED=0 keeps opaque" : "");
+    else if (!first || mode == FRONT_MAC_COMP_OFF) LOG("front end: Metal layer opaque (%s)", why);
+}
+static int win_fullscreen(NSWindow *win) { return g_fullscreen || ((win.styleMask & NSWindowStyleMaskFullScreen) != 0); }
 // The software keyboard input box is up (front_text_input). The game window is not key then, which is not a focus change the game should see: on hardware the inline keyboard is drawn inside
 // the game, which keeps its focus, and ShowKeyboard's applet sends its own out-of-focus / in-focus pair (DM_APPLET). Monster Hunter Rise dropped the hunter's name after the round trip and asked again. Main thread only
 static int g_text_box;
@@ -649,8 +675,8 @@ static void hidpad_detach(hid_pad *d) {   // d is already off g_hidpads
     dm_pad_players(pad_slot_mask(&g_slots));
     cp_poll();   // one controller fewer to wait for, or one player fewer
 }
-// Xbox One pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP device is a pad, unlike a
-// raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. Its Xbox button is Home (hq_buttons)
+// Wired Xbox One (GIP) and Xbox 360 (XUSB) pads over USB that macOS has no driver for (pad_gip_mac.h): a player from its connection, as a GameController controller (a GIP/XUSB
+// pad is a gamepad, unlike a raw HID device's GamePad collection), or at its first button press with DM_PAD_PRESS_TO_JOIN. A GIP pad's Xbox button is Home (hq_buttons)
 static void gippad_read(gip_pad *d) {
     if (!g_input_on) return;
     hq_poll();   // Home and the prompt's A and B come from these pads too
@@ -1865,6 +1891,7 @@ void front_run(void (*guest)(void)) {
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
+        win.backgroundColor = NSColor.blackColor;   // black backing behind the Metal layer (matches iOS; prevents window-background bleed when non-opaque)
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
@@ -1874,6 +1901,9 @@ void front_run(void (*guest)(void)) {
         g_layer.device = MTLCreateSystemDefaultDevice();
         g_layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_layer.contentsScale = win.backingScaleFactor;
+        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
+        int want_fs = fs && strcmp(fs, "0");
+        layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);
         // Apple's HUD over the game (frame rate, frame and GPU time, memory): front_hud_env turns it on before the first device. The layer's developerHUDProperties
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
@@ -1881,6 +1911,7 @@ void front_run(void (*guest)(void)) {
         [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
+        layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];
         // A host another process starts (scripts/regress.py) is not activated (its focus state stays 2), so its window opened wherever it landed in the window order, and behind
@@ -1924,8 +1955,7 @@ void front_run(void (*guest)(void)) {
             g_hdr_menu = hm;
         }
         NSApp.mainMenu = bar;
-        const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
-        if (fs && strcmp(fs, "0")) {
+        if (want_fs) {
             g_fs_asked = CACurrentMediaTime(); g_fs_starting = 1;   // front_screen_settling: the display link waits for fullscreen
             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
             // (whichever happens last), and repeat a refused startup request once. Only a request made here owns a retry; a later player request must never restart startup handling
@@ -1938,7 +1968,7 @@ void front_run(void (*guest)(void)) {
                 if (!entering) return;
                 entering = 0;
                 LOG("front end: fullscreen was refused (app active %d, window on the active Space %d)%s", NSApp.isActive, win.isOnActiveSpace, retried ? "" : ", asking once more");
-                if (retried) { g_fs_starting = 0; return; }
+                if (retried) { g_fs_starting = 0; layer_opaque_sync(win.screen, 0); return; }
                 retried = 1; want = 1; dispatch_async(dispatch_get_main_queue(), enter); };
             [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
             [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; enter(); }];
@@ -1971,14 +2001,14 @@ void front_run(void (*guest)(void)) {
         // Lifecycle (hle.h / dm.h): focus lost → 2, focus regained → 1; minimized → 3 + audio paused + GPU suspended, restored → resume (followed by focus regained → 1).
         // Input is released when the window stops being key (and when it is minimized) and taken up again when it is key again
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
-        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
-        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); }];
+        [nc addObserverForName:NSWindowDidChangeScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); if (win.screen) g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); screen_match_apply(); dm_fstep_settle(); }];
+        [nc addObserverForName:NSApplicationDidChangeScreenParametersNotification object:nil queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); layer_opaque_sync(win.screen, win_fullscreen(win) || g_fs_starting); }];
         // Entering and leaving fullscreen: the layer is layer-backed, so its frame (and with it the drawable) follows the
         // content view by itself; only the scale factor has to be carried over to the screen the window ended up on. The screen's rate is matched in fullscreen only (screen_match_apply)
-        for (NSNotificationName nm in @[NSWindowWillEnterFullScreenNotification, NSWindowWillExitFullScreenNotification])
-            [nc addObserverForName:nm object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_fstep_settle(); }];
-        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
-        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; screen_match_apply(); dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowWillEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; layer_opaque_sync(win.screen, 1); dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowWillExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_fstep_settle(); }];
+        [nc addObserverForName:NSWindowDidEnterFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, 1); screen_match_apply(); g_fullscreen = 1; g_fs_starting = 0; dm_fstep_settle(); }];   // the switch first: front_screen_settling holds the link until it settles
+        [nc addObserverForName:NSWindowDidExitFullScreenNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; g_fullscreen = 0; screen_refresh(win.screen); g_layer.contentsScale = win.backingScaleFactor; layer_opaque_sync(win.screen, 0); screen_match_apply(); dm_fstep_settle(); }];
         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));

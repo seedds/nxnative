@@ -4,6 +4,9 @@
 void dm_applet_enter(const char *name) { (void)name; }   // hle_oe.c: the shop and error stand-ins hold the game out of focus
 void dm_applet_leave(void) {}
 #include <mach-o/getsect.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static int unexpected, checks, fails;
 void *guest_sym(const char *name) { (void)name; unexpected++; return NULL; }
@@ -26,6 +29,49 @@ static void *hook(const char *name) {
     }
     CHECK(count == 1 && fn, name);
     return count == 1 ? fn : NULL;
+}
+static void aoc_checks(void) {
+    int (*count)(void) = hook("_ZN2nn3aoc17CountAddOnContentEv");
+    int (*list)(int *, int, int) = hook("_ZN2nn3aoc16ListAddOnContentEPiii");
+    if (!count || !list) return;
+    char dir[] = "/tmp/t_aoc.XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0, "aoc: temp dir"); return; }
+    int made = 1; char path[256];
+    for (int k = 0; k < 1250; k++) {
+        int idx = k < 1249 ? k + 1 : 2000;
+        snprintf(path, sizeof path, "%s/%d", dir, idx);
+        if (mkdir(path, 0700)) made = 0;
+        snprintf(path, sizeof path, "%s/%d.img", dir, idx);
+        int fd = open(path, O_CREAT | O_WRONLY, 0600);
+        if (fd < 0) made = 0; else close(fd);
+    }
+    const char *bad[] = {"0", "0.img", "2001", "2001.img", "01", "1.img.bak", "abc"};
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, bad[i]);
+        int fd = open(path, O_CREAT | O_WRONLY, 0600);
+        if (fd < 0) made = 0; else close(fd);
+    }
+    CHECK(made, "aoc: 1250 paired directory/image entries and rejected names created");
+    setenv("DM_AOC_DIR", dir, 1); unsetenv("DM_AOC_OWNED"); g_naoc = -1;
+    CHECK(count() == 1250, "aoc: 1250 unique indices across 2500 paired entries");
+    int out[1250] = {0}, order = list(out, 0, 1250) == 1250;
+    for (int k = 0; k < 1250 && order; k++) order &= out[k] == (k < 1249 ? k + 1 : 2000);
+    CHECK(order, "aoc: sorted 1..1249 and 2000, rejected names excluded");
+    int page[4] = {0};
+    CHECK(list(page, 1248, 4) == 2 && page[0] == 1249 && page[1] == 2000, "aoc: pagination past end");
+    CHECK(list(page, -5, 2) == 2 && page[0] == 1 && page[1] == 2, "aoc: negative offset starts at 0");
+    setenv("DM_AOC_OWNED", "0", 1); g_naoc = -1;
+    CHECK(count() == 0 && list(page, 0, 2) == 0, "aoc: DM_AOC_OWNED=0 reports none");
+    unsetenv("DM_AOC_DIR"); unsetenv("DM_AOC_OWNED"); g_naoc = -1;
+    for (int k = 0; k < 1250; k++) {
+        int idx = k < 1249 ? k + 1 : 2000;
+        snprintf(path, sizeof path, "%s/%d.img", dir, idx); unlink(path);
+        snprintf(path, sizeof path, "%s/%d", dir, idx); rmdir(path);
+    }
+    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) {
+        snprintf(path, sizeof path, "%s/%s", dir, bad[i]); unlink(path);
+    }
+    rmdir(dir);
 }
 int main(void) {
     // Resolve the exact public SDK symbols: missing the getter let the guest open stpl:u from its input loop even after the Initialize takeover.
@@ -84,6 +130,12 @@ int main(void) {
         linit(local, 4000, 216, 3, NULL, n);
         CHECK(blanks_live == 0 && !limg(local, 0), "a size out of the SDK's range makes no image");
     }
+    // GameChat's virtual camera window: the host's off-screen native window, not 0 (Star Fox passes it to NVN window creation without checking for 0)
+    uint64_t (*vwin)(const void *) = hook("_ZN2nn4chat34GetVirtualCameraNativeWindowHandleEPKNS0_17VirtualCameraTypeE");
+    if (vwin) { uint64_t nw = vwin(NULL); CHECK(nw && dm_native_window_offscreen((const void *)(uintptr_t)nw), "the virtual camera's native window is the off-screen one"); }
+    int other = 0;
+    CHECK(!dm_native_window_offscreen(NULL) && !dm_native_window_offscreen(&other), "display or null native windows are not off-screen");
+    aoc_checks();
     CHECK(unexpected == 0, "no guest symbol lookup or event binding");
     printf("pctl: %d checks, %d failed\n", checks, fails);
     return fails != 0;

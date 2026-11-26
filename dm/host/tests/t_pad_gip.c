@@ -56,6 +56,21 @@ int main(void) {
     CHECK(pad_gip_decode(&g, status, sizeof status, ack, &ack_len) == 0);       // its heartbeat: nothing to do
     pad_gip_reset(&g); CHECK(!g.heard && !g.buttons && !g.guide && g.seq == 9); // a reset clears state and keeps the sequence going
 
+    // Turtle Beach REACT-R (10f5:7024) 36-byte input reports captured on macOS (payload 0x20 bytes), plus declared-length & 10-bit mask checks
+    static const uint8_t reactr_rest[36] = {
+        0x20, 0x00, 0x07, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe4, 0x05, 0x00, 0x00, 0x52, 0xfe,
+    };
+    pad_gip_reset(&g);
+    CHECK(pad_gip_decode(&g, reactr_rest, sizeof reactr_rest, ack, &ack_len) == 1 && g.buttons == 0 && !g.s[0] && !g.s[1] && !g.s[2] && !g.s[3]);
+    uint8_t reactr[36]; memcpy(reactr, reactr_rest, sizeof reactr);
+    reactr[4] = 0x50; reactr[5] = 0x01;   // A + X + D-pad Up -> Switch B + Y + Up
+    reactr[6] = 0x00; reactr[7] = 0x06;   // 10-bit masked (0x200 > 255) even if upper reserved bits are set
+    reactr[8] = 0x00; reactr[9] = 0x04;   // 10-bit masked (0x000 <= 255) even if bit 10 is set
+    CHECK(pad_gip_decode(&g, reactr, sizeof reactr, ack, &ack_len) == 1 && g.buttons == (DM_BTN_B | DM_BTN_Y | DM_BTN_UP | DM_BTN_ZL));
+    CHECK(pad_gip_decode(&g, reactr, 18, ack, &ack_len) == 0);   // declares 0x20 payload bytes, only 18 arrived
+    reactr[3] = 13;
+    CHECK(pad_gip_decode(&g, reactr, sizeof reactr, ack, &ack_len) == 0);   // payload length < 14 rejected
+
     printf("t_pad_gip: %d checks, %d failures\n", checks, fails);
     return fails != 0;
 }

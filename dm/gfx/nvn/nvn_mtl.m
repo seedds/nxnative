@@ -3995,7 +3995,7 @@ static inline void tex_lsize(const tex_t *t, unsigned l, uint32_t *w, uint32_t *
 static void tex_zero_fill(id<MTLTexture> mt);
 static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextureUsage add, MTLPixelFormat view_pf) {
     id holder = tex_get(t->serial);
-    // The serial holds an sRGB / linear view (tex_mtl_) of the asked texture, or the asked texture is that view: the parent is upgraded and the view made again on it, so the pair keeps sharing its bytes
+    // A serial may hold a storage-sharing view of the asked texture, or the asked texture may be that view. Rebuild the view on the upgraded parent with its original mip range.
     id<MTLTexture> view = ![holder isKindOfClass:[NvPkg class]] && obj_is_tex(holder) && ((id<MTLTexture>)holder).parentTexture
         && (holder == asked || ((id<MTLTexture>)holder).parentTexture == asked) ? holder : nil;
     id<MTLTexture> base = view ? view.parentTexture : asked;
@@ -4038,9 +4038,9 @@ static id<MTLTexture> tex_upgrade(const tex_t *t, id<MTLTexture> asked, MTLTextu
         // the old texture is retired once the submissions that used it complete, the view caches follow g_ser_gen (PR #107). An sRGB / linear twin's view is made again on the upgraded
         // texture first and published in the rename's hold (own_upgrade), so no reader finds the serial's old view once its parent has left the sharing table
         if (view) {
-            upgraded_view = [upgraded newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType levels:NSMakeRange(0, upgraded.mipmapLevelCount) slices:NSMakeRange(0, upgraded.arrayLength) swizzle:view.swizzle];
-            static int nview; if (nview++ < 4) MLOG("sRGB / linear view ser=%llu made again on its upgraded parent (%d so far)", (unsigned long long)t->serial, nview);
-            if (!upgraded_view) RED_ONCE(151, "cannot make the sRGB / linear view ser=%llu again on its upgraded parent: it keeps the old storage", (unsigned long long)t->serial);
+            upgraded_view = [upgraded newTextureViewWithPixelFormat:view.pixelFormat textureType:view.textureType levels:NSMakeRange(0, view.mipmapLevelCount) slices:NSMakeRange(0, upgraded.arrayLength) swizzle:view.swizzle];
+            static int nview; if (nview++ < 4) MLOG("storage-sharing view ser=%llu made again on its upgraded parent (%d so far)", (unsigned long long)t->serial, nview);
+            if (!upgraded_view) RED_ONCE(151, "cannot make the storage-sharing view ser=%llu again on its upgraded parent: it keeps the old storage", (unsigned long long)t->serial);
         }
         own_upgrade(base, upgraded, t->serial, view ? upgraded_view : upgraded);   // the serial tables, the pins and the sharing table, a new epoch (nvn_owner.m)
         ua_upgrade(base, upgraded);
@@ -6535,6 +6535,38 @@ static const uint8_t *srgb_twins(uint32_t f) {
     });
     return f < 256 ? tw[f] : tw[0];
 }
+// A shorter mip chain can describe the same leading levels of a block-linear 2D texture.
+// STORM 3 records uploads and then reinitializes the texture with fewer levels at the same pool offset before submitting.
+static id<MTLTexture> tex_mip_prefix(const tex_t *t, const alias_key *key) {
+    if (!t->mem || !t->pool || !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) ||
+        (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ||
+        t->d.target != NVN_TEXTURE_TARGET_2D || !fmt_compressed(t->d.format) ||
+        (t->d.flags & (NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) return nil;
+
+    NSUInteger levels = MAX(t->d.levels, 1u);
+    __block id<MTLTexture> parent = nil;
+    __block alias_key parent_key;
+    pthread_mutex_lock(&g_smu);
+    own_alias_at_locked(t->pool, t->off, ^(const alias_key *k, id shared) {
+        if (parent || k->d.levels <= levels) return;
+        nvn_texdesc d = k->d;
+        d.levels = key->d.levels;
+        if (memcmp(&d, &key->d, sizeof d)) return;
+        nvn_texlayout layout;
+        nvn_tex_layout(&k->d, &layout);
+        if (layout.tileH != t->L.tileH || layout.tileD != t->L.tileD) return;
+        id<MTLTexture> base = shared;
+        if (base.mipmapLevelCount < levels) return;
+        parent = base;
+        parent_key = *k;
+    });
+    pthread_mutex_unlock(&g_smu);
+    if (!parent) return nil;
+
+    id<MTLTexture> view = [parent newTextureViewWithPixelFormat:parent.pixelFormat textureType:parent.textureType
+                                                       levels:NSMakeRange(0, levels) slices:NSMakeRange(0, 1) swizzle:parent.swizzle];
+    return view && own_view_put(t->serial, &parent_key, view) ? view : nil;
+}
 // The usage of a buffer texture's view: every use the guest may make of it, whatever its IMAGE flag. A view on its pool's buffer has no lossless compression for the write and
 // format-view usages to cost (measured on an M6: reads of R32F, R32UI, RGBA8, RGBA16F and RGBA32F views over 64 MB the same with and without them, within run-to-run noise), and
 // its NVN texture objects share one view (tex_mtl_), the IMAGE ones among them: made with read usage alone, the first image write or format view of a view another object made
@@ -6756,7 +6788,7 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         return tex_mtl_result(pk->view ? pk->view : pk->tex, owned);
     }
     if ([have isKindOfClass:[NvPkg class]]) have = nil;   // a movie texture dropped back to non-packaged (e.g. buffer-backed linear): rebuild as an MTLTexture below
-    // An sRGB / linear view whose parent left the sharing table (upgraded, or evicted with its pool; a takeover leaves a held view's parent) no longer shares the storage's bytes: dropped,
+    // A view whose parent left the sharing table (upgraded, or evicted with its pool; a takeover leaves a held view's parent) no longer shares the storage's bytes: dropped,
     // live or finalized (its ghost entry), and made again below on what holds them now. serial_del took only a live entry, so a finalized serial kept resolving to the stale view
     // whenever making the new texture failed, and to any thread in between
     if (obj_is_tex(have) && ((id<MTLTexture>)have).parentTexture && own_view_drop_stale(t->serial, have)) {
@@ -6786,6 +6818,8 @@ static void *tex_mtl_resolve(const tex_t *ct, int *in_storage, id<MTLTexture> __
         if (got != mt) defer_obj_release(mt);   // another thread registered one over the same storage meanwhile: that one is shared
         return tex_mtl_result(got, owned);
     }
+    id<MTLTexture> prefix = tex_mip_prefix(t, &ak);
+    if (prefix) { if (!g_pool_walk) tu_stamp(prefix, 0); return tex_mtl_result(prefix, owned); }
     {   // NVN textures over the same storage share its bytes. One that differs from a shared texture only by the other format of an sRGB / linear pair is a view of it: as its own Metal
         // texture, Mario Kart World's Grand Prix movie (an RGBA8 render target the YUV pass writes, sampled by the composite through an RGBA8_SRGB texture) showed a frozen frame
         // The other formats of the pair are looked up directly (srgb_twins), with the rest of the key unchanged; the descriptor is built only when one is shared

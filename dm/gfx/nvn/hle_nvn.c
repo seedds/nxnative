@@ -1035,7 +1035,7 @@ NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
         int ok = acq_wait_run((acq_wait_t *)(uintptr_t)ah, timeout, &waited, &gf);
         acq_wait_unref((acq_wait_t *)(uintptr_t)ah);
         if (!ok) return sync_expired(o, timeout, now_ns() - t0);
-        if (mtl_wait_acq(gf, 0)) return waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
+        if (!gf || mtl_wait_acq(gf, 0)) return waited ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED;
         if (!timeout) return NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED;
         uint64_t el = now_ns() - t0, rem = timeout == UINT64_MAX ? UINT64_MAX : el >= timeout ? 0 : timeout - el;
         uint64_t w0 = now_ns();
@@ -2119,8 +2119,8 @@ _Static_assert(DM_QUIT_ARCH_MS == MTL_QUIT_ARCH_MS, "a graceful exit gives the p
 // comes before the gate: a second submission waiting for it must not count as in flight, or the suspend waits for it while the first waits to enter the closed gate holding the lock
 static void sleep_until_ns(uint64_t dl);
 static void nvn_acq_ref(uint64_t handle);
-static uint64_t nvn_acq_unref_take_ticket(uint64_t handle);
-static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket);
+static uint64_t nvn_acq_unref_take_ticket(uint64_t handle, uint64_t *next);
+static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket, uint64_t *next);
 #include "nvn_queue.inc"
 NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h) {
     ((queue_t *)q)->submits++;
@@ -2258,13 +2258,23 @@ struct acq_wait {
     win_t *win;           // NULL once finalized or wait completed
     uint64_t avail;       // snapshotted o->avail[*idx] at acquire time
     uint64_t ticket;      // snapshotted o->ticket[*idx] at acquire time (owned until completed, finalized, or freed)
-    uint64_t gpu_fence;   // mtl_last_fence() at acquire time
+    uint64_t next;        // snapshotted o->next_ticket[*idx] at acquire time: the first present after this image's last one (Horizon returns the image once that present has run)
+    uint64_t gpu_fence;   // 0 when DM_NVN_ACQ_NEXT is on (ticket/next carry the exact fences); mtl_last_fence() only when DM_NVN_ACQ_NEXT=0
     unsigned refs;        // held by win->pending_acq, sync_t (fenced == 4), and active waiters
     int paced;            // 1 once pacing (link / sleep / screen / detclock / snap) has completed
     int done;             // 0 = pending, 1 = wait in progress, 2 = completed or abandoned
 };
 static pthread_mutex_t acq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t acq_cv = PTHREAD_COND_INITIALIZER;
+static int acq_next_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("DM_NVN_ACQ_NEXT");
+        on = !e || atoi(e) != 0;
+        if (!on) LOG("DM_NVN_ACQ_NEXT=0: an acquired image is handed back once its own present has run (legacy acquire fence)");
+    }
+    return on;
+}
 static int g_det_pace = -1;
 static uint64_t g_det_step, g_det_last;
 static void det_pace_init(void) {
@@ -2280,26 +2290,29 @@ static void nvn_acq_ref(uint64_t handle) {
     aw->refs++;
     pthread_mutex_unlock(&acq_mu);
 }
-static uint64_t nvn_acq_unref_take_ticket(uint64_t handle) {
+static uint64_t nvn_acq_unref_take_ticket(uint64_t handle, uint64_t *next) {
+    *next = 0;
     if (!handle) return 0;
     acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
     uint64_t tk = 0;
     pthread_mutex_lock(&acq_mu);
-    if (!--aw->refs) { tk = aw->ticket; free(aw); }
+    if (!--aw->refs) { tk = aw->ticket; *next = aw->next; free(aw); }
     pthread_mutex_unlock(&acq_mu);
     return tk;
 }
-static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket) {
-    if (!handle) { *gpu_fence = 0; *ticket = 0; return; }
+static void nvn_acq_snapshot(uint64_t handle, uint64_t *gpu_fence, uint64_t *ticket, uint64_t *next) {
+    if (!handle) { *gpu_fence = 0; *ticket = 0; *next = 0; return; }
     acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
     pthread_mutex_lock(&acq_mu);
     *gpu_fence = aw->gpu_fence;
     *ticket = aw->ticket;
+    *next = aw->next;
     pthread_mutex_unlock(&acq_mu);
 }
 static void acq_wait_unref(acq_wait_t *aw) {
-    uint64_t tk = nvn_acq_unref_take_ticket((uintptr_t)aw);
+    uint64_t nx, tk = nvn_acq_unref_take_ticket((uintptr_t)aw, &nx);
     if (tk) nvn_queue_present_release(tk);
+    if (nx) nvn_queue_present_release(nx);
 }
 static int acq_pace_ready(const win_t *o, uint64_t at) {
     if (!dm_detclock_enabled()) {
@@ -2408,20 +2421,25 @@ static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64
     }
     aw->done = 1;
     win_t *o = aw->win;
-    uint64_t at = aw->avail, tk = aw->ticket, gf = aw->gpu_fence;
+    uint64_t at = aw->avail, tk = aw->ticket, nx = aw->next, gf = aw->gpu_fence;
     int paced = aw->paced;
     pthread_mutex_unlock(&acq_mu);
     if (gpu_fence_out) *gpu_fence_out = gf;
 
     if (!o) {
         pthread_mutex_lock(&acq_mu);
-        uint64_t drop = aw->ticket; aw->ticket = 0; aw->done = 2;
+        uint64_t drop = aw->ticket, dnx = aw->next; aw->ticket = 0; aw->next = 0; aw->done = 2;
         pthread_cond_broadcast(&acq_cv);
         pthread_mutex_unlock(&acq_mu);
         if (drop) nvn_queue_present_release(drop);
+        if (dnx) nvn_queue_present_release(dnx);
         return 1;
     }
-    if (!timeout_ns && ((!paced && !acq_pace_ready(o, at)) || (tk && !nvn_queue_present_ready(tk)))) {
+    int acq_next = acq_next_on();
+    if (!timeout_ns && ((!paced && !acq_pace_ready(o, at))
+                        || (tk && !(acq_next ? nvn_queue_present_gpu_ready(tk, 1) : nvn_queue_present_ready(tk)))
+                        || (nx && !nvn_queue_present_gpu_ready(nx, 0))
+                        || (gf && !mtl_wait_acq(gf, 0)))) {
         pthread_mutex_lock(&acq_mu);
         aw->done = 0;
         pthread_cond_broadcast(&acq_cv);
@@ -2431,7 +2449,7 @@ static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64
 
     int ok = 1;
     if (!paced) {
-        uint64_t rem = timeout_ns == UINT64_MAX ? UINT64_MAX : !timeout_ns ? 0 : now_ns() >= deadline ? 0 : deadline - now_ns();
+        uint64_t rem = acq_rem_ns(timeout_ns, deadline);
         ok = acq_pace_do(o, at, rem, deadline, waited);
         if (ok) {
             pthread_mutex_lock(&acq_mu);
@@ -2440,20 +2458,28 @@ static int acq_wait_run(acq_wait_t *aw, uint64_t timeout_ns, int *waited, uint64
         }
     }
     if (ok && tk) {
-        if (!nvn_queue_present_ready(tk)) *waited = 1;
-        uint64_t rem = timeout_ns == UINT64_MAX ? UINT64_MAX : !timeout_ns ? 0 : now_ns() >= deadline ? 0 : deadline - now_ns();
+        if (!(acq_next ? nvn_queue_present_gpu_ready(tk, 1) : nvn_queue_present_ready(tk))) *waited = 1;
+        uint64_t rem = acq_rem_ns(timeout_ns, deadline);
         uint64_t w0 = now_ns();
-        ok = nvn_queue_present_wait_timeout(tk, rem);
+        ok = acq_next ? nvn_queue_present_gpu_wait_timeout(tk, rem, 1) : nvn_queue_present_wait_timeout(tk, rem);
+        if (ok) atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0);
+    }
+    if (ok && nx) {
+        if (!nvn_queue_present_gpu_ready(nx, 0)) *waited = 1;
+        uint64_t rem = acq_rem_ns(timeout_ns, deadline);
+        uint64_t w0 = now_ns();
+        ok = nvn_queue_present_gpu_wait_timeout(nx, rem, 0);
         if (ok) atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0);
     }
 
-    uint64_t release_tk = 0;
+    uint64_t release_tk = 0, release_nx = 0;
     pthread_mutex_lock(&acq_mu);
-    if (ok) { release_tk = aw->ticket; aw->ticket = 0; aw->win = NULL; aw->done = 2; }
+    if (ok) { release_tk = aw->ticket; aw->ticket = 0; release_nx = aw->next; aw->next = 0; aw->win = NULL; aw->done = 2; }
     else aw->done = 0;
     pthread_cond_broadcast(&acq_cv);
     pthread_mutex_unlock(&acq_mu);
     if (release_tk) nvn_queue_present_release(release_tk);
+    if (release_nx) nvn_queue_present_release(release_nx);
     return ok;
 }
 NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsync *s, int *idx) {
@@ -2477,16 +2503,36 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
         uint64_t period = present_period(o);
         rt_acquire(rt_period_ns(o, period));
     }
-    // Snapshot this slot's earliest display-release time and take ownership of its previous present receipt now, before a concurrent present thread can enqueue a new present for *idx
-    uint64_t at = 0, tk = 0;
+    // Snapshot this slot's earliest display-release time and take ownership of its previous present receipt and successor-present receipt atomically,
+    // before a concurrent present thread can enqueue a new present for *idx. Horizon hands an image back once the compositor has taken the next present
+    // in its place, so the GPU has finished that later frame: games pace their CPU-written per-frame data by the acquire's sync alone (Xenoblade DE/3/2).
+    uint64_t at = 0, tk = 0, nx = 0;
+    int acq_next = acq_next_on();
     pthread_mutex_lock(&acq_mu);
-    if (*idx >= 0 && *idx < 4) { at = o->avail[*idx]; tk = o->ticket[*idx]; o->ticket[*idx] = 0; }
+    if (*idx >= 0 && *idx < 4) {
+        at = o->avail[*idx];
+        tk = o->ticket[*idx]; o->ticket[*idx] = 0;
+        nx = o->next_ticket[*idx]; o->next_ticket[*idx] = 0;
+    }
     pthread_mutex_unlock(&acq_mu);
+    if (!acq_next && nx) { nvn_queue_present_release(nx); nx = 0; }
 
     if (!s) {
         int dummy = 0;
         acq_pace_do(o, at, UINT64_MAX, UINT64_MAX, &dummy);
-        if (tk) { uint64_t w0 = now_ns(); nvn_queue_present_wait(tk); nvn_queue_present_release(tk); atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0); }
+        if (tk) {
+            uint64_t w0 = now_ns();
+            if (acq_next) nvn_queue_present_gpu_wait_timeout(tk, UINT64_MAX, 1);
+            else nvn_queue_present_wait(tk);
+            nvn_queue_present_release(tk);
+            atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0);
+        }
+        if (nx) {
+            uint64_t w0 = now_ns();
+            nvn_queue_present_gpu_wait_timeout(nx, UINT64_MAX, 0);
+            nvn_queue_present_release(nx);
+            atomic_fetch_add(&g_pq_wait_ns, now_ns() - w0);
+        }
         return NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS;
     }
 
@@ -2495,7 +2541,8 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
     aw->win = o;
     aw->avail = at;
     aw->ticket = tk;
-    aw->gpu_fence = mtl_last_fence();
+    aw->next = nx;
+    aw->gpu_fence = acq_next ? 0 : mtl_last_fence();
     aw->refs = 2;   // 1 for win->pending_acq, 1 for sync_t
     pthread_mutex_lock(&acq_mu);
     o->pending_acq = aw;
@@ -2506,7 +2553,7 @@ NVN(nvnWindowAcquireTexture, NVNwindowAcquireTextureResult, NVNwindow *w, NVNsyn
 // The older API (NVN 53, Super Mario 3D World + Bowser's Fury): the queue waits for the texture on the GPU and no sync object is handed out. The host replays in submission order, so later commands already come after earlier presents; the same as WindowAcquireTexture without a sync object
 NVN(nvnWindowFinalize, void, NVNwindow *w) {
     win_t *o = (win_t *)w;
-    uint64_t drop[5] = {0}; int nd = 0;
+    uint64_t drop[10] = {0}; int nd = 0;
     pthread_mutex_lock(&acq_mu);
     acq_wait_t *aw = (acq_wait_t *)o->pending_acq;
     if (aw) {
@@ -2514,11 +2561,16 @@ NVN(nvnWindowFinalize, void, NVNwindow *w) {
         if (aw->done == 0) {
             aw->done = 2; aw->win = NULL;
             if (aw->ticket) { drop[nd++] = aw->ticket; aw->ticket = 0; }
+            if (aw->next) { drop[nd++] = aw->next; aw->next = 0; }
             pthread_cond_broadcast(&acq_cv);
         }
         o->pending_acq = NULL;
     }
-    for (int i = 0; i < 4; i++) { if (o->ticket[i]) { drop[nd++] = o->ticket[i]; o->ticket[i] = 0; } }
+    for (int i = 0; i < 4; i++) {
+        if (o->ticket[i]) { drop[nd++] = o->ticket[i]; o->ticket[i] = 0; }
+        if (o->next_ticket[i]) { drop[nd++] = o->next_ticket[i]; o->next_ticket[i] = 0; }
+    }
+    o->last_pres = 0;
     pthread_mutex_unlock(&acq_mu);
     if (aw) acq_wait_unref(aw);
     for (int i = 0; i < nd; i++) nvn_queue_present_release(drop[i]);
@@ -3364,11 +3416,23 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         presented = 1;
         const tex_t *t = CTX(o->tex[idx]); int lc[4]; const int *crop = present_crop(o->crop, (int)t->d.width, (int)t->d.height, lc);
         uint64_t new_tk = nvn_queue_present((queue_t *)q, t, present_period(o) / 1e9, crop);
+        uint64_t drop[3] = {0}; int nd = 0;
+        int acq_next = acq_next_on(), used_ref = 0;
+        if (acq_next) nvn_queue_present_ref(new_tk);   // speculatively retain a reference for the previous image's next_ticket
         pthread_mutex_lock(&acq_mu);
-        uint64_t old_tk = o->ticket[idx];
+        int prev = o->last_pres - 1;
+        if (acq_next && prev >= 0 && prev < 4 && prev != idx && o->ticket[prev]) {
+            if (o->next_ticket[prev]) drop[nd++] = o->next_ticket[prev];
+            o->next_ticket[prev] = new_tk;
+            used_ref = 1;
+        }
+        if (o->ticket[idx]) drop[nd++] = o->ticket[idx];
+        if (o->next_ticket[idx]) { drop[nd++] = o->next_ticket[idx]; o->next_ticket[idx] = 0; }
         o->ticket[idx] = new_tk;
+        o->last_pres = idx + 1;
         pthread_mutex_unlock(&acq_mu);
-        if (old_tk) nvn_queue_present_release(old_tk);
+        if (acq_next && !used_ref) nvn_queue_present_release(new_tk);
+        for (int i = 0; i < nd; i++) nvn_queue_present_release(drop[i]);
     }
     gfx_leave();
     // Diagnostic DM_NVN_PRESENT_FINISH=1 (off by default): a present returns once the GPU has run the frame, so the game never runs ahead of the GPU

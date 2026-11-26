@@ -74,7 +74,7 @@ typedef struct { uint32_t magic; volatile uint32_t *val; const pool_t *pool; int
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval; NVNtexture *tex[4]; int32_t nactive; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
 // avail[i]: time at which swapchain image i can be acquired again (ns, monotonic clock) = its display time + one present period; pace: target time of this window's present pacer
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4], offscreen; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4]; int32_t nactive, follow; void *pending_acq; } win_t;   // ticket[i]: ticket of the most recent present of image i; nactive as in win_builder_t; follow: see nvn_pace_follow; pending_acq: deferred acquire wait not yet consumed
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, crop[4], offscreen; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], next_ticket[4]; int32_t nactive, follow, last_pres; void *pending_acq; } win_t;   // ticket[i]: receipt of the most recent present of image i; next_ticket[i]: receipt of the first present after image i's most recent present (Horizon returns image i once that successor present has run); last_pres: idx + 1 of the most recent present (0 = none); nactive as in win_builder_t; follow: see nvn_pace_follow; pending_acq: deferred acquire wait not yet consumed
 FITS(win_t, NVNwindow);
 
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), and the list that strings a recording's pieces together into its control memory

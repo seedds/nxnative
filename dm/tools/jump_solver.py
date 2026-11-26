@@ -72,6 +72,20 @@ def _top(chain, w):
         else: hi = _mask(op[-1])
     return hi
 
+def _canon(chain, root):
+    """chain as a function of its root's value, the same for two chains that compute the same value: a 32-bit truncation is an and with 0xffffffff, an and keeps
+    only the bits the value can still have, consecutive ands are one, and an and that keeps every such bit is none (on a 64-bit x8, and w18,w8,#0xffff is
+    w, and 0xffff and and x18,x8,#0xffff is and 0xffff: both are and 0xffff)"""
+    out, bits = [], M64 if len(root) == 1 else _mask(root[-1])
+    for op in chain:
+        if op[0] in ('w', 'and'):
+            nb = bits & (M32 if op[0] == 'w' else op[1])
+            if nb == bits: continue
+            if out and out[-1][0] == 'and': out.pop()   # it was ('and', bits): nb keeps a subset of those
+            out.append(('and', nb)); bits = nb
+        else: out.append(op); bits = _mask(op[-1])
+    return tuple(out)
+
 class Abs:
     """{x : lo <= x <= hi and x & 0xfff in bits}"""
     __slots__ = ('lo', 'hi', 'bits')
@@ -336,6 +350,20 @@ class Function:
             if st.flags and st.flags[4] == r[0] and st.flags[1] == v: st.flags = None
         return self.val(st, r)
 
+    def narrowed(self, st, v):
+        """v, or the copy of it a guard narrowed. Where _refine cannot carry a bound back through a chain to its root (an and wider than the low 12 bits), the registers
+        holding the checked value get a root of their own ('r', root, chain, width); the same value computed again from the root is that copy (DRAGON BALL FighterZ 1.50
+        main+0x252b60: and w18,w8,#0xffff; cmp w18,#0x10; b.hi; and x18,x8,#0xffff, 17 entries). Only for roots that name a new value only through detach, which renames
+        such a copy first: a written value ('d'), a table entry ('e'), a register's constants ('k') or an entry's ('seed'). A phi is made again under the same name at its
+        join (a landing pad's at -1), and so are 'x' and 'r' roots, none of which renames the copies of the old value"""
+        if v[1][0] not in ('d', 'e', 'k', 'seed'): return v
+        c = None
+        for r in st.regs:
+            if r[0] == 's' and not r[2] and r[1][0] == 'r' and r[1][1] == v[1]:
+                if c is None: c = _canon(v[2], v[1])
+                if _canon(r[1][2], v[1]) == c: return r
+        return v
+
     def put(self, st, k, d, v):
         n, w = d
         if w == 32 and v[0] in ('c', 's'): v = self.trunc(v)   # a table entry (ldrb / ldrh into wN) is already the value the register holds
@@ -347,7 +375,7 @@ class Function:
         if src[0] == 'c':
             return self.put(st, k, d, ('c', frozenset(_apply((op,), x) for x in src[1]), frozenset(_apply((op,), x) for x in src[2])))
         if src[0] != 's': return self.put(st, k, d, self.fresh(st, k, d[0], d[1]))
-        self.put(st, k, d, ('s', src[1], src[2] + (op,)))
+        self.put(st, k, d, self.narrowed(st, ('s', src[1], src[2] + (op,))))
 
     def unknown(self, st, k):
         """Every general-purpose register instruction k writes becomes unknown"""

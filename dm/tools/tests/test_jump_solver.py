@@ -118,6 +118,40 @@ class Bounds(Solver):
         w = self.base() + [ldr_w(18), sub_w(0, 18, 0xd1), cmp_w(0, 0x31), bcond(HI, 20, 40), ldrsw(18, 4, 0), ADDR(18, 18, 4), BR(18)] + [RET] * 55
         self.assertEqual(self.site(w), t)
 
+    def test_masked_copy_wider_than_the_low_bits(self):
+        # DRAGON BALL FighterZ 1.50 main+0x252b60: and w18,w8,#0xffff; cmp w18,#0x10; b.hi; and x18,x8,#0xffff; ldrsw x18,[x14,x18,lsl #2]. A mask wider than
+        # the low 12 bits does not carry the bound back to x8, so the index computed again from x8 must take it from the guarded copy (17 entries, not 65,536)
+        def run(load, copy, again, between=()):
+            head = self.base() + [load(8), copy, cmp_w(copy & 31, 16)]
+            at = 4 * len(head)   # the b.hi
+            body = list(between) + [again, ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)]
+            start = at + 4 + 4 * len(body)
+            t = [start + 4 * i for i in range(17)]; self.table(t)
+            return self.site(head + [bcond(HI, at, start + 4 * 17)] + body + [RET] * 18), t
+        for load, copy in ((ldr_w, and_w(18, 8, 16)),    # the copy in x18 itself, overwritten by the index (FighterZ)
+                           (ldr_w, and_w(16, 8, 16)),    # the copy in another register (Link's Awakening's form, with a 16-bit mask)
+                           (ldr_x, and_w(18, 8, 16))):   # a 64-bit x8: the copy reads w8 (a 32-bit truncation, then the mask), the index x8
+            found, t = run(load, copy, and_x(18, 8, 16))
+            self.assertEqual(found, t)
+        found, _ = run(ldr_w, and_w(16, 8, 16), and_x(18, 8, 17))   # another mask is another value: 0x1ffff reaches past the guard
+        self.assertIsNone(found)
+        for copy in (and_w(18, 8, 16), and_w(16, 8, 16)):   # x8 written again after the check: its new value is not the one checked
+            found, _ = run(ldr_w, copy, and_x(18, 8, 16), [ldr_w(8)])
+            self.assertIsNone(found)
+
+    def test_narrowed_copies_only_of_roots_detach_renames(self):
+        # A phi is made again under the same name at its join (every landing pad's at -1), and so are 'x' and 'r' roots, without renaming the copies of the old value:
+        # a narrowed copy of one may be of another value than the root now names. Only a 'd', 'e', 'k' or 'seed' root's copy is taken
+        fn, mask = jump_solver.Function([], b'', None, False), (('and', 0xffff),)
+        for root, taken in ((('d', 3, 8, 32), True), (('seed', 0, 8, 64), True), (('p', -1, 8, 64), False), (('x', 1, 8, 64), False),
+                            (('r', ('d', 3, 8, 32), mask, 32), False)):
+            copy = ('s', ('r', root, mask, 32), ())
+            st = jump_solver.State([('s', root, ())] * 16 + [copy] + [('s', root, ())] * 14, {}, None)
+            self.assertEqual(fn.narrowed(st, ('s', root, mask)), copy if taken else ('s', root, mask), root)
+        st = jump_solver.State([('s', ('d', 3, 8, 64), ())] * 16 + [('s', ('r', ('d', 3, 8, 64), (('w',), ('and', 0xffff)), 32), ())] + [('s', ('d', 3, 8, 64), ())] * 14, {}, None)
+        self.assertEqual(fn.narrowed(st, ('s', ('d', 3, 8, 64), mask))[1][0], 'r')   # w8 & 0xffff of a 64-bit x8 is x8 & 0xffff
+        self.assertEqual(fn.narrowed(st, ('s', ('d', 3, 8, 64), (('and', 0x1ffff),))), ('s', ('d', 3, 8, 64), (('and', 0x1ffff),)))   # another mask is another value
+
     def test_64_bit_compare_and_32_bit_values(self):
         # OCTOPATH TRAVELER main+0x1676f30: cmp x22,#0x10 bounds the 64-bit index. A 32-bit compare bounds it only where the upper half is known zero
         t = [36 + 4 * i for i in range(5)]; self.table(t)

@@ -112,6 +112,14 @@ To enroll a cut for any game's own module:
 - **Fix:** carry the expression's width to the new root. The existing dataflow follows the copied table base, and the 32-bit compare can bound the full index. A compare on the low half of an index with unknown upper bits still cannot prove the table.
 - **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)). A full Mac rewrite resolves six dispatches in one function to four targets each.
 
+### A guard on a copy masked wider than 12 bits
+
+- **Symptom:** `jump table 252b78: a target is not an instruction of the function` stops the rewrite.
+- **Cause:** the bounds check is on one masked copy of a value, and the index masks the value again: `and w18,w8,#0xffff; cmp w18,#0x10; b.hi; and x18,x8,#0xffff; ldrsw x18,[x14,x18,lsl #2]`. A guard reaches the root only through truncations, adds, complements and masks of at most 0xfff, whose low 12 bits the solver tracks exactly. Through `and #0xffff`, `_refine` narrows only the registers that hold the checked value, as a root of their own. The second mask reads the root, which nothing narrowed: the index is 0..0xffff, 65,536 entries (exactly `MAXN`, so the size check passes), and the words past the 17-entry table are not instructions of the analysis piece.
+- **Fix:** a value computed again from the same root through an equivalent chain is the narrowed copy (`Function.narrowed`). Chains are compared by `_canon`: a truncation is an and with 0xffffffff, consecutive ands are one, and an and that keeps every bit the value can have is none (`w8 & 0xffff` of a 64-bit `x8` is `x8 & 0xffff`). This holds only for roots that `detach` renames when they name a new value (`d`, `e`, `k`, `seed`). A phi is made again under the same name at its join (every landing pad's at −1), and so are `x` and `r` roots, so a copy of their old value could pass for the new one.
+- **Check:** `dm/tools/tests/test_jump_solver.py` `test_masked_copy_wider_than_the_low_bits` and `test_narrowed_copies_only_of_roots_detach_renames`.
+- **Found on:** DRAGON BALL FighterZ 1.50 (v1703936, SDK 4.5.0, Unreal Engine) `main+0x252b78`, in the 34 MB of its `main` without unwind entries: 17 targets, the table the recognizers before the [jump solver](#jump-tables-proved-over-control-flow) (PR #2562) proved. The game is not in the corpus that change was checked on.
+
 ### Offset jump tables through x18 read at rewrite time
 
 - **Symptom:** `jump table <addr>` assertion in `patch_nso.py`, in a Unity / IL2CPP `main`.

@@ -1715,11 +1715,21 @@ def patch_files(repo, exe_dir, mods, game_id=None):
             if p in shared or p.parent.name == selected or any(i in p.read_text(errors='replace') for i in ids)]
 
 
+def _nrr_files(romfs):
+    out = []
+    for dp, _, fs in rfs.walk(romfs):
+        for name in fs:
+            if not name.endswith('.nrr'): continue
+            p = rfs.Path(dp) / name
+            if p.is_file(): out.append(p)
+    return sorted(out)
+
+
 def collect_nros(py, repo, romfs, dst, env, logs):
     """The NROs a game registers in NRR files (RomFS *.nrr) and loads at run time with nn::ro, found by their SHA-256 as loose files or inside the RomFS's archives (dm/tools/nro_collect.py):
     {module name: NRO path}, {} for a game without NRRs. The host maps their rewritten copies at start and loads one when the game asks (loader.c "NRO modules"; Super Smash Bros. Ultimate:
     98 in data.arc). Reused while the NRRs, RomFS tree and collection tools are unchanged"""
-    nrrs = sorted(p for p in romfs.rglob('*.nrr') if p.is_file())   # Super Smash Bros. Ultimate keeps them in a folder named .nrr
+    nrrs = _nrr_files(romfs)   # Super Smash Bros. Ultimate keeps them in a folder named .nrr
     kf = dst.with_name(dst.name + '.key')
     if not nrrs:
         rmtree(dst); rmtree(kf)   # an update can remove its NRRs: do not carry the previous manifest into the rewrite

@@ -268,7 +268,12 @@ class Path(type(_Path())):
         if not _resolve(self): yield from super().glob(pattern, **kwargs); return
         if '/' not in pattern:
             yield from (p for p in self.iterdir() if fnmatch.fnmatchcase(p.name, pattern)); return
+        tail = pattern[3:] if pattern.startswith('**/') and '/' not in pattern[3:] else None
         for directory, dirs, files in walk(self):
+            if tail is not None:
+                for name in dirs + files:
+                    if fnmatch.fnmatchcase(name, tail): yield Path(directory) / name
+                continue
             for name in dirs + files:
                 p = Path(directory) / name; rel = p.relative_to(self).as_posix()
                 if fnmatch.fnmatchcase(rel, pattern) or (pattern.startswith('**/') and fnmatch.fnmatchcase(rel, pattern[3:])): yield p

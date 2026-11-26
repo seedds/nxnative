@@ -1206,6 +1206,66 @@ class RewriteWorkers(Base):
                 collect.assert_not_called()
 
 
+class CollectNrosDiscovery(Base):
+    def test_nrr_discovery_matches_across_loose_tree_and_image_and_cleans_manifest(self):
+        import romfs as rfs
+        import romfs_image
+
+        # 1. Empty tree -> no matches and removes any stale manifest/key
+        empty = self.tmp / 'empty_romfs'; empty.mkdir()
+        dst = self.tmp / 'nro_out'; dst.mkdir()
+        (dst / 'nro.tsv').write_text('nro0\t00\t1\ta.nrr\tloose\n')
+        kf = dst.with_name(dst.name + '.key'); kf.write_text('stale\n')
+        self.assertEqual(nsp.collect_nros(Path(sys.executable), REPO, rfs.Path(empty), dst, {}, self.tmp / 'logs'), {})
+        self.assertFalse(dst.exists())
+        self.assertFalse(kf.exists())
+
+        # 2. Loose tree with .nrr directory, mixed-case suffix, nested files, valid file symlink, and broken symlink
+        loose = self.tmp / 'loose_romfs'; loose.mkdir()
+        (loose / '.nrr').mkdir()
+        (loose / '.nrr/zeta.nrr').write_bytes(b'NRR0-z')
+        (loose / '.nrr/alpha.nrr').write_bytes(b'NRR0-a')
+        (loose / '.nrr/UPPER.NRR').write_bytes(b'NRR0-u')
+        (loose / 'sub/deep').mkdir(parents=True)
+        (loose / 'sub/deep/ok.nrr').write_bytes(b'NRR0-d')
+        (loose / 'sub/Mixed.Nrr').write_bytes(b'NRR0-m')
+        (loose / 'sub/target.bin').write_bytes(b'NRR0-link')
+        # Pack equivalent image before adding broken symlink
+        img = self.tmp / 'RomFS.img'
+        (loose / 'sub/link.nrr').symlink_to(loose / 'sub/target.bin')
+        romfs_image.pack(loose, img)
+        (loose / 'sub/broken.nrr').symlink_to(loose / 'sub/does_not_exist')
+
+        loose_root = rfs.Path(loose)
+        img_root = rfs.Path(img)
+        loose_rel = [p.relative_to(loose_root).as_posix() for p in nsp._nrr_files(loose_root)]
+        img_rel = [p.relative_to(img_root).as_posix() for p in nsp._nrr_files(img_root)]
+        expected = ['.nrr/alpha.nrr', '.nrr/zeta.nrr', 'sub/deep/ok.nrr', 'sub/link.nrr']
+        self.assertEqual(loose_rel, expected)
+        self.assertEqual(img_rel, expected)
+        self.assertEqual(loose_rel, sorted(p.relative_to(loose_root).as_posix() for p in loose_root.rglob('*.nrr') if p.is_file()))
+
+        # 3. collect_nros runs when NRRs exist, reuses when unchanged, and cleans dst/key when the last match disappears
+        runs = []
+        def fake_run(cmd, log, env=None):
+            runs.append(cmd)
+            out = Path(cmd[3]); out.mkdir(parents=True, exist_ok=True)
+            (out / 'nro.tsv').write_text('nro0\t' + '00' * 32 + '\t64\talpha.nrr\tloose\n')
+            (out / 'nro0.nro').write_bytes(b'NRO0')
+        with mock.patch.object(nsp, 'run', side_effect=fake_run):
+            got = nsp.collect_nros(Path(sys.executable), REPO, loose_root, dst, {}, self.tmp / 'logs')
+            self.assertEqual(set(got), {'nro0'})
+            self.assertEqual(len(runs), 1)
+            got2 = nsp.collect_nros(Path(sys.executable), REPO, loose_root, dst, {}, self.tmp / 'logs')
+            self.assertEqual(got2, got)
+            self.assertEqual(len(runs), 1)
+        # Remove every matching .nrr file (leaving .nrr directory, UPPER.NRR, and broken.nrr)
+        for rel in expected: (loose / rel).unlink()
+        self.assertEqual(nsp.collect_nros(Path(sys.executable), REPO, loose_root, dst, {}, self.tmp / 'logs'), {})
+        self.assertFalse(dst.exists())
+        self.assertFalse(kf.exists())
+
+
 class LayerShaders(Base):
     def test_redumped_romfs_and_captures_invalidate_only_own_libraries(self):
         cap = self.ex / 'capture'; cap.mkdir(); (cap / 'shader.bin').write_bytes(b'shader')

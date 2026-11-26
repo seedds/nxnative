@@ -39,6 +39,8 @@ General tool changes first needed here; each applies to every game:
 - **60-byte pack entries, zstd program records and `MTRL` forms, and program records whose control length is not a multiple of 0x40**, which the reader had skipped without a word in Metroid Prime Remastered too (28,479 of its shaders) (`rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
 - **JoyDual vibration handles routed to FullKey and Handheld controllers** (`vib_valid`, `hle_hid.c`; `main+0xaab6f8` requests only `STYLE_JOYDUAL` handles at boot): [services.md](../../../docs/reference/services.md#joydual-vibration-handles-on-a-whole-controller).
 
+- **Indexed Maxwell fragment inputs lost flat interpolation.** On an Apple M1 Mac, correcting the selector interface removed the reported flicker in extended Metroid Prime 4 Beyond gameplay. [Shader mechanism](../../../docs/reference/shaders.md#maxwell-indexed-fragment-inputs-lose-flat-interpolation).
+
 ## Open
 
 - The iPhone: no IPA built or tested. The game needs a 3.16 GB heap in a 4 GB layout, 4.0 GB resident on the Mac, and 68 GB of Mac shader libraries; the pipeline prewarm list `pso_manifest.tsv` is still empty.

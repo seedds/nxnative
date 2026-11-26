@@ -27,7 +27,7 @@ FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
     'StructuredIr/ShaderProperties.cs', 'StructuredIr/AstOperand.cs', 'StructuredIr/AstOptimizer.cs', 'StructuredIr/StructuredProgram.cs',
     'Translation/Optimizations/BindlessElimination.cs', 'Translation/Optimizations/Optimizer.cs',
     'Translation/Optimizations/GlobalToStorage.cs', 'CodeGen/Spirv/SpirvGenerator.cs')]
-FILES += ['tools/' + f for f in ('dmsh_rt.py', 'dmsh_rt_build.py', 'dmsh_rt_compile.py', 'shader_split.py', 'dmsh_wrap.py')]
+FILES += ['tools/' + f for f in ('dmsh_rt.py', 'dmsh_rt_build.py', 'dmsh_rt_compile.py', 'shader_split.py', 'dmsh_wrap.py', 'dmsh_interp.py')]
 FILES += ['../third_party/ryujinx/src/Ryujinx.Graphics.Shader/' + f for f in (
     'IGpuAccessor.cs', 'Decoders/DecoderAmpere.cs', 'Instructions/InstEmitAmpere.cs',
     'Instructions/InstEmitAmpereAlu.cs', 'Instructions/InstEmitAmpereMem.cs',

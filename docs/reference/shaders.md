@@ -1927,6 +1927,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Nintendo Switch 2 Welcome Tour](../../dm/games/040057C02159A000/README.md), Bezel PBR hull shader `0b9e5d475e9afd21`, in `_SystemBuiltinRenderer.ounce.bea` (`bezel_pbr.bfsha`). Its repaired hull compiles through the production tessellation lowering; no draw using it was observed in Area A.
 - **Check:** `DMSH_TEST_XLATE=<translator> DMSH_TEST_GPU=1 python3 dm/gfx/tests/test_dmsh_ampere_patch.py`: every valid patch word, out-of-range and wrapping addresses, and four-component stores crossing factor and user-output boundaries. A translation-chain change, with no game or build binding.
 
+### Maxwell indexed fragment inputs lose flat interpolation
+
+- **Symptom:** Some objects flicker between bright and dark as the camera moves. Their material shaders use a flat integer bit pattern to select a lighting record.
+- **Cause:** An indexed IPA makes the translator combine fragment inputs into one SPIR-V array. The array inherits location zero's interpolation mode. Other locations lose their flat or screen-linear decoration.
+- **Fix:** `dmsh_interp.py` splits the raster interface into locations with their SPH qualifiers before SPIRV-Cross. It gathers the values into a private array so direct and dynamic access chains keep their original indexing. Known unsupported interfaces, including a vector whose active lanes require different modes, keep the original SPIR-V. The build reports each affected shader and counts successful stock fallbacks, including cache hits. The stock qualifiers can still be inaccurate for those shaders. Invalid input and unexpected lowering failures continue to surface as errors.
+- **Found on:** [Metroid Prime 4: Beyond](../../dm/games/010019A01E2F2000/README.md#found-on-this-game). Restoring the qualifiers in isolated controls removed the flicker on MacKenzie and the spherical decorations. The regenerated chain linked those shaders with their original vertex shaders on the Mac.
+- **Check:** `python3 dm/tools/tests/test_dmsh_interp.py`. Extended gameplay validation of the regenerated chain is pending.
+
 ### IPA at an offset, and the barycentric coordinates
 
 - **Symptom:** `[translation failed] NotSupportedException: Ampere 326 at …: IPA at an offset`; before the offset is reached, the build's log has `Attribute offset 0x3B4 is not valid` and the read gives 0.

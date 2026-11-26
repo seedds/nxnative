@@ -118,9 +118,12 @@ typedef struct { CC_SHA256_CTX sha; FILE *out; ss_meta *m; uint32_t entries; uin
 
 static int pack_entry(packer *k, const char *abs, const char *rel, const struct stat *st) {
     char guest[1024]; ssize_t gl = getxattr(abs, GUEST_NAME, guest, sizeof guest, 0, XATTR_NOFOLLOW);
-    if (gl < 0) gl = 0;   // ENOATTR: the host name is the guest's
+    if (gl < 0) {
+        if (errno != ENOATTR) return -1;
+        gl = 0;   // ENOATTR: the host name is the guest's
+    }
     size_t pl = strlen(rel); int file = S_ISREG(st->st_mode);
-    if (pl > UINT16_MAX) return -1;
+    if (pl > UINT16_MAX) { errno = ENAMETOOLONG; return -1; }
     uint8_t h[ENT] = {(uint8_t)(file ? 2 : 1)}; uint16_t pl16 = (uint16_t)pl, gl16 = (uint16_t)gl;
     uint64_t size = file ? (uint64_t)st->st_size : 0; int64_t mt = st->st_mtimespec.tv_sec;
     memcpy(h + 2, &pl16, 2); memcpy(h + 4, &gl16, 2); memcpy(h + 8, &size, 8); memcpy(h + 16, &mt, 8);
@@ -136,8 +139,9 @@ static int pack_entry(packer *k, const char *abs, const char *rel, const struct 
         if (k->out && fwrite(k->buf, 1, (size_t)got, k->out) != (size_t)got) break;
         left -= (uint64_t)got;
     }
+    int read_err = left ? errno : 0;
     close(fd);
-    if (left) return -1;   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
+    if (left) { errno = read_err; return -1; }   // a failed read, or a file shorter than its size (the save is a clone no Commit touches, so not one being written)
     k->m->files++; k->m->bytes += (int64_t)size;
     if (mt > k->m->saved) k->m->saved = mt;
     return 0;
@@ -155,7 +159,10 @@ static int walk(const char *abs, const char *rel, packer *k) {
         else if (S_ISDIR(st.st_mode)) { if (!(r = pack_entry(k, a, p, &st))) r = walk(a, p, k); }
         else if (S_ISREG(st.st_mode)) r = pack_entry(k, a, p, &st);
     }
-    free_names(v, n); return r;
+    int err = r ? errno : 0;
+    free_names(v, n);
+    if (r) errno = err;
+    return r;
 }
 
 static int pack_save(const char *save, packer *k) {
@@ -173,25 +180,29 @@ static int pack_save(const char *save, packer *k) {
 int ss_scan(const char *save, ss_meta *m) {
     memset(m, 0, sizeof *m);
     packer *k = calloc(1, sizeof *k); if (!k) return -1;
-    k->m = m; int r = pack_save(save, k);
-    free(k); return r;
+    k->m = m; int r = pack_save(save, k), err = r ? errno : 0;
+    free(k);
+    if (r) errno = err;
+    return r;
 }
 
 int ss_pack(const char *save, const char *title, const char *out, ss_meta *m) {
     memset(m, 0, sizeof *m);
     upper_title(title, m->title, sizeof m->title); device_name(m->device, sizeof m->device);
     packer *k = calloc(1, sizeof *k); if (!k) return -1;
-    k->m = m; int r = -1;
+    k->m = m; int r = -1, err = 0;
     uint8_t hdr[HDR] = {0}; uint32_t version = 1;
-    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END, k->out) != sizeof END) goto done;
+    if (!(k->out = fopen(out, "wb")) || fwrite(hdr, 1, HDR, k->out) != HDR || pack_save(save, k) || fwrite(END, 1, sizeof END, k->out) != sizeof END) { err = errno; goto done; }
     memcpy(hdr, MAGIC, 8); memcpy(hdr + 8, &version, 4); memcpy(hdr + 12, &k->entries, 4); memcpy(hdr + 16, m->hash, strlen(m->hash));
     memcpy(hdr + 48, &m->saved, 8); memcpy(hdr + 56, m->title, strlen(m->title)); memcpy(hdr + 80, m->device, strlen(m->device));
-    if (fseeko(k->out, 0, SEEK_SET) || fwrite(hdr, 1, HDR, k->out) != HDR || fflush(k->out) || fsync(fileno(k->out))) goto done;
+    if (fseeko(k->out, 0, SEEK_SET) || fwrite(hdr, 1, HDR, k->out) != HDR || fflush(k->out) || fsync(fileno(k->out))) { err = errno; goto done; }
     r = 0;
 done:
-    if (k->out && fclose(k->out)) r = -1;
+    if (k->out && fclose(k->out)) { if (!err) err = errno; r = -1; }
     if (r) unlink(out);
-    free(k); return r;
+    free(k);
+    if (r) errno = err;
+    return r;
 }
 
 // A path in a packed save: under save/ or save_device/, with no empty, . or .. part (a damaged file must not write outside `into`)

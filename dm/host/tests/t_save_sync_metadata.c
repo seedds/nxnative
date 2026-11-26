@@ -17,10 +17,13 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 static int fail_open, fail_write, fail_close, fail_rename, cleanup_errno, track_metadata;
 static int fail_stage_write_after, stage_write_seen, stage_write_fd = -1, fail_stage_publish;
+static const char *fail_xattr_suffix;
+static int fail_xattr_errno;
 static int closes, metadata_fd;
 static _Atomic int renames, unlinks;
 static FILE *metadata;
@@ -132,6 +135,10 @@ static ssize_t test_write(int fd, const void *buf, size_t n) {
     }
     return write(fd, buf, n);
 }
+static ssize_t test_getxattr(const char *path, const char *name, void *value, size_t size, u_int32_t position, int options) {
+    if (fail_xattr_suffix && ends(path, fail_xattr_suffix)) { errno = fail_xattr_errno; return -1; }
+    return getxattr(path, name, value, size, position, options);
+}
 static int test_unlink(const char *path) {
     unlinks++;
     int r = unlink(path);
@@ -144,6 +151,7 @@ static int test_unlink(const char *path) {
 #define flock test_flock
 #define open test_open
 #define write test_write
+#define getxattr test_getxattr
 #define rename test_rename
 #define unlink test_unlink
 #define renamex_np test_renamex_np
@@ -154,6 +162,7 @@ static int test_unlink(const char *path) {
 #undef flock
 #undef open
 #undef write
+#undef getxattr
 #undef rename
 #undef unlink
 #undef renamex_np
@@ -659,6 +668,66 @@ static void conflict_cloud_backup_cases(const char *folder) {
     free(cloud_before);
     rm_tree(root);
 }
+static void xattr_failure_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    const char *name = "guest-name getxattr failures";
+    char root[PATH_MAX], cloud_dir[PATH_MAX], title_dir[PATH_MAX], cf[PATH_MAX];
+    char orig[PATH_MAX], local[PATH_MAX], out[PATH_MAX], unpacked[PATH_MAX], p[PATH_MAX], base[SS_HASH + 1];
+    ss_meta mo, ml, mr;
+    snprintf(root, sizeof root, "%s/xattr-fail", folder);
+    snprintf(cloud_dir, sizeof cloud_dir, "%s/cloud", root);
+    snprintf(title_dir, sizeof title_dir, "%s/%s", cloud_dir, TID);
+    snprintf(cf, sizeof cf, "%s/save.dmsync", title_dir);
+    snprintf(orig, sizeof orig, "%s/orig/save", root);
+    snprintf(local, sizeof local, "%s/local/save", root);
+    snprintf(out, sizeof out, "%s/packed.dmsync", root);
+    snprintf(unpacked, sizeof unpacked, "%s/unpacked", root);
+    rm_tree(root); mkdirs(title_dir); mkdirs(orig); mkdirs(local);
+
+    snprintf(p, sizeof p, "%s/plain", orig); put(p, "previous-cloud");
+    CHECK(!ss_pack(orig, TID, cf, &mo), "pack previous cloud save");
+    uint8_t *cloud_before = NULL; size_t cloud_before_len = 0;
+    CHECK(!read_file_bytes(cf, &cloud_before, &cloud_before_len), "snapshot previous cloud bytes");
+
+    snprintf(p, sizeof p, "%s/plain", local); put(p, "ordinary-file");
+    snprintf(p, sizeof p, "%s/.dm-case-1", local); put(p, "alias-content");
+    CHECK(!setxattr(p, GUEST_NAME, "Plain", 5, 0, XATTR_NOFOLLOW), "attach guest-name xattr to .dm-case-1 alias");
+    write_base(local, mo.hash);
+
+    // Ordinary file lacks GUEST_NAME (ENOATTR) and succeeds alongside the attributed alias
+    CHECK(!ss_scan(local, &ml) && ml.files == 2, "scan succeeds with ENOATTR on ordinary file and readable alias xattr");
+
+    // Inject EIO reading the alias xattr (with cleanup_errno set to verify error preservation through ss_pack cleanup)
+    fail_xattr_suffix = "/.dm-case-1";
+    fail_xattr_errno = EIO;
+    cleanup_errno = EBUSY;
+    CHECK(ss_scan(local, &mr) == -1 && errno == EIO, "ss_scan propagates EIO from getxattr");
+    CHECK(ss_pack(local, TID, out, &mr) == -1 && errno == EIO, "ss_pack propagates EIO from getxattr through cleanup");
+    CHECK(access(out, F_OK) == -1 && errno == ENOENT, "failed ss_pack leaves no partial archive");
+    CHECK(send_save(local, TID, cf) == 0, "send_save refuses to upload when getxattr fails");
+    read_base(local, base);
+    CHECK(!strcmp(base, mo.hash), "previous sync base is unchanged after getxattr failure");
+    uint8_t *cloud_now = NULL; size_t cloud_now_len = 0;
+    CHECK(!read_file_bytes(cf, &cloud_now, &cloud_now_len) && cloud_now_len == cloud_before_len && !memcmp(cloud_now, cloud_before, cloud_before_len),
+          "previous cloud bytes are identical after getxattr failure");
+    free(cloud_now);
+
+    // Clear fault: send succeeds and the attributed alias round-trips its original guest name and contents
+    fail_xattr_suffix = NULL;
+    fail_xattr_errno = 0;
+    cleanup_errno = 0;
+    CHECK(send_save(local, TID, cf) == 1, "send_save succeeds once getxattr is readable");
+    mkdirs(unpacked);
+    CHECK(!ss_read(cf, unpacked, &mr) && !strcmp(mr.hash, ml.hash), "uploaded archive unpacks with matching hash");
+    snprintf(p, sizeof p, "%s/save/plain", unpacked);
+    CHECK(is(p, "ordinary-file"), "ordinary file round-trips");
+    snprintf(p, sizeof p, "%s/save/.dm-case-1", unpacked);
+    char g[16] = {0}; ssize_t gl = getxattr(p, GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(is(p, "alias-content") && gl == 5 && !strcmp(g, "Plain"), "attributed .dm-case-1 alias round-trips guest name and contents");
+
+    free(cloud_before);
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -693,6 +762,7 @@ int main(void) {
     fetch_cases(folder);
     concurrent_send_cases(folder);
     conflict_cloud_backup_cases(folder);
+    xattr_failure_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

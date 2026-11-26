@@ -269,7 +269,7 @@ static int allocprof_level(void) { if (g_allocprof < 0) { const char *e = getenv
 // draw_ itself is split into consecutive stages (dp_switch): entry, checks before the pass, pass setup, pipeline choice, dynamic state, binding, bookkeeping, the Metal draw call
 enum { DP_OTHER, DP_STATE, DP_DRAW, DP_FB, DP_UBD, DP_PSO, DP_ARGS, DP_VBUF, DP_PULL, DP_PASS_BEGIN, DP_PASS_END, DP_GEO, DP_IMG, DP_TEX, DP_COMMIT,
        DP_D_PRE, DP_D_PASS, DP_D_PSO, DP_D_DYN, DP_D_BIND, DP_D_TAIL, DP_D_ISSUE, DP_N };
-static const char *const g_dp_names[DP_N] = {"other", "state", "draw_entry", "feedback", "ubd", "pipeline", "args", "vbuf", "pull", "pass_begin", "pass_end", "geometry", "image", "texture", "commit",
+static const char *const g_dp_names[DP_N] = {"other", "state", "draw_entry", "feedback", "ubd", "pipeline", "args", "vbuf", "pull", "pass_begin", "pass_end", "geo", "image", "texture", "commit",
        "d_precheck", "d_passsetup", "d_psochoice", "d_dynstate", "d_bind", "d_tail", "d_issue"};
 static int g_dp_on = -1;
 static _Thread_local struct { uint8_t stk[64]; int sp; uint64_t t; } g_dp;
@@ -2829,7 +2829,7 @@ static int ubd_covers_scan(uint64_t lo, uint64_t hi) {
 // 29,000 times a frame in Breath of the Wild, and consecutive draws bind mostly the same ranges between two updates: the scans of the list (up to 160 updates kept across passes) and its
 // page filter were about 8% of the submit thread's cycles. A small table remembers the last answers per range. DM_NVN_UBD_MEMO=0 always scans (diagnostic)
 static uint64_t g_ubd_ver = 1;
-typedef struct { uint64_t lo, hi, ver, shadow; int8_t hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
+typedef struct { uint64_t lo, hi, ver, shadow; int hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
 enum { UBD_MEMO = 512 };
 static ubd_memo_ent g_ubd_memo[UBD_MEMO];
 __attribute__((noinline)) static int ubd_memo_init(void) { const char *e = getenv("DM_NVN_UBD_MEMO"); int v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_UBD_MEMO=0: deferred update lookups scan the list every time"); return v; }
@@ -2845,7 +2845,7 @@ __attribute__((noinline)) static int ubd_hits_slow(uint64_t lo, uint64_t hi) {
     if (!ubd_pf_hit(lo, hi)) return 0;   // the page filter answers most lookups (vertex and index buffers, other pools) without the table
     int r;
     if (!ubd_memo_on()) r = ubd_hits_scan(lo, hi);
-    else { ubd_memo_ent *m = ubd_memo(lo, hi); if (m->hits < 0) m->hits = (int8_t)ubd_hits_scan(lo, hi); r = m->hits; }
+    else { ubd_memo_ent *m = ubd_memo(lo, hi); if (m->hits < 0) m->hits = ubd_hits_scan(lo, hi); r = m->hits; }
     g_ubd_hitn += (uint64_t)r; return r;
 }
 static inline int ubd_hits(uint64_t lo, uint64_t hi) {
@@ -2855,7 +2855,7 @@ static inline int ubd_hits(uint64_t lo, uint64_t hi) {
 static int ubd_covers(uint64_t lo, uint64_t hi) {
     if (hi <= lo) return 1;
     if (!ubd_memo_on()) return ubd_covers_scan(lo, hi);
-    ubd_memo_ent *m = ubd_memo(lo, hi); if (m->covers < 0) m->covers = (int8_t)ubd_covers_scan(lo, hi); return m->covers;
+    ubd_memo_ent *m = ubd_memo(lo, hi); if (m->covers < 0) m->covers = ubd_covers_scan(lo, hi); return m->covers;
 }
 // GPU address of the shadow of uniform range [lo, hi) (ubd_covers holds): one deferred update holding all of it and suitably aligned is used in place; otherwise the updates are laid into the arena in order
 static uint64_t ubd_shadow_(uint64_t lo, uint64_t hi);
@@ -16812,8 +16812,9 @@ static inline int cbsc_on(void) { return __builtin_expect(g_cbsc_on >= 0, 1) ? g
 void mtl_cbsc_stats(uint64_t *hits, uint64_t *miss) { *hits = g_cbsc_hits; *miss = g_cbsc_miss; }
 static __attribute__((noinline)) uint64_t cbsize_table_slow(int nvn_stage, __unsafe_unretained id<MTLBuffer> *use) {
     uint32_t d[CBSIZE_WORDS]; memset(d, 0, sizeof d);
-    for (int r = 0; r < DMSH_CBSIZE_SLOTS; r++) { const p_bind_buf *u = &S.ubo[nvn_stage][r]; if (u->addr) d[r] = u->size < 65536 ? (uint32_t)ub_bound(u->size) : 65536; }   // rounded up to 256, as the driver gives it to the GPU (ub_bound)
-    int cache = cbsc_on() && (unsigned)nvn_stage < NVN_RESOURCE_STAGES;
+    int valid = (unsigned)nvn_stage < NVN_RESOURCE_STAGES;
+    if (valid) for (int r = 0; r < DMSH_CBSIZE_SLOTS; r++) { const p_bind_buf *u = &S.ubo[nvn_stage][r]; if (u->addr) d[r] = u->size < 65536 ? (uint32_t)ub_bound(u->size) : 65536; }   // rounded up to 256, as the driver gives it to the GPU (ub_bound)
+    int cache = cbsc_on() && valid;
     if (cache && g_cbsc[nvn_stage].epoch == g_arena_epoch && g_cbsc[nvn_stage].gpu && !memcmp(g_cbsc[nvn_stage].d, d, sizeof d)) {
         g_cbsc[nvn_stage].sgen = g_cbsize_gen[nvn_stage]; *use = g_cbsc[nvn_stage].buf; g_cbsc_hits++; return g_cbsc[nvn_stage].gpu;
     }
@@ -17607,16 +17608,17 @@ int nvn_dpool_base(const void *pool, int tex);   // hle_nvn.c: where a descripto
 static inline void state_scissor(const void *a) {
     R.sc = *(const p_scissor *)a; R.has_sc = 1; g_ed_dirty |= ED_SC;
 }
+static inline int state_ne(const void *a, const void *b, size_t n) { return memcmp(a, b, n) != 0; }
 static inline void state_bind_state(const void *a) {
     const p_bind_state *b = a;
     switch (b->kind) {
         case 0: { blend_st bs; memcpy(&bs, b->bytes, sizeof bs); blend_st *d = &S.blend[bs.target];
-            if (memcmp(d, &bs, sizeof bs)) { *d = bs; PSO_DIRTY(); } break; }
-        case 1: if (memcmp(&S.color, b->bytes, sizeof S.color)) { memcpy(&S.color, b->bytes, sizeof S.color); PSO_DIRTY(); } break;
-        case 2: if (memcmp(&S.chmask, b->bytes, sizeof S.chmask)) { memcpy(&S.chmask, b->bytes, sizeof S.chmask); PSO_DIRTY(); } break;
-        case 3: if (memcmp(&S.ms, b->bytes, sizeof S.ms)) { memcpy(&S.ms, b->bytes, sizeof S.ms); PSO_DIRTY(); } break;
-        case 4: if (memcmp(&S.poly, b->bytes, sizeof S.poly)) { memcpy(&S.poly, b->bytes, sizeof S.poly); PSO_DIRTY(); g_ed_dirty |= ED_CULL | ED_WIND | ED_FILL | ED_BIAS | ED_CLIP; } break;
-        case 5: if (memcmp(&S.ds, b->bytes, sizeof S.ds)) { memcpy(&S.ds, b->bytes, sizeof S.ds); g_dss_dirty = 1; } break;
+            if (state_ne(d, &bs, sizeof bs)) { *d = bs; PSO_DIRTY(); } break; }
+        case 1: if (state_ne(&S.color, b->bytes, sizeof S.color)) { memcpy(&S.color, b->bytes, sizeof S.color); PSO_DIRTY(); } break;
+        case 2: if (state_ne(&S.chmask, b->bytes, sizeof S.chmask)) { memcpy(&S.chmask, b->bytes, sizeof S.chmask); PSO_DIRTY(); } break;
+        case 3: if (state_ne(&S.ms, b->bytes, sizeof S.ms)) { memcpy(&S.ms, b->bytes, sizeof S.ms); PSO_DIRTY(); } break;
+        case 4: if (state_ne(&S.poly, b->bytes, sizeof S.poly)) { memcpy(&S.poly, b->bytes, sizeof S.poly); PSO_DIRTY(); g_ed_dirty |= ED_CULL | ED_WIND | ED_FILL | ED_BIAS | ED_CLIP; } break;
+        case 5: if (state_ne(&S.ds, b->bytes, sizeof S.ds)) { memcpy(&S.ds, b->bytes, sizeof S.ds); g_dss_dirty = 1; } break;
     }
 }
 static inline void state_bind_vattr(const void *a) {
@@ -19826,8 +19828,8 @@ static __attribute__((noinline, cold)) int ubd_fast_init(void) { const char *e =
 static inline __attribute__((always_inline)) int ubd_fast_on(void) { return __builtin_expect(g_ubd_fast_on >= 0, 1) ? g_ubd_fast_on : ubd_fast_init(); }
 void mtl_ubdt_stats(uint64_t *hits, uint64_t *miss) { *hits = g_ubdt_hits; *miss = g_ubdt_miss; }   // hle_nvn.c's buffer-texture scan line
 static int ubd_conflict_textures(__unsafe_unretained NvShader *sh, int st) {
-    if (!g_nubd) return 0;
-    int cache = ubdt_on() && st >= 0 && st < NVN_RESOURCE_STAGES;
+    if (!g_nubd || (unsigned)st >= NVN_RESOURCE_STAGES) return 0;
+    int cache = ubdt_on();
     if (cache && ((ubd_fast_on() && sh->ubdt_agen == g_args_gen[st] && sh->ubdt_fgen == g_fbc_gen) ||
                   (g_ubdt[st].sh == sh && g_ubdt[st].agen == g_args_gen[st] && g_ubdt[st].gen == g_fbc_gen))) { g_ubdt_hits++; return 0; }
     if (cache) g_ubdt_miss++;
@@ -20469,6 +20471,7 @@ static int rt_has_depth(void) {
     return nvn_fmt_to_mtl((int)nf, &pf, NULL) && (pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth32Float_Stencil8);
 }
 static __attribute__((noinline, cold)) void draw_entry_passdump_cold(const p_draw *dw, const p_draw_idx *di) {
+    if (!dw && !di) return;
     NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
     PD("j %llu draw-entry vs=%s fs=%s gs=%s prim=%d count=%d instances=%d indexed=%d indirect=%#llx discard=%d feedback=%d", g_stat_pass + !g_enc,
        p && p->sh[0] ? p->sh[0]->key : "-", p && p->sh[1] ? p->sh[1]->key : "-", p && p->sh[2] ? p->sh[2]->key : "-",
@@ -20488,6 +20491,7 @@ static __attribute__((noinline, cold)) void draw_indlog_cold(uint64_t ia, const 
                   a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]); }];
 }
 static __attribute__((noinline, cold)) void draw_passdump_cold(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di, int prim, NSUInteger tw, NSUInteger th) {
+    if (!dw && !di) return;
     static uint64_t last_pass = ~0ull; static int all = -1; if (all < 0) all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
     if (all || g_kd_force) PD("d %llu bv=%d bi=%d first=%d vs=%s fs=%s vc=%d inst=%d blend=%#x b0=%#llx dt=%d dw=%d df=%d cull=%d st=%d sf=%d,%d sop=%d,%d,%d/%d,%d,%d smask=%#x,%#x/%#x,%#x sref=%#x,%#x ib=%#llx it=%d cmask=%#x b1=%#llx b2=%#llx b3=%#llx po=%d/%g,%g,%g dc=%d", g_stat_pass, di ? di->base_vertex : 0, di ? di->base_instance : 0, dw ? dw->first : 0, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-",
                 dw ? dw->count : di->count, dw ? dw->instances : di->instances, S.color.blend_en, (unsigned long long)*(uint64_t *)&S.blend[0], (int)S.ds.dt, (int)S.ds.dw, (int)S.ds.df, (int)S.poly.cull,
@@ -20535,7 +20539,8 @@ static __attribute__((noinline, cold)) void draw_passdump_cold(__unsafe_unretain
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
 static void draw_(const p_draw *dw, const p_draw_idx *di) { DP_SCOPE(DP_DRAW);
-    g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
+    if (!dw && !di) return;
+    g_draw_binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (__builtin_expect(passdump(), 0)) draw_entry_passdump_cold(dw, di);
     // An empty direct draw invokes no shader and changes no resources; indirect counts belong to the GPU.
     // Skipping before pass setup and buffer resolution also prevents a 0-byte index lookup from hitting big_lookup's len <= 1 unknown-length promotion.
@@ -20723,7 +20728,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) { DP_SCOPE(DP_DRAW);
                 { uint32_t sw; memcpy(&sw, S.vp_sw[0], 4);
                   if (sw == 0x100) { v.originY += v.height; v.height = -v.height; }
                   else if (sw) RED_ONCE(108, "viewport swizzle %d,%d,%d,%d not implemented (drawn unswizzled)", S.vp_sw[0][0], S.vp_sw[0][1] ^ 2, S.vp_sw[0][2] ^ 4, S.vp_sw[0][3] ^ 6); }
-                if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; }
+                if (!(g_ed.ok & ED_VP) || g_ed.vp.originX != v.originX || g_ed.vp.originY != v.originY || g_ed.vp.width != v.width || g_ed.vp.height != v.height || g_ed.vp.znear != v.znear || g_ed.vp.zfar != v.zfar) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; }
                 g_ed.vp_oll = vp_oll;
             }
             if (ed_need & ED_SC) {
@@ -20765,12 +20770,12 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) { DP_SCOPE(DP_DRAW);
                 if (!(g_ed.ok & ED_CULL) || g_ed.cull != cu) { enc_r_cull(en, (MTLCullMode)cu); g_ed.cull = cu; g_ed.ok |= ED_CULL; }
                 if (!(g_ed.ok & ED_WIND) || g_ed.wind != wi) { enc_r_winding(en, (MTLWinding)wi); g_ed.wind = wi; g_ed.ok |= ED_WIND; }
                 if (!(g_ed.ok & ED_FILL) || g_ed.fill != fi) { enc_r_fill(en, (MTLTriangleFillMode)fi); g_ed.fill = fi; g_ed.ok |= ED_FILL; }
-                if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
+                if (!(g_ed.ok & ED_BIAS) || g_ed.bias[0] != bi[0] || g_ed.bias[1] != bi[1] || g_ed.bias[2] != bi[2]) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
                 if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
                 g_ed.pos_far = pos_far; g_ed.q_oll = g_queue_origin_ll;
             }
             if (ed_need & ED_BLEND) {
-                if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; }
+                if (!(g_ed.ok & ED_BLEND) || g_ed.blend[0] != S.blend_color[0] || g_ed.blend[1] != S.blend_color[1] || g_ed.blend[2] != S.blend_color[2] || g_ed.blend[3] != S.blend_color[3]) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; }
             }
             if (!g_wl.on && !S.dbnd.on && pc_tp() == g_pc_rep_tp && dyn_dirty_on()) g_ed_dirty = 0;
             else if (g_wl.on) g_ed_dirty |= ED_CULL | ED_FILL | ED_BIAS | ED_CLIP;

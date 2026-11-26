@@ -17956,6 +17956,7 @@ static const wide_ent *wide_find(const p_draw_idx *di) {
 static void wide_take(const p_draw_idx *di) { if (g_wide_n < WIDE_MAX && !wide_find(di)) g_wide[g_wide_n++] = (wide_ent){di->ibuf, di->count, 0}; }
 // The face-split pass's draw (fsp_plan): once per target the draw writes, into its layer, with that target's pipeline
 static void fsp_encode(id<MTLRenderCommandEncoder> en, MTLPrimitiveType mp, const p_draw *dw, const p_draw_idx *di) {
+    if (di && di->count <= 0) return;
     uint64_t gpu = 0, il = 0; MTLIndexType ty = MTLIndexTypeUInt32;
     if (di && di->itype == 0) {   // 8-bit indices, widened to 16 bits as draw does: on the GPU before the pass when written in this submission (wide_run), else here
         const wide_ent *w = wide_wanted(di) ? wide_find(di) : NULL; ty = MTLIndexTypeUInt16; il = (uint64_t)di->count * 2;
@@ -18840,6 +18841,20 @@ static int rt_has_depth(void) {
     return nvn_fmt_to_mtl((int)nf, &pf, NULL) && (pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float || pf == MTLPixelFormatDepth32Float_Stencil8);
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+// Replay has already applied the draw state and dependencies.
+static int draw_direct_indices(id<MTL4RenderCommandEncoder> en, MTLPrimitiveType prim, const p_draw_idx *di) {
+    if (di->count <= 0) return 0;
+    void *buffer;
+    uint64_t offset, gpu;
+    if (!mtl_gpu_addr(di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4), &buffer, &offset, &gpu)) {
+        RED_ONCE(22, "index buffer is in no memory pool");
+        return 0;
+    }
+    enc_r_draw_indexed(en, prim, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32,
+                       gpu, ((__bridge id<MTLBuffer>)buffer).length - offset,
+                       di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+    return 1;
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -19216,11 +19231,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             enc_r_draw_indexed(en, mp, di->count, MTLIndexTypeUInt16, at.gpu, (NSUInteger)di->count * 2, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
             return;
         }
-        void *mb; uint64_t mo;
-        uint64_t gpu;
-        if (!mtl_gpu_addr(di->ibuf, (uint64_t)di->count * (di->itype == 1 ? 2 : 4), &mb, &mo, &gpu)) { RED_ONCE(22, "index buffer is in no memory pool"); return; }
-        if (di->count) enc_r_draw_indexed(en, mp, di->count, di->itype == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32, gpu, ((__bridge id<MTLBuffer>)mb).length - mo,
-                di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+        draw_direct_indices((id<MTL4RenderCommandEncoder>)en, mp, di);
     }
 }
 // Compute pipelines by shader and whether the pipeline is without the border corrections: a dispatch takes that function unless a sampler it binds needs them (border_need, cps_new_b),

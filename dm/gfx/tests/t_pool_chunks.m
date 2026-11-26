@@ -171,6 +171,17 @@ int main(void) { @autoreleasepool {
         uint8_t *um = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (um == MAP_FAILED) abort();
         uint64_t ub = (uint64_t)(uintptr_t)um, at = ub + 100 * MB + 16;
         mtl_pool_add(um, GB);
+        int empty_before = g_npool;
+        uint64_t draws = g_cm_mdraws;
+        p_draw_idx draw = {.ibuf = at, .itype = 1, .base_vertex = 7};
+        CHECK("empty indexed draw emits nothing", !draw_direct_indices(nil, MTLPrimitiveTypeTriangle, &draw)
+              && g_cm_mdraws == draws);
+        CHECK("empty indexed draw resolves no buffer", g_npool == empty_before);
+        CHECK("empty indexed draw leaves replay arguments intact", draw.base_vertex == 7 && draw.ibuf == at);
+        draw.count = 3;
+        CHECK("following indexed draw resolves its bounded buffer and encodes",
+              draw_direct_indices(nil, MTLPrimitiveTypeTriangle, &draw) && g_cm_mdraws == draws + 1
+              && g_npool == empty_before + 1 && !g_big[big_of(at)].full);
         id<MTLBuffer> short_view = look(at, 64);   // a chunk short of the pool's end, now in this thread's lookup cache
         int before = g_npool;
         CHECK("unknown extent: not the short chunk the cache holds", mtl_gpu_addr(at, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb != short_view);

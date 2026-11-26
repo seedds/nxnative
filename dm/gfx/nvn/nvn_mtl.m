@@ -18590,17 +18590,54 @@ static int lc_same(const p_set_rt *a, int ka, const p_set_rt *b, int kb) {   // 
     int h1 = ka == 8 ? a->has_dview : a->has_cview[ka], h2 = kb == 8 ? b->has_dview : b->has_cview[kb];
     return h1 == h2 && (!h1 || !memcmp(ka == 8 ? &a->dview : &a->cview[ka], kb == 8 ? &b->dview : &b->cview[kb], sizeof(view_t)));
 }
-// Land every waiting clear, oldest first, each group in a pass of its own (rp_flush's way)
+// Land every waiting clear, oldest first. Clears of targets with the same size land together, up to 8 colour targets and one depth / stencil target a pass: a clear-only pass costs
+// its fixed GPU overhead whatever it holds. A clear joins a pass only when no clear of the same texture lands before it or with it, so clears of one texture keep their order.
+// Xenoblade Chronicles: Definitive Edition clears its 960x540 and 480x270 targets one at a time at the start of a frame: about 20 clear-only passes a frame landed one per group.
+// DM_NVN_LC_BATCH=0 lands each group in a pass of its own (rp_flush's way), as before
+static int lc_batch_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_LC_BATCH", 1); if (!m) MLOG("DM_NVN_LC_BATCH=0: each waiting clear group lands in a pass of its own"); } return sw_on(m); }
+static int lc_dim(const p_set_rt *r, int k, uint32_t d[3]) {   // attachment k's level size and sample count
+    const tex_t *t = k == 8 ? r->depth : r->color[k]; if (!t) return 0;
+    uint64_t ser; int lv, sl; rt_sub(r, k, &ser, &lv, &sl); if (lv > 15) return 0;
+    d[0] = t->d.width >> lv ? t->d.width >> lv : 1; d[1] = t->d.height >> lv ? t->d.height >> lv : 1; d[2] = t->d.samples > 1 ? (uint32_t)t->d.samples : 1; return 1;
+}
 static void lc_land(void) {
     if (!g_nlc) return;
     if (g_enc) rp_end();
     int n = g_nlc; g_nlc = 0;
     typeof(R) save = R;
-    for (int gi = 0; gi < n; gi++) { const lc_group *g = &g_lc[gi]; int any = g->clear_d || g->clear_s; for (int i = 0; i < 8; i++) any |= g->clear_c[i];
-        if (!any || !g_cb) continue;
-        R.rt = g->rt; R.has_rt = 1; memcpy(R.clear_c, g->clear_c, sizeof R.clear_c); memcpy(R.cc, g->cc, sizeof R.cc);
-        R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs;
-        rp_begin_ex(1); rp_end(); g_lc_landed++; }
+    if (!lc_batch_on()) {
+        for (int gi = 0; gi < n; gi++) { const lc_group *g = &g_lc[gi]; int any = g->clear_d || g->clear_s; for (int i = 0; i < 8; i++) any |= g->clear_c[i];
+            if (!any || !g_cb) continue;
+            R.rt = g->rt; R.has_rt = 1; memcpy(R.clear_c, g->clear_c, sizeof R.clear_c); memcpy(R.cc, g->cc, sizeof R.cc);
+            R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs;
+            rp_begin_ex(1); rp_end(); g_lc_landed++; }
+        R = save; return;
+    }
+    // The waiting clears as items (group, slot 0-7 colour or 8 depth / stencil), oldest first
+    struct { uint8_t g, k, done; uint32_t d[3]; uint64_t ser; } it[LC_MAX * 9]; int ni = 0;
+    for (int gi = 0; gi < n; gi++) { const lc_group *g = &g_lc[gi];
+        for (int k = 0; k < 9; k++) { if (k < 8 ? !g->clear_c[k] || !g->rt.color[k] : !(g->clear_d || g->clear_s) || !g->rt.depth) continue;
+            it[ni].g = (uint8_t)gi; it[ni].k = (uint8_t)k; it[ni].done = 0; it[ni].ser = k < 8 ? g->rt.color[k]->serial : g->rt.depth->serial;
+            if (!lc_dim(&g->rt, k, it[ni].d)) { it[ni].d[0] = 0; it[ni].d[1] = (uint32_t)ni; }   // size unknown: a pass of its own
+            ni++; } }
+    for (int first = 0; first < ni && g_cb; first++) { if (it[first].done) continue;
+        memset(&R.rt, 0, sizeof R.rt); memset(R.clear_c, 0, sizeof R.clear_c); R.clear_d = R.clear_s = 0; R.has_rt = 1;
+        int nc = 0, hasd = 0; uint64_t in[9]; int nin = 0;
+        for (int j = first; j < ni; j++) { if (it[j].done) continue;
+            int ok = !memcmp(it[j].d, it[first].d, sizeof it[j].d) && (it[j].k == 8 ? !hasd : nc < 8);
+            for (int q = 0; q < nin && ok; q++) if (in[q] == it[j].ser) ok = 0;   // one subresource of a texture a pass
+            for (int q = first; q < j && ok; q++) if (!it[q].done && it[q].ser == it[j].ser) ok = 0;   // an older clear of this texture still waits
+            if (!ok) continue;
+            const lc_group *g = &g_lc[it[j].g]; int k = it[j].k;
+            if (k < 8) { R.rt.color[nc] = g->rt.color[k]; R.rt.has_cview[nc] = g->rt.has_cview[k]; R.rt.cview[nc] = g->rt.cview[k]; R.clear_c[nc] = 1; R.cc[nc] = g->cc[k]; nc++; }
+            else { R.rt.depth = g->rt.depth; R.rt.has_dview = g->rt.has_dview; R.rt.dview = g->rt.dview; R.clear_d = g->clear_d; R.clear_s = g->clear_s; R.cd = g->cd; R.cs = g->cs; hasd = 1; }
+            in[nin++] = it[j].ser; it[j].done = 2;   // 2: in this pass
+            if (!it[first].d[0]) break;
+        }
+        for (int j = first; j < ni; j++) if (it[j].done == 2) it[j].done = 1;
+        R.rt.n = nc;
+        rp_begin_ex(1); rp_end(); g_lc_landed++;
+    }
     R = save;
 }
 // SetRenderTargets with clears pending and no draw since: the clears wait instead of opening a pass

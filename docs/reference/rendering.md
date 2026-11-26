@@ -703,6 +703,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Fix:** lazy clears (`DM_NVN_LAZY_CLEAR`) fold clear-only passes into the pass that follows.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md): the four clear-only passes before the G-buffer fold into its first pass (about 30 MB less loaded and stored a frame at 1600x900).
 
+### Waiting clears landed one pass each
+
+- **Symptom:** a frame starts with a dozen clear-only passes (`DM_NVN_PASSDUMP`: passes ending in `lc_land` with no draw), each one target.
+- **Cause:** lazy clears that no later pass takes land in a pass of their own per `SetRenderTargets` group, and the game clears its targets one at a time.
+- **Fix:** `lc_land` in `nvn_mtl.m` packs the waiting clears, oldest first, into passes of up to 8 colour targets and one depth / stencil target of the same size and sample count. A clear joins a pass only when no clear of the same texture lands before it or with it, so the clears of one texture keep their order. A clear of more layers than the pass, or of a larger target, still gets a pass of its own in `rp_begin_ex`. `DM_NVN_LC_BATCH=0` lands each group alone, as before; `ab` alternates it with `DM_AB`.
+- **Found on:** Xenoblade Chronicles: Definitive Edition, Switch 2 Edition (`0400FF500E34A001`, no profile in the repository): about 22 clear-only passes a combat frame became 8, the first 14 (960x540 and 480x270 colour and depth targets) 4.
+
 ### A waiting lazy clear landed after a scissored clear and its draws
 
 - **Symptom:** a scene drawn into a scissored part of a target is wiped to the clear colour, while what a later pass draws on top (UI, menus) shows. No red lines.

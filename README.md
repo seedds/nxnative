@@ -31,6 +31,7 @@ These Switch 2 games have passed Mac gameplay testing. Build them from a [`.nup`
 - [Super Mario Bros. Wonder – Nintendo Switch 2 Edition + Meetup in Bellabel Park](dm/games/040015100B514001/README.md)
 - [The Legend of Zelda: Ocarina of Time](dm/games/0400486024DEC000/README.md)
 - [Xenoblade Chronicles 2 – Nintendo Switch 2 Edition](dm/games/0400E95004038001/README.md)
+- [Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition](dm/games/0400453019AA8001/README.md)
 - [Yoshi and the Mysterious Book](dm/games/0400245021D2C000/README.md)
 
 ## Community front ends

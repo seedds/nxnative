@@ -36,6 +36,12 @@ int main(void) {
         run(&c, 120, 0.7, 1, 2, 0); check(c.s.k == 1, "120 fps: the cap's end returns to 120");
     }
     char b[160];
+    {   // fps_hold off at 120 (hle_nvn.c fstep_kmax: kmax is the cap's vsyncs, 1 tick): frames 11 % over the tick (9.25 ms, just past FSTEP_LATE) stay at 120, each shown late rather than stepping the hold to 60
+        sim f = {0}; f.s.per_vsync = 2; f.s.no_payback = 1;
+        run(&f, 600, 1.11, 1, 1, 0);
+        snprintf(b, sizeof b, "120 fps, fps_hold off: frames of 9.2 ms hold 120, no step to 60 (k %d, ups %llu, late %llu)", f.s.k, (unsigned long long)f.s.ups, (unsigned long long)f.s.late);
+        check(f.s.k == 1 && f.s.ups == 0 && f.s.late > 100, b);
+    }
     {   sim m = {0}; run(&m, 600, 0.5, 1, 3, 0);
         check(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
     }

@@ -1,6 +1,6 @@
 // The present: the frame drawn into the drawable, cropped (nvn_mtl.m present_pipeline). One fragment function per route (nvn_mtl.m present_route), chosen from the window's format and
 // the drawable's:
-//   fs           an 8-bit window into an 8-bit drawable: the stored bytes as they are (the SDR present)
+//   fs           an 8-bit window into an 8-bit drawable: the stored colour bytes, alpha 1 (the SDR present)
 //   fs_hdr_itm   an 8-bit window into the RGBA16Float EDR drawable: sRGB decode, then BT.2446 Method A, a target luminance never below SDR's, applied in ICtCp (1.0 = the screen's SDR white)
 //   fs_pq_linear a PQ (BT.2100) window into the EDR drawable: PQ decode, divided by the paper white vi reports, so that white is EDR 1.0, BT.2020 to BT.709, clipped at 0
 //   fs_pq_to_sdr a PQ window into an 8-bit drawable or capture: PQ decode, / paper white, BT.2020 to BT.709, clipped to 1, sRGB encode

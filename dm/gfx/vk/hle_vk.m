@@ -394,7 +394,7 @@ static int argbuf_ok(const shinfo *si) {
 }
 struct VkCommandPool_T { struct VkCommandBuffer_T *cbs; };
 struct VkCommandBuffer_T { void *loader; VkCommandPool pool; struct VkCommandBuffer_T *prev, *next; uint8_t *buf; size_t n, cap; };
-struct VkSwapchainKHR_T { uint32_t n, next; VkImage img[4]; uint64_t ticket[4]; };
+struct VkSwapchainKHR_T { uint32_t n, next; VkImage img[4]; uint64_t ticket[4]; uint8_t held[4]; pthread_mutex_t mu; pthread_cond_t cv; };
 
 static void *zalloc(size_t n) { void *p = calloc(1, n); if (!p) die("[vk] out of memory %zu", n); return p; }
 
@@ -2879,6 +2879,8 @@ VKB(vkCreateSwapchainKHR, VkResult, VkDevice d, const VkSwapchainCreateInfoKHR *
     const fmt_t *f = fmt_of(ci->imageFormat);
     if (!f || f->pf == MTLPixelFormatInvalid) { LOG("[vk] [RED] swap chain format %d not mapped", ci->imageFormat); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
     VkSwapchainKHR sc = zalloc(sizeof *sc); sc->n = umin(umax(ci->minImageCount, 2), 4);
+    pthread_mutex_init(&sc->mu, NULL);
+    pthread_cond_init(&sc->cv, NULL);
     @autoreleasepool {
         for (uint32_t i = 0; i < sc->n; i++) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f->pf width:ci->imageExtent.width height:ci->imageExtent.height mipmapped:NO];
@@ -2900,6 +2902,8 @@ VKB(vkDestroySwapchainKHR, void, VkDevice d, VkSwapchainKHR sc, const VkAllocati
     for (uint32_t i = 0; i < sc->n; i++) { if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]); }
     // The present path keeps each texture until its presents have completed on the GPU, then lets it go (mtl_ext_tex_release); kept for good before, at every recreation
     for (uint32_t i = 0; i < sc->n; i++) { mtl_ext_tex_release(sc->img[i]->serial); sc->img[i]->tex = nil; free(sc->img[i]); }
+    pthread_cond_destroy(&sc->cv);
+    pthread_mutex_destroy(&sc->mu);
     free(sc);
 }
 VK(vkGetSwapchainImagesKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint32_t *n, VkImage *out) {
@@ -2907,20 +2911,130 @@ VK(vkGetSwapchainImagesKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint32_t *n
     uint32_t k = umin(*n, sc->n); memcpy(out, sc->img, k * sizeof *out); *n = k; return k < sc->n ? VK_INCOMPLETE : VK_SUCCESS;
 }
 static uint64_t g_next_acq;   // pacing without the display link: the earliest time of the next acquire (one frame period after the previous one)
-VKB(vkAcquireNextImageKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence f, uint32_t *idx) {
-    (void)d; (void)timeout; (void)sem;
-    uint32_t i = sc->next++ % sc->n;
-    uint64_t period = 1000000000ull / (uint64_t)mtl_fps_target(), now = now_ns();
-    // Paced by the display link when it runs, as NVN's acquire (hle_nvn.c nvnWindowAcquireTexture): FIFO presents one frame per vsync. A clock of our own drifts against the screen:
-    // Super Mario Galaxy 2 on an iPhone put two frames into some display-link ticks and none into others (about one tick in seven), and on a Mac window it ran at 30 fps
-    if (mtl_link_active() && mtl_link_wait_tick((int)(60 / mtl_fps_target()), 2 * period)) g_next_acq = now_ns() + period;
-    else {
-        if (g_next_acq > now) { uint64_t w = g_next_acq - now; struct timespec ts = {(time_t)(w / 1000000000ull), (long)(w % 1000000000ull)}; nanosleep(&ts, NULL); }
-        now = now_ns(); g_next_acq = g_next_acq && now < g_next_acq + period ? g_next_acq + period : now + period;
+static uint64_t vk_now_default(void) { return now_ns(); }
+static int vk_ticket_ready_default(uint64_t tk) { return !tk || mtl_present_texture_ready(tk, 0); }
+static int vk_ticket_wait_default(uint64_t tk, uint64_t timeout_ns) { return !tk || mtl_present_wait_timeout(tk, timeout_ns); }
+static void vk_sleep_default(uint64_t ns) { struct timespec ts = {(time_t)(ns / 1000000000ull), (long)(ns % 1000000000ull)}; nanosleep(&ts, NULL); }
+static uint64_t (*g_vk_now_ns)(void) = vk_now_default;
+static int (*g_vk_ticket_ready)(uint64_t tk) = vk_ticket_ready_default;
+static int (*g_vk_ticket_wait)(uint64_t tk, uint64_t timeout_ns) = vk_ticket_wait_default;
+static void (*g_vk_sleep_ns)(uint64_t ns) = vk_sleep_default;
+static int (*g_vk_link_active)(void) = mtl_link_active;
+static int (*g_vk_link_wait_tick)(int vsyncs, uint64_t timeout_ns) = mtl_link_wait_tick;
+
+static uint64_t vk_rem_ns(uint64_t dl) {
+    if (dl == UINT64_MAX) return UINT64_MAX;
+    uint64_t now = g_vk_now_ns();
+    return now >= dl ? 0 : dl - now;
+}
+// Snapshot unheld slots and prefer an immediately ready image starting at sc->next, else the unheld image with the oldest pending ticket.
+// Returns 1 if an unheld candidate exists (with *out_ready set when ready now), or 0 if every image is currently held by the guest.
+static int vk_pick_image(VkSwapchainKHR sc, uint32_t *out_idx, uint64_t *out_tk, int *out_ready) {
+    uint8_t held[4]; uint64_t ticket[4]; uint32_t start;
+    pthread_mutex_lock(&sc->mu);
+    start = sc->next % sc->n;
+    for (uint32_t j = 0; j < sc->n; j++) { held[j] = sc->held[j]; ticket[j] = sc->ticket[j]; }
+    pthread_mutex_unlock(&sc->mu);
+    for (uint32_t off = 0; off < sc->n; off++) {
+        uint32_t c = (start + off) % sc->n;
+        if (!held[c] && g_vk_ticket_ready(ticket[c])) { *out_idx = c; *out_tk = ticket[c]; *out_ready = 1; return 1; }
     }
-    if (sc->ticket[i]) mtl_present_wait(sc->ticket[i]);   // its previous present has been shown, so drawing into it again is safe
-    if (f) atomic_store(&f->val, 0);
-    *idx = i; return VK_SUCCESS;
+    int found = 0; uint32_t best = 0; uint64_t best_tk = UINT64_MAX;
+    for (uint32_t off = 0; off < sc->n; off++) {
+        uint32_t c = (start + off) % sc->n;
+        if (!held[c] && (!found || ticket[c] < best_tk)) { found = 1; best = c; best_tk = ticket[c]; }
+    }
+    if (found) { *out_idx = best; *out_tk = best_tk; *out_ready = 0; return 1; }
+    *out_ready = 0;
+    return 0;
+}
+// Try to atomically claim an already-ready unheld image whose ticket has not changed since it was checked.
+static int vk_try_claim(VkSwapchainKHR sc, uint32_t idx, uint64_t expected_tk) {
+    pthread_mutex_lock(&sc->mu);
+    int ok = !sc->held[idx] && sc->ticket[idx] == expected_tk;
+    if (ok) { sc->held[idx] = 1; sc->next = (idx + 1) % sc->n; }
+    pthread_mutex_unlock(&sc->mu);
+    return ok;
+}
+// FIFO pacing for blocking callers, bounded by one monotonic deadline dl. Returns 1 when paced (with *next_acq_out set for commit on success), 0 on deadline expiry.
+static int vk_pace_wait(uint64_t dl, uint64_t *next_acq_out) {
+    uint64_t period = 1000000000ull / (uint64_t)mtl_fps_target();
+    if (g_vk_link_active()) {
+        uint64_t cap = 2 * period;
+        if (dl != UINT64_MAX) {
+            uint64_t rem = vk_rem_ns(dl);
+            if (!rem) return 0;
+            if (rem < cap) cap = rem;
+        }
+        if (g_vk_link_wait_tick((int)(60 / mtl_fps_target()), cap)) {
+            *next_acq_out = g_vk_now_ns() + period;
+            return 1;
+        }
+        if (dl != UINT64_MAX && g_vk_now_ns() >= dl) return 0;   // caller deadline expired: do not fall through to nanosleep
+    }
+    uint64_t now = g_vk_now_ns();
+    if (g_next_acq > now) {
+        uint64_t need = g_next_acq - now;
+        if (dl != UINT64_MAX) {
+            uint64_t rem = now >= dl ? 0 : dl - now;
+            if (need > rem) {
+                if (rem) g_vk_sleep_ns(rem);
+                return 0;
+            }
+        }
+        g_vk_sleep_ns(need);
+        now = g_vk_now_ns();
+    }
+    *next_acq_out = g_next_acq && now < g_next_acq + period ? g_next_acq + period : now + period;
+    return 1;
+}
+VKB(vkAcquireNextImageKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint64_t timeout, VkSemaphore sem, VkFence f, uint32_t *idx) {
+    (void)d; (void)sem;
+    if (timeout == 0) {
+        for (uint32_t tries = 0; tries < sc->n + 1; tries++) {
+            uint32_t c = 0; uint64_t tk = 0; int ready = 0;
+            if (!vk_pick_image(sc, &c, &tk, &ready) || !ready) return VK_NOT_READY;
+            if (vk_try_claim(sc, c, tk)) {
+                if (f) atomic_store(&f->val, 0);
+                *idx = c; return VK_SUCCESS;
+            }
+        }
+        return VK_NOT_READY;
+    }
+    uint64_t start = g_vk_now_ns();
+    uint64_t dl = timeout == UINT64_MAX || timeout > UINT64_MAX - start ? UINT64_MAX : start + timeout;
+    uint64_t next_acq = g_next_acq;
+    if (!vk_pace_wait(dl, &next_acq)) return VK_TIMEOUT;
+    for (;;) {
+        uint32_t c = 0; uint64_t tk = 0; int ready = 0;
+        if (vk_pick_image(sc, &c, &tk, &ready)) {
+            if (!ready) {
+                uint64_t rem = vk_rem_ns(dl);
+                if (!rem || !g_vk_ticket_wait(tk, rem)) return VK_TIMEOUT;
+            }
+            if (vk_try_claim(sc, c, tk)) {
+                g_next_acq = next_acq;
+                if (f) atomic_store(&f->val, 0);
+                *idx = c; return VK_SUCCESS;
+            }
+            continue;
+        }
+        // Every image is currently held by the guest: wait for vkQueuePresentKHR to release one within the remaining budget
+        pthread_mutex_lock(&sc->mu);
+        int all_held = 1;
+        for (uint32_t j = 0; j < sc->n; j++) if (!sc->held[j]) { all_held = 0; break; }
+        if (all_held) {
+            if (dl == UINT64_MAX) {
+                pthread_cond_wait(&sc->cv, &sc->mu);
+            } else {
+                uint64_t rem = vk_rem_ns(dl);
+                if (!rem) { pthread_mutex_unlock(&sc->mu); return VK_TIMEOUT; }
+                struct timespec rel = {(time_t)(rem / 1000000000ull), (long)(rem % 1000000000ull)};
+                pthread_cond_timedwait_relative_np(&sc->cv, &sc->mu, &rel);
+            }
+        }
+        pthread_mutex_unlock(&sc->mu);
+    }
 }
 static uint64_t g_frames;
 static void frame_end(void) {
@@ -2940,7 +3054,14 @@ VKB(vkQueuePresentKHR, VkResult, VkQueue q, const VkPresentInfoKHR *pi) {
     for (uint32_t i = 0; i < pi->swapchainCount; i++) {
         VkSwapchainKHR sc = pi->pSwapchains[i]; uint32_t k = pi->pImageIndices[i];
         int fit = crop[2] > 0 && crop[3] > 0 && k < sc->n && (uint32_t)(crop[0] + crop[2]) <= sc->img[k]->w && (uint32_t)(crop[1] + crop[3]) <= sc->img[k]->h;
-        if (k < sc->n) sc->ticket[k] = mtl_present_ext(sc->img[k]->serial, 1.0 / mtl_fps_target(), (__bridge void *)g_ev, v, fit ? crop : NULL);
+        if (k < sc->n) {
+            uint64_t tk = mtl_present_ext(sc->img[k]->serial, 1.0 / mtl_fps_target(), (__bridge void *)g_ev, v, fit ? crop : NULL);
+            pthread_mutex_lock(&sc->mu);
+            sc->ticket[k] = tk;
+            sc->held[k] = 0;
+            pthread_cond_broadcast(&sc->cv);
+            pthread_mutex_unlock(&sc->mu);
+        }
         if (pi->pResults) pi->pResults[i] = VK_SUCCESS;
     }
     dm_gfx_leave();

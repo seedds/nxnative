@@ -12,11 +12,21 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 #define SF_H0 0xd0000u   // session handles: outside the kernel handle table (0x1000 + slot, 4096 slots, hle_thread.c)
 #define SF_MAX 64
-// A session: its service's answer (sf_req, hle.h; NULL: success with zeroed output, as for olsc:u), its own state, and what to do with that state when the session closes
-static struct { char name[16]; int used, domain; unsigned seen; sf_answer answer; void *ctx; void (*close)(void *); } g_sf[SF_MAX];
+// Shared owner for a host service session: duplicate handles and active requests share one owner, destroyed outside g_sf_mu on the last release.
+typedef struct {
+    char name[16];
+    sf_answer answer;
+    void *ctx;
+    void (*close)(void *);
+    unsigned seen;
+    unsigned refs;
+} sf_obj;
+// Handle table: each slot keeps handle-specific flags (domain) and a reference to its shared owner.
+static struct { int used, domain; sf_obj *obj; } g_sf[SF_MAX];
 static pthread_mutex_t g_sf_mu = PTHREAD_MUTEX_INITIALIZER;
 // notif:a, the reminder alarms (nn::notification, linked by most SDKs; Fit Boxing 3 lists them when its Settings open, PR 1974): the SDK's client sends only 1000 Initialize (with the process
 // ID), 500 Register, 510 Update, 520 List, 530 LoadApplicationParameter and 540 Delete (SDK 21's sdk+0x58ac80..0x58ad10), and aborts on any failure; its notification event comes from am.
@@ -33,18 +43,40 @@ static const sf_service_ent *sf_registered(unsigned long *n) {
     *n = e ? sz / sizeof *e : 0; return e;
 }
 
-static int sf_slot(uint32_t h) {
+static int sf_slot_locked(uint32_t h) {
     unsigned i = h - SF_H0;
     return i < SF_MAX && g_sf[i].used ? (int)i : -1;
 }
-static uint32_t sf_new(const char *name, int domain, sf_answer answer, void *ctx, void (*close)(void *)) {
+static int sf_slot(uint32_t h) {
     pthread_mutex_lock(&g_sf_mu);
+    int i = sf_slot_locked(h);
+    pthread_mutex_unlock(&g_sf_mu);
+    return i;
+}
+static uint32_t sf_alloc_locked(int domain, sf_obj *o) {
     unsigned i = 0; while (i < SF_MAX && g_sf[i].used) i++;
     if (i == SF_MAX) die("sf: more than %d host service sessions", SF_MAX);
-    strlcpy(g_sf[i].name, name, sizeof g_sf[i].name); g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].seen = 0; g_sf[i].answer = answer;
-    g_sf[i].ctx = ctx; g_sf[i].close = close;
-    pthread_mutex_unlock(&g_sf_mu);
+    g_sf[i].used = 1; g_sf[i].domain = domain; g_sf[i].obj = o;
     return SF_H0 + i;
+}
+static void sf_obj_destroy(sf_obj *o) {
+    if (o->close) o->close(o->ctx);   // the session's own state ends with its last handle and active request (an audio renderer stops rendering)
+    free(o);
+}
+static void sf_obj_put(sf_obj *o) {
+    pthread_mutex_lock(&g_sf_mu);
+    unsigned left = --o->refs;
+    pthread_mutex_unlock(&g_sf_mu);
+    if (!left) sf_obj_destroy(o);
+}
+static uint32_t sf_new(const char *name, int domain, sf_answer answer, void *ctx, void (*close)(void *)) {
+    sf_obj *o = calloc(1, sizeof *o);
+    if (!o) die("sf: out of memory allocating host session");
+    strlcpy(o->name, name, sizeof o->name); o->answer = answer; o->ctx = ctx; o->close = close; o->refs = 1;
+    pthread_mutex_lock(&g_sf_mu);
+    uint32_t h = sf_alloc_locked(domain, o);
+    pthread_mutex_unlock(&g_sf_mu);
+    return h;
 }
 uint32_t sf_session(const char *name, sf_answer answer, void *ctx, void (*close)(void *)) { return sf_new(name, 0, answer, ctx, close); }
 
@@ -93,10 +125,14 @@ HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect t
     return 0xe15u;   // sm ResultNotRegistered
 }
 HLE_FORCE("_ZN2nn2sf4hipc24CloseClientSessionHandleENS_3svc6HandleE", "close a session (kernel handle) → the host session", void, h_sf_Close, uint32_t h) {
-    int i = sf_slot(h);
-    if (i < 0) { LOG("[RED] sf: CloseClientSessionHandle on %#x, not a host session", h); return; }
-    pthread_mutex_lock(&g_sf_mu); void (*close)(void *) = g_sf[i].close; void *ctx = g_sf[i].ctx; g_sf[i].used = 0; g_sf[i].close = NULL; g_sf[i].ctx = NULL; pthread_mutex_unlock(&g_sf_mu);
-    if (close) close(ctx);   // the session's own state ends with it (an audio renderer stops rendering)
+    pthread_mutex_lock(&g_sf_mu);
+    int i = sf_slot_locked(h);
+    if (i < 0) { pthread_mutex_unlock(&g_sf_mu); LOG("[RED] sf: CloseClientSessionHandle on %#x, not a host session", h); return; }
+    sf_obj *o = g_sf[i].obj;
+    g_sf[i].used = 0; g_sf[i].domain = 0; g_sf[i].obj = NULL;
+    unsigned left = --o->refs;
+    pthread_mutex_unlock(&g_sf_mu);
+    if (!left) sf_obj_destroy(o);
 }
 // Control requests: the pointer buffer is the server's receive buffer for X descriptors (none: the host reads them in place), the domain conversion makes the session's object 1, a duplicate
 // is a new session to the same object
@@ -106,14 +142,23 @@ HLE_FORCE("_ZN2nn2sf4hipc6client22QueryPointerBufferSizeEPtNS_3svc6HandleE", "co
 }
 HLE_FORCE("_ZN2nn2sf4hipc6client22ConvertSessionToDomainEPNS0_4cmif18CmifDomainObjectIdENS_3svc6HandleE", "control request: convert a session to a domain → the host session's object 1", Result, h_sf_ToDomain,
           uint32_t *out, uint32_t h) {
-    int i = sf_slot(h);
-    if (i < 0) { LOG("[RED] sf: ConvertSessionToDomain on %#x, not a host session", h); return RES_FAIL; }
-    g_sf[i].domain = 1; *out = 1; return RES_OK;
+    pthread_mutex_lock(&g_sf_mu);
+    int i = sf_slot_locked(h);
+    if (i < 0) { pthread_mutex_unlock(&g_sf_mu); LOG("[RED] sf: ConvertSessionToDomain on %#x, not a host session", h); return RES_FAIL; }
+    g_sf[i].domain = 1;
+    pthread_mutex_unlock(&g_sf_mu);
+    *out = 1; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2sf4hipc6client16DuplicateSessionEPNS_3svc6HandleES4_", "control request: clone a session → a new host session to the same service", Result, h_sf_Dup, uint32_t *out, uint32_t h) {
-    int i = sf_slot(h);
-    if (i < 0) { LOG("[RED] sf: DuplicateSession on %#x, not a host session", h); return RES_FAIL; }
-    *out = sf_new(g_sf[i].name, g_sf[i].domain, g_sf[i].answer, g_sf[i].ctx, NULL); return RES_OK;   // the state stays the original session's: it ends when that one closes
+    pthread_mutex_lock(&g_sf_mu);
+    int i = sf_slot_locked(h);
+    if (i < 0) { pthread_mutex_unlock(&g_sf_mu); LOG("[RED] sf: DuplicateSession on %#x, not a host session", h); return RES_FAIL; }
+    sf_obj *o = g_sf[i].obj;
+    int dom = g_sf[i].domain;
+    o->refs++;
+    uint32_t dup = sf_alloc_locked(dom, o);
+    pthread_mutex_unlock(&g_sf_mu);
+    *out = dup; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2sf4hipc6client18DuplicateSessionExEPNS_3svc6HandleES4_j", "control request: clone a session (with a tag) → a new host session to the same service", Result, h_sf_DupEx,
           uint32_t *out, uint32_t h, unsigned tag) { (void)tag; return h_sf_Dup(out, h); }
@@ -124,8 +169,19 @@ HLE_FORCE("_ZN2nn2sf4hipc6client18DuplicateSessionExEPNS_3svc6HandleES4_j", "con
 static uint64_t sf_desc_addr(uint32_t lo, uint32_t mid4, uint32_t hi) { return lo | (uint64_t)mid4 << 32 | (uint64_t)hi << 36; }
 HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request on a session (svcSendSyncRequest) → answered by the host for its sessions", Result, h_sf_Send,
           uint32_t h, uint32_t *m, uint64_t size) {
-    int i = sf_slot(h);
-    if (i < 0 || size < 0x40) { LOG("[RED] sf: SendSyncRequest on %#x (%llu bytes), not a host session", h, (unsigned long long)size); return 0xe401u; }   // kernel ResultInvalidHandle
+    pthread_mutex_lock(&g_sf_mu);
+    int i = sf_slot_locked(h);
+    if (i < 0 || size < 0x40) {
+        pthread_mutex_unlock(&g_sf_mu);
+        LOG("[RED] sf: SendSyncRequest on %#x (%llu bytes), not a host session", h, (unsigned long long)size);
+        return 0xe401u;   // kernel ResultInvalidHandle
+    }
+    int slot_dom = g_sf[i].domain;
+    sf_obj *o = g_sf[i].obj;
+    o->refs++;
+    pthread_mutex_unlock(&g_sf_mu);
+
+    Result ret = RES_OK;
     uint8_t *base = (uint8_t *)m;
     unsigned type = m[0] & 0xffff, nx = m[0] >> 16 & 15, na = m[0] >> 20 & 15, nb = m[0] >> 24 & 15, nw = m[0] >> 28 & 15, ndw = m[1] & 0x3ff;
     sf_req q; memset(&q, 0, sizeof q);
@@ -143,24 +199,26 @@ HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request 
         else if (k < na + nb) { if (q.nb < 4) { q.b[q.nb].p = a; q.b[q.nb++].size = n; } }
     }
     size_t data = (size_t)((uint8_t *)p - base), cm = (data + 15) & ~(size_t)15;
-    int dom = g_sf[i].domain && (type == 4 || type == 6);
+    int dom = slot_dom && (type == 4 || type == 6);
     unsigned dtype = dom ? base[cm] : 1, obj = dom ? *(uint32_t *)(base + cm + 4) : 0;
     size_t hin = cm + (dom ? 16 : 0);
-    if (hin + 16 > size || data + ndw * 4 > size) { LOG("[RED] sf: %s: request of %u data words does not fit %llu bytes", g_sf[i].name, ndw, (unsigned long long)size); return 0xe401u; }
+    if (hin + 16 > size || data + ndw * 4 > size) { LOG("[RED] sf: %s: request of %u data words does not fit %llu bytes", o->name, ndw, (unsigned long long)size); ret = 0xe401u; goto out; }
     uint32_t magic = *(uint32_t *)(base + hin), ver = *(uint32_t *)(base + hin + 4), cmd = *(uint32_t *)(base + hin + 8);
-    static int trace = -1; if (trace < 0) trace = getenv("DM_SF_TRACE") && atoi(getenv("DM_SF_TRACE"));
-    if (trace) { char hx[3 * 0x80 + 1] = ""; for (unsigned k = 0; k < 0x80 && k < size; k++) snprintf(hx + 3 * k, 4, "%02x ", base[k]); LOG("sf: %s request: %s", g_sf[i].name, hx); }
-    if (type == 2) return 0xf601u;   // HIPC Close: the session ends, and the kernel answers the closed-session result (SDK 21's client sends one for a session it is done with: Star Fox's camera session)
-    if (type != 4 && type != 6) { LOG("[RED] sf: %s: HIPC message type %u not served", g_sf[i].name, type); return 0xe401u; }
-    if (dtype == 2) { memset(base, 0, 16); return RES_OK; }   // a domain object closed: nothing to answer
-    if (magic != 0x49434653) { LOG("[RED] sf: %s: request without SFCI (%#x)", g_sf[i].name, magic); return 0xe401u; }
+    static _Atomic int trace_flag = -1;
+    int trace = atomic_load(&trace_flag);
+    if (trace < 0) { trace = getenv("DM_SF_TRACE") && atoi(getenv("DM_SF_TRACE")); atomic_store(&trace_flag, trace); }
+    if (trace) { char hx[3 * 0x80 + 1] = ""; for (unsigned k = 0; k < 0x80 && k < size; k++) snprintf(hx + 3 * k, 4, "%02x ", base[k]); LOG("sf: %s request: %s", o->name, hx); }
+    if (type == 2) { ret = 0xf601u; goto out; }   // HIPC Close: the session ends, and the kernel answers the closed-session result (SDK 21's client sends one for a session it is done with: Star Fox's camera session)
+    if (type != 4 && type != 6) { LOG("[RED] sf: %s: HIPC message type %u not served", o->name, type); ret = 0xe401u; goto out; }
+    if (dtype == 2) { memset(base, 0, 16); ret = RES_OK; goto out; }   // a domain object closed: nothing to answer
+    if (magic != 0x49434653) { LOG("[RED] sf: %s: request without SFCI (%#x)", o->name, magic); ret = 0xe401u; goto out; }
     size_t end_in = data + ndw * 4;
-    q.cmd = cmd & 0xffff; q.object = obj; q.in = base + hin + 16; q.in_len = end_in > hin + 16 ? end_in - hin - 16 : 0; q.ctx = g_sf[i].ctx;
+    q.cmd = cmd & 0xffff; q.object = obj; q.in = base + hin + 16; q.in_len = end_in > hin + 16 ? end_in - hin - 16 : 0; q.ctx = o->ctx;
     unsigned key = (obj & 0xff) << 16 | (cmd & 0xffff);   // log each object / command once
-    pthread_mutex_lock(&g_sf_mu); int first = g_sf[i].seen != key; g_sf[i].seen = key; pthread_mutex_unlock(&g_sf_mu);
-    Result res = g_sf[i].answer ? g_sf[i].answer(&q) : RES_OK;
-    if (q.out_move && dom) { LOG("[RED] sf: %s: command %u returns an object in a domain, which the host does not serve", g_sf[i].name, q.cmd); q.out_move = 0; res = 0xe401u; }
-    if (first || trace) LOG("sf: %s object %u command %u (%u data words in): %s%s%s", g_sf[i].name, obj, cmd, ndw, res ? "fails" : g_sf[i].answer ? "success" : "success, zeroed output",
+    pthread_mutex_lock(&g_sf_mu); int first = o->seen != key; o->seen = key; pthread_mutex_unlock(&g_sf_mu);
+    Result res = o->answer ? o->answer(&q) : RES_OK;
+    if (q.out_move && dom) { LOG("[RED] sf: %s: command %u returns an object in a domain, which the host does not serve", o->name, q.cmd); q.out_move = 0; res = 0xe401u; }
+    if (first || trace) LOG("sf: %s object %u command %u (%u data words in): %s%s%s", o->name, obj, cmd, ndw, res ? "fails" : o->answer ? "success" : "success, zeroed output",
                             q.out_copy ? ", a copied handle" : "", q.out_move ? ", a moved session" : "");
     // The response: no descriptors. The special header (its handle counts) and the handles come right after the HIPC header, when there are any; the CMIF part starts at the next
     // 16-byte boundary (+0x10 with none or one handle), the domain's out header first in a domain. Everything after it up to the buffer's end reads as zero
@@ -170,7 +228,9 @@ HLE_FORCE("_ZN2nn2sf4hipc15SendSyncRequestENS_3svc6HandleEPvm", "send a request 
     m[1] = (uint32_t)((end - dw) / 4 < 0x3ff ? (end - dw) / 4 : 0x3ff);
     if (nc + nm) { m[1] |= 1u << 31; m[2] = nc << 1 | nm << 5; if (nc) m[3] = q.out_copy; if (nm) m[3 + nc] = q.out_move; }
     size_t out = ((dw + 15) & ~(size_t)15) + (dom ? 16 : 0);
-    uint32_t *o = (uint32_t *)(base + out); o[0] = 0x4f434653; o[1] = ver; o[2] = res; o[3] = 0;   // "SFCO"; a domain's out-object count before it stays 0
+    uint32_t *o_hdr = (uint32_t *)(base + out); o_hdr[0] = 0x4f434653; o_hdr[1] = ver; o_hdr[2] = res; o_hdr[3] = 0;   // "SFCO"; a domain's out-object count before it stays 0
     if (!res && q.out_len) memcpy(base + out + 16, q.out, q.out_len <= sizeof q.out && out + 16 + q.out_len <= end ? q.out_len : 0);
-    return RES_OK;
+out:
+    sf_obj_put(o);
+    return ret;
 }

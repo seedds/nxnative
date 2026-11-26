@@ -453,6 +453,51 @@ static void posts(void) {
     post_complete(f+1,0,0); post_complete(f+2,0,0);
     CHECK("callbacks never repeat an event",event==15);
 }
+// Passes into one layer of two textures at once, and into the depth planes of 3D textures (sm_rt_slice, DM_NVN_SLICE_MRT): Xenoblade Chronicles DE writes planes 0-14 of
+// two 16x16x16 light volumes, one pass a plane. Six such passes take five continuations into one layered pass, and every layer or plane of both targets gets its own colour
+static tex_t texture_n(int target, int format, int layers, int levels) {
+    static uint64_t serial=850000;
+    serial++;
+    tex_t t={.magic=MAGIC('T','E','X',0),.serial=serial,.off=(int64_t)serial<<20};
+    t.d=(nvn_texdesc){.target=target,.format=format,.width=8,.height=8,.depth=layers,.levels=levels,.samples=1};
+    nvn_tex_layout(&t.d,&t.L); return t;
+}
+static void rt2(chain *c, const tex_t *a, const tex_t *b, int layer, int d3) {
+    p_set_rt r={.n=2}; r.color[0]=a; r.color[1]=b;
+    for(int k=0;k<2;k++) { r.has_cview[k]=1; r.cview[k]=(view_t){.set_layers=1,.min_layer=layer,.nlayers=1};
+        if(d3) { r.cview[k].set_target=1; r.cview[k].target=NVN_TEXTURE_TARGET_3D; } }   // the game's view names the 3D target
+    emit(c,OP_SET_RT,&r,sizeof r);
+}
+static int layers_hold(const tex_t *t, int n, int level, const uint8_t want[4], int d3) {   // the number of layers (or depth planes) not entirely want at that level
+    id<MTLTexture> mt=tex_mtl((tex_t *)t); int w=8>>level; if(w<1) w=1;
+    id<MTLBuffer> out=[g_dev newBufferWithLength:(NSUInteger)(n*256) options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    for(int sl=0;sl<n;sl++) [e copyFromTexture:mt sourceSlice:(NSUInteger)(d3?0:sl) sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,(NSUInteger)(d3?sl:0)) sourceSize:MTLSizeMake((NSUInteger)w,(NSUInteger)w,1)
+                                     toBuffer:out destinationOffset:(NSUInteger)(sl*256) destinationBytesPerRow:(NSUInteger)(4*w) destinationBytesPerImage:(NSUInteger)(4*w*w)];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    int bad=0; const uint8_t *bytes=out.contents;
+    for(int sl=0;sl<n;sl++) for(int i=0;i<w*w;i++) if(memcmp(bytes+sl*256+4*i,want,4)) { bad++; break; }
+    return bad;
+}
+static void wait_amp(void) {
+    for(int i=0;i<g_sm_amp_n;i++) for(int k=0;k<2000;k++) { os_unfair_lock_lock(&g_sm_amp_lock); int done=g_sm_amp[i].done; os_unfair_lock_unlock(&g_sm_amp_lock); if(done) break; usleep(1000); }
+}
+static void slices_mrt(id<MTLLibrary> lib) {
+    static const uint8_t red[4]={255,0,0,255}, green[4]={0,255,0,255};
+    for(int d3=0;d3<2;d3++) {
+        int tg=d3?NVN_TEXTURE_TARGET_3D:NVN_TEXTURE_TARGET_2D_ARRAY;
+        tex_t a=texture_n(tg,NVN_FORMAT_RGBA8,6,1), b=texture_n(tg,NVN_FORMAT_RGBA8,6,1);
+        prog_t pg={0}; NvProg *p=make_program(lib,&pg,"two"); p->sh[1]->rf.color_mask=3;
+        chain c={0}; bind(&c,&pg,3);
+        for(int sl=0;sl<6;sl++) { rt2(&c,&a,&b,sl,d3); triangle(&c); }
+        execute(&c); wait_amp();
+        c.n-=8; uint64_t before=g_sm_ncont; execute(&c);
+        int want=sm_on() && sm_mrt_on() ? 5 : 0;
+        CHECK(d3?"six depth planes of two 3D textures take five continuations":"six layers of two array textures take five continuations",g_sm_ncont-before==(uint64_t)want);
+        CHECK(d3?"every plane of the first 3D texture is red":"every layer of the first texture is red",!layers_hold(&a,6,0,red,d3));
+        CHECK(d3?"every plane of the second 3D texture is green":"every layer of the second texture is green",!layers_hold(&b,6,0,green,d3));
+    }
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if(argc==2 && !strcmp(argv[1],"--cpu")) {
         alarm(10); setbuf(stdout,NULL); wait_budgets(); posts();
@@ -465,11 +510,13 @@ int main(int argc, char **argv) { @autoreleasepool {
         "fragment float4 red() { return float4(1,0,0,1); }\n"
         "struct Six { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; float4 c3 [[color(3)]]; float4 c4 [[color(4)]]; float4 c5 [[color(5)]]; };\n"
         "fragment Six six() { Six o; o.c0=float4(0,1,1,1); o.c1=float4(0.2,0.8,1,1); o.c2=float4(0.4,0.6,1,1); o.c3=float4(0.6,0.4,1,1); o.c4=float4(0.8,0.2,1,1); o.c5=float4(1,0,1,1); return o; }\n"
+        "struct Two { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\n"
+        "fragment Two two() { return {float4(1,0,0,1),float4(0,1,0,1)}; }\n"
         "struct ReadArgs { texture2d<float> t [[id(0)]]; };\n"
         "fragment Six six_read(constant ReadArgs &a [[buffer(0)]]) { float4 c=a.t.read(uint2(0)); return {c,c,c,c,c,c}; }\n"
         "struct Args { device uint *p [[id(0)]]; };\n"
         "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
-    slices(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
+    slices(lib); slices_mrt(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

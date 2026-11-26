@@ -5265,6 +5265,43 @@ static int mem_any(const uint8_t *p, uint64_t n) {   // whether any byte is non-
     for (; i < n; i++) if (p[i]) return 1;
     return 0;
 }
+// Stale storage read as floating-point texels. A render target placed in CPU_NO_ACCESS memory that held other data (Splatoon 3 12.0.0's environment-probe arrays, RG11B10F, over
+// reused storage) starts as that data on the Switch too; the game renders faces with SRC_ALPHA / ONE_MINUS_SRC_ALPHA blending and alpha 1, and Maxwell's float blender (SET_BLEND_FLOAT_OPTION:
+// zero times anything is zero) drops the old value even where it decodes as NaN. Metal computes NaN x 0 = NaN, so any stale NaN stays and spreads through reflections. Workaround for Metal's
+// fixed-function blender: if a non-COMPRESSIBLE float texture's first-use storage in a CPU_NO_ACCESS pool holds any NaN or infinite element, skip the fill and start from zeros instead.
+// Only CPU_NO_ACCESS pools are checked: in CPU-visible pools the storage holds what the CPU wrote (t_direct_upload writes NaN and infinity on purpose).
+static int storage_float_size(MTLPixelFormat pf) {   // element size in bytes, 0 for a format this does not check
+    switch (pf) {
+        case MTLPixelFormatRG11B10Float: return 4;
+        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatR16Float: return 2;
+        case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG32Float: case MTLPixelFormatR32Float: return 4;
+        default: return 0;
+    }
+}
+static int storage_has_nonfinite(const tex_t *t, MTLPixelFormat pf) {
+    int size = storage_float_size(pf);
+    if (!size) return 0;
+    const uint8_t *p = t->mem;
+    if (pf == MTLPixelFormatRG11B10Float) {
+        for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+            uint32_t v; memcpy(&v, p + i, 4);
+            if (((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31) return 1;
+        }
+        return 0;
+    }
+    if (size == 2) {
+        for (size_t i = 0; i + 2 <= t->L.size; i += 2) {
+            uint16_t v; memcpy(&v, p + i, 2);
+            if ((v & 0x7c00) == 0x7c00) return 1;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+        uint32_t v; memcpy(&v, p + i, 4);
+        if ((v & 0x7f800000) == 0x7f800000) return 1;
+    }
+    return 0;
+}
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
     if (t->d.samples > 1 || ((int)mt.pixelFormat >= 250 && (int)mt.pixelFormat <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8 (some names are macOS-only)
@@ -5276,6 +5313,13 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     static int flush_fill = -1; if (flush_fill < 0) { const char *e = getenv("DM_NVN_FLUSH_FILL"); flush_fill = !e || atoi(e) != 0; }
     if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread() || !mem_any(t->mem, t->L.size)) return 0;   // the upload batch belongs to the submit thread
+    static int stale_keep = -1; if (stale_keep < 0) { const char *e = getenv("DM_NVN_STALE_FLOAT"); stale_keep = e && atoi(e) == 1; }
+    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt.pixelFormat)) {
+        static uint64_t ns;
+        if (ns++ < 8 || !(ns & (ns - 1))) MLOG("initial content: ser=%llu %ux%ux%u format %#x: its storage holds non-finite float texels; starts from zeros (%llu so far; DM_NVN_STALE_FLOAT=1 keeps it)",
+                                               (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)ns);
+        return 0;
+    }
     if (pkg_upload(t, NULL, mt, 0, nil, NULL, 0, NULL) != mt) return 0;
     int why = no_cpu ? 0 : uncached ? 1 : 2;
     static uint64_t n[3]; if (n[why]++ < 4) MLOG("initial content: ser=%llu %ux%ux%u format %#x filled from its storage, %s (%llu so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format,
@@ -7027,8 +7071,7 @@ static inline int passdump(void) {
 void dm_gfx_passdump_next(long n) { long f = (long)atomic_load(&g_cur_frame); g_pd_a1 = f + n; g_pd_a0 = f + 1; }
 #define PD(...) do { if (passdump()) { flockfile(stderr); fprintf(stderr, "[pass] F%llu ", (unsigned long long)atomic_load(&g_cur_frame)); fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); funlockfile(stderr); } } while (0)
 static void blit_note(void) { if (g_enc) PD("E %llu copy / buffer update ends the render pass", g_stat_pass); }
-__attribute__((weak)) void dm_guest_frame_tick(void) {}   // hle_os.c provides the strong definition (DM_DETCLOCK deterministic guest clock); a no-op when graphics unit tests do not link the host   // diag.c provides the strong definition (DM_TICK_HOLD=E:SHOT unfreeze); a no-op when graphics unit tests do not link the host
-__attribute__((weak)) void dm_cheats_present(void) {}   // hle_cheats.c provides the strong definition (the Atmosphère cheat pass per presented frame); a no-op when graphics unit tests do not link the host
+__attribute__((weak)) void dm_guest_frame_tick(void) {}   // hle_os.c provides the strong definition (DM_DETCLOCK + per-frame cheats); a no-op when graphics unit tests do not link the host
 __attribute__((weak)) int dm_detclock_enabled(void) { return 0; }   // Same as above: the host's hle_os.c provides the strong definition; when graphics unit tests do not link the host, the deterministic clock is treated as off
 // The guest clock when graphics unit tests do not link the host (hle_os.c): now_ns, as the host's is with no pause and no deterministic clock, whatever clock the test gives now_ns
 // (bp_now's is the host's). Counter reports map GPU timestamps and feedback times through it; stubs that returned 0 sent every report to the time of its completion handler, so two
@@ -20109,11 +20152,19 @@ typedef struct { uint32_t n, cap; ua_reg_ent e[]; } ua_reg_cell;
 static nvn_hmap g_ua_reg = {.klen = sizeof(const void *)};   // under leaf lock g_ua_reg_lk (never taken before g_rmu): t->mem → live registered uncompressed 2D textures
 static os_unfair_lock g_ua_reg_lk = OS_UNFAIR_LOCK_INIT;
 static _Atomic uint64_t g_ua_reg_gen;                        // bumped when g_ua_reg changes
+// Registration changes since the replay thread last looked (under g_ua_reg_lk): ua_hot_refresh brings g_ua_hot up to date from these alone. A game that registers textures
+// over written storage all the time (Mario Kart World: about 46 changes a frame, 1,800 writer entries) otherwise pays a walk of every writer entry for each draw that follows a change.
+enum { UA_REG_EV = 128 };
+typedef struct { const void *mem; int id; } ua_reg_ev;
+static ua_reg_ev g_ua_reg_ev[UA_REG_EV];
+static uint32_t g_nua_reg_ev;
+static int g_ua_reg_ev_over;                                 // more changes than the list holds: the next refresh walks every writer entry
 enum { UA_RSN_DIRECT = 0, UA_RSN_CLEAR = 1, UA_RSN_BINDLESS = 2, UA_RSN_N = 3 };
 static nvn_hmap g_ua_wr = {.klen = sizeof(const void *)};   // replay-thread-only: t->mem → malloc'd ua_entry
 static _Atomic uint64_t g_ua_bits[64];                      // 4096-bit bloom filter of keys in g_ua_wr (set on replay thread, tested by ua_reg_idx to avoid spurious refreshes)
-static uint64_t g_ua_hot[1024];                             // 65536-bit fast bitmap of registered tids that currently have a dirty compatible writer (replay-thread-only)
-static uint32_t g_ua_hot_n, g_ua_hot_hi;
+static uint64_t *g_ua_hot;                                  // bitmap of the registered tids whose storage a compatible texture of another format wrote last (replay-thread-only);
+static uint32_t g_ua_hot_words;                             // it grows to the highest such ID: Mario Kart World's IDs pass 65,536, and a fixed bitmap had to call every ID above it hot
+static uint32_t g_ua_hot_n;
 static uint64_t g_ua_reg_seen;
 static uint64_t g_ua_gen;
 static const void **g_ua_bdirty; static uint32_t g_nua_bdirty, g_cua_bdirty;
@@ -20124,16 +20175,24 @@ static inline uint32_t ua_bit_idx(const void *mem) { return (uint32_t)((((uintpt
 static inline int ua_bit_test(const void *mem) { uint32_t h = ua_bit_idx(mem); return (int)((atomic_load_explicit(&g_ua_bits[h >> 6], memory_order_relaxed) >> (h & 63)) & 1); }
 static inline void ua_bit_set(const void *mem) { uint32_t h = ua_bit_idx(mem); atomic_fetch_or_explicit(&g_ua_bits[h >> 6], 1ull << (h & 63), memory_order_relaxed); }
 static inline int ua_hot_test(int tid) {
-    if (tid < 0) return 0;
-    if ((unsigned)tid < 65536u) return (int)((g_ua_hot[(unsigned)tid >> 6] >> (tid & 63)) & 1);
-    return g_ua_hot_hi != 0;
+    return tid >= 0 && ((unsigned)tid >> 6) < g_ua_hot_words && ((g_ua_hot[(unsigned)tid >> 6] >> (tid & 63)) & 1);
 }
 static inline void ua_hot_mark(int tid) {
     if (tid < 0) return;
-    if ((unsigned)tid < 65536u) {
-        uint64_t m = 1ull << (tid & 63);
-        if (!(g_ua_hot[(unsigned)tid >> 6] & m)) { g_ua_hot[(unsigned)tid >> 6] |= m; g_ua_hot_n++; }
-    } else { g_ua_hot_hi++; g_ua_hot_n++; }
+    uint32_t w = (unsigned)tid >> 6;
+    if (w >= g_ua_hot_words) {
+        uint32_t nw = MAX(g_ua_hot_words * 2, MAX(w + 1, 1024u));
+        g_ua_hot = realloc_or_die(g_ua_hot, nw * sizeof *g_ua_hot, "uncompressed alias hot IDs");
+        memset(g_ua_hot + g_ua_hot_words, 0, (nw - g_ua_hot_words) * sizeof *g_ua_hot);
+        g_ua_hot_words = nw;
+    }
+    uint64_t m = 1ull << (tid & 63);
+    if (!(g_ua_hot[w] & m)) { g_ua_hot[w] |= m; g_ua_hot_n++; }
+}
+static inline void ua_hot_clear(int tid) {
+    if (tid < 0 || ((unsigned)tid >> 6) >= g_ua_hot_words) return;
+    uint64_t m = 1ull << (tid & 63);
+    if (g_ua_hot[(unsigned)tid >> 6] & m) { g_ua_hot[(unsigned)tid >> 6] &= ~m; g_ua_hot_n--; }
 }
 static int ua_kind_desc(const nvn_texdesc *d) {
     if (!d || d->target != NVN_TEXTURE_TARGET_2D || d->samples > 1 || (d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) || fmt_depth(d->format)) return 0;
@@ -20141,6 +20200,11 @@ static int ua_kind_desc(const nvn_texdesc *d) {
     return bw == 1 && bh == 1 && b && !(b & (b - 1)) && b <= 16 ? b : 0;
 }
 static int ua_kind(const tex_t *t) { return t && t->mem ? ua_kind_desc(&t->d) : 0; }
+static void ua_reg_changed_locked(const void *mem, int id_) {   // caller holds g_ua_reg_lk: a registration at written storage came or went
+    if (g_nua_reg_ev == UA_REG_EV) g_ua_reg_ev_over = 1;
+    else g_ua_reg_ev[g_nua_reg_ev++] = (ua_reg_ev){mem, id_};
+    atomic_fetch_add_explicit(&g_ua_reg_gen, 1, memory_order_release);
+}
 static void ua_reg_idx(int id_, const tex_t *t, int add) {   // caller holds g_rmu; takes leaf lock g_ua_reg_lk
     int bpp = ua_kind(t); if (!bpp) return;
     const void *k = t->mem;
@@ -20158,23 +20222,25 @@ static void ua_reg_idx(int id_, const tex_t *t, int add) {   // caller holds g_r
             i = c->n++;
         }
         c->e[i] = (ua_reg_ent){.id = id_, .bpp = bpp, .d = t->d};
-        if (ua_bit_test(k)) atomic_fetch_add_explicit(&g_ua_reg_gen, 1, memory_order_release);
+        if (ua_bit_test(k)) ua_reg_changed_locked(k, id_);
     } else if (c && i < c->n) {
         c->e[i] = c->e[--c->n];
         if (!c->n) { nvn_hm_del(&g_ua_reg, &k); free(c); }
-        if (ua_bit_test(k)) atomic_fetch_add_explicit(&g_ua_reg_gen, 1, memory_order_release);
+        if (ua_bit_test(k)) ua_reg_changed_locked(k, id_);
     }
     os_unfair_lock_unlock(&g_ua_reg_lk);
 }
 static int ua_compat_desc(const nvn_texdesc *a, int ba, const nvn_texdesc *b, int bb) {
     return ba > 0 && bb > 0 && a->format != b->format && (uint64_t)a->width * (uint64_t)ba == (uint64_t)b->width * (uint64_t)bb && a->height == b->height;
 }
+// An ID is registered at one storage address (ua_reg_idx takes it out of the old one first), so the writer at that address alone decides its bit: a registration that
+// does not match the latest writer has its bit cleared, which also drops the bit of a texture whose storage was written again in its own format.
 static int ua_hot_add_locked(const ua_entry *w) {   // caller holds g_ua_reg_lk; returns 1 if any registered compatible alias exists at w->mem
     const ua_reg_cell *c = nvn_hm_get(&g_ua_reg, &w->mem);
     if (!c) return 0;
     int any = 0;
     for (uint32_t k = 0; k < c->n; k++) {
-        if (!ua_compat_desc(&w->t.d, w->bpp, &c->e[k].d, c->e[k].bpp)) continue;
+        if (!ua_compat_desc(&w->t.d, w->bpp, &c->e[k].d, c->e[k].bpp)) { ua_hot_clear(c->e[k].id); continue; }
         ua_hot_mark(c->e[k].id);
         any = 1;
     }
@@ -20186,18 +20252,40 @@ static void ua_bdirty_push(ua_entry *e) {
     if (g_nua_bdirty == g_cua_bdirty) { g_cua_bdirty = g_cua_bdirty ? g_cua_bdirty * 2 : 32; g_ua_bdirty = realloc_or_die(g_ua_bdirty, g_cua_bdirty * sizeof *g_ua_bdirty, "uncompressed alias bindless list"); }
     g_ua_bdirty[g_nua_bdirty++] = e->mem;
 }
-static void ua_hot_refresh(void) {
-    uint64_t rg = atomic_load_explicit(&g_ua_reg_gen, memory_order_acquire);
-    if (rg == g_ua_reg_seen) return;
-    g_ua_reg_seen = rg;
-    if (g_ua_hot_n) { memset(g_ua_hot, 0, sizeof g_ua_hot); g_ua_hot_n = 0; g_ua_hot_hi = 0; }
-    if (!g_ua_wr.n) return;
-    os_unfair_lock_lock(&g_ua_reg_lk);
+// Brings g_ua_hot up to date with the registration index (caller holds g_ua_reg_lk). Everything that sets bits from the index runs this first (ua_hot_refresh before a
+// read, ua_note_write before it marks its storage's aliases), so a change is never applied over a bit a later state of the index already set.
+static void ua_hot_catch_up_locked(void) {
+    int whole = g_ua_reg_ev_over || g_ua_reg_seen == ~0ull;   // ~0: ua_drain_drops took writer entries away
+    g_ua_reg_seen = atomic_load_explicit(&g_ua_reg_gen, memory_order_relaxed);   // changes are made under this lock
+    if (!whole) {
+        // only the registrations that changed: each ID's bit follows what is registered now at that address and the writer there (an ID that left has none);
+        // a writer that gained a compatible alias is offered to the bindless tables again, as the whole walk does for every writer with one
+        for (uint32_t i = 0; i < g_nua_reg_ev; i++) {
+            const ua_reg_ev *v = &g_ua_reg_ev[i];
+            ua_hot_clear(v->id);
+            const ua_reg_cell *c = nvn_hm_get(&g_ua_reg, &v->mem);
+            uint32_t k = 0; if (c) while (k < c->n && c->e[k].id != v->id) k++;
+            if (!c || k == c->n) continue;
+            ua_entry *w = nvn_hm_get(&g_ua_wr, &v->mem);
+            if (!w || !ua_compat_desc(&w->t.d, w->bpp, &c->e[k].d, c->e[k].bpp)) continue;
+            ua_hot_mark(v->id);
+            w->bsynced = 0; ua_bdirty_push(w);
+        }
+        g_nua_reg_ev = 0;
+        return;
+    }
+    g_nua_reg_ev = 0; g_ua_reg_ev_over = 0;
+    if (g_ua_hot_n) { memset(g_ua_hot, 0, g_ua_hot_words * sizeof *g_ua_hot); g_ua_hot_n = 0; }
     for (uint32_t i = 0; i < g_ua_wr.cap; i++) {
         ua_entry *e = g_ua_wr.vals[i];
         if (!e) continue;
         if (ua_hot_add_locked(e)) { e->bsynced = 0; ua_bdirty_push(e); }
     }
+}
+static void ua_hot_refresh(void) {
+    if (atomic_load_explicit(&g_ua_reg_gen, memory_order_acquire) == g_ua_reg_seen) return;
+    os_unfair_lock_lock(&g_ua_reg_lk);
+    ua_hot_catch_up_locked();
     os_unfair_lock_unlock(&g_ua_reg_lk);
 }
 static void ua_drop_pool(const void *pool) {
@@ -20260,13 +20348,16 @@ static void ua_stamp_set(id<MTLTexture> rm, const void *mem, uint64_t gen) {
     if (!st) { st = [NvUaStamp new]; objc_setAssociatedObject(rm, &g_ua_stamp_key, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     st->mem = mem; st->gen = gen;
 }
-static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, int reason) {
-    if (!bcp_on() || !rm0 || !w || !g_cb) return;
+static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w0, int reason) {
+    if (!bcp_on() || !rm0 || !w0 || !g_cb) return;
+    // Snapshot the g_ua_wr entry before blit() / bcp_blocks(), which can end an open render pass
+    // (rp_end -> ua_flush -> ua_note_write -> ua_drain_drops) and free or mutate *w0 in place.
+    const ua_entry w = *w0;
     id<MTLTexture> rm = rm0; while (rm.parentTexture) rm = rm.parentTexture;
-    if ((__bridge void *)rm == w->root) return;
+    if ((__bridge void *)rm == w.root) return;
     NvUaStamp *st = objc_getAssociatedObject(rm, &g_ua_stamp_key);
-    if (st && st->mem == w->mem && st->gen == w->gen) return;
-    if (w->zero_clear) {
+    if (st && st->mem == w.mem && st->gen == w.gen) return;
+    if (w.zero_clear) {
         size_t bpp = mtl_pf_bytes(rm.pixelFormat);
         size_t row = (size_t)rm.width * bpp;
         id<MTLBuffer> zb = bpp ? zero_buf(row) : nil;
@@ -20278,11 +20369,11 @@ static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, i
         }
         atomic_fetch_add_explicit(&g_ua_zero_fills, 1, memory_order_relaxed);
     } else {
-        id<MTLTexture> wm = bcp_have(&w->t);
+        id<MTLTexture> wm = bcp_have(&w.t);
         if (!wm || wm == rm || !fam_is_valid(wm)) return;
         if (!bcp_blocks(wm, 0, 0, 0, 0, BCP_WHOLE, BCP_WHOLE, rm, 0, 0, 0, 0)) return;
     }
-    ua_stamp_set(rm, w->mem, w->gen);
+    ua_stamp_set(rm, w.mem, w.gen);
     fam_mark_valid(rm);
     if (r) gsb_store(r, rm, 0, 0, 1, &(NVNcopyRegion){0, 0, 0, (int)rm.width, (int)rm.height, 1});
     atomic_fetch_add_explicit(&g_ua_copies, 1, memory_order_relaxed);
@@ -20291,10 +20382,10 @@ static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, i
     if (nl++ < 8) {
         static const char *const rn[UA_RSN_N] = {"read", "clear-before-write", "bindless"};
         MLOG("uncompressed alias (%s%s): ser=%llu (%ux%u format %#x) → ser=%llu (%ux%u format %#x)", rn[reason >= 0 && reason < UA_RSN_N ? reason : 0],
-             w->zero_clear ? ", zero-fill" : "", (unsigned long long)w->t.serial, w->t.d.width, w->t.d.height, w->t.d.format,
+             w.zero_clear ? ", zero-fill" : "", (unsigned long long)w.t.serial, w.t.d.width, w.t.d.height, w.t.d.format,
              r ? (unsigned long long)r->serial : 0ull, r ? r->d.width : (unsigned)rm.width, r ? r->d.height : (unsigned)rm.height, r ? r->d.format : 0u);
     }
-    PD("t uncompressed alias (%d%s): ser=%llu → ser=%llu %lux%lu", reason, w->zero_clear ? ",z" : "", (unsigned long long)w->t.serial, r ? (unsigned long long)r->serial : 0ull, (unsigned long)rm.width, (unsigned long)rm.height);
+    PD("t uncompressed alias (%d%s): ser=%llu → ser=%llu %lux%lu", reason, w.zero_clear ? ",z" : "", (unsigned long long)w.t.serial, r ? (unsigned long long)r->serial : 0ull, (unsigned long)rm.width, (unsigned long)rm.height);
 }
 static void ua_before_read(const tex_t *t, id<MTLTexture> mt) {
     if (!bcp_on() || !t || !t->mem) return;
@@ -20303,8 +20394,9 @@ static void ua_before_read(const tex_t *t, id<MTLTexture> mt) {
     int bpp = ua_kind(t); if (!bpp) return;
     const ua_entry *w = nvn_hm_get(&g_ua_wr, &t->mem);
     if (!w || !ua_compat_desc(&w->t.d, w->bpp, &t->d, bpp)) return;
+    const ua_entry ws = *w;
     id<MTLTexture> rm = mt ? mt : tex_mtl_replay(t);
-    ua_sync_tex(t, rm, w, UA_RSN_DIRECT);
+    ua_sync_tex(t, rm, &ws, UA_RSN_DIRECT);
 }
 static void ua_before_write_only(const tex_t *t, id<MTLTexture> mt) {
     if (!bcp_on() || !t || !t->mem) return;
@@ -20313,8 +20405,9 @@ static void ua_before_write_only(const tex_t *t, id<MTLTexture> mt) {
     int bpp = ua_kind(t); if (!bpp) return;
     const ua_entry *w = nvn_hm_get(&g_ua_wr, &t->mem);
     if (!w || !w->is_clear || !ua_compat_desc(&w->t.d, w->bpp, &t->d, bpp)) return;
+    const ua_entry ws = *w;
     id<MTLTexture> rm = mt ? mt : tex_mtl_replay(t);
-    ua_sync_tex(t, rm, w, UA_RSN_CLEAR);
+    ua_sync_tex(t, rm, &ws, UA_RSN_CLEAR);
 }
 static void ua_note_write(const tex_t *t, id<MTLTexture> mt0, int is_clear, int zero_clear) {
     if (!bcp_on() || !t || !t->mem || !mt0) return;
@@ -20335,6 +20428,7 @@ static void ua_note_write(const tex_t *t, id<MTLTexture> mt0, int is_clear, int 
     NvUaStamp *st = objc_getAssociatedObject(mt, &g_ua_stamp_key);
     if (st) { st->mem = e->mem; st->gen = e->gen; }
     os_unfair_lock_lock(&g_ua_reg_lk);
+    if (g_nua_reg_ev || g_ua_reg_ev_over || g_ua_reg_seen == ~0ull) ua_hot_catch_up_locked();
     int has_alias = ua_hot_add_locked(e);
     os_unfair_lock_unlock(&g_ua_reg_lk);
     if (has_alias) ua_bdirty_push(e);
@@ -20374,9 +20468,9 @@ static void ua_prepare_bindless(uint8_t bmask) {
     if (!list) return;
     memcpy(list, g_ua_bdirty, nb * sizeof *list);
     g_nua_bdirty = 0;
-    struct { tex_t t; const ua_entry *w; } bh[32]; int nbh = 0;
+    struct { tex_t t; ua_entry w; } bh[32]; int nbh = 0;
     os_unfair_lock_lock(&g_rmu);
-    if (g_seen_buf) pool_seen_scan();
+    if (g_seen_buf) { int pw = g_pool_walk; g_pool_walk = 1; pool_seen_scan(); g_pool_walk = pw; }
     for (uint32_t i = 0; i < nb; i++) {
         ua_entry *w = nvn_hm_get(&g_ua_wr, &list[i]);
         if (!w) continue;
@@ -20421,7 +20515,7 @@ static void ua_prepare_bindless(uint8_t bmask) {
             }
             int dup = 0;
             for (int j = 0; j < nbh && !dup; j++) dup = bh[j].t.serial == rt->serial && bh[j].t.mem == rt->mem;
-            if (!dup && nbh < 32) bh[nbh++] = (__typeof__(bh[0])){*rt, w};
+            if (!dup && nbh < 32) bh[nbh++] = (__typeof__(bh[0])){*rt, *w};
         }
         w->bsynced |= bmask;
         if (keep) g_ua_bdirty[g_nua_bdirty++] = w->mem;
@@ -20430,7 +20524,7 @@ static void ua_prepare_bindless(uint8_t bmask) {
     os_unfair_lock_unlock(&g_rmu);
     for (int j = 0; j < nbh; j++) {
         id<MTLTexture> rm = tex_mtl_replay(&bh[j].t);
-        ua_sync_tex(&bh[j].t, rm, bh[j].w, UA_RSN_BINDLESS);
+        ua_sync_tex(&bh[j].t, rm, &bh[j].w, UA_RSN_BINDLESS);
     }
     if (list != local) free(list);
 }

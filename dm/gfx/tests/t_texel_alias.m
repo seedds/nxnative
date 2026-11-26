@@ -250,6 +250,128 @@ int main(void) { @autoreleasepool {
     sample_tex(cs_r, 22);
     CHECK(g_ua_copies == c0, "finalized pool drops its uncompressed alias writer state");
 
+    // 11. Registration changes update the hot IDs one by one (ua_hot_refresh), without a walk of every writer entry.
+    //     Mario Kart World registers textures over written storage about 46 times a frame, with IDs past 65,536.
+    static uint8_t s8[STOR], s9[STOR];
+    tex_t wu = tex2d(NVN_FORMAT_R32UI, W, H, s8); mtl_tex_init(&wu); mtl_reg_tex(30, &wu, NULL);
+    id<MTLBuffer> p11 = pattern(113);
+    store_img(pr_w, 30, &wu, p11, 0);
+    // 11a. An alias registered after the store, with nothing written in between, is hot and gets the store on its first read.
+    tex_t la = tex2d(NVN_FORMAT_RGB9E5F, W, H, s8); mtl_tex_init(&la); mtl_reg_tex(31, &la, NULL);
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 31);
+    CHECK(ua_hot_test(31), "an alias registered after the store is hot");
+    CHECK(g_ua_copies == c0 + 1, "an alias registered after the store is copied to on its first read");
+    CHECK(!memcmp(bytes_of(base_of(&la)).contents, p11.contents, SIZE), "the store reaches the alias registered after it");
+    // 11b. An ID past 65,536 has a bit of its own: its neighbour over unwritten storage is not hot.
+    tex_t hi = tex2d(NVN_FORMAT_R11G11B10F, W, H, s8), hn = tex2d(NVN_FORMAT_R11G11B10F, W, H, s9);
+    mtl_tex_init(&hi); mtl_tex_init(&hn); mtl_reg_tex(70000, &hi, NULL); mtl_reg_tex(70001, &hn, NULL);
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 31);   // any prepared read brings the hot IDs up to date
+    CHECK(ua_hot_test(70000), "an alias with an ID past 65,536 is hot");
+    CHECK(!ua_hot_test(70001), "an ID past 65,536 over unwritten storage is not hot");
+    CHECK(g_ua_copies == c0, "a repeat read copies nothing while other IDs are registered");
+    // 11c. A registration that goes away is no longer hot; the others at its storage stay.
+    mtl_reg_tex(70000, NULL, NULL);
+    sample_tex(cs_r, 31);
+    CHECK(!ua_hot_test(70000), "an unregistered alias is no longer hot");
+    CHECK(ua_hot_test(31), "the other alias at its storage stays hot");
+    // 11d. More registration changes between two reads than the change list holds: the whole walk still finds every alias.
+    enum { MANY = UA_REG_EV + 8 };
+    static tex_t many[MANY];
+    for (int i = 0; i < MANY; i++) { many[i] = tex2d(NVN_FORMAT_RGB9E5F, W, H, s8); mtl_tex_init(&many[i]); mtl_reg_tex(1000 + i, &many[i], NULL); }
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 1000 + MANY - 1);
+    int hot_many = 0; for (int i = 0; i < MANY; i++) hot_many += ua_hot_test(1000 + i);
+    CHECK(hot_many == MANY, "every alias is hot after more registrations than the change list holds");
+    CHECK(g_ua_copies == c0 + 1, "the last of them is copied to on its read");
+    // 11e. Storage written again through one of its aliases: that alias's bit clears (it is the writer now) and the former writer's sets.
+    NvShader *cs_none = [NvShader new];
+    S.tex[5][0] = 31;
+    mtl_sub_begin(); ua_note_write(&la, bcp_have(&la) ?: tex_mtl(&la), 0, 0); ua_prepare_shader(cs_none, 5);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "write through the alias completes");
+    CHECK(!ua_hot_test(31), "the texture that wrote last is not hot");
+    CHECK(ua_hot_test(30), "the former writer is hot once an alias of another format wrote its storage");
+
+    // 11f. An ID that leaves written storage and is registered again over storage written afterwards: the pending change for the old address must not clear the bit the
+    //      write at the new address set (ua_note_write applies pending changes first).
+    static uint8_t s10[STOR];
+    tex_t mv = tex2d(NVN_FORMAT_R11G11B10F, W, H, s8); mtl_tex_init(&mv); mtl_reg_tex(40, &mv, NULL);
+    sample_tex(cs_r, 40);
+    CHECK(ua_hot_test(40), "an alias of written storage is hot before it moves");
+    mtl_reg_tex(40, NULL, NULL);
+    tex_t mv2 = tex2d(NVN_FORMAT_R11G11B10F, W, H, s10), wv = tex2d(NVN_FORMAT_R32UI, W, H, s10);
+    mtl_tex_init(&mv2); mtl_tex_init(&wv); mtl_reg_tex(40, &mv2, NULL); mtl_reg_tex(41, &wv, NULL);
+    id<MTLBuffer> p13 = pattern(171);
+    store_img(pr_w, 41, &wv, p13, 0);
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 40);
+    CHECK(ua_hot_test(40), "an ID registered again over storage written afterwards is hot");
+    CHECK(g_ua_copies == c0 + 1, "it is copied to on its read");
+    CHECK(!memcmp(bytes_of(base_of(&mv2)).contents, p13.contents, SIZE), "the store reaches the ID registered again at other storage");
+
+    // 12a. Pool drop drained during blit() -> rp_end() -> ua_flush() inside ua_sync_tex() must not UAF w.
+    static uint8_t s11[STOR], s12[STOR];
+    pool_t drop_pool = {.magic = MAGIC('P','O','O','L'), .mem = s11, .size = STOR};
+    tex_t dp_w = tex2d(NVN_FORMAT_R32UI, W, H, s11), dp_r = tex2d(NVN_FORMAT_RGBA8, W, H, s11);
+    tex_t dp_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s12);
+    dp_w.pool = &drop_pool; dp_w.off = 0; dp_r.pool = &drop_pool; dp_r.off = 0;
+    mtl_tex_init(&dp_w); mtl_tex_init(&dp_r); mtl_tex_init(&dp_rt);
+    mtl_reg_tex(23, &dp_w, NULL); mtl_reg_tex(24, &dp_r, NULL);
+    store_img(pr_w, 23, &dp_w, p1, 0);
+    id<MTLTexture> mdp_r = base_of(&dp_r);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &dp_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "pending RT pass opens for 12a");
+    g_stat_draw++;
+    ua_drop_pool(&drop_pool);   // deferred until ua_drain_drops inside rp_end -> ua_flush -> ua_note_write
+    c0 = g_ua_copies;
+    ua_sync_tex(&dp_r, mdp_r, nvn_hm_get(&g_ua_wr, &dp_w.mem), UA_RSN_DIRECT);
+    CHECK(g_ua_copies == c0 + 1, "ua_sync_tex completes safely when rp_end drains writer pool drop");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12a submission completes");
+    CHECK(!memcmp(bytes_of(mdp_r).contents, p1.contents, SIZE), "12a copied writer bytes before drop");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+
+    // 12b. When rp_end() inside ua_before_read's blit updates g_ua_wr[mem] in place to a newer RT write,
+    //      the read texture must be stamped with the earlier writer's gen, not the newer RT's gen.
+    static uint8_t s13[STOR];
+    tex_t mut_w0 = tex2d(NVN_FORMAT_R32UI, W, H, s13), mut_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s13), mut_r = tex2d(NVN_FORMAT_R8, W * 4, H, s13);
+    mtl_tex_init(&mut_w0); mtl_tex_init(&mut_rt); mtl_tex_init(&mut_r);
+    mtl_reg_tex(25, &mut_w0, NULL); mtl_reg_tex(26, &mut_rt, NULL); mtl_reg_tex(27, &mut_r, NULL);
+    id<MTLTexture> mmut_r = base_of(&mut_r);
+    store_img(pr_w, 25, &mut_w0, p1, 0);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &mut_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "mutating RT pass opens for 12b");
+    g_stat_draw++;
+    ua_before_read(&mut_r, mmut_r);   // copies p1 from mut_w0 while rp_end updates g_ua_wr[s13] to green mut_rt
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12b first submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 27);   // must observe mut_rt's newer gen and sync green RT pixels into mut_r
+    CHECK(g_ua_copies == c0 + 1, "subsequent read sees newer RT gen after in-place g_ua_wr update");
+    {
+        id<MTLBuffer> got_mut = bytes_of(mmut_r);
+        const uint32_t *px_mut = (const uint32_t *)got_mut.contents;
+        CHECK(px_mut[0] == 0xff00ff00u && px_mut[W * H - 1] == 0xff00ff00u, "R8 alias receives green render-pass pixels");
+    }
+
+    // 13. ua_prepare_bindless calls pool_seen_scan() with g_pool_walk = 1 so scanned IDs are not stamped as slot-bind uses.
+    (void)pool_seen_gpu();
+    g_pool_walk = 0;
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_sub = g_sub_serial - 1;
+    g_treg[27].used = 0;
+    g_seen_todo[27 >> 5] |= 1u << (27 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    store_img(pr_w, 25, &mut_w0, p2, 0);
+    mtl_sub_begin();
+    g_seen_sub = g_sub_serial - 1;
+    g_treg[27].used = 0;
+    g_seen_todo[27 >> 5] |= 1u << (27 & 31);
+    ua_prepare_shader(cs_bindless, 5);
+    CHECK(g_pool_walk == 0, "g_pool_walk is restored after ua_prepare_bindless");
+    CHECK(g_treg[27].used == 0, "ua_prepare_bindless does not stamp scanned IDs as slot-bind uses");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "13 submission completes");
+
     printf("t_texel_alias: %d checks, %d failed (ua_copies=%llu, zero_fills=%llu)\n", checks, failed, (unsigned long long)g_ua_copies, (unsigned long long)g_ua_zero_fills);
     return failed != 0;
 } }

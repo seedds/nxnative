@@ -1656,6 +1656,7 @@ typedef struct {
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
     // for a copy or dispatch in the middle of the pass and is resumed (loading the attachments) at the next draw
     MTLRenderPassDescriptor *rpd; const fmt_t *rt_color[8]; MTLStoreAction st_col[8], st_d, st_s; int cut;
+    VkRect2D rp_area; id<MTLTexture> rp_res[8];   // deferred partial resolves until final end_rp
     VkQueryPool aq; uint32_t aq_first;   // the occlusion query running (occ_start)
     uint32_t sdyn[3][2]; int sdyn_set[3], s_dirty;   // dynamic stencil compare mask / write mask / reference, front and back (C_STENCIL)
     float blend[4], bias[3], db[2], db_cur[2]; int have_blend, have_bias, have_db, db_live, d_dirty;   // dynamic blend constants, depth bias and depth bounds (C_DYN); db_live/db_cur: encoder's active bounds
@@ -1668,13 +1669,59 @@ static void split_submit(rs_t *s);
 static void wait_done(uint64_t v);
 static void end_comp(rs_t *s) { if (s->ce) { [s->ce endEncoding]; s->ce = nil; } }
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
+static int clip_rect(VkRect2D r, uint32_t w, uint32_t h, MTLScissorRect *out) {
+    int64_t x0 = r.offset.x > 0 ? r.offset.x : 0, y0 = r.offset.y > 0 ? r.offset.y : 0;
+    int64_t x1 = (int64_t)r.offset.x + r.extent.width, y1 = (int64_t)r.offset.y + r.extent.height;
+    if (x1 > (int64_t)w) x1 = w;
+    if (y1 > (int64_t)h) y1 = h;
+    if (x1 <= x0 || y1 <= y0) return 0;
+    *out = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
+    return 1;
+}
+static int rect_covers_tex(VkRect2D area, id<MTLTexture> t, NSUInteger level) {
+    if (!t) return 1;
+    uint32_t w = (uint32_t)MAX(t.width >> level, 1u), h = (uint32_t)MAX(t.height >> level, 1u);
+    return area.offset.x <= 0 && area.offset.y <= 0 &&
+           (int64_t)area.offset.x + area.extent.width >= (int64_t)w &&
+           (int64_t)area.offset.y + area.extent.height >= (int64_t)h;
+}
 static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
-    if (!s->re) return;
     MTLRenderPassDescriptor *d = s->rpd;
-    for (int i = 0; i < 8; i++) if (d.colorAttachments[i].texture) [s->re setColorStoreAction:final ? s->st_col[i] : keep(s->st_col[i]) atIndex:i];
-    if (d.depthAttachment.texture) [s->re setDepthStoreAction:final ? s->st_d : MTLStoreActionStore];
-    if (d.stencilAttachment.texture) [s->re setStencilStoreAction:final ? s->st_s : MTLStoreActionStore];
-    [s->re endEncoding]; s->re = nil;
+    if (s->re) {
+        for (int i = 0; i < 8; i++) if (d.colorAttachments[i].texture) [s->re setColorStoreAction:final ? s->st_col[i] : keep(s->st_col[i]) atIndex:i];
+        if (d.depthAttachment.texture) [s->re setDepthStoreAction:final ? s->st_d : MTLStoreActionStore];
+        if (d.stencilAttachment.texture) [s->re setStencilStoreAction:final ? s->st_s : MTLStoreActionStore];
+        [s->re endEncoding]; s->re = nil;
+    }
+    if (!final || !d) return;
+    for (int i = 0; i < 8; i++) {
+        id<MTLTexture> dst = s->rp_res[i];
+        if (!dst) continue;
+        s->rp_res[i] = nil;
+        MTLRenderPassColorAttachmentDescriptor *src = d.colorAttachments[i];
+        if (!src.texture) continue;
+        uint32_t aw = (uint32_t)MAX(src.texture.width >> src.level, 1u), ah = (uint32_t)MAX(src.texture.height >> src.level, 1u);
+        MTLScissorRect clip;
+        if (!clip_rect(s->rp_area, umin(aw, (uint32_t)dst.width), umin(ah, (uint32_t)dst.height), &clip)) continue;
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.texture.pixelFormat width:aw height:ah mipmapped:NO];
+        td.storageMode = MTLStorageModePrivate; td.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> temp = [g_dev newTextureWithDescriptor:td];
+        if (!temp) { RED1("cannot allocate partial render pass resolve texture"); continue; }
+        for (uint32_t layer = 0; layer < s->rt_layers; layer++) {
+            MTLRenderPassDescriptor *rd = [MTLRenderPassDescriptor renderPassDescriptor];
+            MTLRenderPassColorAttachmentDescriptor *rc = rd.colorAttachments[0];
+            rc.texture = src.texture; rc.level = src.level; rc.slice = src.slice + layer;
+            rc.resolveTexture = temp; rc.resolveLevel = 0; rc.resolveSlice = 0;
+            rc.loadAction = MTLLoadActionLoad; rc.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+            [[s->cb renderCommandEncoderWithDescriptor:rd] endEncoding];
+            id<MTLBlitCommandEncoder> be = [s->cb blitCommandEncoder];
+            [be copyFromTexture:temp sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(clip.x, clip.y, 0)
+                     sourceSize:MTLSizeMake(clip.width, clip.height, 1)
+                      toTexture:dst destinationSlice:layer destinationLevel:0
+              destinationOrigin:MTLOriginMake(clip.x, clip.y, 0)];
+            [be endEncoding];
+        }
+    }
 }
 // A copy inside a render pass, which NVIDIA's driver runs: Super Mario Galaxy copies from its EFB in the middle of a pass (vkCmdCopyImage). The encoder ends here and
 // the pass resumes at its next draw (resume_rp); without that, the rest of the pass's draws were dropped
@@ -1721,44 +1768,82 @@ static void resume_rp(rs_t *s) { load_rp(s); reopen_rp(s); }
 // Re:ZERO's pfx pass blends its effects layer over the copy the pass before wrote into the same image, both opened with DONT_CARE; a DontCare load starts Apple's tiles
 // empty, and the 3D world came out black. Its particle pass reopens the half-res depth with DONT_CARE and STORE, draws nothing, and the pfx pass samples that depth: a
 // DontCare load stores whatever the tiles held (t_vk_dontcare; docs/reference/rendering.md, "Attachments opened with LOAD_OP_DONT_CARE")
-static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : MTLLoadActionLoad; }
+static void clear_attachment_rects(rs_t *s, const VkClearAttachment *a, const VkClearRect *rects, uint32_t n);
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
 static void begin_rp(rs_t *s, const c_brp *c) {
     end_blit(s); end_comp(s);
     end_rp(s, 1); s->cut = 0;
+    for (int i = 0; i < 8; i++) s->rp_res[i] = nil;
+    s->rp_area = c->area;
     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
     uint32_t w = fb->w, h = fb->h;
+    VkClearAttachment pclears[9]; uint32_t npclear = 0;
     for (uint32_t i = 0; i < rp->ncol; i++) {
         int a = rp->col[i]; if (a < 0 || (uint32_t)a >= fb->n) continue;
         const ratt *at = &rp->att[a]; MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
         ca.texture = fb->v[a]->tex; w = umin(w, (uint32_t)ca.texture.width); h = umin(h, (uint32_t)ca.texture.height);
-        ca.loadAction = load_a(at->load); s->st_col[i] = store_a(at->store); ca.storeAction = MTLStoreActionUnknown;
+        int full_c = fb->layers == 1 && rect_covers_tex(c->area, ca.texture, ca.level);
         s->rt_color[i] = fmt_of(at->fmt);
-        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) ca.clearColor = fmt_clear_color(s->rt_color[i], &c->clear[a].color);
+        if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) {
+            if (full_c) { ca.loadAction = MTLLoadActionClear; ca.clearColor = fmt_clear_color(s->rt_color[i], &c->clear[a].color); }
+            else { ca.loadAction = MTLLoadActionLoad; pclears[npclear++] = (VkClearAttachment){.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = i, .clearValue.color = c->clear[a].color}; }
+        } else {
+            ca.loadAction = MTLLoadActionLoad;
+        }
+        // Preserve pixels outside renderArea when store op is DONT_CARE.
+        s->st_col[i] = full_c ? store_a(at->store) : MTLStoreActionStore;
+        ca.storeAction = MTLStoreActionUnknown;
         int r = rp->res[i];
-        if (r >= 0 && (uint32_t)r < fb->n) { ca.resolveTexture = fb->v[r]->tex; s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve; }
+        if (r >= 0 && (uint32_t)r < fb->n) {
+            id<MTLTexture> rt = fb->v[r]->tex;
+            if (full_c && rect_covers_tex(c->area, rt, 0)) {
+                ca.resolveTexture = rt;
+                s->st_col[i] = at->store == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve;
+            } else {
+                s->st_col[i] = MTLStoreActionStore;
+                s->rp_res[i] = rt;
+            }
+        }
     }
     if (rp->depth >= 0 && (uint32_t)rp->depth < fb->n) {
         int a = rp->depth; const ratt *at = &rp->att[a]; const fmt_t *f = fmt_of(at->fmt); id<MTLTexture> t = fb->v[a]->tex;
         w = umin(w, (uint32_t)t.width); h = umin(h, (uint32_t)t.height);
+        int full_ds = fb->layers == 1 && rect_covers_tex(c->area, t, 0);
+        VkImageAspectFlags ds_partial = 0;
         if (fmt_has_depth(f)) {
-            d.depthAttachment.texture = t; d.depthAttachment.loadAction = load_a(at->load); s->st_d = store_a(at->store); d.depthAttachment.storeAction = MTLStoreActionUnknown;
-            if ((uint32_t)a < c->nclear) d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth;
+            if (at->load == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) {
+                if (full_ds) { d.depthAttachment.loadAction = MTLLoadActionClear; d.depthAttachment.clearDepth = c->clear[a].depthStencil.depth; }
+                else { d.depthAttachment.loadAction = MTLLoadActionLoad; ds_partial |= VK_IMAGE_ASPECT_DEPTH_BIT; }
+            } else {
+                d.depthAttachment.loadAction = MTLLoadActionLoad;
+            }
+            d.depthAttachment.texture = t; s->st_d = full_ds ? store_a(at->store) : MTLStoreActionStore; d.depthAttachment.storeAction = MTLStoreActionUnknown;
         }
         if (fmt_has_stencil(f)) {
-            d.stencilAttachment.texture = t; d.stencilAttachment.loadAction = load_a(at->sload); s->st_s = store_a(at->sstore); d.stencilAttachment.storeAction = MTLStoreActionUnknown;
-            if ((uint32_t)a < c->nclear) d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil;
+            if (at->sload == VK_ATTACHMENT_LOAD_OP_CLEAR && (uint32_t)a < c->nclear) {
+                if (full_ds) { d.stencilAttachment.loadAction = MTLLoadActionClear; d.stencilAttachment.clearStencil = c->clear[a].depthStencil.stencil; }
+                else { d.stencilAttachment.loadAction = MTLLoadActionLoad; ds_partial |= VK_IMAGE_ASPECT_STENCIL_BIT; }
+            } else {
+                d.stencilAttachment.loadAction = MTLLoadActionLoad;
+            }
+            d.stencilAttachment.texture = t; s->st_s = full_ds ? store_a(at->sstore) : MTLStoreActionStore; d.stencilAttachment.storeAction = MTLStoreActionUnknown;
         }
+        if (ds_partial) pclears[npclear++] = (VkClearAttachment){.aspectMask = ds_partial, .clearValue.depthStencil = c->clear[a].depthStencil};
     }
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq->vis) {
         d.visibilityResultBuffer = s->sq->vis;
         d.visibilityResultType = MTLVisibilityResultTypeAccumulate;   // Reset clears earlier encoders' slots too; the submit initialized this buffer to zero
     }
+    s->rpd = d; s->rt_w = w; s->rt_h = h; s->rt_layers = fb->layers;
+    if (npclear) {
+        VkClearRect r = {c->area, 0, fb->layers};
+        for (uint32_t i = 0; i < npclear; i++) clear_attachment_rects(s, &pclears[i], &r, 1);
+    }
     fan_prepare(s, (const chdr *)((const uint8_t *)s->cmd + s->cmd->size));
-    s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->enc_id = ++g_enc_id;
-    s->applied = NULL; s->rt_w = w; s->rt_h = h; s->rt_layers = fb->layers; s->db_live = 0;
+    s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->enc_id = ++g_enc_id;
+    s->applied = NULL; s->db_live = 0;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
     s->vp_dirty = s->sc_dirty = 1;
@@ -2426,12 +2511,15 @@ static void clear_attachment_rects(rs_t *s, const VkClearAttachment *a, const Vk
         [en setVertexBytes:&z length:sizeof z atIndex:0];
         if (color) [en setFragmentBytes:&a->clearValue.color length:sizeof a->clearValue.color atIndex:0];   // retain integer bits, including values above INT32_MAX
         if (stencil) [en setStencilReferenceValue:a->clearValue.depthStencil.stencil];
-        [en setViewport:(MTLViewport){0, 0, MAX(at.texture.width >> at.level, 1u), MAX(at.texture.height >> at.level, 1u), 0, 1}];
+        uint32_t aw = (uint32_t)MAX(at.texture.width >> at.level, 1u), ah = (uint32_t)MAX(at.texture.height >> at.level, 1u);
+        [en setViewport:(MTLViewport){0, 0, aw, ah, 0, 1}];
         [en setCullMode:MTLCullModeNone];
         for (uint32_t j = 0; j < n; j++) {
             const VkClearRect *r = &rects[j];
             if (layer < r->baseArrayLayer || layer - r->baseArrayLayer >= r->layerCount) continue;
-            [en setScissorRect:(MTLScissorRect){r->rect.offset.x, r->rect.offset.y, r->rect.extent.width, r->rect.extent.height}];
+            MTLScissorRect sc;
+            if (!clip_rect(r->rect, aw, ah, &sc)) continue;
+            [en setScissorRect:sc];
             [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
         [en endEncoding];

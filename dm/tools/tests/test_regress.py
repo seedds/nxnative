@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # scripts/regress.py: the parts that need no game, GPU or git revision: the MSL interface reader (GitHub issue #283), the [RED] normalization, the routes, and the comparisons
-import fcntl, importlib.util, json, os, tempfile, time, unittest
+import concurrent.futures as cf, fcntl, importlib.util, json, os, shutil, subprocess, sys, tempfile, textwrap, time, unittest
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -1148,6 +1148,130 @@ class Validated(unittest.TestCase):
             for mode, row in regress.read_validated(f).items():
                 self.assertIn(mode, ('quick', 'full'), f)
                 self.assertTrue(row.get('chain') and row.get('commit') and row.get('date'), f)
+
+
+class HostAndGL(unittest.TestCase):
+    def _make_host_tree(self, root, codec_val, legacy=False):
+        hd = root / 'dm/host'; hd.mkdir(parents=True)
+        codec_dir = root / 'dm/third_party/codec'; codec_dir.mkdir(parents=True)
+        (codec_dir / 'codec.c').write_text(f'#define CODEC_VAL "{codec_val}"\n')
+        (hd / 'main.c').write_text('#include <stdio.h>\n#include "../third_party/codec/codec.c"\nint main(void) { printf("%s:%s\\n", CODEC_VAL, GAME_ID); return 0; }\n')
+        if legacy:
+            makefile = textwrap.dedent('''\
+                .PHONY: FORCE dmhost
+                FORCE:
+                dmhost: main.c FORCE
+                \t@sleep 0.15
+                \t@cc -DGAME_ID='"$(GAME)"' main.c -o $@
+            ''')
+        else:
+            makefile = textwrap.dedent('''\
+                HOST_BIN = gen/$(GAME)/dmhost
+                OBJ_DIR = gen/$(GAME)/obj
+                HOST_OBJ = $(OBJ_DIR)/main.c.o
+                $(OBJ_DIR)/%.c.o: %.c
+                \t@mkdir -p $(dir $@)
+                \tcc -MMD -MP -DGAME_ID='"$(GAME)"' -c $< -o $@
+                $(HOST_BIN): $(HOST_OBJ)
+                \t@mkdir -p $(dir $@)
+                \tcc -o $@ $<
+                dmhost: $(HOST_BIN)
+                \t@cmp -s $(HOST_BIN) $@ || cp $(HOST_BIN) $@
+                -include $(HOST_OBJ:.o=.d)
+            ''')
+        (hd / 'Makefile').write_text(makefile)
+
+    def test_host_for_tracks_included_codec_across_revisions_and_reuses_identical_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            t1, t2 = root / 'tree1', root / 'tree2'
+            self._make_host_tree(t1, 'v1')
+            self._make_host_tree(t2, 'v2')
+            g = NS(id='010015100B514000', env=lambda tree: dict(os.environ, DM_GAME='010015100B514000'))
+            with patch.object(regress, 'game_root', return_value=root / 'regress'), patch.object(regress, 'say'):
+                dst1, k1, _ = regress.host_for(NS(path=t1, id='r1'), g, 1)
+                dst2, k2, _ = regress.host_for(NS(path=t2, id='r2'), g, 1)
+                self.assertNotEqual((dst1, k1), (dst2, k2))
+                self.assertEqual(subprocess.check_output([str(dst1)], text=True).strip(), 'v1:010015100B514000')
+                self.assertEqual(subprocess.check_output([str(dst2)], text=True).strip(), 'v2:010015100B514000')
+                dst1_again, k1_again, s1_again = regress.host_for(NS(path=t1, id='r1'), g, 1)
+                self.assertEqual((dst1_again, k1_again, s1_again), (dst1, k1, 0))
+                past = time.time() - 5
+                for p in t1.rglob('*'):
+                    if p.is_file(): os.utime(p, (past, past))
+                (t1 / 'dm/third_party/codec/codec.c').write_text('#define CODEC_VAL "v1_updated"\n')
+                dst1_new, k1_new, _ = regress.host_for(NS(path=t1, id='r1'), g, 1)
+                self.assertNotEqual((dst1_new, k1_new), (dst1, k1))
+                self.assertEqual(subprocess.check_output([str(dst1_new)], text=True).strip(), 'v1_updated:010015100B514000')
+
+    def test_host_for_isolates_concurrent_titles_on_per_title_and_legacy_makefiles(self):
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy), tempfile.TemporaryDirectory() as td:
+                root = Path(td); tree = root / 'tree'
+                self._make_host_tree(tree, 'shared', legacy=legacy)
+                games = [NS(id=gid, env=lambda t, gid=gid: dict(os.environ, DM_GAME=gid)) for gid in ('010015100B514000', '0100535012974000')]
+                with patch.object(regress, 'game_root', side_effect=lambda g: root / 'regress' / g.id), patch.object(regress, 'say'):
+                    with cf.ThreadPoolExecutor(max_workers=2) as pool:
+                        futs = [pool.submit(regress.host_for, NS(path=tree, id='rev'), g, 1) for g in games]
+                        results = {g.id: fut.result()[0] for g, fut in zip(games, futs)}
+                for gid, exe in results.items():
+                    self.assertEqual(subprocess.check_output([str(exe)], text=True).strip(), f'shared:{gid}')
+
+    def test_gl_fixed_function_chain_key_manifest_and_translation(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / 'translations.json'; p.write_text('{}')
+            self.assertEqual(regress.gl_manifest(p, True, root / 'log', fixed=True), {})
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(p, False, root / 'log', fixed=True)
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(p, True, root / 'log', fixed=False)
+            (root / 'translations_nonempty.json').write_text(json.dumps({'a_frag': {'st': 'ok'}}))
+            with self.assertRaises(regress.HarnessError): regress.gl_manifest(root / 'translations_nonempty.json', True, root / 'log', fixed=True)
+
+            # gl_fixed_mode uses profile_guess.build_sources evidence, not title ID
+            build = root / '0100000000000001_build'
+            (build / 'extract/v1/ExeFS').mkdir(parents=True)
+            (build / 'extract/v1/ExeFS/main').write_bytes(b'main')
+            (build / 'extract/v1/RomFS').mkdir(parents=True)
+            g = NS(id='0100000000000001', kind='gl', build=build, ver='v1',
+                   romfs=lambda: build / 'extract/v1/RomFS',
+                   shader_roots=lambda: [build / 'extract/v1/RomFS'],
+                   env=lambda tree: dict(os.environ, DM_GAME='0100000000000001'))
+            with patch.object(regress, 'load_module', side_effect=lambda name, path: NS(build_sources=lambda e, r, m: {'gl_fixed': (True, 'fixed')}) if name == 'regress_profile_guess' else importlib.util.module_from_spec(importlib.util.spec_from_file_location(name, path))):
+                self.assertTrue(regress.gl_fixed_mode(g))
+            with patch.object(regress, 'load_module', side_effect=lambda name, path: NS(build_sources=lambda e, r, m: {'gl_fixed': (False, 'shader')})):
+                self.assertFalse(regress.gl_fixed_mode(g))
+
+            # chain_key distinguishes fixed-function from shader-based GL
+            tree_root = root / 'repo'; tree_root.mkdir()
+            (tree_root / 'dm').symlink_to(REPO / 'dm')
+            tools_bin = root / 'bin'; tools_bin.mkdir()
+            xcrun = tools_bin / 'xcrun'
+            xcrun.write_text(f'#!{sys.executable}\n' + textwrap.dedent('''\
+                import pathlib, sys
+                args = sys.argv[1:]
+                if '-o' in args: pathlib.Path(args[args.index('-o') + 1]).write_bytes(b'stub-metal')
+            '''))
+            xcrun.chmod(0o755)
+            tree = NS(path=tree_root, id='cand')
+            fake_env = dict(os.environ, PATH=str(tools_bin) + os.pathsep + os.environ['PATH'])
+            with patch.dict(os.environ, fake_env, clear=True):
+                with patch.object(regress, 'gl_fixed_mode', return_value=True):
+                    _, _, k_fixed = regress.chain_key(tree, g, 'tools')
+                with patch.object(regress, 'gl_fixed_mode', return_value=False):
+                    _, _, k_shader = regress.chain_key(tree, g, 'tools')
+                self.assertNotEqual(k_fixed, k_shader)
+
+                # End-to-end chain_build_locked with real gl_shaders.py and fake xcrun: fixed=True succeeds, fixed=False fails on empty sources
+                (root / 'regress').mkdir(parents=True, exist_ok=True)
+                with patch.object(regress, 'game_root', return_value=root / 'regress'), patch.object(regress, 'say'):
+                    with patch.object(regress, 'gl_fixed_mode', return_value=True):
+                        m, out = regress.chain_build_locked(tree, g, NS(jobs=1, pause_lock=None), 'v', 'v1', k_fixed, root / 'out_fixed')
+                    self.assertEqual((m['total'], m['failed'], m['build_failed']), (0, 0, False))
+                    self.assertTrue((out / 'gl/gl_shaders.metallib').is_file())
+                    self.assertIn('# Fixed-function OpenGL uses the host Metal shaders', (out / 'gl/gl_shaders.tsv').read_text())
+                    with patch.object(regress, 'gl_fixed_mode', return_value=False):
+                        with self.assertRaises(regress.HarnessError):
+                            regress.chain_build_locked(tree, g, NS(jobs=1, pause_lock=None), 'v', 'v1', k_shader, root / 'out_shader')
 
 
 if __name__ == '__main__':

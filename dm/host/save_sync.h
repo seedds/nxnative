@@ -10,6 +10,9 @@
 // with one, the chosen save wins. Without DM_SAVE_SYNC_CHOICE the newer one wins. Only the start decides: a send replaces a cloud save only when it is no save, the
 // one last synced, damaged, or the one the start chose against. A cloud that changed since (or that the start could not read) waits for the next start.
 // Every save this replaces, here or in the cloud, is kept first in <DM_SAVE>-backups/<date> <side>; the newest 10 of each side stay.
+// With sync on or off (unless DM_SAVE_BACKUPS=0), the first save mount also stages and atomically publishes a clone of the save the game starts from in
+// <DM_SAVE>-backups/<date> start when its hash differs from the newest start copy's (checked via <backup>/.hash without re-hashing the backup); the newest
+// 10 stay within a 256 MiB logical byte budget (always keeping at least the newest 1), and on iOS <DM_SAVE>-backups is excluded from device backups.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -53,9 +56,10 @@ int save_sync_report(const char *save, const char *title, const char *folder, in
 
 // ---- the host ----
 const char *dm_save_title(void);          // the title ID the cloud file is named after (hle_fs.c, from the game's profile): for a front end in the host's process (the iPhone launcher)
-// The game's first save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says), then
-// brings the cloud's save in when it is the one to keep, and starts the sender. 0: the save may be mounted (whether or not the cloud's came in); -1: it may not, as this
-// device's save could not be put back whole (the log says where it is; the next start tries again). A second mount gets the first's answer
+// The game's first save mount (hle_fs.c): puts back this device's save from a pull of the cloud's that did not finish (<save>.pull, whatever DM_SAVE_SYNC says),
+// cleans leftover backup staging, brings the cloud's save in when it is the one to keep, keeps the start copy, and starts the sender. 0: the save may be mounted
+// (whether or not the cloud's came in); -1: it may not, as this device's save could not be put back whole (the log says where it is; the next start tries again;
+// no start copy). A second mount gets the first's answer
 int save_sync_mount(const char *save, const char *title);
 void save_sync_committed(void);           // a Commit went through (hle_fs.c, under its locks: it only wakes the sender)
 int save_sync_flush(int timeout_ms);      // sends now what was committed and not sent (the iPhone app going to the background): 1 = in step with the cloud, 0 = not (yet)
@@ -82,5 +86,7 @@ int front_save_sync_store(const char *local, const char *cloud, const ss_cloud_i
 // Shared POSIX primitives (save_sync.c) used by the weak defaults and inside save_sync_apple.m's NSFileCoordinator accessors.
 int ss_fetch_copy(const char *cloud, const char *local, ss_cloud_id *id);
 int ss_store_conditional(const char *local, const char *cloud, const ss_cloud_id *expected);
+// Marks the <save>-backups root as excluded from device backups on iOS so APFS clones do not multiply iCloud/Finder device backups (no-op on macOS and tests).
+void front_save_backup_exclude(const char *dir);
 // Clones the committed save folder `dir` to `to` while no Commit can swap it (hle_fs.c takes its lock; the default, with no host running, does not need one). 0 on success
 int dm_fs_clone_committed(const char *dir, const char *to);

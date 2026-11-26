@@ -13,6 +13,8 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 void dm_vi_layer_crop(int c[4]) { c[0] = c[1] = c[2] = c[3] = 0; }
 int dm_opmode(void) { return 1; }
+static _Atomic int g_vk_frame_ticks;
+void dm_guest_frame_tick(void) { atomic_fetch_add(&g_vk_frame_ticks, 1); }
 static int checks, fails;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: " __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
@@ -202,7 +204,10 @@ int main(void) {
         g_test_layer.framebufferOnly = NO; g_test_layer.drawableSize = CGSizeMake(64, 32);
     }
     test_ownership_and_timeouts();
+    int ticks_before = atomic_load(&g_vk_frame_ticks);
     for (int c = 0; c < CYCLES; c++) one_cycle(weak[c]);
+    CHECK(atomic_load(&g_vk_frame_ticks) == ticks_before + CYCLES * FRAMES,
+          "each Vulkan vkQueuePresentKHR drives dm_guest_frame_tick once");
     int left = 0;
     for (int tries = 0; tries < 200; tries++) {   // up to 2 s for the presents' completions and the releases behind them
         left = 0; for (int c = 0; c < CYCLES; c++) left += alive(weak[c], IMAGES);

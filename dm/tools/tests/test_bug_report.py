@@ -124,6 +124,113 @@ class BugReport(unittest.TestCase):
         for folder in ('shader/cache/b-0123456789ab', 'shader/ios/b-abcdef012345', 'shader/b-deadbeef0001'):
             self.assertIn(folder, report)
 
+    def nsp_app(self, name, tid=TID):
+        """a Mac app the NSP script wrote into the NSP folder, stamped with DMCommit and DMChain"""
+        app = self.nsp / name; (app / 'Contents/Resources/msl/b-abcdef012345').mkdir(parents=True)
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'DMTitleID': tid, 'CFBundleDisplayName': 'Beside Game', 'CFBundleShortVersionString': '9.9.9',
+                                                                  'CFBundleExecutable': 'FakeGame', 'DMCommit': 'abc1234', 'DMChain': 'abcdef012345'}))
+        (app / 'Contents/Resources/dm').mkdir(); (app / 'Contents/Resources/dm/env.txt').write_text('DM_BESIDE=1\n')
+        return app
+
+    def nsp_report(self, target=None):
+        with mock.patch.object(br, 'git_state', return_value='collector-commit'), mock.patch.object(br, 'chain_version', return_value='collector-chain'):
+            code, out = self.run_main(str(target or self.nsp))
+        self.assertEqual(code, 0)
+        return zipfile.ZipFile(out).read('report.md').decode(), self.names(out)
+
+    def test_nsp_folder_takes_its_one_app(self):
+        self.nsp_app('Fake Game.app')
+        for target in (self.nsp, self.nsp / f'{TID}_build'):
+            report, names = self.nsp_report(target)
+            self.assertIn('## nxnative commit\nabc1234 (recorded by Fake Game.app in the NSP folder)', report)
+            self.assertIn('## Shader chain version\nabcdef012345 (recorded by Fake Game.app in the NSP folder)', report)
+            self.assertIn('Contents/Resources/msl/b-abcdef012345, shader/b-deadbeef0001', report)
+            self.assertIn('Mac app in the NSP folder: Fake Game.app', report)
+            self.assertIn('logs/build/dmsh_build.log', names)   # the build's logs still go in
+            self.assertIn('## How it was built and run\nfill in', report)   # the app beside the build need not be what ran
+            for value in ('Beside Game', '9.9.9', 'DM_BESIDE'): self.assertNotIn(value, report)   # only its stamps are taken
+
+    def test_nsp_folder_never_guesses_between_apps(self):
+        self.nsp_app('Fake Game.app'); self.nsp_app('Fake Game-provisional.app')
+        report, _ = self.nsp_report()
+        self.assertIn('## nxnative commit\nunknown (not recorded by the build)', report)
+        self.assertIn('## Shader chain version\nunknown (not recorded by the build)', report)
+        self.assertIn('Mac app in the NSP folder: 2 with title ID', report)
+
+    def test_nsp_folder_app_of_another_title(self):
+        self.nsp_app('Other Game.app', tid='0100BBBB0000C000')
+        (self.nsp / 'Not An App.app').mkdir()   # no Info.plist
+        report, _ = self.nsp_report()
+        self.assertIn('## nxnative commit\nunknown (not recorded by the build)', report)
+        self.assertIn('## Shader chain version\nunknown (not recorded by the build)', report)
+        self.assertIn(f'Mac app in the NSP folder: none with title ID {TID}', report)
+        self.assertEqual(br.nsp_apps(self.root / 'missing', TID), [])
+
+    def test_runtime_log_provenance_for_title_id_and_nsp_folder(self):
+        log = self.home / f'Library/Logs/nxnative/{TID}.log'
+        log.write_text(f'[dm] build: commit 786715256f37+dirty, shader chain ded41f8d62ed, profile {TID}\n')
+        with mock.patch.object(br, 'git_state', return_value='collector-commit'), mock.patch.object(br, 'chain_version', return_value='collector-chain'):
+            code, out = self.run_main(TID)
+        self.assertEqual(code, 0)
+        report = zipfile.ZipFile(out).read('report.md').decode()
+        self.assertIn(f'## nxnative commit\n786715256f37+dirty (logged by logs/mac-app/{TID}.log)', report)
+        self.assertIn(f'## Shader chain version\nded41f8d62ed (logged by logs/mac-app/{TID}.log)', report)
+        # Runtime log beats a stale sibling .app in the NSP folder.
+        self.nsp_app('Fake Game.app')
+        report, _ = self.nsp_report()
+        self.assertIn(f'## nxnative commit\n786715256f37+dirty (logged by logs/mac-app/{TID}.log)', report)
+        self.assertIn(f'## Shader chain version\nded41f8d62ed (logged by logs/mac-app/{TID}.log)', report)
+        # "commit not recorded" in a runtime log keeps commit unknown instead of mixing with the sibling .app.
+        log.write_text(f'[dm] build: commit not recorded, shader chain ded41f8d62ed, profile {TID}\n')
+        report, _ = self.nsp_report()
+        self.assertIn(f'## nxnative commit\nunknown (not recorded by logs/mac-app/{TID}.log)', report)
+        self.assertIn(f'## Shader chain version\nded41f8d62ed (logged by logs/mac-app/{TID}.log)', report)
+        # Falls back to .prev.log only when .log is absent.
+        log.unlink()
+        (self.home / f'Library/Logs/nxnative/{TID}.prev.log').write_text(f'[dm] build: commit 111122223333, shader chain 444455556666, profile {TID}\n')
+        with mock.patch.object(br, 'git_state', return_value='collector-commit'), mock.patch.object(br, 'chain_version', return_value='collector-chain'):
+            code, out = self.run_main(TID)
+        self.assertEqual(code, 0)
+        report = zipfile.ZipFile(out).read('report.md').decode()
+        self.assertIn(f'## nxnative commit\n111122223333 (logged by logs/mac-app/{TID}.prev.log)', report)
+        self.assertIn(f'## Shader chain version\n444455556666 (logged by logs/mac-app/{TID}.prev.log)', report)
+
+    def test_ios_log_provenance_does_not_use_mac_sources(self):
+        (self.home / f'Library/Logs/nxnative/{TID}.log').write_text(f'[dm] build: commit mac111111111, shader chain aaaaaaaaaaaa, profile {TID}\n')
+        self.nsp_app('Fake Game.app')
+        ios = self.root / 'log.txt'
+        ios.write_text(f'[dm] build: commit ios222222222, shader chain bbbbbbbbbbbb, profile {TID}\n')
+        code, out = self.run_main(str(self.nsp), '--ios-log', str(ios))
+        self.assertEqual(code, 0)
+        report = zipfile.ZipFile(out).read('report.md').decode()
+        self.assertIn('## nxnative commit\nios222222222 (logged by logs/ios/log.txt)', report)
+        self.assertIn('## Shader chain version\nbbbbbbbbbbbb (logged by logs/ios/log.txt)', report)
+        # Without a build line in --ios-log, do not cross-attribute Mac log or sibling Mac .app stamps.
+        ios.write_text('early crash\n')
+        code, out = self.run_main(str(self.nsp), '--ios-log', str(ios))
+        self.assertEqual(code, 0)
+        report = zipfile.ZipFile(out).read('report.md').decode()
+        self.assertIn('## nxnative commit\nunknown (not recorded by the iPhone log)', report)
+        self.assertIn('## Shader chain version\nunknown (not recorded by the iPhone log)', report)
+
+    def test_data_bundle_msl_symlink_and_img_chain_fallback(self):
+        app = self.root / 'Bundled.app'
+        bundle_msl = app / 'Contents/PlugIns/ShaderLibraries.bundle/Contents/Resources/msl'
+        bundle_msl.mkdir(parents=True)
+        (bundle_msl / 'b-0123456789ab.img').write_bytes(b'img')
+        res = app / 'Contents/Resources'; res.mkdir(parents=True)
+        (res / 'msl').symlink_to('../PlugIns/ShaderLibraries.bundle/Contents/Resources/msl')
+        (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'DMTitleID': TID, 'CFBundleDisplayName': 'Bundled Game', 'CFBundleExecutable': 'nxnative'}))
+        code, out = self.run_main(str(app))
+        self.assertEqual(code, 0)
+        report = zipfile.ZipFile(out).read('report.md').decode()
+        self.assertIn('## Shader chain version\n0123456789ab\n', report)
+        self.assertIn('Contents/Resources/msl/b-0123456789ab.img', report)
+        # A symlink pointing outside the .app bundle is still ignored.
+        outside = self.root / 'outside_msl'; (outside / 'b-fedcba987654').mkdir(parents=True)
+        (res / 'msl').unlink(); (res / 'msl').symlink_to(outside)
+        self.assertEqual(br.shader_dirs(app, None), [])
+
     def test_home_redacted(self):
         code, out = self.run_main(str(self.app))
         z = zipfile.ZipFile(out)

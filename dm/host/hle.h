@@ -144,6 +144,9 @@ extern int dm_fps_step_max;   // loader.c: the largest step the frame step stubs
 int dm_movie_hz(void);   // hle_movie.c: the picture rate of the movie playing (the fastest video decoder that handed out a picture in the last half second), 0 when none: the frame step follows it
 void dm_movie_picture(const void *dec, const char *lib, int64_t ts_ns, int unknown_hz);   // hle_movie.c: video decoder dec (nn::movie's or nn::codec's) handed out a picture of this time; unknown_hz: its rate while the times give none
 void dm_movie_stopped(const void *dec);   // hle_movie.c: dec was stopped or destroyed: its movie ends now
+void nro_key_words(module_t *m, uint64_t *page);   // hle_nro.c: the words FC 27's renderer NRO reads its swapchain size from, written into its key page before the page is sealed (loader.c install_key_page)
+int dm_display_target(int *w, int *h);   // hle_display.c: the display size games are told while Native resolution is on (1), 0 when they keep the Switch's
+void dm_display_fit(int dw, int dh, int *w, int *h);   // hle_display.c: the 16:9 picture that fits dw x dh
 void dm_audio_suspend(int on);
 uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
 void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)

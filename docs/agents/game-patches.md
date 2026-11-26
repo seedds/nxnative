@@ -36,6 +36,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `game` → `host` | Metal encoding on its own thread on the Mac | frame rate | gap | judgement | 1 | `enc_thread`: [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | what iOS does for every game: a default for every game after `regress.py check` on the games |
 | `game` → `host` | MTL4Compiler pipelines on iOS | rendering | gap | judgement | 1 | `pso_mtl4`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with on an iPhone: a default for every game after `regress.py check` on the games |
 | `game` → `host` | present snapshots | rendering | gap | judgement | 1 | `present_snap`: [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | a setting the game was tested with: a default for every game after `regress.py check` on the games |
+| `build` → `game` | FC 27's renderer NRO: the key page words its swapchain cuts read the size from (hle_nro.c) | rendering | gap | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | the host fills the words the rewriter's cuts load; they only mean something to that NRO's rewritten build |
 | `build` → `game` | frame limiter 30 → 60 fps and the 1/60 update step | frame rate | gap | judgement | 1 | [DARK SOULS: REMASTERED](../../dm/games/01004AB00A260000/README.md) | the game's own limiter constant and fixed step |
 | `build` → `game` | frame limiter spin: its branch back cut | frame rate | gap | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the engine's own spin limiter; a function-matched rule could carry it over the game's updates |
 | `build` → `game` | frame step floor 2 → 1 vsync, and its frame step | frame rate | gap | judgement | 1 | [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet) |
@@ -49,6 +50,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: Rise has not been verified with the engine matcher that finds Apollo Justice | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
+| `build` → `engine` | the renderer NRO's swapchain size rows follow the display size (key page words) | rendering | blocked: one Frostbite game here, and no function-matched rule for the constructor yet | judgement | 1 | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | Frostbite's SwapChainNvn code, which its other games ship; the rows are this NRO's own instructions |
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | cutscene fade scheduling uses the sequence frame rate | frame rate | blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs | checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity | 1 | [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) | the title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate |
@@ -72,6 +74,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 4 | 0 | 0 | `build` → `game`, `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [Digimon Story Time Stranger](#digimon-story-time-stranger) | 0 | 0 | 0 | 2 | 0 | `game` |
+| [EA SPORTS FC 27](#ea-sports-fc-27) | 7 | 0 | 0 | 0 | 1 | `build` → `engine`, `build` → `game` |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
@@ -318,6 +321,23 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
 - **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
+
+### EA SPORTS FC 27
+
+[EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md), `0100C49025D3E000`, [patches.py](../../dm/games/0100C49025D3E000/patches.py).
+
+- **`build` → `engine`**, rendering, blocked: one Frostbite game here, and no function-matched rule for the constructor yet, judgement: the renderer NRO's swapchain size rows follow the display size (key page words). Frostbite's SwapChainNvn code, which its other games ship; the rows are this NRO's own instructions
+- **`build` → `game`**, rendering, gap, judgement: FC 27's renderer NRO: the key page words its swapchain cuts read the size from (hle_nro.c). The host fills the words the rewriter's cuts load; they only mean something to that NRO's rewritten build
+
+- **1.8d.6523 `nro0`** `d924da0d…` ([patches.py:13](../../dm/games/0100C49025D3E000/patches.py#L13))
+  - cut `+0x7a310`: swapchain size from the key page: constructor, width: cbz w8 (the 1280 default) → ldr w8, [key page +0x80]
+  - cut `+0x7a314`: swapchain size from the key page: constructor: ldr w8,[x19,#0x10] → str w8,[x19,#0xc]
+  - cut `+0x7a318`: swapchain size from the key page: constructor, height: cbz w8 (the 720 default) → ldr w8, [key page +0x88]
+  - cut `+0x7a31c`: swapchain size from the key page: constructor: mov x0,x19 → str w8,[x19,#0x10] (x0 still holds the object)
+  - cut `+0x7ad00`: swapchain size from the key page: resize, width: cbz x1 → ldr x1, [key page +0x80]
+  - cut `+0x7ad18`: swapchain size from the key page: resize, height: mov x20,x2 → ldr x2, [key page +0x88]
+  - cut `+0x7ad1c`: swapchain size from the key page: resize: cbz x2 → mov x20,x2
+  - host [hle_nro.c:7](../../dm/host/hle_nro.c#L7): build check
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 
@@ -788,6 +808,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `launch_param hex:2d726567696f6e206575202d6c616e20656e202d73656c66726567696f6e204555202d7265736f6c7574696f6e2030202d75707363616c652030202d6c61756e63686572706174682030` | [METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)](../../dm/games/010099801C4FA001/README.md) | `game`, at goal | what another program of the application hands over with oe::ExecuteProgram, for one run alone |
 | `launch_param lang8 f32:0.5 f32:1` | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | `game`, at goal | what another program of the application hands over with oe::ExecuteProgram, for one run alone |
 | `launch_param lang8 f32:1.12 f32:2.24` | [Super Mario 3D All-Stars: Super Mario 64](../../dm/games/010049900F546001/README.md) | `game`, at goal | what another program of the application hands over with oe::ExecuteProgram, for one run alone |
+| `native_res 1` | [EA SPORTS FC 27](../../dm/games/0100C49025D3E000/README.md) | `game`, at goal | on only for a game checked at that size: whether another game sizes its picture from the display calls is not known |
 | `present_snap on` | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game` → `host`, gap | a setting the game was tested with: a default for every game after `regress.py check` on the games |
 | `programs 1=010049900F546001 2=010049900F546002` | [Super Mario 3D All-Stars](../../dm/games/010049900F546000/README.md) | `game`, at goal | which programs a game has that this host can run: a fact of its files, the profiles that exist for them |
 | `programs 1=010099801C4FA001` | [METAL GEAR SOLID: Peace Walker - Master Collection Version](../../dm/games/010099801C4FA000/README.md) | `game`, at goal | which programs a game has that this host can run: a fact of its files, the profiles that exist for them |

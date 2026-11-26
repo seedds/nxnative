@@ -45,6 +45,19 @@ static void roundtrip(const char *tag, int target, int fmt, uint32_t w, uint32_t
     free(st);
 }
 
+typedef struct { const uint8_t *base; uint8_t *seen; uint64_t size; int bad; uint64_t calls; } visit_ctx;
+static int visit_mark(const uint8_t *p, size_t n, void *arg) {
+    visit_ctx *c = arg; c->calls++;
+    if (p < c->base || (uint64_t)(p - c->base) > c->size || n > c->size - (uint64_t)(p - c->base)) { c->bad = 1; return 1; }
+    uint64_t off = (uint64_t)(p - c->base);
+    for (size_t i = 0; i < n; i++) {
+        if (c->seen[off + i]) { c->bad = 1; return 1; }
+        c->seen[off + i] = 1;
+    }
+    return 0;
+}
+static int visit_stop(const uint8_t *p, size_t n, void *arg) { (void)p; (void)n; (*(uint64_t *)arg)++; return 1; }
+
 // Compare both copy directions against byte addresses, independently of move()'s segment arithmetic.
 // Comparing all storage bytes and padded rows also checks that tails leave unrelated data untouched.
 static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
@@ -54,14 +67,24 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
     nvn_texlayout L; nvn_tex_layout(d, &L);
     size_t pitch = rb + 1 + (rnd() & 31), nlin = pitch * rows * slices, nst = L.size + 32;
     uint8_t *storage = malloc(nst), *expected = malloc(nst), *linear = malloc(nlin + 32), *out = malloc(nlin + 32);
+    uint8_t *expected_seen = calloc(L.size, 1), *got_seen = calloc(L.size, 1);
     for (size_t i = 0; i < nst; i++) storage[i] = rnd();
     memset(linear, 0xAB, nlin + 32); memset(out, 0xAB, nlin + 32);
     uint32_t lb = nvn_tex_level_gobs(d, level) * 64;
     if (lb < rb) lb = rb;
-    for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
-        linear[((size_t)z * rows + y) * pitch + x] = storage[base + nvn_bl_offset(x, y, z, lb, rows, th, td, nvn_gob_order(d))];
+    for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++) {
+        uint64_t off = base + nvn_bl_offset(x, y, z, lb, rows, th, td, nvn_gob_order(d));
+        linear[((size_t)z * rows + y) * pitch + x] = storage[off];
+        expected_seen[off] = 1;
+    }
     CHECK(!nvn_deswizzle(d, level, layer, storage, out, pitch) && !memcmp(linear, out, nlin + 32),
           "D read differs target %d format %#x flags %#x mip %u layer %u", d->target, d->format, d->flags, level, layer);
+    visit_ctx vc = {storage, got_seen, L.size, 0, 0};
+    CHECK(!nvn_deswizzle_visit(d, level, layer, storage, visit_mark, &vc) && !vc.bad && !memcmp(got_seen, expected_seen, L.size),
+          "D visit differs target %d format %#x flags %#x gob %u mip %u layer %u", d->target, d->format, d->flags, d->gob_order, level, layer);
+    uint64_t stop_calls = 0;
+    CHECK(nvn_deswizzle_visit(d, level, layer, storage, visit_stop, &stop_calls) == 1 && stop_calls == 1,
+          "D visit early stop target %d format %#x mip %u layer %u", d->target, d->format, level, layer);
     for (size_t i = 0; i < nlin; i++) linear[i] = rnd();
     memcpy(expected, storage, nst);
     for (uint32_t z = 0; z < slices; z++) for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++)
@@ -72,7 +95,7 @@ static void differential(const nvn_texdesc *d, unsigned level, unsigned layer) {
           "D short source pitch accepted");
     CHECK(nvn_deswizzle(d, level, layer, storage, out, rb - 1) == -1,
           "D short destination pitch accepted");
-    free(storage); free(expected); free(linear); free(out);
+    free(storage); free(expected); free(linear); free(out); free(expected_seen); free(got_seen);
 }
 
 static void differential_shapes(void) {
@@ -88,6 +111,7 @@ static void differential_shapes(void) {
         if (d.target == 9) d.depth = 12;
         if ((i / 8) & 1) d.pkg_layout = 1 + (rnd() % 4) + (d.target == 2 ? (rnd() % 3) * 16 : 0);
         if ((i / 16) & 1) d.flags = 0x20;
+        d.gob_order = (uint16_t)((i / 32) & 1);
         nvn_texlayout L; nvn_tex_layout(&d, &L);
         for (unsigned l = 0; l < d.levels; l++) {
             differential(&d, l, L.layers - 1); cases++;
@@ -96,7 +120,14 @@ static void differential_shapes(void) {
     // Sparse levels wide enough for padded GOB columns, followed by their mip tails.
     nvn_texdesc sparse = {1, 0x7D, 0x20, 0, 1024, 1024, 1, 5, 0, 0, 0};
     for (unsigned l = 0; l < sparse.levels; l++) { differential(&sparse, l, 0); cases++; }
-    printf("  D %u layouts: both directions equal byte-address oracle, including pitch padding and tails\n", cases);
+    // Dense unpadded levels (fast path in nvn_deswizzle_visit) in both GOB orders, 2D and 3D.
+    nvn_texdesc dense2d = {1, 0x2E, 0, 0, 64, 64, 1, 1, 0, 0, 0};
+    differential(&dense2d, 0, 0); cases++;
+    dense2d.gob_order = 1; differential(&dense2d, 0, 0); cases++;
+    nvn_texdesc dense3d = {2, 0x29, 0, 0, 16, 16, 16, 1, 0, 0, 0};
+    differential(&dense3d, 0, 0); cases++;
+    dense3d.gob_order = 1; differential(&dense3d, 0, 0); cases++;
+    printf("  D %u layouts: both directions and visit equal byte-address oracle, including pitch padding and tails\n", cases);
 }
 
 int main(void) {
@@ -115,6 +146,11 @@ int main(void) {
         uint8_t storage[2048] = {0}, pixels[1024] = {0};
         CHECK(nvn_deswizzle(&d, 0, 0, storage, pixels, 64) == -1,
               "L linear render target must not be deswizzled");
+        uint64_t stop_calls = 0;
+        CHECK(nvn_deswizzle_visit(&d, 0, 0, storage, visit_stop, &stop_calls) == -1 && stop_calls == 0,
+              "L linear render target must not be visited");
+        CHECK(nvn_deswizzle_visit(&d, 0, 0, storage, NULL, NULL) == -1,
+              "L visit refuses NULL callback");
         d.stride = 0; nvn_tex_layout(&d, &L);
         CHECK(L.size == 2048 && L.align == 128, "L implicit render target stride must align to 128");
         d.flags |= 0x10; nvn_tex_layout(&d, &L);

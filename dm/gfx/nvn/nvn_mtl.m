@@ -5279,27 +5279,52 @@ static int storage_float_size(MTLPixelFormat pf) {   // element size in bytes, 0
         default: return 0;
     }
 }
-static int storage_has_nonfinite(const tex_t *t, MTLPixelFormat pf) {
-    int size = storage_float_size(pf);
-    if (!size) return 0;
-    const uint8_t *p = t->mem;
+static int span_has_nonfinite(const uint8_t *p, size_t n, void *ctx) {
+    MTLPixelFormat pf = *(const MTLPixelFormat *)ctx;
     if (pf == MTLPixelFormatRG11B10Float) {
-        for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+        for (size_t i = 0; i + 4 <= n; i += 4) {
             uint32_t v; memcpy(&v, p + i, 4);
             if (((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31) return 1;
         }
         return 0;
     }
-    if (size == 2) {
-        for (size_t i = 0; i + 2 <= t->L.size; i += 2) {
+    if (storage_float_size(pf) == 2) {
+        for (size_t i = 0; i + 2 <= n; i += 2) {
             uint16_t v; memcpy(&v, p + i, 2);
             if ((v & 0x7c00) == 0x7c00) return 1;
         }
         return 0;
     }
-    for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+    for (size_t i = 0; i + 4 <= n; i += 4) {
         uint32_t v; memcpy(&v, p + i, 4);
         if ((v & 0x7f800000) == 0x7f800000) return 1;
+    }
+    return 0;
+}
+static int storage_has_nonfinite(const tex_t *t, id<MTLTexture> mt) {
+    MTLPixelFormat pf = mt.pixelFormat;
+    if (!storage_float_size(pf)) return 0;
+    if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) {
+        int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+        if (!bpb || bw != 1 || bh != 1) return 0;
+        uint32_t w, h, z; tex_lsize(t, 0, &w, &h, &z);
+        size_t pitch = (size_t)w * (size_t)bpb, srow = tex_linear_row(t);
+        if (z != 1 || srow < pitch || (uint64_t)srow * h > t->L.size) return 0;
+        const uint8_t *p = t->mem;
+        for (uint32_t r = 0; r < h; r++)
+            if (span_has_nonfinite(p + (size_t)r * srow, pitch, &pf)) return 1;
+        return 0;
+    }
+    unsigned levels = (unsigned)mt.mipmapLevelCount;
+    unsigned max_levels = t->d.levels ? t->d.levels : 1;
+    if (levels > max_levels) levels = max_levels;
+    unsigned layers = t->L.layers ? t->L.layers : 1;
+    for (unsigned l = 0; l < levels; l++) {
+        for (unsigned y = 0; y < layers; y++) {
+            int rc = nvn_deswizzle_visit(&t->d, l, y, t->mem, span_has_nonfinite, &pf);
+            if (rc > 0) return 1;
+            if (rc < 0) return 0;
+        }
     }
     return 0;
 }
@@ -5315,7 +5340,7 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread() || !mem_any(t->mem, t->L.size)) return 0;   // the upload batch belongs to the submit thread
     static int stale_keep = -1; if (stale_keep < 0) { const char *e = getenv("DM_NVN_STALE_FLOAT"); stale_keep = e && atoi(e) == 1; }
-    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt.pixelFormat)) {
+    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt)) {
         static uint64_t ns;
         if (ns++ < 8 || !(ns & (ns - 1))) MLOG("initial content: ser=%llu %ux%ux%u format %#x: its storage holds non-finite float texels; starts from zeros (%llu so far; DM_NVN_STALE_FLOAT=1 keeps it)",
                                                (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)ns);

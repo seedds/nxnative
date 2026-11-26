@@ -30,3 +30,7 @@ uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, u
 int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer,
                        uint32_t *row_bytes, uint32_t *rows, uint32_t *slices,
                        uint64_t *base, unsigned *tileH, unsigned *tileD, uint32_t *bpb);
+// Visit every addressable byte of level and layer as contiguous spans in storage (unpadded dense levels as one span; padded levels as 16-byte GOB segments plus clipped row tails).
+// Each span preserves 2-, 4-, 8-, and 16-byte element alignment whenever row_bytes is a multiple of the element size. Stops early and returns 1 when fn returns non-zero; returns 0 if all spans return 0, or -1 on unsupported geometry.
+int nvn_deswizzle_visit(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage,
+                        int (*fn)(const uint8_t *p, size_t n, void *ctx), void *ctx);

@@ -639,6 +639,7 @@ static int geo_mesh_take(__unsafe_unretained id<MTL4RenderCommandEncoder> en) {
 // The draw itself (draw() calls it with its pipeline, the vertex and fragment arguments and the pulling layout bound): the kernel's arguments, with vb_info
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
 static int geo_args_keep_on(void) { static int keep = -1; if (keep < 0) { const char *e = getenv("DM_NVN_GEO_ARGS_KEEP"); keep = !(e && !strcmp(e, "0")); } return keep; }
+static int geo_sblen_patch_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_GEO_SBLEN_PATCH"); on = !(e && !strcmp(e, "0")); } return on; }
 // The geometry stage's block of the last mesh draw (geo_mesh_encode) and the stage's binding generation when that draw ended (geo_mesh_draw): the next mesh draw of the same lean
 // shader with the generation unchanged patches that block (g_args_geo_only) instead of encoding it in full. DM_NVN_GEO_ARGS_KEEP=0 encodes it in full every time
 static struct { const void *sh, *ab; size_t off; uint64_t gen; } g_gme;
@@ -648,7 +649,9 @@ static void geo_mesh_encode(__unsafe_unretained id<MTL4RenderCommandEncoder> en)
     uint32_t *ip = (uint32_t *)(void *)at.cpu; ip[0] = 0; ip[1] = 1; ip[2] = 0; ip[3] = 0; ip[4] = tris; ip[5] = 0; ip[6] = 0; ip[7] = 0;
     uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = at.gpu;
     __unsafe_unretained NvShader *lean = g_geo_mesh.lean;
-    int geo_patch = geo_args_keep_on() && g_gme.sh == (__bridge const void *)lean && g_gme.gen == g_args_ngen[2] && !lean->rf.sblen && lean->ab_buf && (__bridge const void *)lean->ab_buf == g_gme.ab && lean->ab_off == g_gme.off;
+    if (lean->rf.sblen && !lean->ab_gnp) ab_gix_build(lean);
+    int sblen_ok = !lean->rf.sblen || (geo_sblen_patch_on() && lean->ab_sblen_ok && lean->ab_sblen_cpu && lean->ab_sblen_epoch == g_arena_epoch);
+    int geo_patch = geo_args_keep_on() && g_gme.sh == (__bridge const void *)lean && g_gme.gen == g_args_ngen[2] && sblen_ok && lean->ab_buf && (__bridge const void *)lean->ab_buf == g_gme.ab && lean->ab_off == g_gme.off;
     if (!geo_patch) args_dirty(2);
     g_args_mesh = GEO_MESH_GS_SLOT; g_args_geo_only = geo_patch; encode_args(en, lean, 2, 0); g_args_geo_only = 0; g_args_mesh = 0; args_dirty(2);
     g_gme.sh = (__bridge const void *)lean; g_gme.ab = (__bridge const void *)lean->ab_buf; g_gme.off = lean->ab_off; g_gme.gen = 0;   // the generation once the draw ends (geo_mesh_draw)

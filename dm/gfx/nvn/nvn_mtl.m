@@ -8463,6 +8463,7 @@ static void shmap_read(void) {
     uint8_t has_geo_bind;   // geo_mesh_draw: 0 not decided, 1 no NVN_RB_GEOMETRY binding, 2 has NVN_RB_GEOMETRY binding
     uint8_t vc_tf, vc_any; uint64_t vc_vgen;   // vconv_bind memo: keyed by g_vattr_gen and tf!=0
     uint32_t ab_sbw_pgen; uint64_t ab_sbw_rcgen, ab_sbw_drwgen;   // g_args_geo_only: skip unchanged SBUFP slots while submission/rc/drain gens match
+    const uint32_t *ab_sblen_cpu; uint64_t ab_sblen_epoch; uint8_t ab_sblen_aid, ab_sblen_ok;   // g_args_geo_only: cached sblen table CPU ptr + epoch + SBLEN aid (ab_sblen_ok: 1 when all sbx bindings are SBUFP)
     __unsafe_unretained id<MTLBuffer> ab_buf; uint64_t ab_gpu; size_t ab_off; const uint8_t *ab_cpu; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen, ab_gen, ab_ugen;   // ab_gen / ab_ugen: the stage's binding generations it was written at (g_args_gen); ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)   // ab_cpu: the block's CPU address, so a patch copies it with no -contents (which ARC wraps in a retain and autorelease of the buffer: returns an inner pointer)
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
@@ -16791,11 +16792,14 @@ static uint64_t cbsize_table(int nvn_stage, __strong id<MTLBuffer> *use) { __uns
 // there, and the other memory's bytes became hot surfel colours that the GI spread through the R53 hangar (GitHub issue #2618). So the translator compares each access with the memory
 // bound (Ryujinx TranslationFlags.MetalStorageBounds), from the shader's length table (dmsh_abi.h DMSH_SBLEN_BANK): the binding's words before the address, then those plus the
 // words from it to the buffer's end. Out of it a load gives 0 and a store or an atomic is dropped, as on an unmapped page. buf nil: a dummy, nothing readable
-static void sblen_put(uint32_t *t, const nvn_rbind *b, id<MTLBuffer> buf, uint64_t off) {
+static inline void sblen_put_len(uint32_t *t, const nvn_rbind *b, uint64_t len, uint64_t off) {
     if (!t || !b->sbx) return;
-    uint64_t len = buf ? buf.length : 0, before = off <= len ? off >> 2 : 0, total = off <= len ? before + ((len - off) >> 2) : 0;
+    uint64_t before = off <= len ? off >> 2 : 0, total = off <= len ? before + ((len - off) >> 2) : 0;
     if (total > UINT32_MAX) { total = UINT32_MAX; if (before > total) before = total; }   // a binding is far smaller than 16 GB; kept inside the u32 the comparison wraps at
     t[2 * (b->sbx - 1)] = (uint32_t)before; t[2 * (b->sbx - 1) + 1] = (uint32_t)total;
+}
+static void sblen_put(uint32_t *t, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> buf, uint64_t off) {
+    sblen_put_len(t, b, buf ? buf.length : 0, off);
 }
 // Whether a block of sh can be patched when only what the uniform bindings point at changed: every binding that reads through a uniform buffer is a plain CBUF slot (no handles or
 // addresses read out of one: TEXU, SAMPU, IMGU, TBUFU, TEXH, SAMPH, SBUFU, UBOP), or the slots' size table (CBSIZE, made from the bindings alone), or the buffer images' offsets (TBIAS, made from the images, which such a change leaves as they are), and no slot is registered by its
@@ -16897,12 +16901,16 @@ __attribute__((noinline)) static void ab_ix_build(__unsafe_unretained NvShader *
     sh->ab_np = n > (int)sizeof sh->ab_ix ? 0xff : (uint8_t)(n + 1);
 }
 __attribute__((noinline)) static void ab_gix_build(__unsafe_unretained NvShader *sh) {
-    int n = 0;
-    for (int i = 0; i < sh->rf.nb && n <= (int)sizeof sh->ab_gix; i++) {
+    int n = 0, sblen_aid = 255, sblen_bad = 0;
+    for (int i = 0; i < sh->rf.nb; i++) {
         int k = sh->rf.b[i].kind;
+        if (k == NVN_RB_SBLEN) { if (sh->rf.b[i].aid < 255) sblen_aid = sh->rf.b[i].aid; else sblen_bad = 1; }
+        if (sh->rf.b[i].sbx && k != NVN_RB_SBUFP) sblen_bad = 1;
         if (k == NVN_RB_CBUF || k == NVN_RB_CBSIZE || k == NVN_RB_GEOMETRY || k == NVN_RB_SBUFP || k == NVN_RB_UBOP) { if (n < (int)sizeof sh->ab_gix) sh->ab_gix[n] = (uint8_t)i; n++; }
     }
     sh->ab_gnp = n > (int)sizeof sh->ab_gix ? 0xff : (uint8_t)(n + 1);
+    sh->ab_sblen_aid = (uint8_t)sblen_aid;
+    sh->ab_sblen_ok = (sh->rf.sblen && !sblen_bad && sblen_aid < 255) ? 1 : 0;
 }
 __attribute__((noinline)) static int encode_args_slow(__unsafe_unretained id<MTLCommandEncoder> en, __unsafe_unretained NvShader *sh, int nvn_stage, int metal_vertex, const rt_argument_values *rt, NSUInteger arg_len);
 __attribute__((noinline)) static int encode_args_patch_cb(__unsafe_unretained id<MTLCommandEncoder> en, __unsafe_unretained NvShader *sh, int nvn_stage, int metal_vertex) {
@@ -17012,6 +17020,12 @@ static int encode_args_full(__unsafe_unretained id<MTLCommandEncoder> en, __unsa
         int cbs_dirty = !cbsc_on() || sh->ab_cbs_gen != g_cbsize_gen[nvn_stage] || sh->ab_cbs_epoch != g_arena_epoch;
         int use_ix = cb_patch_ix_on();
         if (use_ix && !sh->ab_gnp) ab_gix_build(sh);
+        uint32_t *sblen = NULL;
+        if (sh->rf.sblen) {
+            __unsafe_unretained id<MTLBuffer> sb; arena_at sat = arena_take_u(DMSH_SBLEN_SLOTS * 8u, &sb); (void)sb;
+            sblen = (uint32_t *)(void *)sat.cpu; memcpy(sblen, sh->ab_sblen_cpu, DMSH_SBLEN_SLOTS * 8u);
+            p[sh->ab_sblen_aid] = sat.gpu; za_check(sat.gpu, "argument block address slot", sh->ab_sblen_aid);
+        }
         int cnt = (use_ix && sh->ab_gnp != 0xff) ? sh->ab_gnp - 1 : sh->rf.nb;
         const uint8_t *ix = (use_ix && sh->ab_gnp != 0xff) ? sh->ab_gix : NULL;
         for (int j = 0; j < cnt; j++) { const nvn_rbind *b = &sh->rf.b[ix ? ix[j] : j]; __unsafe_unretained id<MTLBuffer> use;
@@ -17023,28 +17037,35 @@ static int encode_args_full(__unsafe_unretained id<MTLCommandEncoder> en, __unsa
                 int reg = b->reg;
                 if (b->kind == NVN_RB_UBOP && keep_ok && reg < 16 && g_ubo_sgen[nvn_stage][reg] <= kept_ugen) continue;
                 if (b->kind == NVN_RB_SBUFP && ssbo_same_env && reg < 16 && g_ssbo_sgen[nvn_stage][reg] <= kept_gen) continue;
-                const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL; void *mb; uint64_t mo, gpu;
+                const p_bind_buf *u = reg < 16 ? (b->kind == NVN_RB_UBOP ? &S.ubo[nvn_stage][reg] : &S.ssbo[nvn_stage][reg]) : NULL; void *mb; uint64_t mo = 0, gpu = 0;
                 static struct { uint64_t gen; pc_ent pc; } g_sbm[NVN_RESOURCE_STAGES][16];
                 if (u && u->addr) {
-                    uint64_t sz = u->size ? u->size : 1, wlen = 0; int ok = 0;
+                    uint64_t sz = u->size ? u->size : 1, wlen = 0, blen = 0; int ok = 0;
                     int sm = vbmemo_on() && b->kind == NVN_RB_SBUFP && reg < 16 && pc_tp() == g_pc_rep_tp;
                     if (sm && g_sbm[nvn_stage][reg].gen == pgen && u->addr >= g_sbm[nvn_stage][reg].pc.lo && u->addr < g_sbm[nvn_stage][reg].pc.hi && pc_holds(&g_sbm[nvn_stage][reg].pc, u->addr, sz)) {
-                        mo = u->addr - g_sbm[nvn_stage][reg].pc.base; gpu = g_sbm[nvn_stage][reg].pc.gpu + mo;
-                        wlen = u->size ? u->size : (g_sbm[nvn_stage][reg].pc.blen > mo ? g_sbm[nvn_stage][reg].pc.blen - mo : 0);
+                        mo = u->addr - g_sbm[nvn_stage][reg].pc.base; gpu = g_sbm[nvn_stage][reg].pc.gpu + mo; blen = g_sbm[nvn_stage][reg].pc.blen;
+                        wlen = u->size ? u->size : (blen > mo ? blen - mo : 0);
                         ok = 1;
                     } else if (mtl_gpu_addr(u->addr, sz, &mb, &mo, &gpu)) {
-                        if (sm) { const pc_ent *c = pc_get(u->addr, sz); if (c && c->buf == (__bridge id<MTLBuffer>)mb) { g_sbm[nvn_stage][reg].gen = pgen; g_sbm[nvn_stage][reg].pc = *c; } else g_sbm[nvn_stage][reg].pc.hi = 0; }
+                        if (sm) { const pc_ent *c = pc_get(u->addr, sz); if (c && c->buf == (__bridge id<MTLBuffer>)mb) { g_sbm[nvn_stage][reg].gen = pgen; g_sbm[nvn_stage][reg].pc = *c; blen = c->blen; } else { g_sbm[nvn_stage][reg].pc.hi = 0; blen = ((__bridge id<MTLBuffer>)mb).length; } }
+                        else blen = ((__bridge id<MTLBuffer>)mb).length;
                         wlen = sbw_len(u->size, mb, mo); ok = 1;
+                    } else if (u->size > 1 && mtl_gpu_addr(u->addr, 1, &mb, &mo, &gpu)) {
+                        blen = ((__bridge id<MTLBuffer>)mb).length; wlen = sbw_len(u->size, mb, mo); ok = 1;
                     }
-                    if (ok) { p[b->aid] = gpu; if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) sbw_note(u->addr, wlen, SBW_GPU); }
-                    else p[b->aid] = dummy_buf_gpu();
-                } else p[b->aid] = dummy_buf_gpu(); }
+                    if (ok) {
+                        p[b->aid] = gpu;
+                        if (sblen && b->sbx) sblen_put_len(sblen, b, blen, mo);
+                        if (b->rw && b->kind == NVN_RB_SBUFP && !(reg < 32 && (sh->sb_ro >> reg & 1))) { uint64_t room = blen > mo ? blen - mo : 0; sbw_note(u->addr, MIN(wlen, room), SBW_GPU); }
+                    } else { p[b->aid] = dummy_buf_gpu(); if (sblen && b->sbx) sblen_put_len(sblen, b, 0, 0); }
+                } else { p[b->aid] = dummy_buf_gpu(); if (sblen && b->sbx) sblen_put_len(sblen, b, 0, 0); } }
             else continue;
             if (g_args_mesh && nvn_stage == 2 && b->kind == NVN_RB_GEOMETRY && (b->reg < 3 || b->reg == 4)) continue;   // mesh-local scratch, as args_check_addresses skips it
             za_check(p[b->aid], "argument block address slot", b->aid); }
         bind_args(en, nvn_stage, metal_vertex, ab, ab_gpu, off, sh->rf.abi);
         sh->ab_buf = ab; sh->ab_gpu = ab_gpu; sh->ab_off = off; sh->ab_cpu = (const uint8_t *)p; sh->ab_ugen = g_args_ugen[nvn_stage]; sh->ab_gen = g_args_gen[nvn_stage]; sh->ab_cbs_gen = g_cbsize_gen[nvn_stage]; sh->ab_cbs_epoch = g_arena_epoch;
         sh->ab_sbw_pgen = g_pend_gen; sh->ab_sbw_rcgen = g_rc_note_gen; sh->ab_sbw_drwgen = g_drw_drain_gen;
+        if (sblen) { sh->ab_sblen_cpu = sblen; sh->ab_sblen_epoch = g_arena_epoch; }
         g_args_wrote[nvn_stage] = g_args_seq;
         g_stat_args_patch++; g_args_geo_patch++;
         return 1;
@@ -17071,8 +17092,8 @@ __attribute__((noinline)) static int encode_args_slow(__unsafe_unretained id<MTL
     uint32_t *tbias = NULL; uint64_t tbias_gpu = 0; __strong id<MTLBuffer> tbias_buf = nil;
     if (sh->rf.tbias_n) { arena_at at = arena_take(sh->rf.tbias_n * 4u, &tbias_buf); tbias = (uint32_t *)(void *)at.cpu; tbias_gpu = at.gpu; memset(tbias, 0, sh->rf.tbias_n * 4u); }
     // The length table of the bounded storage buffers (dmsh_abi.h DMSH_SBLEN_BANK, sblen_put), filled as they are encoded; 0 for a slot with no buffer, which reads nothing
-    uint32_t *sblen = NULL; uint64_t sblen_gpu = 0; __strong id<MTLBuffer> sblen_buf = nil;
-    if (sh->rf.sblen) { arena_at at = arena_take(DMSH_SBLEN_SLOTS * 8u, &sblen_buf); sblen = (uint32_t *)(void *)at.cpu; sblen_gpu = at.gpu; memset(sblen, 0, DMSH_SBLEN_SLOTS * 8u); }
+    uint32_t *sblen = NULL; uint64_t sblen_gpu = 0; __unsafe_unretained id<MTLBuffer> sblen_buf = nil;
+    if (sh->rf.sblen) { arena_at at = arena_take_u(DMSH_SBLEN_SLOTS * 8u, &sblen_buf); sblen = (uint32_t *)(void *)at.cpu; sblen_gpu = at.gpu; memset(sblen, 0, DMSH_SBLEN_SLOTS * 8u); }
     uint64_t pgen = pool_gen_cur();
     os_unfair_lock_lock(&g_rmu);   // The texture / sampler registration tables may be being grown or rewritten by the game thread
     for (int i = 0; i < sh->rf.nb; i++) {
@@ -17435,6 +17456,7 @@ __attribute__((noinline)) static int encode_args_slow(__unsafe_unretained id<MTL
     bind_args(en, nvn_stage, metal_vertex, ab, at.gpu, off, sh->rf.abi);
     sh->ab_buf = ab; sh->ab_gpu = at.gpu; sh->ab_off = off; sh->ab_cpu = (const uint8_t *)at.cpu; sh->ab_pass = g_pass.serial; sh->ab_binst = g_draw_binst; sh->ab_pgen = g_psnap_gen; sh->ab_gen = g_args_gen[nvn_stage]; sh->ab_ugen = g_args_ugen[nvn_stage]; sh->ab_cbs_gen = g_cbsize_gen[nvn_stage]; sh->ab_cbs_epoch = g_arena_epoch;
     sh->ab_sbw_pgen = g_pend_gen; sh->ab_sbw_rcgen = g_rc_note_gen; sh->ab_sbw_drwgen = g_drw_drain_gen;
+    sh->ab_sblen_cpu = sblen; sh->ab_sblen_epoch = g_arena_epoch;
     g_args_wrote[nvn_stage] = g_args_seq;
     g_stat_args_enc++;
     return 1;

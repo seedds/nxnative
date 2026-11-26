@@ -216,6 +216,7 @@ DM_NVN_GEOMETRY_PACK	diagnostic	legacy uses the serial block-prefix scan for com
 DM_NVN_GEOMETRY_QUERY_RUN	switch	0 prevents geometry runs across samples-passed query reports/resets; default retains independent captures while queries replay at their raster positions.
 DM_NVN_GEOMETRY_WAIT	diagnostic	always drains before indexed geometry preparation for comparison; default waits only for possible writes to CPU assembly inputs.
 DM_NVN_GEO_ARGS_KEEP	switch	`0` invalidates every stage's argument blocks after each mesh geometry draw; by default only the geometry stage and a vertex shader with a geometry binding are encoded again
+DM_NVN_GEO_SBLEN_PATCH	switch	`0` encodes a mesh geometry lean shader's argument block in full when it carries a storage-buffer length table (`NVN_RB_SBLEN`); by default `g_args_geo_only` patches the length table in place from the cached buffer lengths
 DM_NVN_GEO_HOIST	switch	`0` draws each geometry draw's capture and kernel at its own place, ending the render pass; by default a run of lean geometry draws is prepared before the pass opens and only their rasters are drawn in it (`geo_run_walk`)
 DM_NVN_GEO_LEAN	switch	`0` draws passthrough geometry shaders through their full kernel and reader, as before; by default a lean kernel culls and the program's own vertex shader draws (`nvn_geometry.inc`)
 DM_NVN_GEO_MESH	switch	`0` draws passthrough geometry pairs that have a mesh library (the prewarm list's `G` rows, `geo_mesh.tsv`) through the compute path; by default they are mesh draws in the render pass (`geo_mesh_draw`)

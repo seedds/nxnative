@@ -12334,7 +12334,10 @@ static int arch_retire(NSString *p) {
 // A pipeline from the archive: the file the index names for its key alone, else each file without a complete index (the bundle first among the p files, which plain skips: a base
 // with a vertex layout and a compute pipeline are never in one). *from_run: it came from a run file this compaction takes, so the compacting prewarm captures it again
 static int arch_compact_takes(id<MTL4Archive> a);
+static _Atomic uint64_t g_last_arch_ns;
+static _Thread_local int t_in_bg_demand;
 static id arch_lookup(MTL4PipelineDescriptor *d, int plain, int *from_run) {
+    if (!t_in_bg_demand) atomic_store_explicit(&g_last_arch_ns, now_ns(), memory_order_relaxed);
     if (from_run) *from_run = 0;
     int compute = [d isKindOfClass:MTL4ComputePipelineDescriptor.class];
     id (^ask)(id<MTL4Archive>) = ^id(id<MTL4Archive> a) {
@@ -13847,6 +13850,22 @@ static dispatch_queue_t pp_bg_queue(void) {
         for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.pso-bg", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
     return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
 }
+// Quiet window (ms) before non-urgent hybrid stand-in background builds (pso_pend_demand) start compiling: concurrent MTL4Compiler compiles contend with
+// MTL4Archive lookups on the submit thread (0.3 ms idle vs 15-140 ms under compile load). Separate queues keep geometry mesh builds and shader prefetches on pp_bg_queue unblocked.
+static int pp_bg_delay_ms(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_PSO_BG_DELAY_MS"); v = e ? atoi(e) : 150; if (v < 0) v = 0; }
+    return v;
+}
+static dispatch_queue_t pp_demand_queue(void) {
+    static dispatch_queue_t q[8]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
+    dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
+        const char *e = getenv("DM_PSO_BG_WORKERS");
+        n = e && atoi(e) > 0 ? atoi(e) : (pp_bg_delay_ms() > 0 ? (pc / 2 < 2 ? 1 : 2) : pc / 2);
+        if (n > 8) n = 8; if (n < 1) n = 1;
+        for (int i = 0; i < n; i++) q[i] = dispatch_queue_create("dm.nvn.pso-demand", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0)); });
+    return q[atomic_fetch_add(&rr, 1) % (unsigned)n];
+}
 // Draws that waited for their pipeline on the submit thread, by why no stand-in served them: 0 hybrid pipelines off, 1 merged pass or readable-tile fragment, 2 diagnostic fragment,
 // 3 no pulling entry (layer-writing or transform feedback vertex shader, or no pulling library), 4 pulling base not made yet; count and time (prediction walks left out)
 static uint64_t g_pw_n[5], g_pw_ns[5];
@@ -13868,16 +13887,32 @@ static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
     g_pp[slot].order = ++g_pp_kicked; *gen = ++g_pp[slot].gen;
     return slot;
 }
-static void pso_pend_start(int slot, uint32_t gen, MTLRenderPipelineDescriptor *d, int off, dispatch_queue_t q) {
+static void pso_pend_start_ex(int slot, uint32_t gen, MTLRenderPipelineDescriptor *d, int off, dispatch_queue_t q, int delay_ms) {
     pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) { g_pp[slot].d = d; g_pp[slot].off = off; } pthread_mutex_unlock(&g_pp_mu);   // only the submit thread takes a queued build, so none has yet
-    dispatch_async(q, ^{ @autoreleasepool {   // The global queues and pp_bg_queue do not drain worker temporaries after each build.
+    void (^work)(void) = ^{ @autoreleasepool {   // The global queues and pp_bg_queue do not drain worker temporaries after each build.
+        if (delay_ms > 0) {
+            uint64_t wait_ns = (uint64_t)delay_ms * 1000000ull;
+            for (int tries = 0; tries < 20; tries++) {
+                uint64_t last = atomic_load_explicit(&g_last_arch_ns, memory_order_relaxed), now = now_ns();
+                if (!last || now >= last + wait_ns) break;
+                uint64_t rem = last + wait_ns - now;
+                if (rem > wait_ns) rem = wait_ns;
+                struct timespec ts = {(time_t)(rem / 1000000000ull), (long)(rem % 1000000000ull)};
+                nanosleep(&ts, NULL);
+            }
+        }
         pthread_mutex_lock(&g_pp_mu);
         int go = g_pp[slot].used && g_pp[slot].gen == gen && !g_pp[slot].run; if (go) { g_pp[slot].run = 1; g_pp[slot].d = nil; }
         pthread_mutex_unlock(&g_pp_mu);
         if (!go) return;   // the draw made it itself
-        NSError *e = nil; id<MTLRenderPipelineState> ps = pso_build(d, off, &e);
+        NSError *e = nil; t_in_bg_demand = delay_ms > 0; id<MTLRenderPipelineState> ps = pso_build(d, off, &e); t_in_bg_demand = 0;
         pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) { g_pp[slot].ps = ps; g_pp[slot].done = 1; } g_pp_done_n++; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
-    } });
+    } };
+    if (delay_ms > 0) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delay_ms * NSEC_PER_MSEC), q, work);
+    else dispatch_async(q, work);
+}
+static void pso_pend_start(int slot, uint32_t gen, MTLRenderPipelineDescriptor *d, int off, dispatch_queue_t q) {
+    pso_pend_start_ex(slot, gen, d, off, q, 0);
 }
 // Admission of a build of d, the descriptor of k (spec as pso_pend_slot: 1 a speculative guess, which waits for no backlog in front of a demanded compile; 2 a later draw of
 // this submission as the scan met it, admitted whatever runs). Any thread (g_pp_mu)
@@ -13918,7 +13953,8 @@ static int pso_pend_demand(const pso_key *k, NvShader *vs, NvShader *fs) {
     if (hm_get_id(&g_pso, k)) return 0;
     pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, 0, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
-    pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), pso_off(k, fs, 0), pp_bg_queue());
+    atomic_store_explicit(&g_last_arch_ns, now_ns(), memory_order_relaxed);
+    pso_pend_start_ex(slot, gen, pso_desc(k, vs, fs, nil, 0), pso_off(k, fs, 0), pp_demand_queue(), pp_bg_delay_ms());
     return 1;
 }
 // Called by the submit thread: a build in the table is taken (waited for while its worker runs it; made here at once while it is still queued, so a draw that waits waits for its

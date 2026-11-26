@@ -23,6 +23,11 @@
 //        device's save newer: not sent that session, the next start sends it and keeps the cloud's in the backups ("cloud")
 //   (17) the cloud shows no save though this device synced one there (removed, wrong folder, or iCloud has not listed it yet): with a front end that asks,
 //        the report says conflict=1 cloud=0, the start sends nothing, nor does the launcher after the host; the player's local:none sends; no front end sends, as before
+//   (18) conflict cloud backup rotates to newest 10 and keeps user folders
+//   (19) a copy of the save at each start ("start"), sync on or off: one when the save changed since the newest copy, none when it did not, when DM_SAVE_BACKUPS=0,
+//        or when there is no save; the oldest beyond 10 go while sync's backups and player folders stay; an unwritable backups folder does not stop the game;
+//        with sync on, the copy is the save the game starts from (the cloud's when it came in); after a pull that did not finish, the copy is this device's save put back,
+//        and a save the mount refuses (a journal that cannot be put back or read) is not copied
 #include "../hle_fs.c"
 #include <ctype.h>
 #include <sys/wait.h>
@@ -45,12 +50,31 @@ static void set_mtime(const char *p, time_t t) { struct timeval tv[2] = {{t, 0},
 static time_t mtime_of(const char *p) { struct stat st; return stat(p, &st) ? 0 : st.st_mtimespec.tv_sec; }
 static int exists(const char *p) { return !access(p, F_OK); }
 
-// The newest backup of a save whose name ends in " <side>", "" when there is none
+static int is_side_backup(const char *name, const char *side) {
+    if (strlen(name) < 20) return 0;
+    const char *s = name + 19;
+    if (*s != ' ') return 0;
+    s++;
+    size_t sl = strlen(side);
+    if (strncmp(s, side, sl)) return 0;
+    if (!s[sl]) return 1;
+    if (s[sl] != ' ' || !s[sl + 1]) return 0;
+    for (s += sl + 1; *s; s++) if (!isdigit((unsigned char)*s)) return 0;
+    return 1;
+}
+static int cmp_backup_name(const char *a, const char *b) {
+    int c = strncmp(a, b, 19);
+    if (c) return c;
+    const char *sa = strrchr(a + 19, ' '), *sb = strrchr(b + 19, ' ');
+    unsigned long na = sa && isdigit((unsigned char)sa[1]) ? strtoul(sa + 1, NULL, 10) : 1;
+    unsigned long nb = sb && isdigit((unsigned char)sb[1]) ? strtoul(sb + 1, NULL, 10) : 1;
+    return na < nb ? -1 : na > nb ? 1 : strcmp(a, b);
+}
+// The newest backup of a save for `side` ("YYYY-MM-DD HH.MM.SS <side>" or with " <k>"), "" when there is none
 static void backup_of(const char *save, const char *side, char *out, size_t n) {
     char dir[1200]; snprintf(dir, sizeof dir, "%s-backups", save); out[0] = 0;
     DIR *d = opendir(dir); struct dirent *e; char best[256] = "";
-    size_t sl = strlen(side);
-    while (d && (e = readdir(d))) { size_t l = strlen(e->d_name); if (l > sl && e->d_name[l - sl - 1] == ' ' && !strcmp(e->d_name + l - sl, side) && strcmp(e->d_name, best) > 0) strlcpy(best, e->d_name, sizeof best); }
+    while (d && (e = readdir(d))) if (is_side_backup(e->d_name, side) && (!*best || cmp_backup_name(e->d_name, best) > 0)) strlcpy(best, e->d_name, sizeof best);
     if (d) closedir(d);
     if (*best) snprintf(out, n, "%s/%s", dir, best);
 }
@@ -100,8 +124,8 @@ static const char *choice_of(const char *side, const char *cf) {
 }
 static int backups(const char *save, const char *side) {   // how many backups of that side
     char dir[1200]; snprintf(dir, sizeof dir, "%s-backups", save);
-    int k = 0; DIR *d = opendir(dir); struct dirent *e; size_t sl = strlen(side);
-    while (d && (e = readdir(d))) { size_t l = strlen(e->d_name); k += l > sl && e->d_name[l - sl - 1] == ' ' && !strcmp(e->d_name + l - sl, side); }
+    int k = 0; DIR *d = opendir(dir); struct dirent *e;
+    while (d && (e = readdir(d))) k += is_side_backup(e->d_name, side);
     if (d) closedir(d);
     return k;
 }
@@ -117,16 +141,20 @@ int main(void) {
     snprintf(p, sizeof p, "%s/sub", P); mkd(p); snprintf(p, sizeof p, "%s/empty", P); mkd(p); snprintf(p, sizeof p, "%s_device", P); mkd(p);
     snprintf(p, sizeof p, "%s/a", P); put(p, "hello"); set_mtime(p, 1000000000);
     snprintf(p, sizeof p, "%s/sub/b", P); put(p, "xy"); setxattr(p, FS_GUEST_NAME, "B", 1, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000100);
+    snprintf(p, sizeof p, "%s/sub/.dm-case-1", P); put(p, "alias"); setxattr(p, FS_GUEST_NAME, "CaseFile", 8, 0, XATTR_NOFOLLOW); set_mtime(p, 1000000075);
     snprintf(p, sizeof p, "%s_device/d", P); put(p, "dev"); set_mtime(p, 1000000050);
-    CHECK(!ss_scan(P, &m) && m.files == 3 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 3 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
+    CHECK(!ss_scan(P, &m) && m.files == 4 && strlen(m.hash) == SS_HASH && m.saved == 1000000100, "scan: 4 files, a 32-digit hash, saved = the newest file's date (%d files, saved %lld)", m.files, (long long)m.saved);
     snprintf(bundle, sizeof bundle, "%s/pack/save.dmsync", root);
     CHECK(!ss_pack(P, "0100abc", bundle, &m2) && !strcmp(m2.hash, m.hash) && !strcmp(m2.title, "0100ABC"), "pack: the same hash as the scan, the title ID in capitals (%s)", m2.title);
-    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 3 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
+    CHECK(!ss_read(bundle, NULL, &m2) && !strcmp(m2.hash, m.hash) && m2.files == 4 && m2.saved == 1000000100 && !strcmp(m2.title, "0100ABC") && m2.device[0], "read: hash, files, date, title and device come back (from %s)", m2.device);
     snprintf(u, sizeof u, "%s/pack/out", root); mkd(u);
     CHECK(!ss_read(bundle, u, &m2), "unpack");
     snprintf(p, sizeof p, "%s/save/a", u); snprintf(q, sizeof q, "%s/save/sub/b", u);
-    char g[8] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    char g[16] = {0}; ssize_t gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
     CHECK(same(p, "hello") && same(q, "xy") && gl == 1 && g[0] == 'B', "files and the guest name (hle_fs.c's FS_GUEST_NAME) come back");
+    snprintf(q, sizeof q, "%s/save/sub/.dm-case-1", u);
+    memset(g, 0, sizeof g); gl = getxattr(q, FS_GUEST_NAME, g, sizeof g - 1, 0, XATTR_NOFOLLOW);
+    CHECK(same(q, "alias") && gl == 8 && !strcmp(g, "CaseFile"), "a .dm-case-1 alias round-trips its original guest name and contents");
     CHECK(mtime_of(p) == 1000000000, "a file's date comes back (%lld)", (long long)mtime_of(p));
     snprintf(p, sizeof p, "%s/save/empty", u); snprintf(q, sizeof q, "%s/save_device/d", u);
     struct stat st; CHECK(!stat(p, &st) && S_ISDIR(st.st_mode) && same(q, "dev"), "an empty folder and the device save come back");
@@ -190,7 +218,7 @@ int main(void) {
     snprintf(p, sizeof p, "%s.sync-tmp", A); CHECK(!exists(p), "nothing is left beside the save");
     snprintf(p, sizeof p, "%s/game.dat", B);
     CHECK(session(B, cloud, NULL, NULL) == 0 && same(p, "v1"), "the iPhone's first session brings it in");
-    snprintf(q, sizeof q, "%s-backups", B); CHECK(!exists(q), "with no save of its own, the iPhone keeps no backup");
+    CHECK(!backups(B, "local"), "with no save of its own, the iPhone keeps no local backup");
     CHECK(session(B, cloud, "game.dat", "v2") == 0 && cloud_has(cf, root, "game.dat", "v2"), "the iPhone saves: the cloud has its save");
 
     printf("(4) the cloud's changed\n");
@@ -450,6 +478,256 @@ int main(void) {
         CHECK(run(W, cloud6, NULL, NULL, "local:none", NULL, READABLE) == 0 && cloud_has(cf6, root, "game.dat", "w3"), "the player's local:none: this device's save is sent");
         unlink(hid); unlink(cf6); put(p, "w4");   // the cloud's file removed for good, and this device saves on
         CHECK(session(W, cloud6, NULL, NULL) == 0 && cloud_has(cf6, root, "game.dat", "w4"), "no front end asks: sent, as before");
+    }
+    printf("(18) conflict cloud backup rotates to newest 10 and keeps user folders\n");
+    {   char K[1200], L[1200], cloud7[1200], cf7[1400], bdir[1300];
+        snprintf(K, sizeof K, "%s/mac9/save", root); snprintf(L, sizeof L, "%s/iphone6/save", root);
+        snprintf(cloud7, sizeof cloud7, "%s/iCloud Drive/Seventh Saves", root); mkd(K); mkd(L); mkd(cloud7);
+        snprintf(cf7, sizeof cf7, "%s/%s/save.dmsync", cloud7, id);
+        snprintf(p, sizeof p, "%s/game.dat", K); put(p, "k0");
+        CHECK(session(K, cloud7, NULL, NULL) == 0 && session(L, cloud7, "game.dat", "l1") == 0, "Mac sends k0 and iPhone advances cloud to l1");
+        CHECK(session(K, NULL, "game.dat", "k1") == 0, "Mac diverges offline with k1");
+        snprintf(bdir, sizeof bdir, "%s-backups", K);
+        for (int i = 1; i <= 10; i++) {
+            char mark[32];
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save", bdir, i); mkd(p);
+            snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d cloud/save/mark.txt", bdir, i);
+            snprintf(mark, sizeof mark, "old-%02d", i); put(p, mark);
+        }
+        snprintf(p, sizeof p, "%s/player-folder", bdir); mkd(p);
+        snprintf(p, sizeof p, "%s/player-folder/keep.txt", bdir); put(p, "mine");
+        CHECK(run(K, cloud7, NULL, NULL, choice_of("local", cf7), NULL, READABLE) == 0 && cloud_has(cf7, root, "game.dat", "k1"),
+              "local choice backs up cloud save and sends k1");
+        int clouds = 0; DIR *bd = opendir(bdir); struct dirent *be;
+        while (bd && (be = readdir(bd))) {
+            size_t l = strlen(be->d_name);
+            clouds += l > 6 && (!strcmp(be->d_name + l - 6, " cloud") || strstr(be->d_name, " cloud "));
+        }
+        if (bd) closedir(bd);
+        backup_of(K, "cloud", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.01 cloud", bdir);
+        snprintf(u, sizeof u, "%s/2001-01-01 00.00.02 cloud/save/mark.txt", bdir);
+        char userf[1400]; snprintf(userf, sizeof userf, "%s/player-folder/keep.txt", bdir);
+        CHECK(clouds == 10 && *back && same(q, "l1") && !exists(p) && same(u, "old-02") && same(userf, "mine"),
+              "exactly 10 completed cloud backups stay with l1 published, oldest pruned and user folder intact (%d)", clouds);
+    }
+    printf("(19) a copy of the save at each start\n");
+    {
+        char S[1200], E[1200], W[1200], O[1200], cloud8[1200];
+        snprintf(S, sizeof S, "%s/start-a/save", root); snprintf(E, sizeof E, "%s/start-empty/save", root);
+        snprintf(W, sizeof W, "%s/start-ro/save", root); snprintf(O, sizeof O, "%s/start-off/save", root);
+        snprintf(cloud8, sizeof cloud8, "%s/iCloud Drive/Eighth Saves", root);
+        mkd(S); mkd(E); mkd(W); mkd(O); mkd(cloud8);
+        snprintf(p, sizeof p, "%s/game.dat", S); put(p, "s1");
+        snprintf(p, sizeof p, "%s_device", S); mkd(p); snprintf(p, sizeof p, "%s_device/dev.dat", S); put(p, "d1");
+        CHECK(session(S, NULL, NULL, NULL) == 0 && backups(S, "start") == 1, "a start with a save and sync off makes one copy (%d)", backups(S, "start"));
+        backup_of(S, "start", back, sizeof back);
+        snprintf(q, sizeof q, "%s/save/game.dat", back); snprintf(u, sizeof u, "%s/save_device/dev.dat", back);
+        char hf[1500]; snprintf(hf, sizeof hf, "%s/.hash", back);
+        CHECK(*back && same(q, "s1") && same(u, "d1") && exists(hf), "it holds the save, device save, and cached .hash (%s)", back);
+        CHECK(session(S, NULL, "game.dat", "s2") == 0 && backups(S, "start") == 1, "the next start, save unchanged: no copy, though the game then saves (%d)", backups(S, "start"));
+        CHECK(session(S, NULL, NULL, NULL) == 0 && backups(S, "start") == 2, "the start after it, save changed: one more (%d)", backups(S, "start"));
+        backup_of(S, "start", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        CHECK(*back && same(q, "s2"), "the newest holds what the game saved (%s)", back);
+        snprintf(p, sizeof p, "%s/game.dat", S); CHECK(same(p, "s2"), "the save itself is untouched");
+        CHECK(session(E, NULL, NULL, NULL) == 0, "a first start with no save");
+        snprintf(q, sizeof q, "%s-backups", E); CHECK(!exists(q), "makes no copy");
+        snprintf(p, sizeof p, "%s/game.dat", O); put(p, "opt-out");
+        setenv("DM_SAVE_BACKUPS", "0", 1);
+        CHECK(session(O, NULL, NULL, NULL) == 0, "DM_SAVE_BACKUPS=0 mounts normally");
+        unsetenv("DM_SAVE_BACKUPS");
+        snprintf(q, sizeof q, "%s-backups", O); CHECK(!exists(q), "DM_SAVE_BACKUPS=0 creates no backups folder");
+        snprintf(q, sizeof q, "%s-backups", S);
+        for (int i = 0; i < 12; i++) { snprintf(p, sizeof p, "%s/2001-01-01 00.00.%02d start/save", q, i); mkd(p); }
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.00 local", q); mkd(p);
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.00 cloud", q); mkd(p);
+        snprintf(p, sizeof p, "%s/my copy", q); mkd(p);
+        snprintf(p, sizeof p, "%s/game.dat", S); put(p, "s3");
+        CHECK(session(S, NULL, NULL, NULL) == 0 && backups(S, "start") == 10, "with 14 start copies already there, a new one leaves the newest 10 (%d)", backups(S, "start"));
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.04 start", q); snprintf(u, sizeof u, "%s/2001-01-01 00.00.05 start", q);
+        CHECK(!exists(p) && exists(u), "the five oldest went (00 to 04)");
+        snprintf(p, sizeof p, "%s/2001-01-01 00.00.00 local", q); snprintf(u, sizeof u, "%s/2001-01-01 00.00.00 cloud", q);
+        char u3[1400]; snprintf(u3, sizeof u3, "%s/my copy", q);
+        CHECK(exists(p) && exists(u) && exists(u3), "sync's backups and a folder of the player's stay");
+        snprintf(p, sizeof p, "%s/game.dat", W); put(p, "w1");
+        snprintf(q, sizeof q, "%s-backups", W); mkd(q); chmod(q, 0555);
+        CHECK(session(W, NULL, "game.dat", "w2") == 0 && backups(W, "start") == 0, "an unwritable backups folder makes no copy and still lets the game mount, save and commit");
+        chmod(q, 0755);
+        snprintf(p, sizeof p, "%s/game.dat", W); CHECK(same(p, "w2"), "what it saved is in the save");
+        snprintf(p, sizeof p, "%s/game.dat", W); put(p, "w3");
+        CHECK(session(W, cloud8, NULL, NULL) == 0 && session(E, cloud8, NULL, NULL) == 0, "with sync on, one device sends w3 and another brings it in");
+        snprintf(p, sizeof p, "%s/game.dat", E);
+        backup_of(E, "start", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        CHECK(same(p, "w3") && *back && same(q, "w3") && !backups(E, "local"), "the start copy is the save the game starts from, the cloud's (%s)", back);
+        snprintf(p, sizeof p, "%s/game.dat", W); put(p, "w4"); snprintf(p, sizeof p, "%s/game.dat", E); put(p, "e1"); set_mtime(p, time(NULL) - 100);
+        CHECK(session(W, cloud8, NULL, NULL) == 0 && session(E, cloud8, NULL, NULL) == 0, "both change; the newer, from the other device, comes in");
+        backup_of(E, "local", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        snprintf(u, sizeof u, "%s/game.dat", E);
+        CHECK(same(u, "w4") && *back && same(q, "e1"), "sync still keeps this device's own save as a local backup (%s)", back);
+        backup_of(E, "start", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+        CHECK(*back && same(q, "w4") && backups(E, "start") == 2, "and the start copy holds the save it brought in (%d)", backups(E, "start"));
+        {   // a pull cut short after its swap: the next start puts this device's save back, then copies it
+            char P19[1200], K19[1300], KS19[1400], J19[1300]; struct stat st19;
+            snprintf(P19, sizeof P19, "%s/start-pull/save", root); mkd(P19); snprintf(p, sizeof p, "%s/game.dat", P19); put(p, "cloud");
+            snprintf(K19, sizeof K19, "%s-backups/2001-01-01 00.00.00 local", P19); snprintf(KS19, sizeof KS19, "%s/save", K19); mkd(KS19);
+            snprintf(p, sizeof p, "%s/game.dat", KS19); put(p, "mine"); stat(KS19, &st19);
+            snprintf(J19, sizeof J19, "%s.pull", P19); FILE *jf = fopen(J19, "w");
+            fprintf(jf, "kept\t%s\nfolder\t0\t2\t%llu\t%llu\nfolder\t1\t0\t0\t0\n", K19, (unsigned long long)st19.st_dev, (unsigned long long)st19.st_ino); fclose(jf);
+            CHECK(session(P19, NULL, NULL, NULL) == 0 && !exists(J19), "a pull cut short: the next start puts this device's save back and mounts it");
+            snprintf(p, sizeof p, "%s/game.dat", P19); backup_of(P19, "start", back, sizeof back); snprintf(q, sizeof q, "%s/save/game.dat", back);
+            CHECK(same(p, "mine") && *back && same(q, "mine") && backups(P19, "start") == 1, "the start copy is this device's save put back, not the cloud's half (%s)", back);
+        }
+        {   // a save the mount refuses is not copied; once the journal is gone, the mount goes on and copies
+            char P20[1200], J20[1300]; snprintf(P20, sizeof P20, "%s/start-refuse/save", root); mkd(P20); snprintf(p, sizeof p, "%s/game.dat", P20); put(p, "half");
+            snprintf(J20, sizeof J20, "%s.pull", P20); put(J20, "kept\t/nonexistent/backup\nfolder\t0\t2\t1\t1\nfolder\t1\t0\t0\t0\n");
+            CHECK(session(P20, NULL, NULL, NULL) != 0 && backups(P20, "start") == 0, "a journal that cannot be put back: the mount stops, and no start copy (%d)", backups(P20, "start"));
+            put(J20, "not a journal\n");
+            CHECK(session(P20, NULL, NULL, NULL) != 0 && backups(P20, "start") == 0, "a journal that cannot be read: the same (%d)", backups(P20, "start"));
+            unlink(J20);
+            CHECK(session(P20, NULL, NULL, NULL) == 0 && backups(P20, "start") == 1, "with no journal the mount goes on and copies the save (%d)", backups(P20, "start"));
+        }
+    }
+    printf("(20) save capacity records round-trip, capacity-only change, backups, and older-bundle restore\n");
+    {
+        char croot[1200], nacp_path[1300], src[1300], dst1[1300], dst2[1300], dst3[1300], devonly[1300], bnd[1300];
+        snprintf(croot, sizeof croot, "%s/cap", root); mkd(croot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", croot);
+        static uint8_t cnacp[0x4000]; memset(cnacp, 0, sizeof cnacp);
+        const int64_t acc_base[2] = {62 << 20, 1 << 20}, dev_base[2] = {32 << 20, 2 << 20};
+        const int64_t acc_max[2] = {128 << 20, 8 << 20}, dev_max[2] = {64 << 20, 4 << 20};
+        memcpy(cnacp + 0x3080, acc_base, sizeof acc_base); memcpy(cnacp + 0x3090, dev_base, sizeof dev_base);
+        memcpy(cnacp + 0x3148, acc_max, sizeof acc_max);   memcpy(cnacp + 0x3158, dev_max, sizeof dev_max);
+        FILE *nf = fopen(nacp_path, "wb"); fwrite(cnacp, 1, sizeof cnacp, nf); fclose(nf);
+        setenv("DM_CONTROL_NACP", nacp_path, 1);
+        const uint64_t uid1[2] = {DM_UID0, DM_UID1};
+        int64_t sz = -1, jrn = -1;
+
+        // Account extension (96/4) + progress file round-trips through ss_pack/ss_read without inventing a device record
+        snprintf(src, sizeof src, "%s/src/save", croot); mkd(src);
+        snprintf(p, sizeof p, "%s/progress.dat", src); put(p, "slot1"); set_mtime(p, 1000000100);
+        setenv("DM_SAVE", src, 1);
+        ss_meta m0, m1, mdev;
+        CHECK(!ss_scan(src, &m0) && m0.files == 1, "cap: initial scan before extend");
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK, "cap: extend account save to 96/4 MiB");
+        CHECK(!ss_scan(src, &m1) && m1.files == 1 && m1.bytes == m0.bytes && strcmp(m1.hash, m0.hash) != 0,
+              "cap: account capacity-only change alters hash without changing file count or bytes");
+        snprintf(bnd, sizeof bnd, "%s/acc.dmsync", croot);
+        CHECK(!ss_pack(src, DM_GAME_ID, bnd, &m2) && !strcmp(m2.hash, m1.hash), "cap: pack account-extended save");
+        snprintf(dst1, sizeof dst1, "%s/dst1", croot); mkd(dst1);
+        CHECK(!ss_read(bnd, dst1, &m2) && !strcmp(m2.hash, m1.hash) && m2.files == 1, "cap: restore into fresh directory");
+        snprintf(p, sizeof p, "%s/save", dst1); setenv("DM_SAVE", p, 1);
+        snprintf(q, sizeof q, "%s/save/progress.dat", dst1);
+        CHECK(same(q, "slot1") && h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20),
+              "cap: restored account save keeps progress file and 96/4 MiB capacity");
+        CHECK(h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (32 << 20) && jrn == (2 << 20),
+              "cap: device capacity stays at declared 32/2 MiB base when not extended");
+        CHECK(!ss_scan(p, &m2) && !strcmp(m2.hash, m1.hash), "cap: restored directory scans to the same hash");
+
+        // Independent device extension (48/4) even with no save_device/ directory (ACNH layout)
+        setenv("DM_SAVE", src, 1);
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK, "cap: extend device save to 48/4 MiB");
+        CHECK(!ss_scan(src, &mdev) && mdev.files == 1 && strcmp(mdev.hash, m1.hash) != 0,
+              "cap: device capacity-only change alters hash independently");
+        snprintf(bnd, sizeof bnd, "%s/both.dmsync", croot);
+        CHECK(!ss_pack(src, DM_GAME_ID, bnd, &m2) && !strcmp(m2.hash, mdev.hash), "cap: pack account+device extended save");
+        snprintf(dst2, sizeof dst2, "%s/dst2", croot); mkd(dst2);
+        CHECK(!ss_read(bnd, dst2, &m2) && !strcmp(m2.hash, mdev.hash), "cap: restore account+device capacities");
+        snprintf(p, sizeof p, "%s/save", dst2); setenv("DM_SAVE", p, 1);
+        CHECK(h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20) &&
+              h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (48 << 20) && jrn == (4 << 20),
+              "cap: account (96/4) and device (48/4) capacities round-trip independently without save_device dir");
+
+        // Device-only extension (no account .size) round-trips without affecting account size
+        snprintf(devonly, sizeof devonly, "%s/devonly/save", croot); mkd(devonly);
+        snprintf(p, sizeof p, "%s/island.dat", devonly); put(p, "island");
+        setenv("DM_SAVE", devonly, 1);
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK, "cap: device-only extend");
+        snprintf(bnd, sizeof bnd, "%s/devonly.dmsync", croot);
+        CHECK(!ss_pack(devonly, DM_GAME_ID, bnd, &m2), "cap: pack device-only extended save");
+        snprintf(dst3, sizeof dst3, "%s/dst3", croot); mkd(dst3);
+        CHECK(!ss_read(bnd, dst3, &m2), "cap: restore device-only extended save");
+        snprintf(p, sizeof p, "%s/save", dst3); setenv("DM_SAVE", p, 1);
+        CHECK(h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (62 << 20) && jrn == (1 << 20) &&
+              h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (48 << 20) && jrn == (4 << 20),
+              "cap: device-only extension keeps account at 62/1 base and restores device 48/4");
+
+        // Malformed type-3 bundles are refused by ss_read (0-file bundle with size entry, bad path, invalid payload)
+        {
+            uint8_t hdr[144] = {0}, h[24] = {3}; uint32_t ver = 1, n = 1; uint16_t pl = 9; uint64_t esz = 18;
+            memcpy(hdr, "DMSYNC1\n", 8); memcpy(hdr + 8, &ver, 4); memcpy(hdr + 12, &n, 4);
+            memcpy(h + 2, &pl, 2); memcpy(h + 8, &esz, 8);
+            snprintf(p, sizeof p, "%s/bad-size-only.dmsync", croot);
+            FILE *bf = fopen(p, "wb");
+            fwrite(hdr, 1, sizeof hdr, bf); fwrite(h, 1, sizeof h, bf); fwrite("save.size", 1, 9, bf); fwrite("100663296 4194304\n", 1, 18, bf); fwrite("DMSYNCE\n", 1, 8, bf); fclose(bf);
+            CHECK(ss_read(p, NULL, &m2) != 0, "cap: type-3 size record with 0 save files is refused");
+            snprintf(p, sizeof p, "%s/bad-size-path.dmsync", croot);
+            pl = 10; memcpy(h + 2, &pl, 2);
+            bf = fopen(p, "wb");
+            fwrite(hdr, 1, sizeof hdr, bf); fwrite(h, 1, sizeof h, bf); fwrite("other.size", 1, 10, bf); fwrite("100663296 4194304\n", 1, 18, bf); fwrite("DMSYNCE\n", 1, 8, bf); fclose(bf);
+            CHECK(ss_read(p, NULL, &m2) != 0, "cap: type-3 entry with disallowed path is refused");
+        }
+
+        // End-to-end cloud sync + live sender wake on capacity-only extend + start backup + restoring older bundle over existing save
+        char CA[1200], CB[1200], ccloud[1200], ccf[1400], older_src[1200], older_bnd[1300];
+        snprintf(CA, sizeof CA, "%s/devA/save", croot); snprintf(CB, sizeof CB, "%s/devB/save", croot);
+        snprintf(ccloud, sizeof ccloud, "%s/cloud", croot);
+        snprintf(ccf, sizeof ccf, "%s/%s/save.dmsync", ccloud, id);
+        mkd(CA); mkd(CB); mkd(ccloud);
+        snprintf(p, sizeof p, "%s/progress.dat", CA); put(p, "v1");
+        CHECK(session(CA, ccloud, NULL, NULL) == 0 && session(CB, ccloud, NULL, NULL) == 0, "cap sync: initial sync of unextended save");
+        // Capacity-only extension during live session wakes sender and syncs to cloud without a Commit
+        fflush(stdout); fflush(stderr);
+        pid_t cp = fork();
+        if (!cp) {
+            setenv("DM_SAVE", CA, 1); setenv("DM_SAVE_SYNC", ccloud, 1); unsetenv("DM_SAVE_SYNC_CHOICE");
+            int bad = h_fs_MountSave("save", NULL) != RES_OK;
+            bad += h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) != RES_OK;
+            if (save_sync_flush(10000) != 1) bad += NOT_SENT;
+            fflush(stdout); fflush(stderr); _exit(bad);
+        }
+        int cst = 0; waitpid(cp, &cst, 0);
+        CHECK(WIFEXITED(cst) && WEXITSTATUS(cst) == 0, "cap sync: capacity-only ExtendSaveData wakes sender and flushes to cloud");
+        // Device B pulls the capacity-only update and preserves it in its start backup
+        CHECK(session(CB, ccloud, NULL, NULL) == 0, "cap sync: Device B pulls capacity-only update");
+        setenv("DM_SAVE", CB, 1);
+        CHECK(h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (96 << 20) && jrn == (4 << 20),
+              "cap sync: Device B reports restored 96/4 MiB account capacity");
+        backup_of(CB, "start", back, sizeof back);
+        snprintf(q, sizeof q, "%s/save.size", back);
+        CHECK(*back && exists(q) && backups(CB, "start") == 2, "cap sync: start backup records the updated save.size (%d copies)", backups(CB, "start"));
+        // Removing .hash still deduplicates via ss_scan (which reads backup's save.size)
+        snprintf(q, sizeof q, "%s/.hash", back); unlink(q);
+        CHECK(session(CB, NULL, NULL, NULL) == 0 && backups(CB, "start") == 2, "cap sync: start backup deduplicates via ss_scan with save.size");
+        // Extending device capacity offline triggers a new start copy on next start (capacity-only change detected)
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK, "cap sync: extend device save offline on Device B");
+        CHECK(session(CB, NULL, NULL, NULL) == 0 && backups(CB, "start") == 3, "cap sync: device capacity-only change creates a new start backup");
+        backup_of(CB, "start", back, sizeof back);
+        snprintf(p, sizeof p, "%s/save.size", back); snprintf(q, sizeof q, "%s/save_device.size", back);
+        CHECK(*back && exists(p) && exists(q), "cap sync: newest start backup holds both save.size and save_device.size");
+
+        // Restore an older bundle (no .size entries) over Device B (which has both save.size and save_device.size)
+        snprintf(older_src, sizeof older_src, "%s/older/save", croot); mkd(older_src);
+        snprintf(p, sizeof p, "%s/progress.dat", older_src); put(p, "older-v0");
+        snprintf(older_bnd, sizeof older_bnd, "%s/older.dmsync", croot);
+        ss_meta m_older;
+        CHECK(!ss_pack(older_src, DM_GAME_ID, ccf, &m_older), "cap sync: plant older bundle without size records in cloud");
+        CHECK(run(CB, ccloud, NULL, NULL, choice_of("cloud", ccf), NULL, READABLE) == 0,
+              "cap sync: pull older bundle over existing save with prior size records");
+        setenv("DM_SAVE", CB, 1);
+        snprintf(p, sizeof p, "%s.size", CB); snprintf(q, sizeof q, "%s_device.size", CB);
+        CHECK(!exists(p) && !exists(q) &&
+              h_fs_SaveSize(&sz, &jrn, uid1) == RES_OK && sz == (62 << 20) && jrn == (1 << 20) &&
+              h_fs_DeviceSaveSize(&sz, &jrn) == RES_OK && sz == (32 << 20) && jrn == (2 << 20),
+              "cap sync: restoring older bundle clears destination's prior size records back to declared base");
+        backup_of(CB, "local", back, sizeof back);
+        snprintf(p, sizeof p, "%s/save.size", back); snprintf(q, sizeof q, "%s/save_device.size", back);
+        CHECK(*back && exists(p) && exists(q), "cap sync: destination's prior size records are preserved in local backup");
+        CHECK(!ss_scan(CB, &m2) && !strcmp(m2.hash, m_older.hash), "cap sync: live save hash matches restored older bundle");
+        backup_of(CB, "start", back, sizeof back);
+        snprintf(p, sizeof p, "%s/save.size", back); snprintf(q, sizeof q, "%s/save_device.size", back);
+        CHECK(*back && !exists(p) && !exists(q), "cap sync: start backup of restored older bundle holds no stale size records");
+
+        unsetenv("DM_SAVE"); unsetenv("DM_CONTROL_NACP");
     }
     printf("== save sync: %d checks, %d failed ==\n", checks, fails);
     if (!fails) { char c[1200]; snprintf(c, sizeof c, "rm -rf '%s'", root); system(c); }

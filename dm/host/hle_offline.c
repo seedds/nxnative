@@ -53,7 +53,7 @@ HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "local wireless (cut)", Result
 HLE_FORCE("_ZN2nn3ldn16GetNetworkConfigEPNS0_13NetworkConfigE", "local wireless (cut)", Result, h_ldn_NetCfg, void *o) { (void)o; return RES_FAIL; }
 
 // ---------- bluetooth: BLE (Pokémon Violet 3.0.1 at boot, likely its Pokémon GO Plus + support). InitializeBle connects to bt and btm:u (an SDK abort without them); the host has no radio:
-// events never fire, scans find nothing, so the GATT calls after a connect are never reached ----------
+// events never fire, scans find nothing, connects and disconnects fail, and GATT notification paths register with no paired device, so post-connect GATT calls are never reached ----------
 HLE_FORCE("_ZN2nn9bluetooth13InitializeBleEv", "BLE init (cut): no service connection", void, h_bt_InitBle, void) {}
 HLE_FORCE("_ZN2nn9bluetooth19AcquireBleScanEventEPNS_2os15SystemEventTypeE", "BLE scan event: bound, never fires", Result, h_bt_EvScan, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
 HLE_FORCE("_ZN2nn9bluetooth37AcquireBleConnectionStateChangedEventEPNS_2os15SystemEventTypeE", "BLE connection event: bound, never fires", Result, h_bt_EvConn, void *ev) { hle_bind_system_event(ev, 0); return RES_OK; }
@@ -66,6 +66,13 @@ HLE_FORCE("_ZN2nn9bluetooth22StopBleScanSmartDeviceEv", "BLE scan stop (cut)", R
 HLE_FORCE("_ZN2nn9bluetooth16GetBleScanResultEPNS0_13BleScanResultEi", "BLE scan results (cut): 0 found", int, h_bt_ScanRes, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi", "BLE connections (cut): 0", int, h_bt_ConnList, void *out, int max) { (void)out; (void)max; return 0; }
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
+HLE_FORCE("_ZN2nn9bluetooth24DisconnectFromGattServerEj", "BLE disconnect (cut): no connection", Result, h_bt_Disconnect, unsigned h) { (void)h; return RES_FAIL; }
+// Registering a GATT notification path is btm:u's job, and InitializeBle made no session: the SDK aborts (Pokémon: Let's Go, Pikachu!'s Options → Open Pokémon GO Settings; Pokémon Violet 4.0.0).
+// A Switch with no paired device registers the path all the same; Let's Go retries only on 0x871 (main+0x114128 in 1.0.0)
+HLE_FORCE("_ZN2nn9bluetooth33RegisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT notification path (cut): registered, nothing ever arrives", Result,
+          h_bt_RegNotif, const void *uuid) { (void)uuid; return RES_OK; }
+HLE_FORCE("_ZN2nn9bluetooth35UnregisterGattOperationNotificationERKNS0_17GattAttributeUuidE", "BLE GATT notification path (cut)", Result, h_bt_UnregNotif, const void *uuid) {
+    (void)uuid; return RES_OK; }
 
 // ---------- socket: aliases of the offline BSD service, including its process-local UDP transport ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };

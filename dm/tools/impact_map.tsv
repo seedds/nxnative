@@ -37,6 +37,7 @@ scripts/pack_nup.py	*:*	NUP packing: games built from NUP containers
 scripts/bench.py	-	the benchmark
 scripts/push_romfs.sh	*:*	RomFS transfer: every game's iOS build
 scripts/regress.py	-	the regression harness
+scripts/bug_report.py	-	the bug report collector (reads logs and stamps, runs no game)
 scripts/cheat_anchor.py	-	cheat files carried between builds offline: no game runs it
 scripts/prepare_mod.py	-	offline mod exefs rewriter: no game runs it
 dm/tools/usage.py	-	the usage manifests

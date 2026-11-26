@@ -42,6 +42,7 @@ void mtl_sub_begin(void);
 void mtl_sub_ready(uint64_t guest_ns);   // the guest ns the submission being encoded was ready to run: its submit, or a wait it held for passing (counter timestamps: sub_place)
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
+void mtl_dlss_forget(uint64_t serial);                 // nvnDlssNetworkFinalize: retire the network's cached MetalFX scalers on the replay thread
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion
@@ -91,4 +92,6 @@ int mtl_hdr_mode_next(int shown, int game_native, int screen_edr);  // the next 
 int mtl_hdr_vi(uint16_t *peak);   // vi::QueryDisplayHdrStatus (hle_vi.c): 1 = HDR output with that peak in nits (DM_HDR=2 on a screen with EDR headroom), 0 = SDR
 int mtl_hdr_vi_answer(void);   // the last answer mtl_hdr_vi gave the game, taken on the game's thread when it queues a present (nvn_queue_present, mtl_present_ext)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
+int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check (copy == 0 checks ticket only)
+int mtl_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);   // bounded ticket wait: 1 ready, 0 timed out
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait

@@ -981,6 +981,11 @@ static _Atomic double g_picture_aspect = 16.0 / 9.0;
 void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = (double)w / h; }
 @interface DmGameView : NSView @end
 @implementation DmGameView
+- (void)toggleStickMotion:(NSMenuItem *)sender {
+    int enabled = !dm_stick_motion_enabled();
+    dm_stick_motion_set(enabled);
+    sender.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+}
 - (void)mouseDown:(NSEvent *)e { [self mouseDragged:e]; }
 - (void)mouseDragged:(NSEvent *)e {
     if (!g_input_on) return;
@@ -1954,6 +1959,12 @@ void front_run(void (*guest)(void)) {
             [[wm addItemWithTitle:@"HDR" action:nil keyEquivalent:@""] setSubmenu:hm];
             g_hdr_menu = hm;
         }
+        NSMenu *controls = [[NSMenu alloc] initWithTitle:@"Controls"];
+        NSMenuItem *stickMotion = [controls addItemWithTitle:@"Right Stick Motion" action:@selector(toggleStickMotion:) keyEquivalent:@"g"];
+        stickMotion.target = v;
+        stickMotion.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+        stickMotion.state = dm_stick_motion_enabled() ? NSControlStateValueOn : NSControlStateValueOff;
+        [[bar insertItemWithTitle:@"Controls" action:nil keyEquivalent:@"" atIndex:bar.numberOfItems - 1] setSubmenu:controls];
         NSApp.mainMenu = bar;
         if (want_fs) {
             g_fs_asked = CACurrentMediaTime(); g_fs_starting = 1;   // front_screen_settling: the display link waits for fullscreen

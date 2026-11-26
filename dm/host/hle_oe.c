@@ -229,7 +229,7 @@ static int prog_plan_make(char **rows, int nr, int hit, prog_plan *out, const vo
     if (relaunch) env[k++] = "DM_RELAUNCH=1";
     else {
         char *pp = NULL, *pe = NULL, *pv = NULL, *ou = NULL;
-        if (asprintf(&pp, "%s/launch_param.bin", dir) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", (int)(DM_GAME_PROGRAM_ID & 0xf)) < 0) die("%s: out of memory", call);
+        if (asprintf(&pp, "%s/launch_param.bin", dir) < 0 || asprintf(&pe, "DM_LAUNCH_PARAM=%s", pp) < 0 || asprintf(&pv, "DM_PREV_PROGRAM=%d", (int)(DM_GAME_PROGRAM_ID & 0xfff)) < 0) die("%s: out of memory", call);
         if (open_users && asprintf(&ou, "DM_OPEN_USERS=%x", open_users) < 0) die("%s: out of memory", call);
         FILE *po = fopen(pp, "wb");
         if (!po || (n && fwrite(param, n, 1, po) != 1)) LOG("[RED] %s: cannot write %s", call, pp);
@@ -243,7 +243,7 @@ static int prog_plan_make(char **rows, int nr, int hit, prog_plan *out, const vo
 // The Mac's plan for starting program `index` in this one's place, into P (an earlier plan there is freed first); 0: nothing can start, this program just ends (P holds nothing)
 static int oe_plan(int index, const void *param, size_t n, int relaunch, prog_plan *P, const char *call) {
     prog_plan_free(P);
-    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf);   // the program index is the program ID less the application's
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xfff);   // the program index is the program ID less the application's
     const char *pf = getenv("DM_PROGRAMS");
     if (!pf || !*pf) {   // a program run by itself
         if (!relaunch && index != cur) return 0;
@@ -293,7 +293,7 @@ static void oe_start(int index, const void *param, size_t n, int relaunch) {
     const char *what = relaunch ? "oe::RequestToRelaunchApplication" : "oe::ExecuteProgram";
     char hex[3 * 32 + 1] = "", call[192]; for (size_t i = 0; i < n && i < 32; i++) snprintf(hex + 3 * i, 4, " %02x", ((const uint8_t *)param)[i]);
     if (relaunch) snprintf(call, sizeof call, "%s", what); else snprintf(call, sizeof call, "%s(%d, %zu bytes of parameters:%s)", what, index, n, hex);
-    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf);
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xfff);
     dm_gfx_quit_begin();   // this program ends: the pipeline archive starts writing now, beside the iPhone's notice (front_program_handoff, 1.5-3 s), and the exit waits for the rest
 #if !TARGET_OS_IPHONE
     static prog_plan P;

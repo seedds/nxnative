@@ -428,10 +428,20 @@ static void *name_at(void ***tab, uint32_t *n, uint32_t *cap, uint32_t k, size_t
     return (*tab)[k];
 }
 
-// use: serial of the last command buffer that read it; immutable: made by glBufferStorage (LÖVE's persistently mapped streams), never orphaned, the game keeps a pointer into it
-typedef struct { __strong id<MTLBuffer> mb; size_t size; uint64_t use; int immutable, deleted; unsigned texrefs; } buf_t;
+// use: serial of the last command buffer that read it; immutable: made by glBufferStorage (LÖVE's persistently mapped streams), never orphaned, the game keeps a pointer into it.
+// refs: 1 for the name-table slot (g_bufs) plus one per live context binding, VAO binding or buffer-texture attachment (OpenGL §5.1.3).
+typedef struct { __strong id<MTLBuffer> mb; size_t size; uint64_t use; int immutable; unsigned refs; } buf_t;
+typedef struct { GLuint name; buf_t *obj; } buf_bind_t;
 NAMES(buf_t, g_bufs, g_nbufs, g_capbufs)
 static buf_t *buf_of(GLuint n) { return n && n < g_nbufs ? g_bufs[n] : NULL; }
+static void buf_free(buf_t *b) { b->mb = nil; free(b); }
+static void buf_release(buf_t *b) { if (b && --b->refs == 0) buf_free(b); }
+static void buf_bind_set(buf_bind_t *slot, GLuint name, buf_t *obj) {
+    if (obj) obj->refs++;
+    buf_release(slot->obj);
+    slot->name = name;
+    slot->obj = obj;
+}
 
 // The sampling parameters GL keeps both in a texture and in a sampler object (GL 3.3): filters, wraps, the LOD range and bias, the depth comparison, anisotropy and border colour.
 // A sampler object bound to a unit replaces all of them for the texture that unit samples; the texture's own levels (GL_TEXTURE_MAX_LEVEL, the levels it has) still bound the LOD.
@@ -477,9 +487,13 @@ static fb_t *fb_of(GLuint n) { return n && n < g_nfbs ? g_fbs[n] : NULL; }
 // glVertexAttribPointer is GL's shorthand for a format, binding i and that binding's buffer, offset and stride; glVertexAttribDivisor for binding i and its
 // divisor. A draw reads an attribute through its binding (vb_of), so every attribute on a binding follows a change to it.
 typedef struct { uint8_t on, size, norm, bind; GLenum type; uint32_t rel; } vattr_t;
-typedef struct { GLuint buf; GLsizei stride; uint8_t div, client; uint64_t off; } vbind_t;
-typedef struct { vattr_t a[16]; vbind_t b[16]; GLuint ebo; } vao_t;
+typedef struct { buf_bind_t buf; GLsizei stride; uint8_t div, client; uint64_t off; } vbind_t;
+typedef struct { vattr_t a[16]; vbind_t b[16]; buf_bind_t ebo; } vao_t;
 static vbind_t *vb_of(vao_t *v, int i) { int b = v->a[i].bind; return &v->b[b ? b - 1 : i]; }
+static void vao_release_buffers(vao_t *v) {
+    buf_bind_set(&v->ebo, 0, NULL);
+    for (int i = 0; i < 16; i++) buf_bind_set(&v->b[i].buf, 0, NULL);
+}
 NAMES(vao_t, g_vaos, g_nvaos, g_capvaos)
 static vao_t g_vao0;   // the default vertex array (GL core has none, the compatibility profile does)
 
@@ -541,8 +555,9 @@ typedef struct { GLenum func, fail, zfail, pass; GLint ref; GLuint mask, wmask; 
 #define STFACE0 {0x207 /* ALWAYS */, GL_KEEP, GL_KEEP, GL_KEEP, 0, 0xffffffff, 0xffffffff}
 #define NUBO 72   // uniform buffer binding points, GL 4.5's minimum GL_MAX_UNIFORM_BUFFER_BINDINGS
 typedef struct {
-    GLuint array_buf, uniform_buf, texture_buf, rb, fb, read_fb, prog, vao; int unit;
-    struct { GLuint buf; GLintptr off; GLsizeiptr size; } ubo[NUBO];   // glBindBufferRange / Base (size 0: the whole buffer)
+    buf_bind_t array_buf, uniform_buf, texture_buf;
+    GLuint rb, fb, read_fb, prog, vao; int unit;
+    struct { buf_bind_t buf; GLintptr off; GLsizeiptr size; } ubo[NUBO];   // glBindBufferRange / Base (size 0: the whole buffer)
     struct { GLuint t2d, tcube, t3d, t2da, tbuf, samp; } units[NUNITS];   // samp: the sampler object bound to the unit (glBindSampler), 0 for the texture's own parameters
     float clear_c[4], blend_c[4]; double clear_d; int clear_s;
     uint8_t cmask[NGL_COLORS], default_draw, default_read;
@@ -562,6 +577,15 @@ typedef struct {
        .swap_interval = 1, .psize = 1, .sample_mask = UINT32_MAX, \
        .va = {{0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, \
               {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0, 1}}}
+static void state_release_buffers(gl_state *s) {
+    buf_bind_set(&s->array_buf, 0, NULL);
+    buf_bind_set(&s->uniform_buf, 0, NULL);
+    buf_bind_set(&s->texture_buf, 0, NULL);
+    for (int i = 0; i < NUBO; i++) {
+        buf_bind_set(&s->ubo[i].buf, 0, NULL);
+        s->ubo[i].off = 0; s->ubo[i].size = 0;
+    }
+}
 static gl_state S = GL_STATE_DEFAULT;
 static vao_t *cur_vao(void) { return S.vao && S.vao < g_nvaos && g_vaos[S.vao] ? g_vaos[S.vao] : &g_vao0; }
 static GLuint *unit_slot(int unit, GLenum target) {   // a unit's binding of a texture target (a cube face names the cube); NULL for a target this layer does not have
@@ -835,12 +859,11 @@ static id<MTLSamplerState> tex_sampler(tex_t *t, GLuint samp) {
 }
 static void lv_free(level_t *l) { free(l->data); memset(l, 0, sizeof *l); }
 static void tex_drop(tex_t *t) { for (int f = 0; f < 6; f++) for (int l = 0; l < MAXLV; l++) lv_free(&t->pend[f][l]); t->tex = t->linear_rt = nil; t->made = 0; t->defined = 0; t->levels = 0; t->gen++; }
-static void buf_free(buf_t *b) { b->mb = nil; free(b); }
 static void texture_buffer_attach(tex_t *t, buf_t *b) {
     if (b != t->buffer) {
-        buf_t *old = t->buffer;
-        if (old && !--old->texrefs && old->deleted) buf_free(old);
-        t->buffer = b; if (b) b->texrefs++;
+        if (b) b->refs++;
+        buf_release(t->buffer);
+        t->buffer = b;
     }
     t->tex = nil;
 }
@@ -1408,7 +1431,7 @@ static void enc_state(void) {
 // A named uniform block's buffer and offset: the range at its binding point. A range shorter than the block (DOOM 3 binds only a skinned model's joints out of its 6,528-byte
 // matrices_ubo), or a buffer that ends before the block does, is copied with zeros after it, so the shader reads no memory outside the buffer
 static id<MTLBuffer> blk_buffer(const pblk_t *b, size_t *mo) {
-    buf_t *x = buf_of(S.ubo[b->binding].buf);
+    buf_t *x = S.ubo[b->binding].buf.obj;
     size_t off = (size_t)S.ubo[b->binding].off, len = 0;
     if (x && x->mb && off < x->size) len = S.ubo[b->binding].size ? ((size_t)S.ubo[b->binding].size < x->size - off ? (size_t)S.ubo[b->binding].size : x->size - off) : x->size - off;
     if (x) x->use = g_serial;
@@ -1509,9 +1532,9 @@ static int draw_setup(void) {
         if (p == &g_ffp && vb->client && vb->stride > 0 && vb->stride <= UINT16_MAX - 3)
             k.stride[s] = (uint16_t)((vb->stride + 3) & ~3);
         if (!k.vf[s] || (k.stride[s] & 3)) { RED1("vertex attribute %d: type %#x size %d stride %d not mapped", p->amap[s], a->type, a->size, vb->stride); return 0; }
-        buf_t *b = buf_of(vb->buf);
+        buf_t *b = vb->buf.obj;
         if (b && b->mb) continue;   // a vertex buffer: bound as it is
-        if (vb->buf) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], vb->buf); return 0; }
+        if (vb->buf.name) { g_sk_attr++; RED1("vertex attribute %d reads a buffer with no data (%u)", p->amap[s], vb->buf.name); return 0; }
         if (!vb->client) { g_sk_attr++; RED1("vertex attribute %d reads a binding with no buffer", p->amap[s]); return 0; }   // GL leaves such a read undefined
         // Client memory: GL lets the game keep the vertices in its own array, Metal needs a buffer, so copy the span this draw touches into a
         // transient block (GameMaker's runner draws every sprite and the screen composite through such arrays). The block keeps vertex i at i * stride from
@@ -1543,7 +1566,7 @@ static int draw_setup(void) {
     for (int i = 0; i < vs->na; i++) {
         int s = vs->a[i].slot, gi = p->amap[s]; vattr_t *a = &v->a[gi];
         if (a->on && cbuf[s]) [e setVertexBuffer:cbuf[s] offset:coff[s] atIndex:30 - s];
-        else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = buf_of(vb->buf); b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
+        else if (a->on) { const vbind_t *vb = vb_of(v, gi); buf_t *b = vb->buf.obj; b->use = g_serial; [e setVertexBuffer:b->mb offset:vb->off + a->rel atIndex:30 - s]; }
         else [e setVertexBytes:p == &g_ffp ? ff_current(gi) : S.va[gi] length:16 atIndex:30 - s];
     }
     if (p == &g_ffp) ff_bind(); else bind_uniforms_textures(p);
@@ -1572,14 +1595,14 @@ static int draw_setup(void) {
           { vao_t *va = cur_vao();
             for (int i = 0; i < vsi->na && i < 8; i++) { int s = vsi->a[i].slot, gi = p->amap[s]; vattr_t *a = &va->a[gi]; const vbind_t *vb = vb_of(va, gi);
               if (!a->on || a->size < 1 || a->size > 4) continue;
-              buf_t *b = buf_of(vb->buf); uint64_t at = vb->off + a->rel;
+              buf_t *b = vb->buf.obj; uint64_t at = vb->off + a->rel;
               const uint8_t *base = b && b->mb ? (const uint8_t *)b->mb.contents + at : vb->client ? (const uint8_t *)(uintptr_t)at : NULL;
               if (!base) { GLOG("   attribute %d: no data", gi); continue; }
               size_t st = (size_t)vb->stride;
               char v[3][64]; for (int k = 0; k < 3; k++) { const float *f = (const float *)(base + k * st); char *o = v[k]; o += snprintf(o, 64, "(");
                 for (int c = 0; c < a->size && c < 4; c++) o += snprintf(o, 64 - (size_t)(o - v[k]), "%s%.4f", c ? " " : "", f[c]);
                 snprintf(o, 64 - (size_t)(o - v[k]), ")"); }
-              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, vb->buf ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
+              GLOG("   attribute %d: size %d type %#x stride %zu %s, first 3 vertices %s %s %s", gi, a->size, a->type, st, vb->buf.name ? "buffer" : "client memory", v[0], v[1], v[2]); } } } }
 
     return 1;
 }
@@ -1622,7 +1645,7 @@ static void draw_elements(GLenum mode, GLsizei count, GLenum type, const void *i
     @autoreleasepool {
         int conv; MTLPrimitiveType pt = prim_of(mode, &conv);
         if (conv < 0) return;
-        buf_t *eb = buf_of(cur_vao()->ebo);
+        buf_t *eb = cur_vao()->ebo.obj;
         uintptr_t io = (uintptr_t)indices; int isz = type == GL_UNSIGNED_INT ? 4 : type == GL_UNSIGNED_SHORT ? 2 : 1;
         const uint8_t *src = eb ? (eb->mb ? (const uint8_t *)eb->mb.contents + io : NULL) : (const uint8_t *)indices;
         if (!src || (eb && io + (size_t)count * isz > eb->size)) { RED1("glDrawElements: indices outside their buffer"); return; }
@@ -2078,9 +2101,9 @@ GL(glGetIntegerv, void, GLenum p, GLint *v) {
         case GL_READ_FRAMEBUFFER_BINDING: *v = S.read_fb; return;
         case GL_RENDERBUFFER_BINDING: *v = S.rb; return;
         case GL_CURRENT_PROGRAM: *v = S.prog; return;
-        case 0x8894: *v = S.array_buf; return;   // ARRAY_BUFFER_BINDING
-        case 0x8895: *v = cur_vao()->ebo; return;   // ELEMENT_ARRAY_BUFFER_BINDING
-        case 0x8a28: *v = S.uniform_buf; return;   // UNIFORM_BUFFER_BINDING
+        case 0x8894: *v = S.array_buf.name; return;   // ARRAY_BUFFER_BINDING
+        case 0x8895: *v = cur_vao()->ebo.name; return;   // ELEMENT_ARRAY_BUFFER_BINDING
+        case 0x8a28: *v = S.uniform_buf.name; return;   // UNIFORM_BUFFER_BINDING
         case 0x85b5: *v = S.vao; return;   // VERTEX_ARRAY_BINDING
         case 0x8069: *v = S.units[S.unit].t2d; return;   // TEXTURE_BINDING_2D
         case GL_TEXTURE_BINDING_CUBE_MAP: *v = S.units[S.unit].tcube; return;
@@ -2109,9 +2132,14 @@ GL(glGetFloatv, void, GLenum p, GLfloat *v) {
 }
 
 // ---------- Buffers and vertex arrays ----------
-GL(glGenBuffers, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t)); }
+GL(glGenBuffers, void, GLsizei n, GLuint *out) {
+    for (GLsizei i = 0; i < n; i++) {
+        out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t));
+        g_bufs[out[i]]->refs = 1;
+    }
+}
 GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
-    // GL unbinds a deleted buffer from the context and the current vertex array (another vertex array keeps its name)
+    // GL unbinds a deleted buffer from the current context and current vertex array; other vertex arrays, shared contexts and buffer textures retain it until unbound (OpenGL §5.1.2–3)
     for (GLsizei i = 0; i < n; i++) {
         buf_t *x = buf_of(b[i]); if (!x) continue;
         g_bufs[b[i]] = NULL;
@@ -2119,32 +2147,40 @@ GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
             tex_t *t = tex_of(S.units[j].tbuf);
             if (t && t->buffer == x) texture_buffer_attach(t, NULL);
         }
-        x->deleted = 1; if (!x->texrefs) buf_free(x);
         vao_t *v = cur_vao();
-        if (S.array_buf == b[i]) S.array_buf = 0; if (S.uniform_buf == b[i]) S.uniform_buf = 0; if (v->ebo == b[i]) v->ebo = 0;
-        if (S.texture_buf == b[i]) S.texture_buf = 0;
-        for (int j = 0; j < NUBO; j++) if (S.ubo[j].buf == b[i]) S.ubo[j].buf = 0;
-        for (int j = 0; j < 16; j++) if (v->b[j].buf == b[i]) v->b[j].buf = 0;
+        if (S.array_buf.obj == x) buf_bind_set(&S.array_buf, 0, NULL);
+        if (S.uniform_buf.obj == x) buf_bind_set(&S.uniform_buf, 0, NULL);
+        if (v->ebo.obj == x) buf_bind_set(&v->ebo, 0, NULL);
+        if (S.texture_buf.obj == x) buf_bind_set(&S.texture_buf, 0, NULL);
+        for (int j = 0; j < NUBO; j++) if (S.ubo[j].buf.obj == x) {
+            buf_bind_set(&S.ubo[j].buf, 0, NULL); S.ubo[j].off = 0; S.ubo[j].size = 0;
+        }
+        for (int j = 0; j < 16; j++) if (v->b[j].buf.obj == x) buf_bind_set(&v->b[j].buf, 0, NULL);
+        buf_release(x);
     }
 }
 GL(glBindBuffer, void, GLenum target, GLuint b) {
-    if (target == GL_ARRAY_BUFFER) S.array_buf = b;
-    else if (target == GL_ELEMENT_ARRAY_BUFFER) cur_vao()->ebo = b;
-    else if (target == GL_UNIFORM_BUFFER) S.uniform_buf = b;
-    else if (target == GL_TEXTURE_BUFFER) S.texture_buf = b;
+    buf_t *obj = buf_of(b);
+    if (target == GL_ARRAY_BUFFER) buf_bind_set(&S.array_buf, b, obj);
+    else if (target == GL_ELEMENT_ARRAY_BUFFER) buf_bind_set(&cur_vao()->ebo, b, obj);
+    else if (target == GL_UNIFORM_BUFFER) buf_bind_set(&S.uniform_buf, b, obj);
+    else if (target == GL_TEXTURE_BUFFER) buf_bind_set(&S.texture_buf, b, obj);
     else RED1("glBindBuffer target %#x not implemented", target);
 }
 // A uniform buffer binding point: the buffer and the range a named uniform block of a program bound to that point reads (bind_blocks); both calls also bind the generic target
 static void ubo_bind(GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size, const char *fn) {
     if (target != GL_UNIFORM_BUFFER) { RED1("%s target %#x not implemented", fn, target); return; }
     if (index >= NUBO || off < 0 || size < 0) { gl_error_at(GL_INVALID_VALUE, fn); return; }
-    S.uniform_buf = b; S.ubo[index].buf = b; S.ubo[index].off = b ? off : 0; S.ubo[index].size = b ? size : 0;
+    buf_t *obj = buf_of(b);
+    buf_bind_set(&S.uniform_buf, b, obj);
+    buf_bind_set(&S.ubo[index].buf, b, obj);
+    S.ubo[index].off = b ? off : 0; S.ubo[index].size = b ? size : 0;
 }
 GL(glBindBufferRange, void, GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size) { ubo_bind(target, index, b, off, size, __func__); }
 GL(glBindBufferBase, void, GLenum target, GLuint index, GLuint b) { ubo_bind(target, index, b, 0, 0, __func__); }
 static buf_t *bound_buf(GLenum target) {
-    return buf_of(target == GL_ARRAY_BUFFER ? S.array_buf : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo :
-                  target == GL_UNIFORM_BUFFER ? S.uniform_buf : target == GL_TEXTURE_BUFFER ? S.texture_buf : 0);
+    return target == GL_ARRAY_BUFFER ? S.array_buf.obj : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo.obj :
+           target == GL_UNIFORM_BUFFER ? S.uniform_buf.obj : target == GL_TEXTURE_BUFFER ? S.texture_buf.obj : NULL;
 }
 // Orphaning: data for a buffer a pending command buffer may still read goes into a new MTLBuffer, so draws already encoded keep the old contents
 GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
@@ -2305,7 +2341,13 @@ GLB(glClientWaitSync, GLenum, void *sy, GLbitfield flags, uint64_t timeout_ns) {
     return ready ? GL_CONDITION_SATISFIED : GL_TIMEOUT_EXPIRED;
 }
 GL(glGenVertexArrays, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_vaos, &g_nvaos, &g_capvaos, sizeof(vao_t)); }
-GL(glDeleteVertexArrays, void, GLsizei n, const GLuint *v) { for (GLsizei i = 0; i < n; i++) if (v[i] && v[i] < g_nvaos && g_vaos[v[i]]) { free(g_vaos[v[i]]); g_vaos[v[i]] = NULL; if (S.vao == v[i]) S.vao = 0; } }
+GL(glDeleteVertexArrays, void, GLsizei n, const GLuint *v) {
+    for (GLsizei i = 0; i < n; i++) if (v[i] && v[i] < g_nvaos && g_vaos[v[i]]) {
+        vao_release_buffers(g_vaos[v[i]]);
+        free(g_vaos[v[i]]); g_vaos[v[i]] = NULL;
+        if (S.vao == v[i]) S.vao = 0;
+    }
+}
 GL(glBindVertexArray, void, GLuint v) { S.vao = v; }
 GL(glEnableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 1; }
 GL(glDisableVertexAttribArray, void, GLuint i) { if (i < 16) cur_vao()->a[i].on = 0; }
@@ -2317,7 +2359,7 @@ static void va_pointer(GLuint i, GLint size, GLenum type, uint32_t norm, GLsizei
     vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
     va_format(a, size, type, norm, 0); a->bind = 0;
     // Stride 0 is tightly packed: GL makes it the format's size here, on the binding (its effective stride), so another attribute on it keeps it
-    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
+    buf_bind_set(&b->buf, S.array_buf.name, S.array_buf.obj); b->client = !S.array_buf.name; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
 }
 GL(glVertexAttribPointer, void, GLuint i, GLint size, GLenum type, uint32_t norm, GLsizei stride, const void *ptr) {
     va_pointer(i, size, type, norm, stride, ptr);
@@ -2342,7 +2384,7 @@ GL(glVertexAttribBinding, void, GLuint i, GLuint bi) {
 }
 GL(glBindVertexBuffer, void, GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {
     if (bi >= 16 || off < 0 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }
-    vbind_t *b = &cur_vao()->b[bi]; b->buf = buf; b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
+    vbind_t *b = &cur_vao()->b[bi]; buf_bind_set(&b->buf, buf, buf_of(buf)); b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
 }
 GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
     if (bi >= 16) { gl_error(GL_INVALID_VALUE); return; }
@@ -2360,7 +2402,7 @@ static void ff_pointer(int i, GLint size, GLenum type, GLsizei stride, const voi
     if (type == GL_DOUBLE) RED1("%s of doubles: Metal reads no double vertex attribute", fn);
     vao_t *v = cur_vao(); vattr_t *a = &v->a[i]; vbind_t *b = &v->b[i];
     va_format(a, size, type, (uint32_t)norm, 0); a->bind = 0;
-    b->buf = S.array_buf; b->client = !S.array_buf; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
+    buf_bind_set(&b->buf, S.array_buf.name, S.array_buf.obj); b->client = !S.array_buf.name; b->off = (uintptr_t)ptr; b->stride = stride ? stride : a->size * vtype_bytes(type);
 }
 GL(glVertexPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(0, size, type, stride, ptr, 0, __func__); }
 GL(glColorPointer, void, GLint size, GLenum type, GLsizei stride, const void *ptr) { ff_pointer(3, size, type, stride, ptr, type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE, __func__); }
@@ -3955,6 +3997,13 @@ EGL(eglWaitGL, EGLBoolean, void) { return EGL_TRUE; }
     X(g_sos) X(g_nsos) X(g_capsos) X(g_rbs) X(g_nrbs) X(g_caprbs) \
     X(g_sps) X(g_nsps) X(g_capsps) X(g_syncs)
 #define GL_FIELD(name) __typeof__(name) name;
+enum { EGL_SURF_WINDOW = 1, EGL_SURF_PBUFFER = 2 };
+typedef struct egl_surface {
+    EGLSurface handle;
+    int kind, destroyed;
+    uint32_t w, h;
+    struct egl_surface *next;
+} egl_surface;
 typedef struct {
     GL_SHARED_TABLES(GL_FIELD)
     unsigned users;
@@ -3969,7 +4018,7 @@ typedef struct gl_context {
     int use_fixed, profile, sized, destroyed;
     const gl_es_version *es;
     EGLContext handle;
-    EGLSurface draw, read;
+    egl_surface *draw, *read;
     pthread_t owner;
     gl_share *share;
     struct gl_context *next;
@@ -3981,6 +4030,7 @@ static gl_context g_default_context = {
     .state = GL_STATE_DEFAULT, .profile = 1, .share = &g_default_share,
 };
 static gl_context *g_contexts, *g_loaded_context = &g_default_context;
+static egl_surface *g_surfaces;
 static __thread struct { EGLDisplay dpy; gl_context *ctx; EGLSurface draw, read; } t_cur;
 static pthread_mutex_t g_gl_mu = PTHREAD_MUTEX_INITIALIZER;
 static __thread unsigned t_gl_depth;
@@ -4050,12 +4100,40 @@ static gl_context *context_find(EGLContext handle) {
         if (c->handle == handle && !c->destroyed) return c;
     return NULL;
 }
+static egl_surface *surface_find(EGLSurface handle) {
+    for (egl_surface *s = g_surfaces; s; s = s->next)
+        if (s->handle == handle && !s->destroyed) return s;
+    return NULL;
+}
+static egl_surface *surface_new(int kind, uint32_t w, uint32_t h) {
+    static uintptr_t next_surface = 3;
+    egl_surface *s = zalloc(sizeof *s);
+    s->handle = (EGLSurface)next_surface++;
+    s->kind = kind;
+    s->w = w; s->h = h;
+    s->next = g_surfaces; g_surfaces = s;
+    return s;
+}
+static int surface_in_use(const egl_surface *s) {
+    for (gl_context *c = g_contexts; c; c = c->next)
+        if (c->owner && (c->draw == s || c->read == s)) return 1;
+    return 0;
+}
+static void surface_free_if_unused(egl_surface *s) {
+    if (!s || !s->destroyed || surface_in_use(s)) return;
+    egl_surface **link = &g_surfaces;
+    while (*link && *link != s) link = &(*link)->next;
+    if (*link == s) *link = s->next;
+    free(s);
+}
 static void context_free(gl_context *c) {
     gl_context *keep = g_loaded_context == c ? &g_default_context : g_loaded_context;
     context_activate(c);
     h_glUseProgram(0);
+    state_release_buffers(&S);
+    vao_release_buffers(&g_vao0);
     for (uint32_t i = 1; i < g_nfbs; i++) free(g_fbs[i]);
-    for (uint32_t i = 1; i < g_nvaos; i++) free(g_vaos[i]);
+    for (uint32_t i = 1; i < g_nvaos; i++) if (g_vaos[i]) { vao_release_buffers(g_vaos[i]); free(g_vaos[i]); }
     for (uint32_t i = 1; i < g_nqueries; i++) if (g_queries[i]) query_free(g_queries[i]);
     free(g_fbs); free(g_vaos); free(g_queries);
     g_fbs = NULL; g_vaos = NULL; g_queries = NULL;
@@ -4084,9 +4162,12 @@ static void context_free(gl_context *c) {
 }
 static void context_release(gl_context *c) {
     if (!c) return;
+    egl_surface *old_draw = c->draw, *old_read = c->read;
     c->owner = NULL;
     c->draw = c->read = NULL;
     if (g_loaded_context == c) context_flush();
+    surface_free_if_unused(old_draw);
+    if (old_read != old_draw) surface_free_if_unused(old_read);
     if (c->destroyed) context_free(c);
 }
 static void cur_release(void *binding) {
@@ -4103,7 +4184,17 @@ EGL(eglDestroyContext, EGLBoolean, EGLDisplay d, EGLContext handle) {
     if (!c->owner) context_free(c);
     return EGL_TRUE;
 }
-EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLint *attr) { (void)d; (void)cfg; (void)attr; RED1("eglCreatePbufferSurface: drawing into it is not implemented"); return (EGLSurface)(uintptr_t)4; }
+EGL(eglCreatePbufferSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, const EGLint *attr) {
+    (void)d; (void)cfg;
+    EGLint w = 0, h = 0;
+    for (int i = 0; attr && i < 64 && attr[i] != 0x3038; i += 2) {
+        if (attr[i] == 0x3057) w = attr[i + 1];        // EGL_WIDTH
+        else if (attr[i] == 0x3056) h = attr[i + 1];   // EGL_HEIGHT
+    }
+    if (w < 0 || h < 0) { t_egl_error = 0x300c; return NULL; }   // BAD_PARAMETER
+    RED1("eglCreatePbufferSurface: drawing into it is not implemented");
+    return surface_new(EGL_SURF_PBUFFER, (uint32_t)w, (uint32_t)h)->handle;
+}
 EGL(eglCreateContext, EGLContext, EGLDisplay d, EGLConfig cfg, EGLContext share, const EGLint *attr) {
     (void)d;
     int major = 1, minor = 0, profile = 1, flags = 0;
@@ -4147,36 +4238,54 @@ EGL(eglCreateWindowSurface, EGLSurface, EGLDisplay d, EGLConfig cfg, void *win, 
     if (g_win.made && (g_win.w != (uint32_t)w || g_win.h != (uint32_t)h)) g_win.made = 0;
     if (!g_win.made) win_make(w, h);
     g_egl.surface = 1;
-    return (EGLSurface)(uintptr_t)3;
+    return surface_new(EGL_SURF_WINDOW, (uint32_t)w, (uint32_t)h)->handle;
 }
-EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface s) { (void)d; (void)s; return EGL_TRUE; }
+EGL(eglDestroySurface, EGLBoolean, EGLDisplay d, EGLSurface handle) {
+    (void)d;
+    egl_surface *s = surface_find(handle);
+    if (!s) { t_egl_error = 0x300d; return EGL_FALSE; }   // BAD_SURFACE
+    s->destroyed = 1;
+    surface_free_if_unused(s);
+    return EGL_TRUE;
+}
 EGL(eglMakeCurrent, EGLBoolean, EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext handle) {
     pthread_once(&g_cur_once, cur_key_init);
     if (!g_cur_key_ok) { t_egl_error = 0x3003; return EGL_FALSE; }   // BAD_ALLOC
     gl_context *c = handle ? context_find(handle) : NULL;
     if (handle && !c) { t_egl_error = 0x3006; return EGL_FALSE; }    // BAD_CONTEXT
+    if (!c && (dr || rd)) { t_egl_error = 0x3009; return EGL_FALSE; }   // BAD_MATCH
+    egl_surface *draw = dr ? surface_find(dr) : NULL;
+    egl_surface *read = rd ? surface_find(rd) : NULL;
+    if ((dr && !draw) || (rd && !read)) { t_egl_error = 0x300d; return EGL_FALSE; }   // BAD_SURFACE
+    if (c && !!draw != !!read) { t_egl_error = 0x3009; return EGL_FALSE; }   // BAD_MATCH
     if (c && c->owner && c != t_cur.ctx) { t_egl_error = 0x3002; return EGL_FALSE; }   // BAD_ACCESS
-    if (c && (dr || rd)) {
+    if (c && (draw || read)) {
         for (gl_context *other = g_contexts; other; other = other->next) {
             if (!other->owner || other == c || other == t_cur.ctx) continue;
-            if ((dr && (dr == other->draw || dr == other->read)) || (rd && (rd == other->draw || rd == other->read))) {
+            if ((draw && (draw == other->draw || draw == other->read)) ||
+                (read && (read == other->draw || read == other->read))) {
                 t_egl_error = 0x3002; return EGL_FALSE;
             }
         }
     }
     if (pthread_setspecific(g_cur_key, c)) { t_egl_error = 0x3003; return EGL_FALSE; }
+    egl_surface *old_draw = NULL, *old_read = NULL;
     if (t_cur.ctx != c) context_release(t_cur.ctx);
+    else if (c) { old_draw = c->draw; old_read = c->read; }
     t_cur.ctx = c;
     t_cur.dpy = c ? d : NULL; t_cur.draw = c ? dr : NULL; t_cur.read = c ? rd : NULL;
     context_activate(c ? c : &g_default_context);
     if (c) {
         c->owner = pthread_self();
-        c->draw = dr; c->read = rd;
-        if (dr && !c->sized && g_win.made) {
+        c->draw = draw; c->read = read;
+        if (draw && !c->sized && (draw->kind == EGL_SURF_PBUFFER || g_win.made)) {
             c->sized = 1;
-            S.vp[2] = S.sc[2] = g_win.w; S.vp[3] = S.sc[3] = g_win.h;
+            S.vp[2] = S.sc[2] = (GLint)(draw->kind == EGL_SURF_WINDOW ? g_win.w : draw->w);
+            S.vp[3] = S.sc[3] = (GLint)(draw->kind == EGL_SURF_WINDOW ? g_win.h : draw->h);
         }
     }
+    surface_free_if_unused(old_draw);
+    if (old_read != old_draw) surface_free_if_unused(old_read);
     return EGL_TRUE;
 }
 EGL(eglReleaseThread, EGLBoolean, void) { if (t_cur.ctx) h_eglMakeCurrent(NULL, NULL, NULL, NULL); t_egl_api = 0; t_egl_error = 0x3000; return EGL_TRUE; }

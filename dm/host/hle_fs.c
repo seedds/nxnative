@@ -53,11 +53,12 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 typedef struct {
     char name[32]; char dir[1024]; char overlay[4096]; char commit[1024];
     romfs_img *img;                  // non-NULL: dir is a RomFS image file
-    int ro;
+    int ro, immutable;
     int releasable;                  // add-on content and cache storage: Unmount releases the name (mount_releasable)
     int released;                    // a releasable entry after its Unmount: kept for open handles and a later mount of its target, matched by no name (mnt_is)
     int txn_root;                    // canonical mount entry for this backing transaction, or -1
     _Atomic int poison;              // failure state belongs to this backing, not to the process
+    _Atomic uint64_t work_gen;       // bumped when rollback swaps out the working tree, invalidating prior writable handles
     _Atomic uint64_t first_write_ns;
 } mount_t;
 static mount_t g_mnt[MAX_MOUNT];   // commit non-empty = transactional save mount
@@ -71,6 +72,7 @@ static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
 #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
 static uint8_t g_fmode[65536];              // fd → open mode
 static _Atomic uint16_t g_ftxn[65536];       // fd → 1-based canonical transaction index, or 0
+static _Atomic uint64_t g_fgen[65536];       // fd → txn_root work_gen captured at open
 static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
 static pthread_once_t g_save_test_once = PTHREAD_ONCE_INIT;
 static int g_save_kill_n, g_save_fail_n, g_save_fail_e;
@@ -181,7 +183,7 @@ static int img_path(const char *p, int *mi, int64_t *k) {
     return 0;
 }
 static void save_old_names(const char *from, const char *to);
-static Result mount_impl(const char *name, const char *dir, int ro, int txn, int releasable) {
+static Result mount_impl(const char *name, const char *dir, int ro, int txn, int releasable, int immutable) {
     pthread_once(&g_txn_lock_once, txn_locks_init);
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
     int back = -1;
@@ -190,11 +192,11 @@ static Result mount_impl(const char *name, const char *dir, int ro, int txn, int
             // Repeating the same mount is harmless, but a different target
             // under this name must not silently resolve to the old mount.
             const char *backing = g_mnt[i].commit[0] ? g_mnt[i].commit : g_mnt[i].dir;
-            Result r = !strcmp(backing, dir) && g_mnt[i].ro == ro ? RES_OK : RES_PATH_EXISTS;
+            Result r = !strcmp(backing, dir) && g_mnt[i].ro == ro && g_mnt[i].immutable == immutable ? RES_OK : RES_PATH_EXISTS;
             pthread_mutex_unlock(&g_lock); return r;
         }
         if (releasable && !txn && g_mnt[i].released && g_mnt[i].releasable &&
-            g_mnt[i].ro == ro && !g_mnt[i].commit[0] && !strcmp(g_mnt[i].dir, dir))
+            g_mnt[i].ro == ro && g_mnt[i].immutable == immutable && !g_mnt[i].commit[0] && !strcmp(g_mnt[i].dir, dir))
             back = i;
     }
     if (back >= 0) {
@@ -207,9 +209,10 @@ static Result mount_impl(const char *name, const char *dir, int ro, int txn, int
     }
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
-    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].releasable = releasable; g_mnt[g_nmnt].released = 0; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
+    g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].immutable = immutable; g_mnt[g_nmnt].releasable = releasable; g_mnt[g_nmnt].released = 0; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
     g_mnt[g_nmnt].txn_root = -1;
     atomic_store(&g_mnt[g_nmnt].poison, 0);
+    atomic_store(&g_mnt[g_nmnt].work_gen, 0);
     atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
     const char *overlay = !strcmp(name, "rom") ? getenv("DM_ROMFS_OVERLAY") : NULL;
     if (overlay) strlcpy(g_mnt[g_nmnt].overlay, overlay, sizeof g_mnt[0].overlay);
@@ -229,12 +232,13 @@ static Result mount_impl(const char *name, const char *dir, int ro, int txn, int
         else if (!access(neu, F_OK) && rm_tree(neu)) why = "cannot clear the .new left over from last time";
         else if (dm_fs_test_fail("mountclone") || clonefile(dir, work, 0))   // ENOTSUP: HFS+ and exFAT can neither clone nor swap directories (RENAME_SWAP), so no transaction can work on them
             why = errno == ENOTSUP ? "the save folder's filesystem cannot clone directories (save transactions need APFS: set DM_SAVE to a folder on an APFS volume)" : "cloning the work directory failed";
-        if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
+        if (why) { txn_err = errno ? errno : EIO; g_mnt[g_nmnt].ro = 1; g_mnt[g_nmnt].immutable = 0; strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
             strlcpy(g_mnt[g_nmnt].commit, dir, sizeof g_mnt[0].commit);
             g_mnt[g_nmnt].txn_root = g_nmnt;
             atomic_store(&g_mnt[g_nmnt].poison, 0);
+            atomic_store(&g_mnt[g_nmnt].work_gen, 1);
             atomic_store(&g_mnt[g_nmnt].first_write_ns, 0);
             strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir); }
     } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
@@ -254,15 +258,15 @@ static Result mount_impl(const char *name, const char *dir, int ro, int txn, int
     LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[g_nmnt - 1].overlay[0] ? " (overlay first)" : "");
     return RES_OK;
 }
-static Result mount_ex(const char *name, const char *dir, int ro, int txn) { return mount_impl(name, dir, ro, txn, 0); }
-static Result mount(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 0); }
+static Result mount_ex(const char *name, const char *dir, int ro, int txn) { return mount_impl(name, dir, ro, txn, 0, 0); }
+static Result mount(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 0, ro); }
 
 // Add-on content and cache storage under a name the game gives back. On Horizon Unmount releases the name and the next mount under it gets the target it names: Pokémon Friends'
 // AocVersionCheker mounts each add-on as "AVCtitle", reads its AocVersion/AocVersion_<label>.json and unmounts it, and Taiko no Tatsujin: Rhythm Festival's plugin mounts cache
 // storage index 1, unmounts it, and mounts index 2 under the same name. The host's table keeps its entries, as an open image file names its entry by index (IMG_HANDLE): Unmount
 // marks a releasable entry released (host_unmount; it keeps its name for the log, and no name lookup matches it, mnt_is), and a later mount of the same target and mode takes that
 // entry back under the same lock, so cycling indices does not grow the table. A different target under a name still in use is refused with RES_PATH_EXISTS, as on Horizon.
-static Result mount_releasable(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 1); }
+static Result mount_releasable(const char *name, const char *dir, int ro) { return mount_impl(name, dir, ro, 0, 1, ro); }
 // Unmount of a host mount: returns 1 if the host owns the name (releasing it when releasable; the entry and any open image stay so handles left open still read),
 // 0 when the name is not in the host's table (so h_fs_Unmount may release an SDK-owned mount with no host lock held)
 static int host_unmount(const char *name) {
@@ -306,8 +310,9 @@ static struct dirent *dir_next(DIR *d) {
     do { errno = 0; e = readdir(d); } while (e && (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")));
     return e;
 }
-// Name index of the directories of read-only mounts (RomFS, a save that fell back to read-only): guest name → physical name, sorted by guest name. The mount table is resident and a read-only mount does not change for the whole process,
-// so each directory's index is built once at its first lookup and stays valid. The entry-by-entry comparison below calls getxattr on every entry of the parent directory for each path component:
+// Name index of the directories of immutable read-only mounts (RomFS, add-on content, system data): guest name → physical name, sorted by guest name.
+// The mount table is resident and an immutable mount does not change for the whole process, whereas read-only save mounts can see sibling commits and scan live.
+// The entry-by-entry comparison below calls getxattr on every entry of the parent directory for each path component:
 // Engage's voice bank directories have 38,000 entries, and walking the whole RomFS at boot (9,680 directories) took about 17 s of black screen on the Mac and longer on the phone;
 // in play every audio file Wwise opened also took tens of milliseconds, all while holding the global path lock. Callers all hold PATH_LOCK (like host_path_ex), so the index takes no lock of its own.
 typedef struct { const char *guest, *phys; } name_ent;
@@ -343,8 +348,8 @@ static const dir_index *dir_index_get(const char *dir) {
     x->hash = h; x->n = n; x->pool = pool; x->next = *slot; *slot = x;
     return x;
 }
-static int path_component(char *parent, size_t n, const char *name, int create, int ro) {
-    if (ro && !create) {
+static int path_component(char *parent, size_t n, const char *name, int create, int immutable) {
+    if (immutable && !create) {
         const dir_index *x = dir_index_get(parent);
         if (x) {
             name_ent key = {name, NULL}; const name_ent *hit = bsearch(&key, x->e, x->n, sizeof *x->e, name_ent_cmp);
@@ -451,7 +456,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
             memcpy(part, rest, k); part[k] = 0;
             if (!strcmp(part, "..")) { errno = ENOENT; return 0; }
             const char *next = end; while (*next == '/') next++;
-            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].ro)) return 0;
+            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].immutable)) return 0;
             rest = end;
         }
         return 1;
@@ -875,6 +880,18 @@ static int save_size_nacp_max(int device, int64_t *size, int64_t *journal) {
     *size = bs; *journal = bj;
     return 0;
 }
+// Effective maximum save size shared by GetSaveDataSizeMax and ExtendSaveData/ExtendDeviceSaveData:
+// explicit NACP max (clamped >= base), else NACP base, else fallback 256 MB / 16 MB.
+static void save_size_max_limit(int device, int64_t *size, int64_t *journal, const char **from) {
+    int m = save_size_nacp_max(device, size, journal);
+    if (m < 0) {
+        *size = SAVE_FALLBACK_SIZE;
+        *journal = SAVE_FALLBACK_JOURNAL;
+    }
+    if (from) *from = m == 1 ? "the control data's max"
+                    : m == 0 ? "the control data's base size"
+                             : "no control data: 256 MB / 16 MB";
+}
 static int save_size_path(char *out, size_t cap, int device, int user) {
     const char *d = getenv("DM_SAVE");
     if (!d || !*d) return -1;
@@ -938,9 +955,11 @@ static Result save_size_get(int64_t *size, int64_t *journal, int device, int use
     return RES_OK;
 }
 // Follows Horizon's ExtendApplicationSaveData + ExtendSaveDataIfNeeded:
-// checks NACP max bounds (ResultExtensionSizeTooLarge), grows monotonically per dimension
-// without shrinking (so e.g. journal=0 keeps the current journal), requires 1 MiB alignment on
-// each growing dimension (ResultExtensionSizeInvalid), and fails if persisting the record fails.
+// enforces the same limit GetSaveDataSizeMax reports (NACP max, else NACP base, else 256 MB / 16 MB)
+// on any growing dimension (ResultExtensionSizeTooLarge) while grandfathering already-recorded oversized
+// capacity as monotonic no-ops, grows monotonically per dimension without shrinking (so e.g. journal=0
+// keeps the current journal), requires 1 MiB alignment on each growing dimension (ResultExtensionSizeInvalid),
+// and fails if persisting the record fails.
 static Result save_size_extend(int device, int user, int64_t size, int64_t journal) {
     if (size < 0 || journal < 0) return RES_INVALID_SIZE;
     char p[1100];
@@ -949,11 +968,7 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
         return RES_FAIL;
     }
     int64_t max_s = 0, max_j = 0;
-    if (save_size_nacp_max(device, &max_s, &max_j) >= 0 && (size > max_s || journal > max_j)) {
-        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)",
-            device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
-        return RES_EXT_SIZE_TOO_LARGE;
-    }
+    save_size_max_limit(device, &max_s, &max_j, NULL);
     pthread_mutex_lock(&g_lock);
     int64_t cur_s = 0, cur_j = 0;
     save_size_current_locked(p, device, &cur_s, &cur_j, NULL);
@@ -962,6 +977,12 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
         LOG("fs extend %s save data to %lld bytes (journal %lld): already %lld / %lld",
             device ? "device" : "account", (long long)size, (long long)journal, (long long)cur_s, (long long)cur_j);
         return RES_OK;
+    }
+    if ((size > cur_s && size > max_s) || (journal > cur_j && journal > max_j)) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)",
+            device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
+        return RES_EXT_SIZE_TOO_LARGE;
     }
     if ((size > cur_s && size % SAVE_EXT_UNIT) || (journal > cur_j && journal % SAVE_EXT_UNIT)) {
         pthread_mutex_unlock(&g_lock);
@@ -974,6 +995,7 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
     int bad = save_size_put_locked(p, device, new_s, new_j);
     pthread_mutex_unlock(&g_lock);
     if (bad) return RES_FAIL;
+    if (device || user == 0) save_sync_committed();
     LOG("fs extend %s save data to %lld bytes (journal %lld)", device ? "device" : "account", (long long)new_s, (long long)new_j);
     return RES_OK;
 }
@@ -988,10 +1010,8 @@ HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save d
 // fsp-srv object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc): UserAccountSaveDataSizeMax / JournalSizeMax (s64 at 0x3148 / 0x3150, clamped >= base), else
 // UserAccountSaveDataSize / JournalSize (0x3080 / 0x3088) when the title declares no separate max, else 256 MB data + 16 MB journal
 HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size from control.nacp", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
-    int64_t s = 0, j = 0;
-    int m = save_size_nacp_max(0, &s, &j);
-    const char *from = m == 1 ? "the control data's max" : m == 0 ? "the control data's base size" : "no control data: 256 MB / 16 MB";
-    if (m < 0) { s = SAVE_FALLBACK_SIZE; j = SAVE_FALLBACK_JOURNAL; }
+    int64_t s = 0, j = 0; const char *from = NULL;
+    save_size_max_limit(0, &s, &j, &from);
     if (size) *size = s;
     if (journal) *journal = j;
     LOG("fs save data size max: %lld bytes, journal %lld (%s)", (long long)s, (long long)j, from);
@@ -1144,7 +1164,7 @@ static Result commit_mount_locked(int i, int *notify_error) {
         if (!access(re, F_OK) && rm_tree(re)) rerr = errno ? errno : EIO;
         else if (dm_fs_test_fail("reclone") || clonefile(g_mnt[i].commit, re, 0)) { rerr = errno ? errno : EIO; rm_tree(re); }
         else if (renamex_np(re, g_mnt[i].dir, RENAME_SWAP)) { rerr = errno ? errno : EIO; rm_tree(re); }
-        else rm_tree(re);                                               // the swapped-out tainted work directory
+        else { atomic_fetch_add(&g_mnt[txn].work_gen, 1); rm_tree(re); }   // invalidate handles opened in the swapped-out work tree
         if (rerr) { save_poison_txn(txn, perr); LOG("[RED] save transaction: recloning the work directory failed errno=%d -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged", rerr); }
         LOG("[RED] save commit refused: a save write failed in this transaction errno=%d (0-byte files in the work directory: %s); the committed version is unchanged, the work directory %s%s", perr, tl ? torn + 1 : "none", rerr ? "could not be recloned (see the previous line)" : "was recloned from the committed version",
             nopen && !rerr ? "; [RED] save files are still open: they point into the discarded work directory, and what is written through them is lost" : nopen ? "; [RED] save files are still open" : "");
@@ -1243,9 +1263,11 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
     g_fmode[fd] = (uint8_t)mode; *out = FH_OUT(fd);
-    { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0;
-      for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, ln) && g_mnt[i].txn_root >= 0) { token = (uint16_t)(g_mnt[i].txn_root + 1); break; }
-      atomic_store(&g_ftxn[fd], token); }
+    { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; uint16_t token = 0; uint64_t gen = 0;
+      for (int i = 0; c && i < g_nmnt; i++) if (mnt_is(&g_mnt[i], path, ln) && g_mnt[i].txn_root >= 0) {
+          int txn = g_mnt[i].txn_root; token = (uint16_t)(txn + 1); gen = atomic_load(&g_mnt[txn].work_gen); break;
+      }
+      atomic_store(&g_fgen[fd], gen); atomic_store(&g_ftxn[fd], token); }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
@@ -1295,13 +1317,30 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     }
     return RES_OK;
 }
+// Acquire the transaction read lock for a writable fd and reject handles opened before a rollback.
+static int txn_write_enter(int fd, const char *op, pthread_rwlock_t **guard, int *stale) {
+    uint16_t token = atomic_load(&g_ftxn[fd]);
+    uint64_t gen = atomic_load(&g_fgen[fd]);
+    int txn = token ? token - 1 : -1;
+    *stale = 0;
+    if (txn >= 0) {
+        *guard = &g_txn_lock[txn];
+        pthread_rwlock_rdlock(*guard);
+        if (gen != atomic_load(&g_mnt[txn].work_gen)) {
+            static _Atomic int stale_red;
+            if (atomic_fetch_add(&stale_red, 1) < 8) LOG("[RED] fs %s on fd %d rejected: handle opened before save rollback", op, fd);
+            *stale = 1;
+        }
+    }
+    return txn;
+}
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) { dm_thread_service_request();
     SDK_HANDLE(h, "_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", Result (*)(uint64_t, int64_t, const void *, size_t, const void *), RES_FAIL, h, off, buf, sz, opt);
     h = FH_IN(h);
     if (!h || IMG_H(h)) return RES_FAIL;
-    int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
-    if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
+    int stale = 0, txn = txn_write_enter((int)h & 0xffff, "WriteFile", &txn_guard, &stale);
+    if (stale) return RES_FAIL;
     (void)opt; size_t put = 0;
     if (txn >= 0) {                                                     // Save write injection point (for deterministic regression; only writes on the save mount are counted)
         pthread_once(&g_save_test_once, save_test_init);
@@ -1330,9 +1369,9 @@ HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)
     SDK_HANDLE(h, "_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", Result (*)(uint64_t, int64_t), RES_FAIL, h, sz);
     h = FH_IN(h);
     if (!h || IMG_H(h)) return RES_FAIL;
-    int fd = (int)h & 0xffff; uint16_t token = atomic_load(&g_ftxn[fd]); int txn = token ? token - 1 : -1;
     pthread_rwlock_t *txn_guard __attribute__((cleanup(txn_unlock))) = NULL;
-    if (txn >= 0) { txn_guard = &g_txn_lock[txn]; pthread_rwlock_rdlock(txn_guard); }
+    int stale = 0, txn = txn_write_enter((int)h & 0xffff, "SetFileSize", &txn_guard, &stale);
+    if (stale) return RES_FAIL;
     if (!ftruncate((int)h, sz)) return RES_OK;
     if (txn >= 0) save_poison_txn(txn, errno);
     return err_res("ftruncate", "fd");
@@ -1349,7 +1388,7 @@ HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void,
     }
     h = FH_IN(h);
     if (!h || IMG_H(h)) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0; an image entry holds no descriptor
-    g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0);
+    g_fmode[(int)h & 0xffff] = 0; atomic_store(&g_ftxn[(int)h & 0xffff], 0); atomic_store(&g_fgen[(int)h & 0xffff], 0);
     close((int)h); }
 HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) {
     SDK_HANDLE(h, "_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", int (*)(uint64_t), 0, h);

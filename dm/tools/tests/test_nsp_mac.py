@@ -25,6 +25,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.sh, self.logs, self.ran = self.tmp / 'shader', self.tmp / 'logs', []
+        self.lib_bytes, self.omit_targets, self.omit_tables, self.fail_partial = b'lib', set(), set(), False
         self.cas_used = [LIVE]   # the cache entries a full dmsh_build.py run lists as used
         self.logs.mkdir()
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_run)):
@@ -35,9 +36,14 @@ class Base(unittest.TestCase):
         tool = Path(cmd[1]).name
         if tool in ('vk_shaders.py', 'gl_shaders.py'):
             api, a = tool[:2], [str(c) for c in cmd]
-            outs = [Path(a[a.index('--ios') - 1]), Path(a[a.index('--ios') + 1])] if '--ios' in a else [Path(a[-1])]
-            for o in outs: (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(b'lib')
+            mac_out = Path(a[a.index('--ios') - 1]) if '--ios' in a else Path(a[-1])
+            outs = [('mac', mac_out)] + ([('ios', Path(a[a.index('--ios') + 1]))] if '--ios' in a else [])
+            for target, o in outs:
+                if target in self.omit_targets: continue
+                (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(self.lib_bytes)
+                if target not in self.omit_tables: (o / api / f'{api}_shaders.tsv').write_text('# table\n')
             log.write_text('macosx: 3 shaders\n' + ('iphoneos: 3 shaders\n' if '--ios' in a else ''))
+            if self.fail_partial: raise nsp.BuildError('simulated translator failure after partial write')
         elif tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
             outs = [self.sh / 'cache'] + ([Path(env['IOSOUT'])] if 'IOSOUT' in env else [])
             targets = (env or {}).get('DMSH_TARGETS', 'mac').split(',')
@@ -52,32 +58,137 @@ class Base(unittest.TestCase):
 
 
 class Layer(Base):
-    def vk(self, mac, key='K'):
+    APIS = (('vk', 'Vulkan'), ('gl', 'GL'))
+
+    def run_layer(self, api, name, mac, key='K', payload=b'lib'):
         self.ran.clear()
-        return nsp.layer_shaders(sys.executable, REPO, 'vk', 'Vulkan', [self.tmp / 'romfs'], self.sh, key, self.logs, {'WORK': str(self.tmp)}, mac)
+        self.lib_bytes = payload
+        return nsp.layer_shaders(sys.executable, REPO, api, name, [self.tmp / 'romfs'], self.sh, key, self.logs, {'WORK': str(self.tmp)}, mac)
 
     def test_mac_only(self):   # no --ios, only the Mac key, the Mac folder for DM_MSL_DIR
-        self.assertEqual(self.vk(True), self.sh)
-        self.assertNotIn('--ios', self.ran[0][0])
-        self.assertTrue((self.sh / 'vk.key').is_file()); self.assertFalse((self.sh / 'ios/vk.key').exists())
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])   # reused
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.assertEqual(self.run_layer(api, name, True), self.sh)
+                self.assertNotIn('--ios', self.ran[0][0])
+                self.assertTrue((self.sh / f'{api}.key').is_file()); self.assertFalse((self.sh / f'ios/{api}.key').exists())
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # reused
 
-    def test_mac_after_ios(self):   # an iOS build makes the Mac library too: a Mac-only build is reused
-        self.assertEqual(self.vk(False), self.sh / 'ios')
-        self.assertIn('--ios', self.ran[0][0])
-        (self.sh / 'vk.key').unlink()   # an iOS build from before Mac-only builds wrote only its own key
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])
+    def test_mac_after_ios_and_legacy_unstamped_layout(self):   # dual builds stamp both targets; a missing Mac stamp triggers one rebuild
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios')
+                self.assertIn('--ios', self.ran[0][0])
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios'); self.assertEqual(self.ran, [])   # dual reuse
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # Mac reuses kmac
+                (self.sh / f'{api}.key').unlink()   # legacy unstamped layout: no Mac stamp
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(len(self.ran), 1)
+                self.assertTrue((self.sh / f'{api}.key').is_file())
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # rebuilt once, then reused
+
+    def test_dual_a_mac_b_mac_a_rebuilds_with_distinct_bytes(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                lib = self.sh / api / f'{api}_shaders.metallib'
+                ios_lib = self.sh / f'ios/{api}/{api}_shaders.metallib'
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                self.assertEqual((lib.read_bytes(), ios_lib.read_bytes()), (b'bytes-A', b'bytes-A'))
+                self.run_layer(api, name, True, 'B', b'bytes-B')
+                self.assertEqual((len(self.ran), lib.read_bytes(), ios_lib.read_bytes()), (1, b'bytes-B', b'bytes-A'))
+                # Requesting Mac A again must not falsely hit ios/<api>.key = A while Mac holds bytes-B.
+                self.run_layer(api, name, True, 'A', b'bytes-A')
+                self.assertEqual((len(self.ran), lib.read_bytes()), (1, b'bytes-A'))
+
+    def test_failed_mac_partial_output_does_not_reuse_ios_stamp(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                self.fail_partial = True
+                try:
+                    with self.assertRaises(nsp.BuildError):
+                        self.run_layer(api, name, True, 'B', b'partial-B')
+                finally:
+                    self.fail_partial = False
+                lib = self.sh / api / f'{api}_shaders.metallib'
+                self.assertEqual(lib.read_bytes(), b'partial-B')
+                self.assertFalse((self.sh / f'{api}.key').exists())
+                # iOS A stamp is still intact, yet Mac A must rebuild instead of returning partial-B.
+                self.assertEqual(nsp.reused(self.sh / f'ios/{api}.key', 'A'), '3 shaders for the Mac and iOS')
+                self.run_layer(api, name, True, 'A', b'bytes-A')
+                self.assertEqual((len(self.ran), lib.read_bytes()), (1, b'bytes-A'))
+
+    def test_dual_missing_mac_output_does_not_publish_stamps(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.omit_targets = {'mac'}
+                try:
+                    with self.assertRaisesRegex(nsp.BuildError, 'no Mac'):
+                        self.run_layer(api, name, False, 'A', b'bytes-A')
+                finally:
+                    self.omit_targets = set()
+                self.assertFalse((self.sh / f'{api}.key').exists())
+                self.assertFalse((self.sh / f'ios/{api}.key').exists())
 
     def test_ios_after_mac(self):   # a Mac-only build made no iPhone library: an iOS build runs
-        self.vk(True)
-        self.assertEqual(self.vk(False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
-        self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, True)
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
+                self.assertTrue((self.sh / f'ios/{api}/{api}_shaders.metallib').is_file())
 
     def test_changed_inputs(self):
-        self.vk(False)
-        self.vk(True, 'K2'); self.assertEqual(len(self.ran), 1)
+        self.run_layer('vk', 'Vulkan', False)
+        self.run_layer('vk', 'Vulkan', True, 'K2'); self.assertEqual(len(self.ran), 1)
         self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())   # the iPhone library stays, under its own (older) key
         self.assertEqual(nsp.reused(self.sh / 'ios/vk.key', 'K'), '3 shaders for the Mac and iOS')
+
+    def test_missing_table_triggers_rebuild_and_keeps_targets_independent(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                mac_tsv = self.sh / api / f'{api}_shaders.tsv'
+                ios_tsv = self.sh / f'ios/{api}/{api}_shaders.tsv'
+                self.assertTrue(mac_tsv.is_file() and ios_tsv.is_file())
+                # Deleting Mac's table leaves iOS reusable, while Mac must rebuild and restore the table.
+                mac_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                # Deleting iOS's table leaves Mac reusable, while iOS must rebuild and restore the table.
+                ios_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(ios_tsv.is_file() and mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+
+    def test_omitted_table_cannot_publish_stamps(self):
+        for api, name in self.APIS:
+            for mac, omit, pattern in ((True, {'mac'}, f'no Mac.*{api}_shaders\\.tsv'),
+                                       (False, {'ios'}, f'no iOS.*{api}_shaders\\.tsv'),
+                                       (False, {'mac'}, f'no Mac.*{api}_shaders\\.tsv')):
+                with self.subTest(api=api, mac=mac, omit=sorted(omit)):
+                    shutil.rmtree(self.sh, ignore_errors=True)
+                    self.omit_tables = set(omit)
+                    try:
+                        with self.assertRaisesRegex(nsp.BuildError, pattern):
+                            self.run_layer(api, name, mac, 'A', b'bytes-A')
+                    finally:
+                        self.omit_tables = set()
+                    self.assertFalse((self.sh / f'{api}.key').exists())
+                    self.assertFalse((self.sh / f'ios/{api}.key').exists())
 
 
 class Nvn(Base):

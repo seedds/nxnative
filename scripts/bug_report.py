@@ -11,6 +11,7 @@ import datetime
 import os
 import plistlib
 import re
+import stat
 import subprocess
 import sys
 import zipfile
@@ -21,6 +22,9 @@ CHAIN_H = 'dm/gfx/nvn/dmsh_chain.h'
 TOTAL_CAP = 20 * 1024 * 1024    # the zip's text content, before compression
 FILE_CAP = 4 * 1024 * 1024      # one file: longer ones keep the first and last half of this
 CRASH_MAX, CRASH_DAYS = 3, 7
+GPU_EVENT_MAX = 10
+GPU_EVENT_MARGIN = 120          # seconds after a log's last line in which macOS may still write the run's report
+SYSTEM_REPORTS = '/Library/Logs/DiagnosticReports'
 
 # The allow-list: the only things this script reads into the bundle. Anything else (RomFS, NSO, NSP, NCA, .metallib, .metal, shader .json, saves, pso_*, screenshots, keys)
 # is not on it, so it cannot get in by a new file type turning up.
@@ -29,10 +33,11 @@ ALLOWED = (
     '~/Library/Application Support/nxnative/<title ID>/env.txt (the player\'s settings file)',
     'Contents/Resources/dm/env.txt of the app (settings baked in with --env-file)',
     'the app\'s saved choices: launcher.* keys and dataFolder of its preferences domain',
-    '<NSP folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the NSP folder)',
+    '<NSP folder>/<title ID>_build/logs/*.log and *.txt (the NSP script\'s step logs; regular text files directly in logs/, nothing else under the build folder)',
     'the file given with --ios-log (a text file other than .keys)',
     '~/Library/Logs/DiagnosticReports/ crash reports (.ips, .crash) of dmhost or the app, the newest 3 of the last 7 days',
-    'Info.plist of the app (a few keys), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
+    '/Library/Logs/DiagnosticReports/ and ~/Library/Logs/DiagnosticReports/ GPU fault reports (gpuEvent-<process>-*.ips) of dmhost or the app written during this game\'s last two Mac app runs (with no Mac app log, of the last 7 days, marked as not matched), the newest 10',
+    'Info.plist of the app (a few keys, or of a matching Mac .app directly in the NSP folder for its commit and shader chain stamps), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
 )
 
 HEX = r'[0-9a-fA-F]'
@@ -40,6 +45,7 @@ HEX = r'[0-9a-fA-F]'
 KEY_LINE = re.compile(rf'(?i)key\w*[\s=:"\'\[\],]*{HEX}{{32,}}')
 KEY_LINE2 = re.compile(rf'(?i)(?:title|master|prod|common|aes|kek|rights)[\w ]*[=:]\s*"?{HEX}{{32,}}\b')   # "titlekek_source = <hex>" and the like
 SECRET_NAME = re.compile(r'(?i)(key|secret|token|password)')
+BUILD_LINE = re.compile(r'^\[dm\] build: commit ([^,\r\n]+), shader chain ([0-9a-fA-F]+)(?:, profile ([0-9a-fA-F]{16}))?\s*$', re.M)
 
 
 def redact(text, home):
@@ -98,23 +104,38 @@ def read_prefs(bundle_id):
     return {k: v for k, v in sorted(d.items()) if k.startswith('launcher.') or k == 'dataFolder'}
 
 
+def app_title_id(app):
+    """the DMTitleID of a Mac app the NSP script packed, or None"""
+    try: plist = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    except Exception: return None
+    tid = str(plist.get('DMTitleID', '')).upper()
+    return tid if re.fullmatch(r'[0-9A-F]{16}', tid) else None
+
+
+def nsp_apps(nsp, tid):
+    """the Mac apps directly in the NSP folder (where the NSP script writes one) that carry this title ID"""
+    try: entries = list(nsp.iterdir())
+    except OSError: return []
+    return sorted(d for d in entries if d.suffix == '.app' and d.is_dir() and not d.is_symlink() and app_title_id(d) == tid)
+
+
 def resolve(target, base=None):
-    """the target as {title_id, app, nsp, build}; None when it is none of a title ID, an .app or an NSP folder"""
-    t: dict = {'title_id': None, 'app': None, 'nsp': None, 'build': None}
+    """the target as {title_id, app, nsp, build, nsp_apps}; None when it is none of a title ID, an .app or an NSP folder.
+    nsp_apps (an NSP folder only): its Mac apps of the title, whose stamps the report takes when there is exactly one."""
+    t: dict = {'title_id': None, 'app': None, 'nsp': None, 'build': None, 'nsp_apps': None}
     if re.fullmatch(r'(?i)[0-9a-f]{16}', target):
         t['title_id'] = target.upper(); return t
     p = Path(target).expanduser()
     if p.is_dir() and p.suffix == '.app':
-        try: plist = plistlib.loads((p / 'Contents/Info.plist').read_bytes())
-        except Exception: return None
-        tid = str(plist.get('DMTitleID', '')).upper()
-        if not re.fullmatch(r'[0-9A-F]{16}', tid): return None
+        tid = app_title_id(p)
+        if not tid: return None
         t.update(title_id=tid, app=p); return t
     if p.is_dir():
         builds = sorted(d for d in p.iterdir() if d.is_dir() and re.fullmatch(r'(?i)[0-9a-f]{16}_build', d.name))
         if p.name.endswith('_build') and re.fullmatch(r'(?i)[0-9a-f]{16}_build', p.name): builds, p = [p], p.parent
         if len(builds) != 1: return None
-        t.update(title_id=builds[0].name[:16].upper(), nsp=p, build=builds[0]); return t
+        tid = builds[0].name[:16].upper()
+        t.update(title_id=tid, nsp=p, build=builds[0], nsp_apps=nsp_apps(p, tid)); return t
     return None
 
 
@@ -143,10 +164,16 @@ def chain_version():
 def shader_dirs(app, build):
     """Available library names only (a folder b-<chain>/ or its image b-<chain>.img, which dmsh_build.py writes); a build may retain several old chains, so none establishes the chain the player ran."""
     root = app if app else build
+    app_root = app.resolve() if app else None
     dirs = [app / 'Contents/Resources/msl'] if app else [build / s for s in ('shader', 'shader/cache', 'shader/ios')] if build else []
     found = []
     for d in dirs:
-        if d.is_symlink() or not d.is_dir(): continue
+        if d.is_symlink():
+            # Packed Mac apps link Contents/Resources/msl into Contents/PlugIns/ShaderLibraries.bundle; follow only symlinks that stay inside the app.
+            try:
+                if not app_root or not d.resolve().is_relative_to(app_root): continue
+            except OSError: continue
+        if not d.is_dir(): continue
         found.extend(p.relative_to(root).as_posix() for p in d.iterdir()
                      if not p.is_symlink() and ((p.is_dir() and re.fullmatch(r'b-[0-9a-f]+', p.name)) or (p.is_file() and re.fullmatch(r'b-[0-9a-f]+\.img', p.name))))
     return sorted(found)
@@ -198,18 +225,75 @@ def crash_reports(home, names, now=None):
     return sorted(items, key=lambda p: p.stat().st_mtime, reverse=True)[:CRASH_MAX]
 
 
-def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_CAP):
+def run_windows(home, tid):
+    """(start, end) of this title's last two Mac app runs, from the two logs the launcher keeps: it starts a new file at each start. Every packed app's process is called nxnative and its host dmhost,
+    so a report's name does not say which game it is of, and its time is what tells them apart"""
+    out = []
+    for name in (f'{tid}.log', f'{tid}.prev.log'):
+        try: st = (Path(home) / 'Library/Logs/nxnative' / name).stat()
+        except OSError: continue
+        out.append((min(getattr(st, 'st_birthtime', st.st_mtime), st.st_mtime), st.st_mtime + GPU_EVENT_MARGIN))
+    return out
+
+
+def gpu_event_reports(home, names, system=None, now=None, windows=()):
+    """the reports macOS writes for a GPU hang or page fault of the host (gpuEvent-<process, 16 characters>-*.ips), from the system's folder and the user's, of the last CRASH_DAYS days: with windows, only those
+    written during one of them. Returns (the newest GPU_EVENT_MAX, how many others of these processes the windows left out)"""
+    now = datetime.datetime.now().timestamp() if now is None else now
+    system = SYSTEM_REPORTS if system is None else system
+    pre = tuple(dict.fromkeys(f'gpuEvent-{n[:16]}-' for n in names if n))
+    if not pre: return [], 0
+    by_name = {}
+    for d in (Path(system), Path(home) / 'Library/Logs/DiagnosticReports'):
+        try: entries = list(d.iterdir())
+        except OSError: continue
+        for p in entries:
+            if p.suffix != '.ips' or not p.name.startswith(pre): continue
+            try: st = p.lstat()
+            except OSError: continue
+            if not stat.S_ISREG(st.st_mode) or now - st.st_mtime > CRASH_DAYS * 86400: continue
+            prev = by_name.get(p.name)
+            if prev is None or st.st_mtime > prev[0]: by_name[p.name] = (st.st_mtime, p)
+    items = list(by_name.values())
+    kept = [(mt, p) for mt, p in items if any(a <= mt <= b for a, b in windows)] if windows else items
+    kept.sort(key=lambda x: x[0], reverse=True)
+    return [p for _, p in kept[:GPU_EVENT_MAX]], len(items) - len(kept)
+
+
+def log_provenance(text):
+    """(commit, chain) from the last host startup line ("[dm] build: commit …, shader chain …") in a collected log, or (None, None)"""
+    if not text: return None, None
+    matches = list(BUILD_LINE.finditer(text))
+    if not matches: return None, None
+    c = matches[-1].group(1).strip()
+    commit = None if not c or c.lower() in ('not recorded', 'unknown') else c
+    return commit, matches[-1].group(2)
+
+
+def info_plist(app, b):
+    try: return plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+    except Exception: b.notes.append(f'Info.plist of {app.name}: cannot be read'); return {}
+
+
+def app_beside_note(tid, apps):
+    if len(apps) == 1: return f'Mac app in the NSP folder: {apps[0].name} (fallback for commit and shader chain)'
+    if not apps: return f'Mac app in the NSP folder: none with title ID {tid}; commit and shader chain not recorded there'
+    return f'Mac app in the NSP folder: {len(apps)} with title ID {tid} ({", ".join(a.name for a in apps)}); commit and shader chain not guessed from them'
+
+
+def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_CAP, system_reports=None):
     """the bundle for target: (Bundle, report.md text)"""
     home = home or str(Path.home())
     b = Bundle(home, total_cap, file_cap)
     # report.md contains settings and preferences too. Reserve its maximum size before admitting logs, then account for its actual bytes below.
     report_cap = min(file_cap, total_cap)
     b.used = report_cap
-    tid, app, build = target['title_id'], target['app'], target['build']
-    plist = {}
-    if app:
-        try: plist = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
-        except Exception: b.notes.append('Info.plist: cannot be read')
+    tid, app, build, beside = target['title_id'], target['app'], target['build'], target.get('nsp_apps')
+    if beside is not None and not ios_log: b.notes.append(app_beside_note(tid, beside))
+    # An NSP folder's one app of the title gives only fallback stamps (never for --ios-log): a build in that folder can be run without it, so its name, version and settings stay out.
+    stamped = app if app else (beside[0] if beside and len(beside) == 1 and not ios_log else None)
+    plist = info_plist(app, b) if app else {}
+    stamps = info_plist(stamped, b) if stamped and stamped != app else plist
     bundle_id = plist.get('CFBundleIdentifier') or f'org.nxnative.{tid.lower()}'
     pname, builds = profile_info(tid, build)
     name = plist.get('CFBundleDisplayName') or plist.get('CFBundleName') or pname or 'unknown'
@@ -223,7 +307,8 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
     env = Path(home) / 'Library/Application Support/nxnative' / tid / 'env.txt'
     env_text = read_text(env) if env.exists() else None
     bundled_env = read_text(app / 'Contents/Resources/dm/env.txt') if app else None
-    if ios_log: b.add_file('logs/ios/' + (Path(ios_log).name or 'log.txt'), ios_log, 'iPhone log (--ios-log)')
+    ios_arc = 'logs/ios/' + (Path(ios_log).name or 'log.txt') if ios_log else None
+    if ios_arc: b.add_file(ios_arc, ios_log, 'iPhone log (--ios-log)')
     if build:
         ld = build / 'logs'
         names = sorted(p.name for p in ld.iterdir() if p.suffix in ('.log', '.txt') and p.is_file() and not p.is_symlink()) if ld.is_dir() else []
@@ -231,22 +316,35 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
         for n in names: b.add_file(f'logs/build/{n}', ld / n, f'build log {n}')
     else:
         b.notes.append('NSP script logs: skipped, no NSP folder given')
-    exe = [plist.get('CFBundleExecutable') or '', 'dmhost']
-    cr = crash_reports(home, [e for e in exe if e])
+    exe = [e for e in (plist.get('CFBundleExecutable'), 'dmhost') if e]
+    cr = crash_reports(home, exe)
     if not cr: b.notes.append('Crash reports: none of dmhost or the app in the last 7 days')
     for p in cr: b.add_file(f'crash/{p.name}', p, f'crash report {p.name}')
+    windows = run_windows(home, tid)
+    gpu, other = gpu_event_reports(home, exe, system_reports, windows=windows)
+    for p in gpu: b.add_file(f'crash/{p.name}', p, f'GPU fault report {p.name}' + ('' if windows else ' (not matched to this game: it has no Mac app log)'))
+    if other: b.notes.append(f"GPU fault reports: {other} from outside this game's last two Mac app runs left out")
 
     # settings
     prefs = read_prefs(bundle_id)
     pl = [f'{k} = {v}' for k, v in prefs.items()]
     dm_env = [f'{k}={v}' for k, v in sorted(os.environ.items()) if k.startswith('DM_') and not SECRET_NAME.search(k)]
-    bdirs = shader_dirs(app, build)
-    source = 'app' if app else 'build' if build else 'target'
-    commit = plist.get('DMCommit') or f'unknown (not recorded by the {source})'
-    # The collector's checkout need not be the checkout that built this app. A packaged app's sole b-<V> directory is its actual library chain.
-    chain = plist.get('DMChain') or (Path(bdirs[0]).name[2:] if app and len(bdirs) == 1 else None)
-    chain_text = chain or f'unknown (not recorded by the {source})'
-    if bdirs: chain_text += '\n\nAvailable shader folder(s): ' + ', '.join(bdirs)
+    log_arc = ios_arc if ios_arc else (f'logs/mac-app/{tid}.log' if f'logs/mac-app/{tid}.log' in b.files else f'logs/mac-app/{tid}.prev.log' if f'logs/mac-app/{tid}.prev.log' in b.files else None)
+    log_commit, log_chain = (None, None) if app else log_provenance(b.files.get(log_arc) if log_arc else None)
+    has_log_stamp = bool(log_commit or log_chain)
+    bdirs = shader_dirs(stamped, build)
+    source = 'iPhone log' if ios_arc and not app else 'app' if stamped else 'build' if build else 'target'
+    # Prefer the run log's startup stamp over a sibling app in the NSP folder (which may be stale or absent). An app beside the build is named with its stamps.
+    app_origin = f' (recorded by {stamped.name} in the NSP folder)' if stamped and stamped != app else ''
+    log_origin = f' (logged by {log_arc})' if log_arc else ''
+    app_commit = stamps.get('DMCommit')
+    # The collector's checkout need not be the checkout that built this app. A packaged app's sole b-<V> library is its actual chain.
+    app_chain = stamps.get('DMChain') or (Path(bdirs[0]).name.removeprefix('b-').removesuffix('.img') if stamped and len(bdirs) == 1 else None)
+    commit = (f'{log_commit}{log_origin}' if log_commit else f'unknown (not recorded by {log_arc})') if has_log_stamp else (f'{app_commit}{app_origin}' if app_commit else f'unknown (not recorded by the {source})')
+    chain_val = (f'{log_chain}{log_origin}' if log_chain else None) if has_log_stamp else (f'{app_chain}{app_origin}' if app_chain else None)
+    chain_text = chain_val or f'unknown (not recorded by the {source})'
+    listed = bdirs + (shader_dirs(None, build) if stamped and build else [])   # the app's libraries, then the build's
+    if listed: chain_text += '\n\nAvailable shader folder(s): ' + ', '.join(listed)
     collector = f'Collector checkout: {git_state() or "unknown"}; shader chain: {chain_version() or "unknown"} (collector only; does not identify the build that ran).'
     dev = device()
 

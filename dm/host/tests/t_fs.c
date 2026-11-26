@@ -218,6 +218,48 @@ int main(void) {
         CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save size: fallback without control.nacp or record is 256 MB / 16 MB");
         size = journal = -1;
         CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size max: fallback without control.nacp is 256 MB / 16 MB");
+        // Without control.nacp, ExtendSaveData and ExtendDeviceSaveData enforce the same 256 MB / 16 MB fallback max
+        snprintf(rec, sizeof rec, "%s.size", sdir);
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 512 MiB above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 32 MiB journal above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 16 << 20) == RES_OK && access(rec, F_OK) != 0,
+              "extend save: no-op at fallback limit succeeds without writing a record");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+              "extend device save: rejects requests above fallback max when control.nacp is absent");
+        // Grandfathering pre-existing oversized records when control.nacp is absent: GetSaveDataSizeMax stays title-level (256/16),
+        // existing oversized capacity stays readable and usable as monotonic no-ops, non-oversized dimensions can still grow up to max,
+        // and new growth above max (on this user or another user) is rejected.
+        {
+            char u2rec[1300], drec[1300];
+            const uint64_t uid3[2] = {DM_UID0 + 2, DM_UID1};
+            CHECK(dm_account_create_user(1) == 0 && dm_account_create_user(2) == 0, "save size: register users 2 and 3 for grandfathering");
+            snprintf(u2rec, sizeof u2rec, "%s_user2.size", sdir);
+            snprintf(drec, sizeof drec, "%s_device.size", sdir);
+            put(rec, "536870912 33554432\n");     // 512 MiB / 32 MiB
+            put(u2rec, "536870912 8388608\n");    // 512 MiB / 8 MiB (data oversized, journal below 16 MiB max)
+            put(drec, "536870912 33554432\n");    // 512 MiB / 32 MiB device
+            CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20),
+                  "save size max: stays title-level 256 MB / 16 MB even with grandfathered oversized records");
+            CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20),
+                  "save size: pre-existing oversized account record stays readable (512 MiB / 32 MiB)");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendSave(uid1, (int64_t)300 << 20, 16 << 20) == RES_OK,
+                  "extend save: requests within grandfathered capacity remain monotonic no-ops");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, (int64_t)512 << 20, 48 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: further growth past grandfathered record above max is rejected");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 16 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK &&
+                  size == ((int64_t)512 << 20) && journal == (16 << 20),
+                  "extend save: under-limit journal can still grow to policy max while preserving grandfathered data size");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 20 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: growing journal above policy max on grandfathered record is rejected");
+            CHECK(h_fs_ExtendSave(uid3, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: another user without an oversized record is bounded by reported 256 MiB max");
+            CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20) &&
+                  h_fs_ExtendDeviceSave((int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendDeviceSave((int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend device save: grandfathers existing oversized record and rejects further growth above fallback max");
+            unlink(rec); unlink(u2rec); unlink(drec);
+        }
         // Unknown or NULL UID is rejected as TargetNotFound without touching outputs
         size = journal = -1;
         CHECK(h_fs_SaveSize(&size, &journal, bad_uid) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: unknown UID returns TargetNotFound");
@@ -266,7 +308,6 @@ int main(void) {
         CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20), "extend device save: recorded independently");
         CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "account save size: unaffected by ExtendDeviceSaveData");
         // Additional account user keeps its own record
-        CHECK(dm_account_create_user(1) == 0, "save size: register user 2");
         CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: user 2 reads control.nacp before its own extend");
         CHECK(h_fs_ExtendSave(uid2, 80 << 20, 2 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (80 << 20) && journal == (2 << 20), "extend save: user 2 gets its own record");
         CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: user 1 record is untouched by user 2");
@@ -645,6 +686,37 @@ int main(void) {
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && h_fs_OpenFile(&h, "save:/savedata0.bin", MODE_READ) != RES_OK, "an erased file stays erased at the next mount");
         CHECK(read_fs("save:/both.bin", got, sizeof got) && !strcmp(got, "new") && read_fs("save:/m/a", got, sizeof got) && !strcmp(got, "ma"), "a second mount changes nothing else");
 #undef OLD
+        g_nmnt = 0;
+    }
+
+    printf("⑩ stale writable handles rejected after rollback\n");
+    {   char s1[1100], s2[1100], f1[1200], f2[1200];
+        snprintf(s1, sizeof s1, "%s/stale1", root); snprintf(s2, sizeof s2, "%s/stale2", root);
+        mkdir(s1, 0755); mkdir(s2, 0755);
+        unsetenv("DM_TEST_FS_FAIL"); unsetenv("DM_TEST_FS_FAILAT");
+        setenv("DM_SAVE", s1, 1); g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && mount_ex("save2", s2, 0, 1) == RES_OK, "mount two independent transactional saves");
+        CHECK(h_fs_CreateFile("save:/stale", 0) == RES_OK && write_save("save:/stale", "orig") == RES_OK && h_fs_Commit("save") == RES_OK, "commit original bytes to save:/stale");
+        CHECK(h_fs_CreateFile("save2:/peer", 0) == RES_OK && write_save("save2:/peer", "peer0") == RES_OK && h_fs_Commit("save2") == RES_OK, "commit original bytes to save2:/peer");
+        uint64_t h = 0, h2 = 0, h_new = 0;
+        CHECK(h_fs_OpenFile(&h, "save:/stale", MODE_WRITE) == RES_OK, "open writable handle on save:/stale");
+        CHECK(h_fs_OpenFile(&h2, "save2:/peer", MODE_WRITE) == RES_OK, "open writable handle on unaffected save2:/peer");
+        g_mode = 1; g_calls = 0;
+        CHECK(h_fs_WriteFile(h, 0, "bad", 3, NULL) == RES_FAIL, "injected zero-byte write fails and taints save");
+        g_mode = 0;
+        CHECK(h_fs_Commit("save") == RES_FAIL, "commit rolls back save while handle h remains open");
+        snprintf(f1, sizeof f1, "%s/stale", s1); snprintf(f2, sizeof f2, "%s/peer", s2);
+        CHECK(same(f1, "orig"), "committed save:/stale remains orig after rollback");
+        CHECK(h_fs_WriteFile(h, 0, "after", 5, NULL) == RES_FAIL, "WriteFile rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h, 1) == RES_FAIL, "SetFileSize rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h2, 5) == RES_OK && h_fs_WriteFile(h2, 0, "peer1", 5, NULL) == RES_OK, "unaffected second transaction handle still writes and resizes");
+        h_fs_CloseFile(h2);
+        CHECK(h_fs_Commit("save2") == RES_OK && same(f2, "peer1"), "unaffected second transaction commits peer1");
+        h_fs_CloseFile(h);
+        CHECK(h_fs_OpenFile(&h_new, "save:/stale", MODE_WRITE) == RES_OK, "close and reopen save:/stale (FD reuse)");
+        CHECK(h_fs_SetFileSize(h_new, 8) == RES_OK && h_fs_WriteFile(h_new, 0, "replaced", 8, NULL) == RES_OK, "reopened handle writes replacement bytes");
+        h_fs_CloseFile(h_new);
+        CHECK(h_fs_Commit("save") == RES_OK && same(f1, "replaced"), "commit succeeds and on-disk save:/stale equals replaced");
         g_nmnt = 0;
     }
 

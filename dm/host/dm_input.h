@@ -33,6 +33,9 @@ int dm_players_reported(void);   // the players the game sees: player 1 and each
 void dm_motion_set(int player, const float acc[3], const float rot[3]);
 void dm_motion_set_switch(int player, const float acc[3], const float rot[3]);   // player 0 only: the phone's own sensors in the Switch frame, kept separate; DM_MOTION_AXES does not apply
 void dm_motion_clear(int player);   // clears GameController motion; another fresh source can take over
+// Player 1's right stick drives the six-axis sensor while enabled. Changing the mode resets its pose to level.
+int dm_stick_motion_enabled(void);
+void dm_stick_motion_set(int enabled);
 // Passive controller HID, already in the Switch frame (G, rad/s). sample_ns is the sample's host now_ns() time, not the packet's arrival; stale / reordered samples are ignored.
 // Kept separate from GameController and the phone; used while GameController supplies no fresh motion for that player. DM_MOTION_AXES / ACC_SIGN apply only to GameController.
 void dm_motion_set_hid(int player, const float acc[3], const float rot[3], uint64_t sample_ns);

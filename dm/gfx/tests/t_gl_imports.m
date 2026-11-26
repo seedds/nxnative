@@ -23,6 +23,8 @@ void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
 uint64_t svc_dispatch(int n, uint64_t *r, uint64_t a) { (void)n; (void)r; (void)a; return 0; }
+static _Atomic int g_gl_frame_ticks;
+void dm_guest_frame_tick(void) { atomic_fetch_add(&g_gl_frame_ticks, 1); }
 uint64_t unimpl_stubs[4096];
 static const char *wrap_kind;
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)name; wrap_kind = kind; return fn; }
@@ -42,7 +44,7 @@ static void (*attr_format)(GLuint, GLint, GLenum, uint32_t, GLuint), (*attr_bind
 
 // What a draw reads for attribute i: its binding's buffer, stride and divisor, at the binding's offset plus the attribute's relative offset
 typedef struct { GLuint buf; uint64_t off; GLsizei stride; uint8_t div; } fetch_t;
-static fetch_t fetch(GLuint i) { vao_t *v = cur_vao(); const vbind_t *b = vb_of(v, (int)i); return (fetch_t){b->buf, b->off + v->a[i].rel, b->stride, b->div}; }
+static fetch_t fetch(GLuint i) { vao_t *v = cur_vao(); const vbind_t *b = vb_of(v, (int)i); return (fetch_t){b->buf.name, b->off + v->a[i].rel, b->stride, b->div}; }
 #define FETCH(i, B, O, ST, D) do { fetch_t f_ = fetch(i); assert(f_.buf == (B) && f_.off == (O) && f_.stride == (ST) && f_.div == (D)); } while (0)
 static const vattr_t *attr(GLuint i) { return &cur_vao()->a[i]; }
 
@@ -67,7 +69,7 @@ static void test_vertex_binding(void) {
     attr_format(2, 3, GL_FLOAT, 0, 0); attr_binding(2, 7); bind_vb(7, b[0], 0, 0); FETCH(2, b[0], 0, 0, 0);
     attr_format(2, 4, GL_FLOAT, 0, 0); FETCH(2, b[0], 0, 0, 0);
     // a binding given no buffer is not client memory: a draw skips the attribute (draw_setup)
-    bind_vb(7, 0, 64, 16); assert(!vb_of(cur_vao(), 2)->client && !vb_of(cur_vao(), 2)->buf);
+    bind_vb(7, 0, 64, 16); assert(!vb_of(cur_vao(), 2)->client && !vb_of(cur_vao(), 2)->buf.name && !vb_of(cur_vao(), 2)->buf.obj);
     bind_vao(0);
 
     // glVertexAttribPointer: a format, binding i, and that binding's buffer (the array buffer at the call), offset and stride (0 = the packed size)
@@ -183,18 +185,18 @@ static void test_uniform_buffer(void) {
     void (*barrier)(GLbitfield) = import("glMemoryBarrier");
     GLuint b[2]; gen_buf(2, b);
     bind_buf(GL_ARRAY_BUFFER, b[1]); bind_buf(GL_UNIFORM_BUFFER, b[0]);
-    assert(S.uniform_buf == b[0] && S.array_buf == b[1]);
+    assert(S.uniform_buf.name == b[0] && S.array_buf.name == b[1]);
     GLint cur = 0; h_glGetIntegerv(0x8a28, &cur); assert(cur == (GLint)b[0]);   // UNIFORM_BUFFER_BINDING
     const uint32_t data[4] = {1, 2, 3, 4};
     h_glBufferData(GL_UNIFORM_BUFFER, sizeof data, data, 0);   // the target's buffer takes the data
     assert(buf_of(b[0])->size == sizeof data && !memcmp(buf_of(b[0])->mb.contents, data, sizeof data) && !buf_of(b[1])->mb);
-    range(GL_UNIFORM_BUFFER, 0, b[1], 0, 4); assert(S.uniform_buf == b[1] && S.array_buf == b[1]);
-    base(GL_UNIFORM_BUFFER, 1, b[0]); assert(S.uniform_buf == b[0]);
+    range(GL_UNIFORM_BUFFER, 0, b[1], 0, 4); assert(S.uniform_buf.name == b[1] && S.array_buf.name == b[1]);
+    base(GL_UNIFORM_BUFFER, 1, b[0]); assert(S.uniform_buf.name == b[0]);
     h_glBufferStorage(GL_UNIFORM_BUFFER, 64, NULL, 0); assert(buf_of(b[0])->immutable && buf_of(b[0])->size == 64);
-    range(GL_ARRAY_BUFFER, 0, b[0], 0, 4); assert(S.array_buf == b[1] && S.uniform_buf == b[0]);   // a target the layer does not have: reported, nothing bound
+    range(GL_ARRAY_BUFFER, 0, b[0], 0, 4); assert(S.array_buf.name == b[1] && S.uniform_buf.name == b[0]);   // a target the layer does not have: reported, nothing bound
     barrier(0x4000);   // CLIENT_MAPPED_BUFFER_BARRIER_BIT, Fire Emblem's every frame
-    del_buf(1, &b[0]); assert(!S.uniform_buf && S.array_buf == b[1]);
-    del_buf(1, &b[1]); assert(!S.array_buf);
+    del_buf(1, &b[0]); assert(!S.uniform_buf.name && !S.uniform_buf.obj && S.array_buf.name == b[1]);
+    del_buf(1, &b[1]); assert(!S.array_buf.name && !S.array_buf.obj);
 }
 
 // Compressed arrays keep each layer's block rows separate, including mip levels
@@ -369,7 +371,7 @@ static void test_doom3(void) {
     h_glBindBufferBase(GL_UNIFORM_BUFFER, 5, ub); mb = blk_buffer(&p->blk[0], &mo); assert(mb == buf_of(ub)->mb && !mo);    // the whole buffer
     range(GL_UNIFORM_BUFFER, 5, ub, 224, 64); mb = blk_buffer(&p->blk[0], &mo); c = (const uint8_t *)mb.contents + mo;      // past the buffer's end
     assert(!memcmp(c, data + 224, 32)); for (int i = 32; i < 64; i++) assert(!c[i]);
-    del_buf(1, &ub); assert(!S.ubo[5].buf); mb = blk_buffer(&p->blk[0], &mo); c = (const uint8_t *)mb.contents + mo; for (int i = 0; i < 64; i++) assert(!c[i]);
+    del_buf(1, &ub); assert(!S.ubo[5].buf.name && !S.ubo[5].buf.obj); mb = blk_buffer(&p->blk[0], &mo); c = (const uint8_t *)mb.contents + mo; for (int i = 0; i < 64; i++) assert(!c[i]);
     h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs);
 
     // A program with a vertex shader alone links, and its pipeline has no fragment function and writes no colour
@@ -557,10 +559,10 @@ static void test_sampler_objects(int gpu) {
 
 // Extension names by gl_aliases.h (Fate/hollow ataraxia REMASTERED asks for its framebuffer functions by their EXT names, issue #2818), never by a stripped suffix; binds that
 // make a name glGen* never gave; EGL's current context, display and surfaces, per thread
-typedef struct { EGLContext context; void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
+typedef struct { EGLContext context; EGLSurface draw, read; void *before, *after; EGLBoolean bound; EGLint error, next_error; } egl_attempt;
 static void *other_thread(void *arg) {
     egl_attempt *seen = arg; seen->before = h_eglGetCurrentContext();
-    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, (EGLSurface)3, (EGLSurface)3, seen->context);
+    seen->bound = h_eglMakeCurrent((EGLDisplay)&g_egl, seen->draw, seen->read, seen->context);
     seen->after = h_eglGetCurrentContext(); seen->error = h_eglGetError(); seen->next_error = h_eglGetError();
     return NULL;
 }
@@ -582,17 +584,113 @@ static void test_extension_names_and_egl(void) {
     assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
     EGLDisplay d = (EGLDisplay)&g_egl;
     EGLContext context = h_eglCreateContext(d, NULL, NULL, NULL); assert(context);
-    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)4, context);
+    EGLSurface win = h_eglCreateWindowSurface(d, NULL, NULL, NULL);
+    EGLSurface pbuf = h_eglCreatePbufferSurface(d, NULL, NULL);
+    assert(win && pbuf && win != pbuf);
+    assert(h_eglMakeCurrent(d, win, pbuf, context));
     assert(h_eglGetCurrentContext() == context && h_eglGetCurrentDisplay() == d);
-    assert(h_eglGetCurrentSurface(0x3059) == (EGLSurface)3 && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && !h_eglGetCurrentSurface(0x3000));
-    egl_attempt seen = {.context = context}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
+    assert(h_eglGetCurrentSurface(0x3059) == win && h_eglGetCurrentSurface(0x305a) == pbuf && !h_eglGetCurrentSurface(0x3000));
+    egl_attempt seen = {.context = context, .draw = win, .read = win}; pthread_t th; pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
     assert(!seen.before && !seen.bound && !seen.after && seen.error == 0x3002 && seen.next_error == 0x3000);   // BAD_ACCESS, cleared on read
-    assert(h_eglGetCurrentContext() == context && h_eglGetCurrentSurface(0x305a) == (EGLSurface)4 && h_eglGetError() == 0x3000);
-    h_eglMakeCurrent(d, NULL, NULL, NULL); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
+    assert(h_eglGetCurrentContext() == context && h_eglGetCurrentSurface(0x305a) == pbuf && h_eglGetError() == 0x3000);
+    assert(h_eglMakeCurrent(d, NULL, NULL, NULL)); assert(!h_eglGetCurrentContext() && !h_eglGetCurrentDisplay() && !h_eglGetCurrentSurface(0x3059));
     pthread_create(&th, NULL, other_thread, &seen); pthread_join(th, NULL);
     assert(!seen.before && seen.bound && seen.after == context && seen.error == 0x3000);   // released here, acquired there; thread exit releases it too
-    h_eglMakeCurrent(d, (EGLSurface)3, (EGLSurface)3, context); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+    assert(h_eglMakeCurrent(d, win, win, context)); h_eglReleaseThread(); assert(!h_eglGetCurrentContext());
+    assert(h_eglDestroySurface(d, win) && h_eglDestroySurface(d, pbuf));
     assert(h_eglDestroyContext(d, context));
+}
+
+typedef struct {
+    EGLDisplay dpy;
+    EGLContext ctx;
+    EGLSurface surf;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int ready, release;
+    EGLBoolean bound;
+    GLint vp[4];
+} pbuffer_hold_t;
+static void *pbuffer_hold_thread(void *arg) {
+    pbuffer_hold_t *h = arg;
+    EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = import("eglMakeCurrent");
+    void (*get_integer)(GLenum, GLint *) = import("glGetIntegerv");
+    EGLBoolean (*release_thread)(void) = import("eglReleaseThread");
+    h->bound = make_current(h->dpy, h->surf, h->surf, h->ctx);
+    if (h->bound) get_integer(GL_VIEWPORT, h->vp);
+    pthread_mutex_lock(&h->mu);
+    h->ready = 1;
+    pthread_cond_signal(&h->cv);
+    while (!h->release) pthread_cond_wait(&h->cv, &h->mu);
+    pthread_mutex_unlock(&h->mu);
+    assert(release_thread());
+    return NULL;
+}
+static void test_egl_pbuffer_lifetime(void) {
+    EGLDisplay d = (EGLDisplay)&g_egl;
+    EGLSurface (*create_pbuffer)(EGLDisplay, EGLConfig, const EGLint *) = import("eglCreatePbufferSurface");
+    EGLBoolean (*destroy_surface)(EGLDisplay, EGLSurface) = import("eglDestroySurface");
+    EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = import("eglMakeCurrent");
+    EGLSurface (*get_surface)(EGLint) = import("eglGetCurrentSurface");
+    EGLContext (*get_context)(void) = import("eglGetCurrentContext");
+    EGLint (*get_error)(void) = import("eglGetError");
+    EGLContext (*create_context)(EGLDisplay, EGLConfig, EGLContext, const EGLint *) = import("eglCreateContext");
+    EGLBoolean (*destroy_context)(EGLDisplay, EGLContext) = import("eglDestroyContext");
+    void (*get_integer)(GLenum, GLint *) = import("glGetIntegerv");
+
+    const EGLint bad_attr[] = {0x3057, -1, 0x3056, 4, 0x3038};
+    assert(!create_pbuffer(d, NULL, bad_attr) && get_error() == 0x300c);   // EGL_BAD_PARAMETER
+    const EGLint attr1[] = {0x3057, 16, 0x3056, 8, 0x3038};
+    const EGLint attr2[] = {0x3057, 32, 0x3056, 16, 0x3038};
+    EGLSurface pb1 = create_pbuffer(d, NULL, attr1);
+    EGLSurface pb2 = create_pbuffer(d, NULL, attr2);
+    assert(pb1 && pb2 && pb1 != pb2);
+    EGLContext c1 = create_context(d, NULL, NULL, NULL);
+    EGLContext c2 = create_context(d, NULL, c1, NULL);
+    assert(c1 && c2);
+
+    pbuffer_hold_t hold = {.dpy = d, .ctx = c1, .surf = pb1, .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER};
+    pthread_t th; assert(!pthread_create(&th, NULL, pbuffer_hold_thread, &hold));
+    pthread_mutex_lock(&hold.mu);
+    while (!hold.ready) pthread_cond_wait(&hold.cv, &hold.mu);
+    pthread_mutex_unlock(&hold.mu);
+    assert(hold.bound && hold.vp[2] == 16 && hold.vp[3] == 8);
+
+    // Separate pbuffer binds simultaneously on this thread while thread 1 holds pb1.
+    assert(make_current(d, pb2, pb2, c2));
+    assert(get_context() == c2 && get_surface(0x3059) == pb2 && get_surface(0x305a) == pb2);
+    GLint vp[4] = {0}; get_integer(GL_VIEWPORT, vp); assert(vp[2] == 32 && vp[3] == 16);
+
+    // Competing for pb1 (still current on thread 1) fails with EGL_BAD_ACCESS and preserves c2/pb2.
+    assert(!make_current(d, pb1, pb1, c2) && get_error() == 0x3002);
+    assert(get_context() == c2 && get_surface(0x3059) == pb2 && get_surface(0x305a) == pb2);
+
+    // Unknown surface handle fails with EGL_BAD_SURFACE.
+    assert(!make_current(d, (EGLSurface)(uintptr_t)0xdead, (EGLSurface)(uintptr_t)0xdead, c2) && get_error() == 0x300d);
+
+    // Destroying pb2 while current defers freeing until unbound, while invalidating its handle immediately.
+    assert(destroy_surface(d, pb2));
+    assert(get_surface(0x3059) == pb2);
+    assert(!destroy_surface(d, pb2) && get_error() == 0x300d);
+    assert(!make_current(d, pb2, pb2, c2) && get_error() == 0x300d);
+    assert(make_current(d, NULL, NULL, NULL));
+
+    pthread_mutex_lock(&hold.mu);
+    hold.release = 1;
+    pthread_cond_signal(&hold.cv);
+    pthread_mutex_unlock(&hold.mu);
+    assert(!pthread_join(th, NULL));
+    pthread_cond_destroy(&hold.cv);
+    pthread_mutex_destroy(&hold.mu);
+
+    // Once thread 1 releases pb1, this thread can bind it, then destroy it.
+    assert(make_current(d, pb1, pb1, c2));
+    assert(make_current(d, NULL, NULL, NULL));
+    assert(destroy_surface(d, pb1));
+    assert(!make_current(d, pb1, pb1, c2) && get_error() == 0x300d);
+    assert(destroy_context(d, c1) && destroy_context(d, c2));
+    assert(!g_surfaces);
+    puts("EGL pbuffers: distinct identities, concurrent threads, BAD_ACCESS and deferred destruction: OK");
 }
 
 static void test_egl_client_api(void) {
@@ -692,6 +790,119 @@ static void test_shared_contexts(void) {
     assert(h_eglDestroyContext(&g_egl, shared));
     assert(h_eglDestroyContext(&g_egl, isolated));
     puts("EGL shared contexts: two threads, local bindings and share-group names: OK");
+}
+
+static void test_shared_buffer_lifetime(void) {
+    dev_init();
+    EGLBoolean (*make_current)(EGLDisplay, EGLSurface, EGLSurface, EGLContext) = import("eglMakeCurrent");
+    void (*gen_buffers)(GLsizei, GLuint *) = import("glGenBuffers");
+    void (*bind_buffer)(GLenum, GLuint) = import("glBindBuffer");
+    void (*bind_buffer_range)(GLenum, GLuint, GLuint, GLintptr, GLsizeiptr) = import("glBindBufferRange");
+    void (*bind_buffer_base)(GLenum, GLuint, GLuint) = import("glBindBufferBase");
+    void (*delete_buffers)(GLsizei, const GLuint *) = import("glDeleteBuffers");
+    void (*buffer_data)(GLenum, GLsizeiptr, const void *, GLenum) = import("glBufferData");
+    void (*buffer_sub_data)(GLenum, GLintptr, GLsizeiptr, const void *) = import("glBufferSubData");
+    void (*get_buffer_sub_data)(GLenum, GLintptr, GLsizeiptr, void *) = import("glGetBufferSubData");
+    void (*get_integer)(GLenum, GLint *) = import("glGetIntegerv");
+    void (*gen_vaos)(GLsizei, GLuint *) = import("glGenVertexArrays");
+    void (*bind_vao_fn)(GLuint) = import("glBindVertexArray");
+    void (*del_vaos)(GLsizei, const GLuint *) = import("glDeleteVertexArrays");
+    void (*attrib_ptr)(GLuint, GLint, GLenum, uint32_t, GLsizei, const void *) = import("glVertexAttribPointer");
+    GLenum (*get_err)(void) = import("glGetError");
+
+    EGLContext ctx_a = h_eglCreateContext(&g_egl, NULL, NULL, NULL);
+    EGLContext ctx_b = h_eglCreateContext(&g_egl, NULL, ctx_a, NULL);
+    assert(ctx_a && ctx_b);
+
+    // Context A creates buffer 1 and populates it.
+    assert(make_current(&g_egl, NULL, NULL, ctx_a));
+    GLuint buf_id = 0; gen_buffers(1, &buf_id); assert(buf_id == 1);
+    const uint32_t initial[4] = {11, 22, 33, 44};
+    bind_buffer(GL_ARRAY_BUFFER, buf_id);
+    @autoreleasepool { buffer_data(GL_ARRAY_BUFFER, sizeof initial, initial, 0); }
+    buf_t *orig = buf_of(buf_id);
+    assert(orig && orig->mb && orig->refs == 2);   // name table + ctx_a ARRAY_BUFFER
+    __weak id<MTLBuffer> weak_orig_mb = orig->mb;
+
+    // Context B binds the same buffer to ARRAY_BUFFER, EBO, UBO and a VAO attribute.
+    assert(make_current(&g_egl, NULL, NULL, ctx_b));
+    GLuint vao_b = 0; gen_vaos(1, &vao_b); bind_vao_fn(vao_b);
+    bind_buffer(GL_ARRAY_BUFFER, buf_id);
+    bind_buffer(GL_ELEMENT_ARRAY_BUFFER, buf_id);
+    bind_buffer_range(GL_UNIFORM_BUFFER, 3, buf_id, 0, sizeof initial);
+    attrib_ptr(0, 4, GL_FLOAT, 0, 16, NULL);
+    assert(orig->refs == 7);   // +ctx_b ARRAY_BUFFER, EBO, UNIFORM_BUFFER, ubo[3], vao_b b[0]
+
+    // Context A deletes buffer 1 and immediately reuses numeric name 1 for a new buffer.
+    assert(make_current(&g_egl, NULL, NULL, ctx_a));
+    delete_buffers(1, &buf_id);
+    assert(!buf_of(buf_id) && orig->refs == 5 && weak_orig_mb != nil);
+    GLint bound = -1; get_integer(0x8894, &bound); assert(bound == 0);
+    GLuint reused = 0; gen_buffers(1, &reused); assert(reused == buf_id);
+    const uint32_t fresh[4] = {901, 902, 903, 904};
+    bind_buffer(GL_ARRAY_BUFFER, reused);
+    @autoreleasepool { buffer_data(GL_ARRAY_BUFFER, sizeof fresh, fresh, 0); }
+    assert(buf_of(reused) && buf_of(reused) != orig);
+
+    // Context B still sees its original buffer (reads, sub-writes, glBufferData, VAO capture), unaffected by name reuse.
+    assert(make_current(&g_egl, NULL, NULL, ctx_b));
+    get_integer(0x8894, &bound); assert(bound == (GLint)buf_id);
+    get_integer(0x8895, &bound); assert(bound == (GLint)buf_id);
+    get_integer(0x8a28, &bound); assert(bound == (GLint)buf_id);
+    uint32_t got[4] = {0};
+    get_buffer_sub_data(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    assert(!memcmp(got, initial, sizeof got));
+    const uint32_t patch[2] = {55, 66};
+    buffer_sub_data(GL_ARRAY_BUFFER, 4, sizeof patch, patch);
+    get_buffer_sub_data(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    assert(got[0] == 11 && got[1] == 55 && got[2] == 66 && got[3] == 44);
+    const uint32_t replaced[4] = {101, 102, 103, 104};
+    @autoreleasepool { buffer_data(GL_ARRAY_BUFFER, sizeof replaced, replaced, 0); }
+    get_buffer_sub_data(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    assert(!memcmp(got, replaced, sizeof got) && get_err() == GL_NO_ERROR);
+    __weak id<MTLBuffer> weak_after_data = S.array_buf.obj->mb;
+    assert(weak_after_data != nil);
+    // Capturing ARRAY_BUFFER into another attribute while name 1 is reused still retains orig.
+    attrib_ptr(1, 4, GL_FLOAT, 0, 16, NULL);
+    assert(cur_vao()->b[1].buf.obj == orig && S.ubo[3].buf.obj == orig && cur_vao()->ebo.obj == orig && orig->refs == 6);
+
+    // Context A's new buffer with the reused name is completely untouched.
+    assert(make_current(&g_egl, NULL, NULL, ctx_a));
+    get_buffer_sub_data(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    assert(!memcmp(got, fresh, sizeof got));
+
+    // Deleting A's reused name from B must not unbind B's older retained buffer sharing the same numeric name.
+    assert(make_current(&g_egl, NULL, NULL, ctx_b));
+    delete_buffers(1, &reused);
+    assert(!buf_of(reused) && S.array_buf.obj == orig && orig->refs == 6);
+    get_buffer_sub_data(GL_ARRAY_BUFFER, 0, sizeof got, got);
+    assert(!memcmp(got, replaced, sizeof got));
+
+    // Releasing bindings keeps orig alive until the very last binding (the VAO) is released.
+    bind_buffer(GL_ARRAY_BUFFER, 0);
+    bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    bind_buffer_base(GL_UNIFORM_BUFFER, 3, 0);
+    assert(orig->refs == 2 && weak_after_data != nil);   // still retained by vao_b's two vertex bindings
+    del_vaos(1, &vao_b);
+    assert(weak_after_data == nil);   // last binding gone: original buffer object freed
+
+    // Destroying a context that still holds the last binding to a deleted buffer releases it cleanly.
+    assert(make_current(&g_egl, NULL, NULL, ctx_a));
+    GLuint id2 = 0; gen_buffers(1, &id2);
+    bind_buffer(GL_ARRAY_BUFFER, id2);
+    @autoreleasepool { buffer_data(GL_ARRAY_BUFFER, sizeof initial, initial, 0); }
+    __weak id<MTLBuffer> weak_id2 = buf_of(id2)->mb;
+    assert(make_current(&g_egl, NULL, NULL, ctx_b));
+    bind_buffer(GL_ARRAY_BUFFER, id2);
+    assert(make_current(&g_egl, NULL, NULL, ctx_a));
+    delete_buffers(1, &id2);
+    assert(!buf_of(id2) && weak_id2 != nil);
+    assert(h_eglDestroyContext(&g_egl, ctx_b));
+    assert(weak_id2 == nil);
+
+    assert(h_eglReleaseThread());
+    assert(h_eglDestroyContext(&g_egl, ctx_a));
+    puts("GL shared buffer lifetime: delete in A, read/write in B across name reuse, free on last unbind: OK");
 }
 
 static PFNNVNDEVICEGETPROCADDRESSPROC nvn_loader(void) {
@@ -1319,10 +1530,12 @@ static int test_framebuffer_srgb(void) {
         int srgb = kind != 1 && kind != 3, rb = kind == 2 || kind == 3;
         GLenum fmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
         GLuint tex = 0, renderbuffer = 0, fb = 0;
+        EGLSurface win_surf = NULL;
         if (kind != 6) h_glGenFramebuffers(1, &fb);
         h_glBindFramebuffer(GL_FRAMEBUFFER, fb);
         if (!fb) {
-            assert(h_eglCreateWindowSurface(NULL, NULL, NULL, NULL));
+            win_surf = h_eglCreateWindowSurface(NULL, NULL, NULL, NULL);
+            assert(win_surf);
         } else if (rb) {
             h_glGenRenderbuffers(1, &renderbuffer); h_glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
             h_glRenderbufferStorage(GL_RENDERBUFFER, fmt, 2, 1);
@@ -1385,6 +1598,7 @@ static int test_framebuffer_srgb(void) {
             GLint encoding = 0;
             h_glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK, 0x8210 /* COLOR_ENCODING */, &encoding);
             assert(encoding == 0x8c40 /* SRGB */);
+            assert(h_eglDestroySurface(NULL, win_surf));
         }
     }
     // Write sRGB bytes through the linear render view, then sample the same texture.
@@ -1702,13 +1916,20 @@ int main(int argc, char **argv) {
     if (!cpu) test_lod_bias();
     test_sampler_objects(!cpu);
     test_extension_names_and_egl();
+    test_egl_pbuffer_lifetime();
     test_egl_client_api();
+    test_shared_buffer_lifetime();
     if (!cpu) { test_shared_contexts(); test_nvn_interop(); }
     test_program_validation();
     test_active_attributes();
     test_fate_calls();
     test_fixed_function(!cpu);
-    if (!cpu) { test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding(); }
+    if (!cpu) {
+        test_image_copies(); test_multiple_draw_buffers(); test_texture_buffer_storage(); test_timestamps(); test_swizzle_and_layout_binding();
+        int gl_ticks0 = atomic_load(&g_gl_frame_ticks);
+        assert(h_eglSwapBuffers(NULL, NULL) == EGL_TRUE && h_eglSwapBuffers(NULL, NULL) == EGL_TRUE);
+        assert(atomic_load(&g_gl_frame_ticks) == gl_ticks0 + 2);
+    }
     if (fixture) test_argument_buffers(fixture);
 
     unsigned long sz;

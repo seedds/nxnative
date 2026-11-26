@@ -2,6 +2,7 @@
 // Replaces save_sync.c's weak defaults at link time so iCloud Drive files are downloaded before reading and coordinated with bird/fileproviderd across writes,
 // while ss_store_conditional still holds the per-title directory flock and verifies the observed destination identity before renaming.
 #import <Foundation/Foundation.h>
+#include <TargetConditionals.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -78,4 +79,18 @@ int front_save_sync_store(const char *local, const char *cloud, const ss_cloud_i
         if (r == SS_STORE_ERR && saved_errno) errno = saved_errno;
         return r;
     }
+}
+
+void front_save_backup_exclude(const char *dir) {
+#if !TARGET_OS_OSX
+    @autoreleasepool {
+        NSURL *u = [NSURL fileURLWithPath:@(dir) isDirectory:YES];
+        NSError *e = nil;
+        if (![u setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&e])
+            fprintf(stderr, "[dm] save backup: %s could not be excluded from device backup: %s\n",
+                    dir, e.localizedDescription.UTF8String ?: "no reason given");
+    }
+#else
+    (void)dir;
+#endif
 }

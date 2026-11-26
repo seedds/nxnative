@@ -127,13 +127,16 @@ int main(void) { @autoreleasepool {
     mtl_tex_init(&col3); mtl_tex_init(&dep3); mtl_tex_init(&mot3); mtl_tex_init(&out3);
     fill(tex_mtl(&col3), MTLClearColorMake(b[0], b[1], b[2], b[3]), 0); fill(tex_mtl(&dep3), MTLClearColorMake(0, 0, 0, 0), 1); fill(tex_mtl(&mot3), MTLClearColorMake(0, 0, 0, 0), 0);
     p_dlss c3 = c; c3.net = c.net = 2; c.reset = 1; c3.tex[DLSS_COLOR] = &col3; c3.tex[DLSS_DEPTH] = &dep3; c3.tex[DLSS_MOTION] = &mot3; c3.tex[DLSS_OUTPUT] = &out3; c3.iw = 960; c3.ih = 486; c3.ow = 1920; c3.oh = 972;
-    // A new network evaluated at 1920x1080, then at 1920x972 (Fast Fusion's second size) in the same submission: its first scaler is replaced before its first commit. The
-    // encoding thread has made the first evaluation's calls by then (rec_drain, as a game's frame of records hands them over in pieces), so the recording holds the scaler no longer
+    // A new network evaluated at 1920x1080, then at 1920x972 (Fast Fusion's second size) in the same submission: the first scaler is kept beside the second, then finalizing the
+    // network drops both from the cache before commit. The encoding thread has made the evaluations' calls by then (rec_drain, as a game's frame of records hands them over in pieces),
+    // so only deferred release keeps the dropped scalers alive until the submission completes (NSZombieEnabled turns an early release into a crash every time)
     mtl_sub_begin(); dlss_eval(&c);
     const void *first = (__bridge void *)g_dlss[1].sc;   // its address only: a reference here would keep it alive
     rec_drain(); dlss_eval(&c3);
-    CHECK(first && g_dlss[1].sc && (__bridge void *)g_dlss[1].sc != first, "new sizes replace the network's scaler");
-    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission that encoded the replaced scaler completes");
+    CHECK(first && g_dlss[1].sc && (__bridge void *)g_dlss[1].sc == first && g_dlss[2].sc && (__bridge void *)g_dlss[2].sc != first, "new sizes keep the network's earlier scaler beside the new one");
+    rec_drain(); mtl_dlss_forget(2); dlss_retire_drain();
+    CHECK(!g_dlss[1].sc && !g_dlss[2].sc, "finalizing the network drops its scalers from the cache before commit");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission that encoded the dropped scalers completes");
     CHECK(flat(tex_mtl(&out), a), "the first evaluation's output holds its own colour");
     CHECK(flat(tex_mtl(&out2), b), "the second evaluation through the same scaler holds its own");
     tex_t col4 = texture(100, 1024, 576, NVN_FORMAT_RGBA16F), dep4 = texture(101, 1024, 576, NVN_FORMAT_DEPTH32F), mot4 = texture(102, 1024, 576, NVN_FORMAT_RG16F), out4 = texture(103, 1536, 864, NVN_FORMAT_RGBA16F);
@@ -145,7 +148,7 @@ int main(void) { @autoreleasepool {
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the 1.5x submission completes");
         c4.reset = 0;
     }
-    dlss_scaler *s4 = NULL; for (int i = 0; i < 4; i++) if (g_dlss[i].net == 3) s4 = &g_dlss[i];
+    dlss_scaler *s4 = NULL; for (int i = 0; i < DLSS_KEEP; i++) if (g_dlss[i].net == 3) s4 = &g_dlss[i];
     CHECK(s4 && s4->sc != nil, "MetalFX made a temporal scaler for 1024x576 into 1536x864");
     CHECK(flat(tex_mtl(&out4), a), "the 1.5x evaluation fills its output");
     // The same network at 768x432 in the same textures, as a dynamic resolution renders: no new scaler, and the output is whole (MetalFX scales the content, not the textures)

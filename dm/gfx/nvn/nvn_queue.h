@@ -3,9 +3,12 @@
 #include "nvn_obj.h"
 void nvn_queue_submit(queue_t *q, int n, const uint64_t *handles);
 uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]);
+void nvn_queue_present_ref(uint64_t ticket);
 void nvn_queue_present_wait(uint64_t ticket);
 int nvn_queue_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);
 int nvn_queue_present_ready(uint64_t ticket);
+int nvn_queue_present_gpu_ready(uint64_t ticket, int wait_tex);
+int nvn_queue_present_gpu_wait_timeout(uint64_t ticket, uint64_t timeout_ns, int wait_tex);
 void nvn_queue_present_release(uint64_t ticket);
 // Unit tests: while held (on=1), replay takes no queued work, so a test can change state between a submit or QueuePresent and its replay; work already replaying finishes
 void nvn_queue_test_hold(int on);

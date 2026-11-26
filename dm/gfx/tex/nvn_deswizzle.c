@@ -130,3 +130,33 @@ int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32
 int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_at, void *dst, size_t dst_pitch) {
     return move(d, level, layer, (uint8_t *)src, src_at, (uint8_t *)dst, dst_pitch, 1);
 }
+
+int nvn_deswizzle_visit(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src,
+                        int (*fn)(const uint8_t *p, size_t n, void *ctx), void *ctx) {
+    if (!d || !src || !fn) return -1;
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb)) return -1;
+    const uint8_t *bl = (const uint8_t *)src + base;
+    uint32_t lb = nvn_tex_level_gobs(d, level) * 64;
+    if (lb < row_bytes) lb = row_bytes;
+    uint32_t bh = 1u << th, bd = 1u << td;
+    uint64_t block = 512ull * bh * bd, gobs_x = (uint64_t)(lb + 63) >> 6, blocks_y = ((uint64_t)rows + 8 * bh - 1) >> (3 + th);
+    // When every GOB column, block row, and block depth slice is completely full, the level has no padding bytes.
+    if ((row_bytes & 63u) == 0 && lb == row_bytes && (rows & (8u * bh - 1u)) == 0 && (slices & (bd - 1u)) == 0) {
+        uint64_t total = (uint64_t)(slices >> td) * blocks_y * gobs_x * block;
+        return total && fn(bl, (size_t)total, ctx) ? 1 : 0;
+    }
+    const gob_segments *gob = &g_segments[nvn_gob_order(d) != 0];
+    uint32_t nfull = row_bytes >> 4, tail = row_bytes & 15u;
+    for (uint32_t z = 0; z < slices; z++) {
+        uint64_t zb = (uint64_t)(z >> td) * gobs_x * blocks_y * block + (uint64_t)(z & (bd - 1u)) * bh * 512;
+        for (uint32_t y = 0; y < rows; y++) {
+            uint64_t p = (uint64_t)(y >> (3 + th)) * gobs_x * block + (uint64_t)((y & (8u * bh - 1u)) >> 3) * 512 + gob->y[y & 7u];
+            const uint8_t *r = bl + zb + p;
+            for (uint32_t j = 0; j < nfull; j++)
+                if (fn(r + (j >> 2) * block + gob->x[j & 3u], 16, ctx)) return 1;
+            if (tail && fn(r + (nfull >> 2) * block + gob->x[nfull & 3u], tail, ctx)) return 1;
+        }
+    }
+    return 0;
+}

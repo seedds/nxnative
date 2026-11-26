@@ -423,6 +423,7 @@ static void gcp_count(NvProg *pr, int why) {
     os_unfair_lock_unlock(&g_gcp_lk);
 }
 static NSMutableDictionary *g_geo_mesh_runfn;   // a mesh entry → its run twin (dm_mesh_run..., dmsh_mesh.py), or NSNull: none in the library, or its pipeline failed
+static uint64_t g_geo_mesh_runfn_gen;   // changes with every write to g_geo_mesh_runfn (geo_mesh_take caches the last lookup)
 // Generated mesh entries inherit the vertex library's constants. Keep their descriptors so fn_dev and fn_dev_b can materialize the defaults or the specialization without the border corrections, as for shader_load.
 static id<MTLFunction> geo_mesh_entry(id<MTLLibrary> lib, NSString *name) { return fn_load(lib, name, NULL); }
 // The mesh entry for this draw's program, or nil (the compute path draws it)
@@ -445,7 +446,7 @@ static id<MTLFunction> geo_mesh_fn(NvProg *pr, const p_draw *dw, const p_draw_id
         f = lib ? geo_mesh_entry(lib, want) : nil;
         if (lib && !f) for (NSString *nm in lib.functionNames) if ([nm hasPrefix:[want stringByAppendingString:@"_p"]]) { f = geo_mesh_entry(lib, nm); break; }   // fewer triangles a group (dm_mesh_p16)
         if (f) { if (!g_geo_mesh_runfn) g_geo_mesh_runfn = [NSMutableDictionary dictionary];   // its run twin: dm_mesh_z_p16 → dm_mesh_run_z_p16
-            g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = geo_mesh_entry(lib, [@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]]) ?: NSNull.null; }
+            g_geo_mesh_runfn_gen++; g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)f]] = geo_mesh_entry(lib, [@"dm_mesh_run" stringByAppendingString:[((id<MTLFunction>)f).name substringFromIndex:7]]) ?: NSNull.null; }
         static int n; if (f || n++ < 16) MLOG("geometry mesh: vertex %s kernel %s %s", vs->key, lean->key, f ? "has a mesh library" : "has no mesh library: the compute path draws it, and the pipeline record lists the pair (G row)");
         // A lean pair the game draws: the pipeline record's G row asks dmsh_build.py for its mesh library (mesh_pairs), so the libraries follow the pairs a game really draws, recorded as its
         // pipelines are, with no list per game. Once per pair a process (this branch), and the user list keeps each line once
@@ -464,6 +465,9 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     pso_key k; pso_key_fill(&k, vs, fs, g_pass.cfmt, g_pass.dfmt, g_pass.sfmt, g_pass.samples, 0);
     memset(k.attr, 0, sizeof k.attr); memset(k.attr_hi, 0, sizeof k.attr_hi); memset(k.stream, 0, sizeof k.stream);   // the pipeline pulls its streams: no vertex layout in it
     k.fsfn = (__bridge void *)fn;
+    // The last built pipeline's key: depth-prepass mesh draws (Donkey Kong Bananza's map: 1,900-8,000 a frame) ask for the same pipeline draw after draw without the lock and hash lookup
+    static pso_key last_k; static __unsafe_unretained id<MTLRenderPipelineState> last_ps;
+    if (last_ps && !memcmp(&k, &last_k, sizeof k)) return last_ps;   // NOLINT(bugprone-suspicious-memory-comparison): pso_key_fill zeroes the whole key first, padding included (as the table's own lookup compares it)
     os_unfair_lock_lock(&g_pso_mesh_lock); id ps = hm_get_id(&g_pso_mesh, &k);
     if (!ps) { if (!g_pso_mesh_building) g_pso_mesh_building = [NSObject new]; hm_put_id(&g_pso_mesh, &k, g_pso_mesh_building); }
     os_unfair_lock_unlock(&g_pso_mesh_lock);
@@ -485,9 +489,11 @@ static id<MTLRenderPipelineState> geo_mesh_pso_for(NvProg *pr, id<MTLFunction> f
     }
     // A failed pipeline sends the pair back to the compute path for good: with its mesh function still set, every draw of the pair left the geometry runs (geo_run_walk) and drew
     // alone (a mesh output over Metal's limit took Donkey Kong Bananza's translation from about 10 to 22-31 ms a frame)
-    if (ps == NSNull.null && run) g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]] = NSNull.null;   // the draws of the pair stay single
+    if (ps == NSNull.null && run) { g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]] = NSNull.null; g_geo_mesh_runfn_gen++; }   // the draws of the pair stay single
     else if (ps == NSNull.null && g_geo_mesh.lean) { NvShader *vs = pr->sh[0]; vs->geo_mesh[@(g_geo_mesh.lean->key)] = NSNull.null; g_geo_mesh_last.vs = nil; }
-    return ps == NSNull.null || ps == g_pso_mesh_building ? nil : ps;
+    if (ps == NSNull.null || ps == g_pso_mesh_building) return nil;
+    last_k = k; last_ps = ps;   // g_pso_mesh retains built pipelines for the life of the process (entries are never removed)
+    return ps;
 }
 static id<MTLRenderPipelineState> geo_mesh_pso(NvProg *pr) { return g_geo_mesh.ps = geo_mesh_pso_for(pr, g_geo_mesh.fn, 0); }
 // Mesh draws gathered into one dispatch. A mesh draw costs the M1 about 2.7 us however few triangles it has: Donkey Kong Bananza's depth prepass draws 420-550 of them a frame
@@ -572,7 +578,14 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
     }
     if (g_mrun.n == GEO_MESH_RUN) geo_mesh_flush_(3);
     if (!g_mrun.n) {
-        NSValue *k = [NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]; id f = g_geo_mesh_runfn[k];
+        // Cache the last mesh function's run twin: boxing an NSValue and looking up g_geo_mesh_runfn on every non-batched mesh draw took ~12% of the submit thread on Donkey Kong Bananza's map
+        static __unsafe_unretained id<MTLFunction> last_fn; static __unsafe_unretained id last_f; static uint64_t last_gen;
+        if ((__bridge void *)g_geo_mesh.fn != (__bridge void *)last_fn || last_gen != g_geo_mesh_runfn_gen) {
+            last_f = g_geo_mesh_runfn[[NSValue valueWithPointer:(__bridge const void *)g_geo_mesh.fn]];
+            last_fn = g_geo_mesh.fn;
+            last_gen = g_geo_mesh_runfn_gen;
+        }
+        id f = last_f;
         if (!f || f == NSNull.null || !geo_mesh_run_fits(pr)) return 0;   // no twin (a library from before runs, or a pair whose vertex resources are not all constant references)
         id<MTLRenderPipelineState> rps = geo_mesh_pso_for(pr, f, 1); if (!rps) return 0;   // built in the background: single draws until it is ready
         g_mrun.en = en; g_mrun.ps = g_geo_mesh.ps; g_mrun.run_ps = rps; g_mrun.fn = g_geo_mesh.fn; g_mrun.vs = pr->sh[0]; g_mrun.fs = pr->sh[1]; g_mrun.lean = g_geo_mesh.lean;

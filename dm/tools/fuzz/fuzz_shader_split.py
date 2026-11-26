@@ -170,10 +170,17 @@ def dbx():
             + struct.pack('<I', 2) + bytes(entries))
 
 
+def nsgz():
+    """Fenrir's HSPK package with one gzip-compressed BNSH record."""
+    import gzip
+    packed = gzip.compress(bnsh(), mtime=0)
+    return b'HSPK' + bytes(0x41c) + ss.NSGZ + struct.pack('<Q', len(packed)) + packed
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx(), 'nsgz': nsgz()}
 
 
 def check(data):

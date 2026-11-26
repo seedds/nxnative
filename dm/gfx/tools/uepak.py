@@ -510,6 +510,22 @@ def lz4_shaders(b, a):
 TOC_MAGIC, IO_SHADER_LIBRARY, IO_SHADER_CODE = b'-==--==--==--==-', 8, 9   # EIoChunkType in Unreal Engine 5 (TOC version 4 and later; 4.27 numbers its chunk types otherwise)
 IO_EXPORT_BUNDLE, IO_EXPORT_BUNDLE_427 = 1, 2   # a cooked package's exports: EIoChunkType in Unreal Engine 5 (TOC version 4 and later), in Unreal Engine 4.27 (TOC version 3)
 
+def _ucas_paths(path, parts):
+    base = path[:-5] if path.endswith('.utoc') else path
+    return [base + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(parts, 1))]
+
+def toc_ucas_paths(path):
+    """Partition .ucas paths referenced by an IoStore .utoc, reading only the 144-byte TOC header."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(144)
+        if len(head) >= 56 and head[:16] == TOC_MAGIC:
+            nparts = struct.unpack_from('<I', head, 52)[0]
+            return _ucas_paths(os.fspath(path), nparts)
+    except OSError:
+        pass
+    return _ucas_paths(os.fspath(path), 1)
+
 class Toc:
     """An IoStore container: the .utoc's chunk table and compression blocks, the data in the .ucas beside it (<name>_s<n>.ucas for partitions after the first). A chunk is a range of the
     container's uncompressed stream, which is cut into blocks of one size, each stored or compressed on its own (method index 0 = stored, else the TOC's method names from 1).
@@ -548,7 +564,7 @@ class Toc:
         t = IO_EXPORT_BUNDLE if self.version >= 4 else IO_EXPORT_BUNDLE_427
         return [i for i, c in enumerate(self.ids) if c[11] == t]
     def ucas_paths(self):
-        return [self.path[:-5] + ('.ucas' if not k else f'_s{k}.ucas') for k in range(max(self.parts, 1))]
+        return _ucas_paths(self.path, self.parts)
     def names(self):
         """{chunk index: file path} from the directory index (FIoDirectoryIndexResource: mount point, directories {name, first child, next sibling, first file}, files {name, next file,
         chunk index}, string table; 0xffffffff ends a list), joined to the mount point with its leading ../ removed, as shader_split.py labels a pak's files (DRAGON BALL Sparking! ZERO's

@@ -80,6 +80,34 @@ int main(int argc, char **argv) {
         assert(h_fs_Commit("p1") == RES_OK);
         assert(h_fs_MountSaveRO("ro2", DM_GAME_PROGRAM_ID, &u2) == RES_OK); expect_user("ro2:/hero", "first-B");
         assert(h_fs_Commit("alias2") == RES_OK); expect_user("ro2:/hero", "next-B");
+        // Warm negative lookup on ro2, then create/rename/delete + commit through the writable alias.
+        uint64_t tmp_h = 0; int32_t tmp_t = -1;
+        assert(h_fs_OpenFile(&tmp_h, "ro2:/fresh", MODE_READ) == RES_PATH_NOT_FOUND);
+        assert(h_fs_GetEntryType(&tmp_t, "ro2:/fresh") == RES_PATH_NOT_FOUND);
+        assert(h_fs_CreateFile("p2:/fresh", 0) == RES_OK && write_user("p2:/fresh", "born-B") == RES_OK);
+        assert(h_fs_Commit("alias2") == RES_OK);
+        expect_user("ro2:/fresh", "born-B");
+        assert(h_fs_OpenFile(&tmp_h, "p1:/fresh", MODE_READ) == RES_PATH_NOT_FOUND);
+        assert(h_fs_RenameFile("p2:/fresh", "p2:/renamed") == RES_OK && h_fs_Commit("p2") == RES_OK);
+        assert(h_fs_OpenFile(&tmp_h, "ro2:/fresh", MODE_READ) == RES_PATH_NOT_FOUND);
+        expect_user("ro2:/renamed", "born-B");
+        assert(h_fs_DeleteFile("p2:/renamed") == RES_OK && h_fs_Commit("p2") == RES_OK);
+        assert(h_fs_OpenFile(&tmp_h, "ro2:/renamed", MODE_READ) == RES_PATH_NOT_FOUND);
+        assert(h_fs_CreateFile("ro2:/nope", 0) != RES_OK);
+        assert(h_fs_OpenFile(&tmp_h, "ro2:/hero", MODE_WRITE) != RES_OK);
+        assert(h_fs_DeleteFile("ro2:/hero") != RES_OK);
+        // Immutable RomFS lookup keeps using dir_index while rejecting wrong case.
+        char romdir[1024], romfile[1100];
+        snprintf(romdir, sizeof romdir, "%s.rom", argv[2]);
+        assert(!mkdir(romdir, 0755));
+        snprintf(romfile, sizeof romfile, "%s/Data", romdir);
+        FILE *rf = fopen(romfile, "w"); assert(rf); fputs("rom-bytes", rf); fclose(rf);
+        assert(mount("romtest", romdir, 1) == RES_OK);
+        expect_user("romtest:/Data", "rom-bytes");
+        assert(h_fs_OpenFile(&tmp_h, "romtest:/data", MODE_READ) == RES_PATH_NOT_FOUND);
+        snprintf(romfile, sizeof romfile, "%s/Late", romdir);
+        rf = fopen(romfile, "w"); assert(rf); fputs("late", rf); fclose(rf);
+        assert(h_fs_OpenFile(&tmp_h, "romtest:/Late", MODE_READ) == RES_PATH_NOT_FOUND);
         fail_write = 1; assert(write_user("p1:/hero", "bad-A") != RES_OK); fail_write = 0;
         assert(write_user("p2:/hero", "good-B") == RES_OK && h_fs_Commit("p2") == RES_OK);
         assert(h_fs_Commit("p1") != RES_OK); expect_user("p1:/hero", "next-A"); expect_user("p2:/hero", "good-B");

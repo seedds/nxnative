@@ -87,8 +87,8 @@ int main(void) {
     CHECK(call(mgr, 0, param, sizeof param, 1, copies, 2, NULL, 0, NULL, 0, NULL, 0) == RES_OK, "OpenAudioRenderer succeeds");
     CHECK(msg[1] >> 31 && (msg[2] >> 5 & 15) == 1 && (msg[2] >> 1 & 15) == 0, "the renderer comes back as one moved handle");
     uint32_t r = msg[3];
-    int slot = sf_slot(r); sv_rnd *rnd = slot >= 0 ? g_sf[slot].ctx : NULL;
-    CHECK(rnd && g_sf[slot].answer == sv_renderer, "the moved handle is a renderer session");
+    int slot = sf_slot(r); sv_rnd *rnd = slot >= 0 && g_sf[slot].obj ? g_sf[slot].obj->ctx : NULL;
+    CHECK(rnd && g_sf[slot].obj->answer == sv_renderer, "the moved handle is a renderer session");
     if (!rnd) { printf("t_audren_sv: %d checks, %d failed\n", checks, fails); return 1; }
     CHECK(call(r, 0, NULL, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0) == RES_OK && rd32(out_raw()) == 48000, "GetSampleRate");
     CHECK(call(r, 1, NULL, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0) == RES_OK && rd32(out_raw()) == 240, "GetSampleCount");
@@ -140,8 +140,14 @@ int main(void) {
     sv_render(rnd, f);
     CHECK(f[0] == 4 && f[2] == -4 && f[2 * 238] == 4 && f[2 * 239] == -4, "ADPCM: nibble × 2^scale, frame after frame");
     CHECK(call(r, 6, NULL, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0) == RES_OK && !rnd->started, "Stop");
-    h_sf_Close(r); h_sf_Close(mgr);
-    CHECK(sf_slot(r) < 0, "closing the renderer session ends it");
+    // Duplicate the renderer handle and close the original first: the duplicate still serves commands and destroys the renderer once on final close
+    uint32_t r_dup = 0;
+    CHECK(h_sf_Dup(&r_dup, r) == RES_OK && r_dup && r_dup != r, "duplicate the renderer session handle");
+    h_sf_Close(r);
+    CHECK(sf_slot(r) < 0 && sf_slot(r_dup) >= 0, "closing original leaves duplicate slot open");
+    CHECK(call(r_dup, 0, NULL, 0, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0) == RES_OK && rd32(out_raw()) == 48000, "duplicate renderer answers GetSampleRate after original closes");
+    h_sf_Close(r_dup); h_sf_Close(mgr);
+    CHECK(sf_slot(r_dup) < 0, "closing the last renderer handle ends it");
     (void)signals;
     printf("t_audren_sv: %d checks, %d failed\n", checks, fails);
     return fails != 0;

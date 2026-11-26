@@ -55,6 +55,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [AI: THE SOMNIUM FILES](010089B00D09C000/README.md) | `010089B00D09C000` | 1.0.1 | 6.4.2 | Unity 2017.4.17f1 IL2CPP | NVN | — |
 | [ASTRAL CHAIN](01007300020FA000/README.md) | `01007300020FA000` | 1.0.1 | 6.4.0 | PlatinumGames' engine | NVN | 60 fps target |
 | [AI: THE SOMNIUM FILES - nirvanA Initiative](0100713016CCC000/README.md) | `0100713016CCC000` | 1.0.2 | 13.3.5 | Unity 2020.3.30f1 IL2CPP | NVN | — |
+| [Alien: Isolation](010075D00E8BA000/README.md) | `010075D00E8BA000` | 1.1.5_64113 | 8.2.0 | Creative Assembly's Cathode, Havok, Wwise | NVN | [60 fps target](010075D00E8BA000/README.md#frame-rate) |
 | [ANIMAL WELL](010020D01AD24000/README.md) | `010020D01AD24000` | 1.0.10 | 20.5.7 | its own (not named) | NVN | — |
 | [Animal Crossing: New Horizons](01006F8002326000/README.md) | `01006F8002326000` | 3.0.3 | 20.5.4 | Nintendo EPD (sead / agl / gsys) | NVN | — |
 | [Apollo Justice: Ace Attorney Trilogy](010020D01B890000/README.md) | `010020D01B890000` | 1.0.1 | 15.3.2 | Capcom's RE Engine, Havok, Wwise | NVN | [60 fps target](010020D01B890000/README.md#frame-rate) |
@@ -168,7 +169,8 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN | 60 fps target |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN | [60 fps mode](010051701FB46000/README.md#frame-rate) |
 | [Mortal Kombat 11](0100F2200C984000/README.md) | `0100F2200C984000` | 1.0.26 | 9.3.1 | NetherRealm's Unreal Engine 3, Wwise, Havok | NVN | — |
-| [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](0100D2D0190A4000/README.md) | `0100D2D0190A4000` | 1.7.1 | 14.3.0 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [Mac VS Battle](0100D2D0190A4000/README.md#mac-gameplay) |
+| [NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Burst](01006BB00800A000/README.md) | `01006BB00800A000` | 1.0.1 | 4.4.0 | CyberConnect2, CRIWARE | NVN | [60 fps in Mac VS Battle](01006BB00800A000/README.md#frame-rate) |
+| [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](0100D2D0190A4000/README.md) | `0100D2D0190A4000` | 1.7.1 | 14.3.0 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [60 fps target](0100D2D0190A4000/README.md#frame-rate) |
 | [Need for Speed: Hot Pursuit Remastered](010029B0118E8000/README.md) | `010029B0118E8000` | 1.0.3 | 10.4.1 | Criterion's engine (Stellar Entertainment port) | NVN | 60 fps target |
 | [NieR:Automata The End of YoRHa Edition](010056B015FE8000/README.md) | `010056B015FE8000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN | 60 fps target |
 | [NieR:Automata The End of YoRHa Edition, Asian release](0100B8E016F76000/README.md) | `0100B8E016F76000` | 1.0.3 | 12.3.9 | PlatinumGames' engine | NVN | 60 fps target |

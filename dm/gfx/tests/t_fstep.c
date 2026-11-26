@@ -560,6 +560,39 @@ int main(void) {
         for (int i = 0; i < FSTEP_RUN; i++) { m.s.gpu_on = 1; m.s.gpu = 0.02; run(&m, 1, 2.5, 1, 3, 0); }
         check(m.s.k > 1 && m.s.ups == 1 && m.s.up_idle == 1, "idle GPU: FSTEP_RUN late frames in a row still step up (CPU-heavy scene)");
     }
+    {   // A light loading screen set the reference, then three slow frames moved the scene to a longer hold.
+        // At that hold the acquire really waits. Its remaining work misses the conservative fit margin
+        // but meets the same deadline tolerance under which the target already runs.
+        for (int unit = 1; unit <= 2; unit++) {
+            for (int load = 0; load < 3; load++) {
+                sim m = {0};
+                m.s.t120 = unit == 2;
+                m.s.per_vsync = unit;
+                for (int i = 0; i < 900; i++) {
+                    double work = i < 600 ? 0.55 : i < 650 ? 1.4 : load == 1 ? 1.2 : 1.06;
+                    m.s.gpu_on = 1;
+                    m.s.gpu = (i < 600 ? 0.4 : i < 650 ? 1.3 : load == 2 ? 1.04 : 0.96) * unit;
+                    run(&m, 1, work * unit, unit, 3 * unit, 0);
+                }
+                check(load ? m.s.k == 2 * unit && !m.s.probes : m.s.k == unit && m.s.probes == 1,
+                      load == 1 ? "paced recovery: work over the late margin keeps the longer hold"
+                    : load == 2 ? "paced recovery: GPU over the target budget keeps the longer hold"
+                                : "paced recovery: scene inside target tolerance recovers after its load");
+            }
+        }
+    }
+    {   // Frames at the longer hold sometimes fit, yet the same scene at the target fails the probe.
+        // The paced probe must use the same extended backoff as the unpaced one.
+        sim m = {0};
+        for (int i = 0; i < 9000; i++) {
+            double w = i < 600 ? 0.55 : i < 650 || m.s.k == 1 ? 1.40 : 1.06;
+            m.s.gpu_on = 1;
+            m.s.gpu = i < 600 ? 0.4 : m.s.k == 1 ? 1.20 : 0.96;
+            run(&m, 1, w, 1, 3, 0);
+        }
+        check(m.s.k == 2 && m.s.failed >= 2 && m.s.uhold == FSTEP_UHOLD_MAX,
+              "failed paced probes back off to one per minute");
+    }
     {   // Unpaced hold probe (#1942): a game that waits outside acquire shows cost == shown == hold at hold 3 while GPU fits k - 1 (0.75 vsyncs); probe brings it back to hold 1
         sim m = {0}; run(&m, 60, 0.5, 1, 3, 0);
         for (int i = 0; i < 10; i++) { m.s.gpu_on = 1; m.s.gpu = 2.5; run(&m, 1, 2.5, 1, 3, 0); }

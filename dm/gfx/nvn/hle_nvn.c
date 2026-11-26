@@ -3341,7 +3341,9 @@ static void fstep_tick(const win_t *o, int c) {
         if (w >= (int)sizeof why) w = sizeof why - 1;
         if (nvn_fstep_same(&g_fs)) w += snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (w >= (int)sizeof why) w = sizeof why - 1;   // snprintf returns the length it would have written
-        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, ", GPU fits a shorter hold, frames not waiting in the pacing");
+        if (g_fs.uprobe) snprintf(why + w, sizeof why - w, "%s", nvn_fstep_unpaced(&g_fs)
+            ? ", GPU fits a shorter hold, frames not waiting in the pacing"
+            : ", frame waited in pacing and mean work is within the target's late margin");
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() || t120 ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
             fixed ? "the game's own step" : kmin0 == FSTEP_OWN ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? (g_fs.up_idle ? "30 late frames, some with the GPU idle" : "3 late frames") : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");

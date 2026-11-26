@@ -209,22 +209,26 @@ class Nup:
     def copy(self, i, out):
         """File i's content to out (anything with write), streamed and checked against its size and SHA-256; returns its size"""
         name, size, sha, eoff, esz, codec = self.files[i]
-        h, n, view = hashlib.sha256(), 0, memoryview(self.mm)
+        h, n = hashlib.sha256(), 0
         def put(b):
             nonlocal n
             h.update(b); out.write(b); n += len(b)
-        if codec == 0:
-            for p in range(eoff, eoff + esz, 8 << 20): put(view[p:min(p + (8 << 20), eoff + esz)])
-        elif size:
-            if zstd is None: raise Error('reading a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
-            d = zstd.ZstdDecompressor()
-            try:
-                for p in range(eoff, eoff + esz, 4 << 20):
-                    put(d.decompress(view[p:min(p + (4 << 20), eoff + esz)]))
-                    if n > size: break
-            except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
-            if not d.eof: n = -1
-        view.release()
+        with memoryview(self.mm) as view:
+            if codec == 0:
+                for p in range(eoff, eoff + esz, 8 << 20):
+                    with view[p:min(p + (8 << 20), eoff + esz)] as chunk:
+                        put(chunk)
+            elif size:
+                if zstd is None: raise Error('reading a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
+                d = zstd.ZstdDecompressor()
+                try:
+                    for p in range(eoff, eoff + esz, 4 << 20):
+                        with view[p:min(p + (4 << 20), eoff + esz)] as chunk:
+                            data = d.decompress(chunk)
+                        put(data)
+                        if n > size: break
+                except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
+                if not d.eof: n = -1
         if n != size or h.digest() != sha: raise Error(f'{self.path}: {name.decode(errors="replace")} does not match its size or SHA-256 (damaged file)')
         return n
 

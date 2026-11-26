@@ -52,6 +52,10 @@ for _d in [out] + ([IOSOUT] if IOSOUT else []):   # one chain version serves eve
 MAP = str(GAME.table('shader_map.tsv'))
 BF_WANT_FILE = str(GAME.table('bf_want.tsv'))
 BF_WANT = {line.strip() for line in open(BF_WANT_FILE) if line.strip() and not line.lstrip().startswith('#')} if os.path.exists(BF_WANT_FILE) else set()
+# A line `*` lists every fragment shader: a game whose areas each bring new decals that sample the G-buffer they write after ORDER_FRAGMENTS_TILED barriers (Xenoblade
+# Chronicles DE: the Colony 9 field, Satorl Marsh and Colony 6 each added 20-30 keys) gets the readable-tile version of all of them. The host still reads the tile only
+# under NVN's contract (fb_tile_plan); the cost is the extra variants' compile time and library size
+BF_ALL = '*' in BF_WANT
 XC = [*dmsh_chain.CROSS_MSL, '--msl-pad-fragment-output']   # MSL 3.2 (see dmsh_chain.CROSS_MSL)
 
 _cas = os.environ.get('DMSH_CAS') or cache_root   # a cache folder: this chain's own file over the folder's older generations (shader_cache.for_chain); a file: that one alone (regress.py's)
@@ -427,7 +431,7 @@ def ps_libraries(key, msl, full, bindings):
     src, info = dmsh_side.unit(full)
     typed = {'main0_u'} if re.search(r'\bfragment\s+main0_out_u\s+main0_u\s*\(', full) else set()
     side = (set(info['alpha'] + info['logic']) if src else set()) | typed
-    folded, fmeta = dmsh_fetch.fold(src or full, bindings, om_only_ok=key in BF_WANT)   # also without side entry points: main0_f then shares the compile with main0 alone
+    folded, fmeta = dmsh_fetch.fold(src or full, bindings, om_only_ok=BF_ALL or key in BF_WANT)   # also without side entry points: main0_f then shares the compile with main0 alone
     for unit, fetch in ([(folded, fmeta)] if folded else []) + ([(src or full, None)] if src or typed else []):
         names = ['_b'] + (['_bx'] if side else []) + (['_bf'] if fetch else [])
         groups = ([side] if side else []) + ([{'main0_f'}] if fetch else [])

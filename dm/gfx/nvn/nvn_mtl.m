@@ -23425,21 +23425,24 @@ uint64_t mtl_present_count(void) { return g_present_n; }   // Actual present cou
 // KEEP_LO_MS. Kept at full duty, the clock stays at its top and the fanless Air heated until its CPU slowed (its power fell from 6 to 3 W after 10 minutes): the duty takes only the clock
 // the frames need, and none while they fit. Each spin is about 2 ms at the top clock (a commit every few ms, not every half millisecond: the submissions alone took a quarter of a core). No present for a quarter
 // second (a pause, a hidden window) stops it. DM_GPU_KEEP=0 turns it off, 1 holds full duty (default auto)
-enum { KEEP_SPIN = 140000 };
-// 14 / 11.5 ms: in handheld mode the game's 13.4 ms of GPU at the clock macOS picks fits its frame, and holding the clock higher only heated the fanless Air into slowing its CPU
-// (58 fps after 10 minutes, against 60 for 10 minutes with the keeper off); at 30 fps the frames take 20 ms and more, and the keeper lifts them back. DM_GPU_KEEP_MS=<hi>,<lo> overrides
+enum { KEEP_SPIN = 35000, KEEP_SPIN_LEGACY = 140000 };
+// 12.0 / 8.5 ms: in handheld mode the game's GPU work fits its frame, and holding the clock higher only heats a fanless Air into slowing its CPU;
+// at heavier scenes or 30 fps the keeper lifts the clock back. DM_GPU_KEEP_MS=<hi>,<lo> overrides.
+// By default (DM_GPU_KEEP_IDLE=1) the keeper only dispatches while the game's GPU queue is idle (rx_inflight() == 0) with a shorter ~0.8 ms kernel,
+// so it keeps clocks high across inter-frame gaps without preempting in-flight render passes for 3-4 ms at a time.
 static double KEEP_HI_MS = 12.0, KEEP_LO_MS = 8.5;
 static _Atomic int g_keep_active;
 static void *gpu_keep_main(void *arg) {
     int mode = (int)(intptr_t)arg; pthread_setname_np("dm-gpu-keep");
     { const char *e = getenv("DM_GPU_KEEP_MS"); double hi, lo; if (e && sscanf(e, "%lf,%lf", &hi, &lo) == 2 && hi > lo && lo >= 0) { KEEP_HI_MS = hi; KEEP_LO_MS = lo; } }
+    const char *ie = getenv("DM_GPU_KEEP_IDLE"); int idle_only = !(ie && !strcmp(ie, "0"));
     NSError *e = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void dm_keep(device float *o [[buffer(0)]], constant uint &n [[buffer(1)]], uint t [[thread_position_in_grid]]) { float x = t; for (uint i = 0; i < n; i++) x = fma(x, 1.0000001f, 0.5f); if (x == 12345.f) o[t] = x; }\n" options:nil error:&e];
     id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"dm_keep"] : nil;
     id<MTLComputePipelineState> ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
     id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLBuffer> o = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModePrivate];
     if (!ps || !q || !o) { MLOG("[RED] GPU clock keeper: cannot make its kernel (%s); off", e ? e.localizedDescription.UTF8String : "no error"); return NULL; }
-    uint32_t n = KEEP_SPIN; uint64_t last_present = 0, last_change = 0, last_adj = 0, lines = 0; double duty = mode == 1 ? 1 : 0;
+    uint32_t n = idle_only ? KEEP_SPIN : KEEP_SPIN_LEGACY; uint64_t last_present = 0, last_change = 0, last_adj = 0, lines = 0; double duty = mode == 1 ? 1 : 0;
     for (;;) { @autoreleasepool {
         uint64_t now = now_ns(), pn = g_present_n;
         if (pn != last_present) { last_present = pn; last_change = now; }
@@ -23452,6 +23455,7 @@ static void *gpu_keep_main(void *arg) {
                 if ((duty > 0) != (was > 0) && lines++ < 40) MLOG("GPU clock keeper: %s (a frame's GPU time %.1f ms)", duty > 0 ? "on" : "off", g); } }
         if (duty <= 0 || !presenting) { atomic_store(&g_keep_active, 0); usleep(20000); continue; }
         atomic_store(&g_keep_active, 1);
+        if (idle_only && rx_inflight() > 0) { usleep(500); continue; }
         id<MTLCommandBuffer> cb = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
         [ce setComputePipelineState:ps]; [ce setBuffer:o offset:0 atIndex:0]; [ce setBytes:&n length:4 atIndex:1];
         [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)]; [ce endEncoding];

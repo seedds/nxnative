@@ -498,6 +498,24 @@ static void slices_mrt(id<MTLLibrary> lib) {
         CHECK(d3?"every plane of the second 3D texture is green":"every layer of the second texture is green",!layers_hold(&b,6,0,green,d3));
     }
 }
+// A cube filter chain drawn face by face (rg_plan, DM_NVN_LEVEL_GROUP): levels 0-2 of layer 0, then of layer 1, ... of a 6-layer array, one draw a pass. The run is replayed level
+// by level, so each level's six layers become one slice-merged pass, and every level of every layer is still drawn
+static void level_group(id<MTLLibrary> lib) {
+    static const uint8_t red[4]={255,0,0,255};
+    tex_t t=texture_n(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6,3);
+    prog_t pg={0}; NvProg *p=make_program(lib,&pg,"red"); (void)p;
+    chain c={0}; bind(&c,&pg,3);
+    for(int sl=0;sl<6;sl++) for(int lv=0;lv<3;lv++) {
+        p_set_rt r={.n=1}; r.color[0]=&t; r.has_cview[0]=1; r.cview[0]=(view_t){.set_levels=1,.base_level=(uint8_t)lv,.nlevels=1,.set_layers=1,.min_layer=(uint16_t)sl,.nlayers=1};
+        emit(&c,OP_SET_RT,&r,sizeof r); triangle(&c); }
+    execute(&c); wait_amp();
+    c.n-=8; uint64_t runs=g_rg_runs, cont=g_sm_ncont; execute(&c);
+    int on=rg_on() && sm_on();
+    CHECK("a face-by-face chain is replayed level by level",g_rg_runs-runs==(uint64_t)on);
+    CHECK("each level's six layers merge into one pass",!on || g_sm_ncont-cont==15);
+    int bad=0; for(int lv=0;lv<3;lv++) bad+=layers_hold(&t,6,lv,red,0);
+    CHECK("every level of every layer is drawn",!bad);
+}
 int main(int argc, char **argv) { @autoreleasepool {
     if(argc==2 && !strcmp(argv[1],"--cpu")) {
         alarm(10); setbuf(stdout,NULL); wait_budgets(); posts();
@@ -517,6 +535,6 @@ int main(int argc, char **argv) { @autoreleasepool {
         "struct Args { device uint *p [[id(0)]]; };\n"
         "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
-    slices(lib); slices_mrt(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
+    slices(lib); slices_mrt(lib); level_group(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

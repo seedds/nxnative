@@ -22,7 +22,11 @@ void duo_calc(char *pane, const float *st) {
     int leaf = *(char *const *)(pane + 0x28) == pane + 0x20;   // no children: a stretch is not inherited
     // a full-screen background (as wide as the screen, centred, at least 810 tall): stretched to the taller screen
     if (gw >= st[4] * u && fab(g[3]) < 60 && fab(g[7]) < 60 && gh >= 810 && gh <= st[6] * u) {
-        if (leaf && g[5] != 0) { float k = gh < 1080 ? (gh + 2 * d) / gh : st[1]; g[4] *= k; g[5] *= k; g[6] *= k; g[7] *= k; }
+        if (leaf && g[5] != 0) { float k = gh < 1080 ? (gh + 2 * d) / gh : st[1]; g[4] *= k; g[5] *= k; g[6] *= k; g[7] *= k;
+            // a full-screen picture (P_pict_*: the cup's emblem at the end of its video, before the first race): zoomed evenly instead, its sides cut, so it keeps its
+            // shape (stretched down, the emblem was 1.244 too tall)
+            u32 cx; __builtin_memcpy(&cx, pane + 0xb0, 4); if (cx == 0x69705f50u && pane[0xb4] == 'c' && pane[0xb5] == 't') { g[0] *= k; g[1] *= k; g[2] *= k; g[3] *= k; } }   // "P_pict"
+
         return;
     }
     // the edge rule: the first pane on the way from the root whose position crosses the edge distance moves out by the extra half-height, everything below it
@@ -41,6 +45,9 @@ void duo_calc(char *pane, const float *st) {
     if (fab(ty) < edge) {
         // not only layout parts (L_*): the HUD's item rows N_Item_00 (y 358, its balloon / bottle / chip rows at 402 to 414) and notice text N_Notify_00 (390),
         // under the HUD's centred N_All, stayed 132 behind the hearts
+        // but not a menu's buttons (L_Btn_*, Mario Kart World's mode menus: the top and bottom entries of a list at y 377 / -325 were pulled away from the rest to the
+        // screen's edges; a list stays together where the 16:9 layout has it)
+        u32 bx; __builtin_memcpy(&bx, pane + 0xb0, 4); if (bx == 0x74425f4cu && pane[0xb4] == 'n') return;   // "L_Btn"
         if (fab(ty) < 300 || fab(f(p, 0x8c)) >= 60) return;
     }
     if (fab(ty) > 540) return;   // outside the 16:9 space: a pane waiting off the screen to slide in (Bananza's dialogue box at y -549.7: moved further out, it never

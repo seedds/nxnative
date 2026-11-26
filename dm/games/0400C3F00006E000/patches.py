@@ -97,8 +97,11 @@ def screen_shape(ctx):
     # The render size (main+0x471938: the packed width / height at the frame object's +0x10, stored at +0x228 and set as the window crop; 2560x1440 docked on the Mac,
     # found by DM_PROBE_WATCH on the crop): a 16:9 size takes the screen's shape, width x (host height / 1920), before both uses. Assembled with clang; x16 / x17 free and
     # no flags read up to the branch back
-    RS = ('adrp', 0xB9404A11, 0x340001B1, 0xD360FD50, 0x531C6E11, 0x52800130, 0x1B107D50, 0x6B11021F, 0x540000E1, 'adrp', 0xB9404A11, 0x1B117D50, 0x5280F011, 0x1AD10A10,
-          0xB3607E0A, 0xD360FD49, 'back')
+    # Also the render scale (state +0x10, DM_RENDER_SCALE 0.5 to 1.0, the launcher's Render scale): both sizes x the scale, multiples of 8, so the picture the game
+    # renders and the window crop that shows it scaled up both follow (heat on the phone). x9, x11, x12 (written after the site), x16 / x17 and s16 / s17 (unused in the
+    # function) free
+    ctx.render_scale = 1
+    RS = (0xd360fd49, 0x2a0a03eb, 'adrp', 0xb9404a11, 0x34000111, 0x5280012c, 0x1b0c7d6c, 0x6b09119f, 0x54000081, 0x1b117d69, 0x5280f00c, 0x1acc0929, 0xbd401210, 0x1e2e1011, 0x1e312200, 0x5400016a, 0x1e202208, 0x5400012d, 0x1e230171, 0x1e300a31, 0x1e39022b, 0x121d716b, 0x1e230131, 0x1e300a31, 0x1e390229, 0x121d7129, 0x2a0b03ea, 0xb3607d2a, 0xd360fd49, 'back')
     site = 0x471938
     fs_site(site, struct.pack('<I', 0xD360FD49).hex())   # lsr x9,x10,#32
     start = here()
@@ -106,7 +109,7 @@ def screen_shape(ctx):
         if w == 'adrp': emit(ADRP(16, here(), FS_STATE_OFF))
         elif w == 'back': emit(B(here(), site + 4))
         else: emit(w)
-    fs_put(site, [B(site, start)], 'screen shape: a 16:9 render size takes the screen\'s shape')
+    fs_put(site, [B(site, start)], 'screen shape: a 16:9 render size takes the screen\'s shape, and the render size takes the render scale')
     # The scene's frame buffer (main+0x474440, its sizes set from a physical size x1 (floats) and a virtual one x2 (ints), copied to the object's +0x20..): the race scene's
     # target stays 2560x1440 (1920x1080 handheld) while its viewport comes in the taller layout (1280x896), so the viewport became 0,-352 2560x1792 on the 1440 target (found by
     # DM_VP_TRACE, the viewport code main+0x78bec, and DM_PROBE_WATCH on the frame buffer): the scene was cut at the top and drawn 1.24 times too tall. A virtual 1280x720 over a
@@ -207,7 +210,7 @@ def screen_shape(ctx):
     # matrix calculation (main+0x2f6520, the same library as Bananza's main+0x2f8420): with the band stubs above the 2D keeps its proportions and its edge widgets reach
     # the screen's edges. The words: `clang -target arm64-apple-macos -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-jump-tables
     # -fno-asynchronous-unwind-tables -c duo_anchor.c`, its __text as 32-bit words (no relocations)
-    ANCHOR = 'bd4000201e2f10021e2208001e20200854000041d65f03c0bd4070012d4a10031e2108611e20c025bd4084011e2108831e2188841e2020681e234c83bd4010241e2208821e2220a0540002abbd407c021e20c04252a84e081e2701041e242040540001e5bd408c021e20c0441e2701051e2520805290000872a889481e2701041e244468540000cbbd4018241e2f10051e2508841e24206054000a09f9400c08b4fffba8bd4008211e2f10021e220823bd408c011e2140221e2020281e214c421e232040540001e552a872c91e2701231e23204054fffa04bd408d031e20c06352a880e91e2701241e24204052a84e091e2701221e22d46054fff8ea1400000552a880e91e2701231e23204054fff84c913e0029528be98a72ac290a528c8e4b72aca96baa0003ec2956398d6b0a01bf7a4b01c054fff700f9400d8cb5ffff6c528a3d8a72a7b70a1e270142aa0803eabd407143bd4081441e2408841f0310631e22206054fff584f9400d4ab5ffff2ad280000af86a692beb08017f54fff4c09100214af120015f54ffff61f9400d08b5ffff081e2140021e2020281e22cc001e202820bd008c00f868692aeb00015f54fff32091002108f120011f54ffff61b94f782892401d0af82a792011000508b90f7828d65f03c0f940140891008009eb09011f54fff1811e20202854fff14052a890e81e2701041e242060540000a51e2010041f040c001e23180014000002bd40042091022008bd4080036e0c04234d4081036e1c04434f8090603d802000d65f03c0'
+    ANCHOR = 'bd4000201e2f10021e2208001e20200854000041d65f03c0bd4070012d4a10031e2108631e20c066bd4084031e2308851e2388841e2020a81e254c85bd4010241e2208821e2220c0540002abbd407c021e20c04452a84e081e2701061e262080540001e5bd408c041e20c0861e2701071e2720c05290000872a889481e2701061e2644a8540000cbbd4018261e2f10071e2708c61e2620a054000ba9f9400c08b4fffba8bd4008211e2f10021e220823bd408c011e2140221e2020281e214c421e232040540001c5b940b009528be98a72ae884a6b0a013f540001c152a872c91e2701231e23204054fff9643942d0097101b93f5400016117ffffc752a880e91e2701231e23204054fff86c1400000e52a872c91e2701231e23204054fff7c4bd408d031e20c06352a880e91e2701241e24204052a84e091e2701221e22d46054fff6aa913e0029528be98a72ac290a528c8e4b72aca96baa0003ec2956398d6b0a01bf7a4b01c054fff560f9400d8cb5ffff6c528a3d8a72a7b70a1e270142aa0803eabd407143bd4081441e2408841f0310631e22206054fff3e4f9400d4ab5ffff2ad280000af86a692beb08017f54fff3209100214af120015f54ffff61f9400d08b5ffff081e2140021e2020281e22cc001e202820bd008c00f868692aeb00015f54fff18091002108f120011f54ffff61b94f782892401d0af82a792011000508b90f7828d65f03c0f940140891008009eb09011f54ffefe11e20206854ffefa052a890e81e2701061e2620a0540000a51e2010061f0614001e25180014000002bd40042091022008bd4080056e0c04654d4081056e1c04854f8090a33d802003b940b008528bea0972ad2e096b09011f54ffed013942d00871018d1f54ffeca13942d4087101d11f54ffec41fc4740036e0360036e0404236e1c04434f8090603d801c00d65f03c0'
     anchor_code = here()
     for i in range(0, len(ANCHOR), 8): emit(int(ANCHOR[i:i + 8], 16))
     # The inline calculation: at its store (main+0x2f6688, stp q6,q4,[x19,#0x70]), not at the mov w22,#1 after it, which the up-to-date path (flags bit 6, main+0x2f65a0)

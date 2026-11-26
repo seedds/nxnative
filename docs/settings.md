@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Game language](#game-language), [Picture](#picture), [Rotation](#rotation), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join), [Buttons by letter](#buttons-by-letter)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -127,6 +127,10 @@ A controller's vibration weaker than this stays off, and the rest is spread over
 ### Press a button to join
 
 Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
+
+### Buttons by letter
+
+Off by default: the face buttons work by position, as on a Switch controller, where A is the right-hand button, B the bottom one, X the top one and Y the left one, so on an Xbox controller the right-hand B presses the game's A. On: a controller lettered as an Xbox controller is (A bottom, B right, X left, Y top) presses the game's button of the letter it shows, so the game's prompts match the letters: an Xbox or PlayStation controller (cross as A, circle as B, square as X, triangle as Y), a controller read as raw HID on the Mac, Steam's virtual controller and Valve's Steam Controller. Nintendo's controllers already have the Switch's letters in the Switch's places and do not change. Do not also swap A and B or X and Y in the Mac's Game Controllers settings: the two swaps undo each other.
 
 ## Performance
 
@@ -298,6 +302,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
 | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
+| Buttons by letter | `DM_PAD_LETTERS` | `1`, `0` |
 | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
 | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
 | Texture filtering (Mac, NVN) | `DM_NVN_ANISO` | `0` game default, or `2` to `16` |

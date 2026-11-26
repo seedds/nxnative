@@ -1,6 +1,7 @@
 // Raw HID gamepads that GameController does not list (an 8BitDo in its own mode: a Bluetooth HID gamepad macOS pairs, GitHub issue #637): one device's buttons, hat and axes
 // as HID reports them, turned into Switch buttons and sticks. Pure, so tests/t_pad_hid.c checks it without a controller; pad_hid_mac.h reads the devices.
-// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y). The default map is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X,
+// Buttons by position, as front_mac.m maps GameController (right A, bottom B, top X, left Y); with DM_PAD_LETTERS (dm_input.h) the default and Xbox 360 maps go by an Xbox
+// pad's letters (A bottom, B right, X left, Y top), while Nintendo's report and the Switch wired layout (pad_hid_switch_wired_map) keep the Switch's, which their letters are. The default map is 8BitDo's D-input numbering (HID button usages 1 A, 2 B, 4 X,
 // 5 Y, 7 / 8 LB / RB, 9 / 10 LT / RT, 11 select, 12 start, 14 / 15 stick clicks, by Xbox labels); DM_HID_MAP=A=2,B=1,… replaces entries, DM_HID_LOG=1 logs each usage pressed.
 // Sticks: X / Y left, Z / Rz right (Rx / Ry on a device without Z); analog triggers (Brake / Accelerator) press ZL / ZR past half.
 // Wrapped unsigned axes (Logical Max encoded as signed -1, exposed by IOHID as -1..0 on multi-bit fields) recover their unsigned range from the field's bit width (pad_hid_norm_bits).
@@ -83,6 +84,9 @@ static void pad_hid_init(pad_hid *h, const char *map, enum pad_hid_layout layout
     }
     memset(h, 0, sizeof *h); h->hat = -1; h->layout = layout;
     memcpy(h->map, button_map, sizeof h->map);
+    if ((layout == PAD_HID_DEFAULT || layout == PAD_HID_X360) && dm_pad_letters()) {   // by an Xbox pad's letters: A and B, X and Y trade usages (DM_HID_MAP still replaces them)
+        uint8_t t = h->map[0]; h->map[0] = h->map[1]; h->map[1] = t; t = h->map[2]; h->map[2] = h->map[3]; h->map[3] = t;
+    }
     for (int a = 0; a < PH_AXES; a++) h->axis[a] = a >= PH_BRAKE ? -1 : 0;
     for (const char *s = map; s && *s; s = strchr(s, ',') ? strchr(s, ',') + 1 : "") {
         const char *eq = strchr(s, '='), *end = strchr(s, ','); if (!eq || (end && eq > end)) continue;

@@ -1,6 +1,6 @@
 // Valve's first Steam Controller's reports and commands (pad_steam.h): its buttons by position, the triggers past half or through their click, the left pad as the d-pad
 // only when clicked, the joystick and the left pad sharing one pair of fields, the right pad as the right stick while touched, a receiver's connect events, the command
-// bytes, Steam's list of the controllers it turns into its virtual pad, and Steam's user client; the bits and the left pad's place DM_HID_LOG logs
+// bytes, Steam's list of the controllers it turns into its virtual pad, and Steam's user client; DM_PAD_LETTERS: the buttons by its letters; the bits and the left pad's place DM_HID_LOG logs
 #include <assert.h>
 #include <stdio.h>
 #include "../pad_steam.h"
@@ -41,6 +41,13 @@ int main(void) {
     assert(press(PAD_STEAM_STICK_CLICK) == DM_BTN_LS && press(PAD_STEAM_RPAD_CLICK | PAD_STEAM_RPAD_TOUCH) == DM_BTN_RS);
     assert(press(PAD_STEAM_LT) == DM_BTN_ZL && press(PAD_STEAM_RT) == DM_BTN_ZR);   // pulled through the click
     assert(press(PAD_STEAM_STEAM | PAD_STEAM_LGRIP | PAD_STEAM_RGRIP) == 0);          // no Switch button
+    // DM_PAD_LETTERS: by its letters, an Xbox pad's; the rest as before
+    setenv("DM_PAD_LETTERS", "1", 1);
+    assert(press(PAD_STEAM_A) == DM_BTN_A && press(PAD_STEAM_B) == DM_BTN_B && press(PAD_STEAM_X) == DM_BTN_X && press(PAD_STEAM_Y) == DM_BTN_Y);
+    assert(press(PAD_STEAM_LB | PAD_STEAM_START) == (DM_BTN_L | DM_BTN_PLUS));
+    assert(press(PAD_STEAM_LPAD_TOUCH | PAD_STEAM_LPAD_CLICK | PAD_STEAM_LPAD_UP) == DM_BTN_UP);
+    unsetenv("DM_PAD_LETTERS");
+    assert(press(PAD_STEAM_A) == DM_BTN_B);
     // analog triggers press ZL / ZR from half on
     state(0, 127, 127, 0, 0, 0, 0); pad_steam_state(&p, r, sizeof r, &m, s); assert(m == 0);
     state(0, 128, 255, 0, 0, 0, 0); pad_steam_state(&p, r, sizeof r, &m, s); assert(m == (DM_BTN_ZL | DM_BTN_ZR));

@@ -1,4 +1,5 @@
-// Face buttons of the shared GameController adapter (pad_apple.h) with fake pads: by position on most pads, by label on a Nintendo pad; no physical controller is needed.
+// Face buttons of the shared GameController adapter (pad_apple.h) with fake pads: by position on most pads (by letter with DM_PAD_LETTERS), by label on a Nintendo pad; no
+// physical controller is needed.
 #import "../pad_apple.h"
 #include <assert.h>
 #include <stdio.h>
@@ -37,6 +38,12 @@ int main(void) { @autoreleasepool {
     for (NSString *k in @[@"Switch Pro Controller", @"Nintendo Switch Joy-Con (L/R)", @"Nintendo Switch Joy-Con (R)"]) {   // by label
         assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
     }
+    setenv("DM_PAD_LETTERS", "1", 1);   // by letter: GameController's names, an Xbox pad's; a Nintendo pad's are the Switch's already
+    for (NSString *k in @[@"Xbox One", @"DualSense", @"HID", @"Switch Pro Controller"]) {
+        assert(face(k, 'A') == DM_BTN_A); assert(face(k, 'B') == DM_BTN_B); assert(face(k, 'X') == DM_BTN_X); assert(face(k, 'Y') == DM_BTN_Y);
+    }
+    setenv("DM_PAD_LETTERS", "0", 1); assert(face(@"Xbox One", 'A') == DM_BTN_B);   // 0: by position
+    unsetenv("DM_PAD_LETTERS");
     TestPad *g = [TestPad new];   // nothing pressed, buttons nil: none
     assert(dm_pad_face((GCExtendedGamepad *)(id)g) == 0);
     printf("t_pad_apple OK\n");

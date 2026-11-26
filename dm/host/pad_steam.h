@@ -13,7 +13,7 @@
 // and 18 bytes of the packet. A state packet (type 4 in the low nibble of its first byte) carries only the chunks its mask names (that byte's high nibble and the next
 // byte, PAD_STEAM_BLE_*): the 24 button bits as over USB, the analog triggers, the joystick, the left pad, the right pad (no longer sharing fields), the gyro's; a chunk
 // left out keeps its last value. Type 5 is its status (the battery), about once a second. Commands are the same bytes, in segments of feature report 3.
-// Switch buttons by position, as front_mac.m maps an Xbox pad: right A, bottom B, top X, left Y. The left pad clicked in a direction is the d-pad (the firmware's direction
+// Switch buttons by position, as front_mac.m maps an Xbox pad: right A, bottom B, top X, left Y; by its letters, an Xbox pad's, with DM_PAD_LETTERS (dm_input.h). The left pad clicked in a direction is the d-pad (the firmware's direction
 // bits, which it sets only while the pad is clicked, in mode 7 too: seen on a wired controller; the click is checked as well), the right pad touched is the right stick (where the thumb is, a round dead zone at its centre), its click RS. The grips and the Steam
 // button have no Switch button. Not read: the gyro (off unless the settings turn it on).
 #pragma once
@@ -79,6 +79,7 @@ static void pad_steam_switch(const pad_steam *p, uint32_t b, uint64_t *m, int32_
     };
     uint64_t o = 0;
     for (size_t i = 0; i < sizeof map / sizeof *map; i++) if (b & map[i].from) o |= map[i].to;
+    if (dm_pad_letters()) o = dm_face_by_letter(o);   // its letters, an Xbox pad's: A bottom, B right, X left, Y top
     if (p->trig[0] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZL;   // past half, as the raw HID pads' analog triggers
     if (p->trig[1] >= PAD_STEAM_TRIGGER_HALF) o |= DM_BTN_ZR;
     if (b & PAD_STEAM_LPAD_CLICK) {

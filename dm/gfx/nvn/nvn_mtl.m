@@ -20349,13 +20349,16 @@ static void ua_stamp_set(id<MTLTexture> rm, const void *mem, uint64_t gen) {
     if (!st) { st = [NvUaStamp new]; objc_setAssociatedObject(rm, &g_ua_stamp_key, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     st->mem = mem; st->gen = gen;
 }
-static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, int reason) {
-    if (!bcp_on() || !rm0 || !w || !g_cb) return;
+static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w0, int reason) {
+    if (!bcp_on() || !rm0 || !w0 || !g_cb) return;
+    // Snapshot the g_ua_wr entry before blit() / bcp_blocks(), which can end an open render pass
+    // (rp_end -> ua_flush -> ua_note_write -> ua_drain_drops) and free or mutate *w0 in place.
+    const ua_entry w = *w0;
     id<MTLTexture> rm = rm0; while (rm.parentTexture) rm = rm.parentTexture;
-    if ((__bridge void *)rm == w->root) return;
+    if ((__bridge void *)rm == w.root) return;
     NvUaStamp *st = objc_getAssociatedObject(rm, &g_ua_stamp_key);
-    if (st && st->mem == w->mem && st->gen == w->gen) return;
-    if (w->zero_clear) {
+    if (st && st->mem == w.mem && st->gen == w.gen) return;
+    if (w.zero_clear) {
         size_t bpp = mtl_pf_bytes(rm.pixelFormat);
         size_t row = (size_t)rm.width * bpp;
         id<MTLBuffer> zb = bpp ? zero_buf(row) : nil;
@@ -20367,11 +20370,11 @@ static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, i
         }
         atomic_fetch_add_explicit(&g_ua_zero_fills, 1, memory_order_relaxed);
     } else {
-        id<MTLTexture> wm = bcp_have(&w->t);
+        id<MTLTexture> wm = bcp_have(&w.t);
         if (!wm || wm == rm || !fam_is_valid(wm)) return;
         if (!bcp_blocks(wm, 0, 0, 0, 0, BCP_WHOLE, BCP_WHOLE, rm, 0, 0, 0, 0)) return;
     }
-    ua_stamp_set(rm, w->mem, w->gen);
+    ua_stamp_set(rm, w.mem, w.gen);
     fam_mark_valid(rm);
     if (r) gsb_store(r, rm, 0, 0, 1, &(NVNcopyRegion){0, 0, 0, (int)rm.width, (int)rm.height, 1});
     atomic_fetch_add_explicit(&g_ua_copies, 1, memory_order_relaxed);
@@ -20380,10 +20383,10 @@ static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w, i
     if (nl++ < 8) {
         static const char *const rn[UA_RSN_N] = {"read", "clear-before-write", "bindless"};
         MLOG("uncompressed alias (%s%s): ser=%llu (%ux%u format %#x) → ser=%llu (%ux%u format %#x)", rn[reason >= 0 && reason < UA_RSN_N ? reason : 0],
-             w->zero_clear ? ", zero-fill" : "", (unsigned long long)w->t.serial, w->t.d.width, w->t.d.height, w->t.d.format,
+             w.zero_clear ? ", zero-fill" : "", (unsigned long long)w.t.serial, w.t.d.width, w.t.d.height, w.t.d.format,
              r ? (unsigned long long)r->serial : 0ull, r ? r->d.width : (unsigned)rm.width, r ? r->d.height : (unsigned)rm.height, r ? r->d.format : 0u);
     }
-    PD("t uncompressed alias (%d%s): ser=%llu → ser=%llu %lux%lu", reason, w->zero_clear ? ",z" : "", (unsigned long long)w->t.serial, r ? (unsigned long long)r->serial : 0ull, (unsigned long)rm.width, (unsigned long)rm.height);
+    PD("t uncompressed alias (%d%s): ser=%llu → ser=%llu %lux%lu", reason, w.zero_clear ? ",z" : "", (unsigned long long)w.t.serial, r ? (unsigned long long)r->serial : 0ull, (unsigned long)rm.width, (unsigned long)rm.height);
 }
 static void ua_before_read(const tex_t *t, id<MTLTexture> mt) {
     if (!bcp_on() || !t || !t->mem) return;
@@ -20392,8 +20395,9 @@ static void ua_before_read(const tex_t *t, id<MTLTexture> mt) {
     int bpp = ua_kind(t); if (!bpp) return;
     const ua_entry *w = nvn_hm_get(&g_ua_wr, &t->mem);
     if (!w || !ua_compat_desc(&w->t.d, w->bpp, &t->d, bpp)) return;
+    const ua_entry ws = *w;
     id<MTLTexture> rm = mt ? mt : tex_mtl_replay(t);
-    ua_sync_tex(t, rm, w, UA_RSN_DIRECT);
+    ua_sync_tex(t, rm, &ws, UA_RSN_DIRECT);
 }
 static void ua_before_write_only(const tex_t *t, id<MTLTexture> mt) {
     if (!bcp_on() || !t || !t->mem) return;
@@ -20402,8 +20406,9 @@ static void ua_before_write_only(const tex_t *t, id<MTLTexture> mt) {
     int bpp = ua_kind(t); if (!bpp) return;
     const ua_entry *w = nvn_hm_get(&g_ua_wr, &t->mem);
     if (!w || !w->is_clear || !ua_compat_desc(&w->t.d, w->bpp, &t->d, bpp)) return;
+    const ua_entry ws = *w;
     id<MTLTexture> rm = mt ? mt : tex_mtl_replay(t);
-    ua_sync_tex(t, rm, w, UA_RSN_CLEAR);
+    ua_sync_tex(t, rm, &ws, UA_RSN_CLEAR);
 }
 static void ua_note_write(const tex_t *t, id<MTLTexture> mt0, int is_clear, int zero_clear) {
     if (!bcp_on() || !t || !t->mem || !mt0) return;
@@ -20464,9 +20469,9 @@ static void ua_prepare_bindless(uint8_t bmask) {
     if (!list) return;
     memcpy(list, g_ua_bdirty, nb * sizeof *list);
     g_nua_bdirty = 0;
-    struct { tex_t t; const ua_entry *w; } bh[32]; int nbh = 0;
+    struct { tex_t t; ua_entry w; } bh[32]; int nbh = 0;
     os_unfair_lock_lock(&g_rmu);
-    if (g_seen_buf) pool_seen_scan();
+    if (g_seen_buf) { int pw = g_pool_walk; g_pool_walk = 1; pool_seen_scan(); g_pool_walk = pw; }
     for (uint32_t i = 0; i < nb; i++) {
         ua_entry *w = nvn_hm_get(&g_ua_wr, &list[i]);
         if (!w) continue;
@@ -20511,7 +20516,7 @@ static void ua_prepare_bindless(uint8_t bmask) {
             }
             int dup = 0;
             for (int j = 0; j < nbh && !dup; j++) dup = bh[j].t.serial == rt->serial && bh[j].t.mem == rt->mem;
-            if (!dup && nbh < 32) bh[nbh++] = (__typeof__(bh[0])){*rt, w};
+            if (!dup && nbh < 32) bh[nbh++] = (__typeof__(bh[0])){*rt, *w};
         }
         w->bsynced |= bmask;
         if (keep) g_ua_bdirty[g_nua_bdirty++] = w->mem;
@@ -20520,7 +20525,7 @@ static void ua_prepare_bindless(uint8_t bmask) {
     os_unfair_lock_unlock(&g_rmu);
     for (int j = 0; j < nbh; j++) {
         id<MTLTexture> rm = tex_mtl_replay(&bh[j].t);
-        ua_sync_tex(&bh[j].t, rm, bh[j].w, UA_RSN_BINDLESS);
+        ua_sync_tex(&bh[j].t, rm, &bh[j].w, UA_RSN_BINDLESS);
     }
     if (list != local) free(list);
 }

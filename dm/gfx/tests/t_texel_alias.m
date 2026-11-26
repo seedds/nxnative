@@ -310,6 +310,68 @@ int main(void) { @autoreleasepool {
     CHECK(g_ua_copies == c0 + 1, "it is copied to on its read");
     CHECK(!memcmp(bytes_of(base_of(&mv2)).contents, p13.contents, SIZE), "the store reaches the ID registered again at other storage");
 
+    // 12a. Pool drop drained during blit() -> rp_end() -> ua_flush() inside ua_sync_tex() must not UAF w.
+    static uint8_t s11[STOR], s12[STOR];
+    pool_t drop_pool = {.magic = MAGIC('P','O','O','L'), .mem = s11, .size = STOR};
+    tex_t dp_w = tex2d(NVN_FORMAT_R32UI, W, H, s11), dp_r = tex2d(NVN_FORMAT_RGBA8, W, H, s11);
+    tex_t dp_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s12);
+    dp_w.pool = &drop_pool; dp_w.off = 0; dp_r.pool = &drop_pool; dp_r.off = 0;
+    mtl_tex_init(&dp_w); mtl_tex_init(&dp_r); mtl_tex_init(&dp_rt);
+    mtl_reg_tex(23, &dp_w, NULL); mtl_reg_tex(24, &dp_r, NULL);
+    store_img(pr_w, 23, &dp_w, p1, 0);
+    id<MTLTexture> mdp_r = base_of(&dp_r);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &dp_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "pending RT pass opens for 12a");
+    g_stat_draw++;
+    ua_drop_pool(&drop_pool);   // deferred until ua_drain_drops inside rp_end -> ua_flush -> ua_note_write
+    c0 = g_ua_copies;
+    ua_sync_tex(&dp_r, mdp_r, nvn_hm_get(&g_ua_wr, &dp_w.mem), UA_RSN_DIRECT);
+    CHECK(g_ua_copies == c0 + 1, "ua_sync_tex completes safely when rp_end drains writer pool drop");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12a submission completes");
+    CHECK(!memcmp(bytes_of(mdp_r).contents, p1.contents, SIZE), "12a copied writer bytes before drop");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+
+    // 12b. When rp_end() inside ua_before_read's blit updates g_ua_wr[mem] in place to a newer RT write,
+    //      the read texture must be stamped with the earlier writer's gen, not the newer RT's gen.
+    static uint8_t s13[STOR];
+    tex_t mut_w0 = tex2d(NVN_FORMAT_R32UI, W, H, s13), mut_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s13), mut_r = tex2d(NVN_FORMAT_R8, W * 4, H, s13);
+    mtl_tex_init(&mut_w0); mtl_tex_init(&mut_rt); mtl_tex_init(&mut_r);
+    mtl_reg_tex(25, &mut_w0, NULL); mtl_reg_tex(26, &mut_rt, NULL); mtl_reg_tex(27, &mut_r, NULL);
+    id<MTLTexture> mmut_r = base_of(&mut_r);
+    store_img(pr_w, 25, &mut_w0, p1, 0);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &mut_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "mutating RT pass opens for 12b");
+    g_stat_draw++;
+    ua_before_read(&mut_r, mmut_r);   // copies p1 from mut_w0 while rp_end updates g_ua_wr[s13] to green mut_rt
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12b first submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+    c0 = g_ua_copies;
+    sample_tex(cs_r, 27);   // must observe mut_rt's newer gen and sync green RT pixels into mut_r
+    CHECK(g_ua_copies == c0 + 1, "subsequent read sees newer RT gen after in-place g_ua_wr update");
+    {
+        id<MTLBuffer> got_mut = bytes_of(mmut_r);
+        const uint32_t *px_mut = (const uint32_t *)got_mut.contents;
+        CHECK(px_mut[0] == 0xff00ff00u && px_mut[W * H - 1] == 0xff00ff00u, "R8 alias receives green render-pass pixels");
+    }
+
+    // 13. ua_prepare_bindless calls pool_seen_scan() with g_pool_walk = 1 so scanned IDs are not stamped as slot-bind uses.
+    (void)pool_seen_gpu();
+    g_pool_walk = 0;
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_sub = g_sub_serial - 1;
+    g_treg[27].used = 0;
+    g_seen_todo[27 >> 5] |= 1u << (27 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    store_img(pr_w, 25, &mut_w0, p2, 0);
+    mtl_sub_begin();
+    g_seen_sub = g_sub_serial - 1;
+    g_treg[27].used = 0;
+    g_seen_todo[27 >> 5] |= 1u << (27 & 31);
+    ua_prepare_shader(cs_bindless, 5);
+    CHECK(g_pool_walk == 0, "g_pool_walk is restored after ua_prepare_bindless");
+    CHECK(g_treg[27].used == 0, "ua_prepare_bindless does not stamp scanned IDs as slot-bind uses");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "13 submission completes");
+
     printf("t_texel_alias: %d checks, %d failed (ua_copies=%llu, zero_fills=%llu)\n", checks, failed, (unsigned long long)g_ua_copies, (unsigned long long)g_ua_zero_fills);
     return failed != 0;
 } }

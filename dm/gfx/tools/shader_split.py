@@ -30,6 +30,7 @@
 #   · PKZ (PlatinumGames, Bayonetta 3): shader objects (VSO / PSO / CSO / HSO / DSO, a control section and a code area each) in the DAT archives of the PKZ entries (Oodle Kraken, decoded by the
 #       game's own decoder in the Mac host), see pkz_entries, pgdat_members and pg_shader
 #   · CRA (Camelot, Mario Tennis Fever): BNSH in the FSHA, VFXB and SARC members of the NARC containers in rom:/42, its files scrambled and listed only in the NRO the game decodes at run time, see cra.py and cra_jobs
+#   · HSPK (Sega Fenrir, Valkyria Chronicles 4): gzip-compressed BNSH in NSGZ records of the HSG shader package and main, see nsgz_shaders
 #   · CPK (CRI's file system, Bayonetta 2): BNSH files ('.vso' / '.pso') in the PlatinumGames DAT archives of the CPK entries (CRILAYLA entries, cpk.py), see cpk_jobs
 #       NieR:Automata's DAT members instead prefix length-delimited NVN code and control sections with a binding table (pg_sized_shader)
 #   · HNSHV002 (Needle, Persona 5 Royal): NVN section descriptors in the shader containers embedded in main and the GSC files of its CPK archives, see needle_shaders
@@ -4419,6 +4420,42 @@ NEST = 16   # archives in archives scan_blob opens (SARC, PlatinumGames' DAT): r
             # only its own subtree a traversal budget for its remaining levels without crediting siblings or growing left[1]. Counting a Yaz0 member by what it expands to in the
             # first budget paid twice for the same bytes, once for the member and once for its members (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc, 204 KB, holds
             # one layout archive that expands 9 times, which then added up to 18 times the file)
+NSGZ = b'NSGZ    '
+NSGZ_MAX = 16 << 20   # top-level expansion floor (matches fuzzlib.allowed); sparse BNSH controls compress 30x+, past NEST * len(d)
+
+def nsgz_shaders(d, label, budget=None):
+    """Fenrir's HSPK packages and main embed NSGZ records: eight magic bytes, a u64 compressed length, then one gzip stream holding a BNSH.
+    Inside an HSPK container every magic is a record and malformed headers fail loudly; in other blobs (such as main) a magic whose length does not fit or whose payload does
+    not open with a gzip header is a literal string and is skipped, while matching gzip records are validated strictly. When nested inside an archive, budget is scan_blob's
+    shared expansion budget left[1]; at top level, allow up to max(NSGZ_MAX, 256 * len(d)) decoded bytes."""
+    strict = d[:4] == b'HSPK'
+    out, pos = [], 0
+    limit = max(NSGZ_MAX, 256 * len(d)) if budget is None else budget[0]
+    while (pos := d.find(NSGZ, pos)) >= 0:
+        where = f'{label}#NSGZ@{pos:#x}'
+        if pos + 16 > len(d):
+            if strict: field(d, '<Q', pos + 8, where)
+            break
+        size = struct.unpack_from('<Q', d, pos + 8)[0]
+        start, end = pos + 16, pos + 16 + size
+        if end > len(d):
+            if strict: red(f'{where}: compressed data runs past the package')
+            pos += len(NSGZ); continue
+        if not strict and (size < 20 or d[start:start + 3] != b'\x1f\x8b\x08'):
+            pos += len(NSGZ); continue
+        stream = zlib.decompressobj(31)
+        try: member = stream.decompress(d[start:end], limit + 1)
+        except zlib.error as e: red(f'{where}: invalid gzip stream ({e})')
+        limit -= len(member)
+        if budget is not None: budget[0] = limit
+        if limit < 0: red(f'{where}: decoded shaders exceed the expansion budget')
+        if not stream.eof or stream.unused_data: red(f'{where}: gzip stream does not match its record length')
+        if member[:8] != b'BNSH\0\0\0\0': red(f'{where}: decoded record is not BNSH')
+        if field(member, '<I', 0x1c, where)[0] != len(member): red(f'{where}: BNSH length does not match the decoded record')
+        out.extend(bnsh_shaders(member, 0, where))
+        pos = end
+    return out
+
 VFS2 = b'VFS2'
 VFS2_MAX = 16 << 20   # single GLSLC output upper bound; keeps corrupt/fuzz length prefixes within fuzzlib's allocation cap
 _VFS2_INV = bytes(range(255, -1, -1))
@@ -4587,6 +4624,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         for m in re.finditer(b'NDSR', d):
             if m.start() + 0x20 <= len(d) and d[m.start() + 4:m.start() + 6] == b'\x00\x01': out.extend(ndsr_shaders(d[m.start():], f'{label}#NDSR@{m.start():#x}'))
         return
+    if NSGZ in d: out.extend(nsgz_shaders(d, label, left[1] if depth else None))
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         if m.start() + 0x20 > len(d): continue   # too near the end for a BNSH header
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
@@ -5237,7 +5275,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), DeferredUnity(args, trees)
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'cover') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and (b'Yaz0' in d or ZSTD_MAGIC in d)) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE: return rel, {}, set(), {}   # a SARC may hold Yaz0 or zstd members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and (b'Yaz0' in d or ZSTD_MAGIC in d)) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != PACX4 and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d and d[:12] != ANVIL_CODE and NSGZ not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 or zstd members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -5252,7 +5290,7 @@ def nxcx_shaders(f, label):
     Seek to GLSLC candidates through a mapping so random magic in compressed textures needs no full-file copy.
     """
     from romfs import mmap
-    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', MGFX + b'\x0a', NEEDLE, SUMO_NX, NVNSH)
+    other = (b'BNSH\0\0\0\0', b'SLCT\x03\x10\0\0', MGFX + b'\x05', MGFX + b'\x08', MGFX + b'\x0a', NEEDLE, SUMO_NX, NVNSH, NSGZ)
     overlap = max(map(len, other)) - 1
     offsets, tail, at = [], b'', 0
     loose = False

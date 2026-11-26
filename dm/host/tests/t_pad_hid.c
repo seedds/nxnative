@@ -55,6 +55,43 @@ int main(void) {
     h.hat = pad_hid_hat(4, 1, 8); CHECK(pad_hid_buttons(&h) == (DM_BTN_DOWN | DM_BTN_RIGHT));
     CHECK(pad_hid_axis_of(1, 0x30) == PH_X && pad_hid_axis_of(1, 0x35) == PH_RZ && pad_hid_axis_of(2, 0xC5) == PH_BRAKE && pad_hid_axis_of(1, 0x39) == -1);
     CHECK(pad_hid_norm(0, 0, 65535) == -1 && pad_hid_norm(65535, 0, 65535) == 1 && pad_hid_norm(5, 3, 3) == 0);
+    // Wrapped unsigned ranges (Logical Max encoded as signed -1, exposed as -1..0 or 0..-1) recover their unsigned bits by report width.
+    CHECK(fabsf(pad_hid_norm_bits(0x7fff, -1, 0, 16)) < 0.001f);
+    CHECK(pad_hid_norm_bits(-32768, -1, 0, 16) > 0 && pad_hid_norm_bits(-32768, -1, 0, 16) < 0.001f);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 16) == -1 && pad_hid_norm_bits(-1, -1, 0, 16) == 1 && pad_hid_norm_bits(65535, -1, 0, 16) == 1);
+    CHECK(pad_hid_norm_bits(0, 0, -1, 16) == -1 && pad_hid_norm_bits(65535, 0, -1, 16) == 1);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 8) == -1 && fabsf(pad_hid_norm_bits(127, -1, 0, 8)) < 0.01f && pad_hid_norm_bits(-1, -1, 0, 8) == 1);
+    CHECK(pad_hid_norm_bits(0, -1, 0, 1) == 1 && pad_hid_norm_bits(0, -1, 0, 0) == 1 && pad_hid_norm_bits(0, -1, 0, 32) == 1);
+    CHECK(pad_hid_norm_bits(127, 0, 254, 16) == 0 && pad_hid_norm_bits(0, -32768, 32767, 16) > 0);
+    // Replay the measured SHIELD 2015 16-bit trigger sweep and stick extremes through pad_hid_norm_bits.
+    { static const long sweep[] = {0, 5305, 16397, 26314, 44624, 65535, 20445, 0};
+      pad_hid sh; int32_t ss[4];
+      pad_hid_init(&sh, NULL, PAD_HID_DEFAULT);
+      static const int axes[4] = {PH_X, PH_Y, PH_Z, PH_RZ};
+      for (int i = 0; i < 4; i++) { sh.has[axes[i]] = 1; sh.axis[axes[i]] = pad_hid_norm_bits(0x7fff, -1, 0, 16); }
+      pad_hid_sticks(&sh, ss);
+      CHECK(ss[0] == 0 && ss[1] == 0 && ss[2] == 0 && ss[3] == 0);
+      for (int i = 0; i < 4; i++) {
+          int a = axes[i];
+          sh.axis[a] = pad_hid_norm_bits(-1, -1, 0, 16); pad_hid_sticks(&sh, ss);
+          CHECK(ss[i] == (i % 2 ? -DM_STICK_MAX : DM_STICK_MAX));
+          sh.axis[a] = pad_hid_norm_bits(0, -1, 0, 16); pad_hid_sticks(&sh, ss);
+          CHECK(ss[i] == (i % 2 ? DM_STICK_MAX : -DM_STICK_MAX));
+          sh.axis[a] = pad_hid_norm_bits(0x7fff, -1, 0, 16);
+      }
+      for (int a = PH_BRAKE; a <= PH_ACCEL; a++) {
+          sh.has[a] = 1;
+          for (unsigned i = 0; i < sizeof sweep / sizeof *sweep; i++) {
+              sh.axis[a] = pad_hid_norm_bits(sweep[i], -1, 0, 16);
+              uint64_t bit = a == PH_BRAKE ? DM_BTN_ZL : DM_BTN_ZR;
+              CHECK(!!(pad_hid_buttons(&sh) & bit) == (sweep[i] > 32767));
+          }
+      }
+      sh.ac_back = 1; CHECK(pad_hid_buttons(&sh) == DM_BTN_MINUS);
+      sh.buttons = 1u << 11; CHECK(pad_hid_buttons(&sh) == (DM_BTN_PLUS | DM_BTN_MINUS));
+      sh.ac_back = 0; CHECK(pad_hid_buttons(&sh) == DM_BTN_PLUS);
+      sh.buttons = 0; sh.ac_back = 1; CHECK(pad_hid_nin_buttons(&sh, 0, 0) == 0);   // full report 0x30 ignores simple-mode ac_back
+    }
     h.has[PH_X] = h.has[PH_Y] = h.has[PH_Z] = h.has[PH_RZ] = 1;
     h.axis[PH_X] = 1; h.axis[PH_Y] = -1; h.axis[PH_Z] = 0.05f; h.axis[PH_RZ] = 0.04f;
     pad_hid_sticks(&h, s);

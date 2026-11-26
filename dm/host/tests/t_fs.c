@@ -218,6 +218,48 @@ int main(void) {
         CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save size: fallback without control.nacp or record is 256 MB / 16 MB");
         size = journal = -1;
         CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size max: fallback without control.nacp is 256 MB / 16 MB");
+        // Without control.nacp, ExtendSaveData and ExtendDeviceSaveData enforce the same 256 MB / 16 MB fallback max
+        snprintf(rec, sizeof rec, "%s.size", sdir);
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 512 MiB above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 32 MiB journal above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 16 << 20) == RES_OK && access(rec, F_OK) != 0,
+              "extend save: no-op at fallback limit succeeds without writing a record");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+              "extend device save: rejects requests above fallback max when control.nacp is absent");
+        // Grandfathering pre-existing oversized records when control.nacp is absent: GetSaveDataSizeMax stays title-level (256/16),
+        // existing oversized capacity stays readable and usable as monotonic no-ops, non-oversized dimensions can still grow up to max,
+        // and new growth above max (on this user or another user) is rejected.
+        {
+            char u2rec[1300], drec[1300];
+            const uint64_t uid3[2] = {DM_UID0 + 2, DM_UID1};
+            CHECK(dm_account_create_user(1) == 0 && dm_account_create_user(2) == 0, "save size: register users 2 and 3 for grandfathering");
+            snprintf(u2rec, sizeof u2rec, "%s_user2.size", sdir);
+            snprintf(drec, sizeof drec, "%s_device.size", sdir);
+            put(rec, "536870912 33554432\n");     // 512 MiB / 32 MiB
+            put(u2rec, "536870912 8388608\n");    // 512 MiB / 8 MiB (data oversized, journal below 16 MiB max)
+            put(drec, "536870912 33554432\n");    // 512 MiB / 32 MiB device
+            CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20),
+                  "save size max: stays title-level 256 MB / 16 MB even with grandfathered oversized records");
+            CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20),
+                  "save size: pre-existing oversized account record stays readable (512 MiB / 32 MiB)");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendSave(uid1, (int64_t)300 << 20, 16 << 20) == RES_OK,
+                  "extend save: requests within grandfathered capacity remain monotonic no-ops");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, (int64_t)512 << 20, 48 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: further growth past grandfathered record above max is rejected");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 16 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK &&
+                  size == ((int64_t)512 << 20) && journal == (16 << 20),
+                  "extend save: under-limit journal can still grow to policy max while preserving grandfathered data size");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 20 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: growing journal above policy max on grandfathered record is rejected");
+            CHECK(h_fs_ExtendSave(uid3, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: another user without an oversized record is bounded by reported 256 MiB max");
+            CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20) &&
+                  h_fs_ExtendDeviceSave((int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendDeviceSave((int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend device save: grandfathers existing oversized record and rejects further growth above fallback max");
+            unlink(rec); unlink(u2rec); unlink(drec);
+        }
         // Unknown or NULL UID is rejected as TargetNotFound without touching outputs
         size = journal = -1;
         CHECK(h_fs_SaveSize(&size, &journal, bad_uid) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: unknown UID returns TargetNotFound");
@@ -266,7 +308,6 @@ int main(void) {
         CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20), "extend device save: recorded independently");
         CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "account save size: unaffected by ExtendDeviceSaveData");
         // Additional account user keeps its own record
-        CHECK(dm_account_create_user(1) == 0, "save size: register user 2");
         CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: user 2 reads control.nacp before its own extend");
         CHECK(h_fs_ExtendSave(uid2, 80 << 20, 2 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (80 << 20) && journal == (2 << 20), "extend save: user 2 gets its own record");
         CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: user 1 record is untouched by user 2");

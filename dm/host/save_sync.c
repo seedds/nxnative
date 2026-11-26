@@ -1,9 +1,9 @@
 // Saves through a cloud folder (iCloud Drive): see save_sync.h. Plain C on system calls and CommonCrypto only, so the Mac launcher links it as the host does (dm/mac/pack_app.py).
 // A packed save (<folder>/<title ID>/save.dmsync), little-endian:
 //   header  "DMSYNC1\n", u32 version (1), u32 entries, 32 hex digits of the hash, i64 saved, char title[24], char device[64]
-//   entry   u8 type (1 folder, 2 file), u8 0, u16 path length, u16 guest-name length, u16 0, u64 size, i64 mtime; the path (save/... or save_device/...), the guest name, the contents
+//   entry   u8 type (1 folder, 2 file, 3 size record), u8 0, u16 path length, u16 guest-name length, u16 0, u64 size, i64 mtime; the path (save/..., save_device/..., or type 3 save.size / save_device.size), the guest name, the contents
 //   end     "DMSYNCE\n", then the end of the file (a file cut off anywhere is refused)
-// The hash runs over each entry's first 16 header bytes (not the date), its path, its guest name and its contents, in the order walk() visits them.
+// The hash runs over each entry's first 16 header bytes (not the date), its path, its guest name and its contents, in the order pack_save() visits them.
 #include "save_sync.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <TargetConditionals.h>
@@ -35,9 +35,61 @@
 enum { HDR = 8 + 4 + 4 + SS_HASH + 8 + 24 + 64, ENT = 24, CHUNK = 1 << 16 };   // header bytes, entry header bytes, the copy buffer
 static const char MAGIC[8] __attribute__((nonstring)) = "DMSYNC1\n", END[8] __attribute__((nonstring)) = "DMSYNCE\n";
 static const char *const FOLDERS[2] = {"save", "save_device"};   // their names in a packed save; on disk DM_SAVE and DM_SAVE_device (hle_fs.c h_fs_MountDeviceSave)
+static const char *const SIZE_FILES[2] = {"save.size", "save_device.size"};   // optional capacity records beside DM_SAVE and DM_SAVE_device (hle_fs.c save_size_path)
 
 // ---------- files ----------
 static void folder_path(const char *save, int i, char *out, size_t n) { snprintf(out, n, i ? "%s_device" : "%s", save); }
+static int size_file_path(const char *save, int i, char *out, size_t n) {
+    int w = snprintf(out, n, i ? "%s_device.size" : "%s.size", save);
+    if (w < 0 || w >= (int)n) { errno = ENAMETOOLONG; return -1; }
+    return 0;
+}
+static int size_path_index(const char *p) {
+    for (int i = 0; i < 2; i++) if (!strcmp(p, SIZE_FILES[i])) return i;
+    return -1;
+}
+// Parse a capacity record ("<size> <journal>") with size > 0 and journal >= 0, matching hle_fs.c save_size_read_locked.
+static int parse_size_record(const char *buf, size_t len, int64_t *size, int64_t *journal) {
+    if (!len || len >= 128 || memchr(buf, 0, len)) return -1;
+    char tmp[128]; memcpy(tmp, buf, len); tmp[len] = 0;
+    char *p = tmp, *end = NULL;
+    errno = 0;
+    long long s = strtoll(p, &end, 10);
+    if (errno == ERANGE || end == p || s <= 0 || !isspace((unsigned char)*end)) return -1;
+    p = end;
+    errno = 0;
+    long long j = strtoll(p, &end, 10);
+    if (errno == ERANGE || end == p || j < 0) return -1;
+    while (isspace((unsigned char)*end)) end++;
+    if (*end) return -1;
+    *size = (int64_t)s; *journal = (int64_t)j;
+    return 0;
+}
+// Read an optional capacity record from disk: 1 = valid record loaded (canonical payload in `canon`, mtime in `mt`),
+// 0 = absent, non-regular, or malformed (matching hle_fs.c), -1 = I/O error (errno set).
+static int read_size_record(const char *path, char *canon, size_t cap, size_t *out_len, int64_t *mt) {
+    struct stat st;
+    if (lstat(path, &st)) return errno == ENOENT ? 0 : -1;
+    if (!S_ISREG(st.st_mode)) return 0;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    char raw[128]; size_t got = 0;
+    for (;;) {
+        ssize_t k = read(fd, raw + got, sizeof raw - got);
+        if (k < 0) { if (errno == EINTR) continue; int e = errno; close(fd); errno = e; return -1; }
+        if (k == 0) break;
+        got += (size_t)k;
+        if (got == sizeof raw) break;
+    }
+    close(fd);
+    int64_t s = 0, j = 0;
+    if (got == sizeof raw || parse_size_record(raw, got, &s, &j)) return 0;
+    int w = snprintf(canon, cap, "%lld %lld\n", (long long)s, (long long)j);
+    if (w <= 0 || (size_t)w >= cap) { errno = EINVAL; return -1; }
+    *out_len = (size_t)w;
+    *mt = st.st_mtimespec.tv_sec;
+    return 1;
+}
 
 static void free_names(char **v, size_t n) { for (size_t i = 0; i < n; i++) free(v[i]); free(v); }
 static int by_name(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
@@ -165,12 +217,32 @@ static int walk(const char *abs, const char *rel, packer *k) {
     return r;
 }
 
+static int pack_size_entry(packer *k, const char *rel, const char *payload, size_t len, int64_t mt) {
+    size_t pl = strlen(rel);
+    uint8_t h[ENT] = {3}; uint16_t pl16 = (uint16_t)pl, gl16 = 0;
+    uint64_t size = (uint64_t)len;
+    memcpy(h + 2, &pl16, 2); memcpy(h + 4, &gl16, 2); memcpy(h + 8, &size, 8); memcpy(h + 16, &mt, 8);
+    CC_SHA256_Update(&k->sha, h, 16); CC_SHA256_Update(&k->sha, rel, (CC_LONG)pl); CC_SHA256_Update(&k->sha, payload, (CC_LONG)len);
+    if (k->out && (fwrite(h, 1, ENT, k->out) != ENT || fwrite(rel, 1, pl, k->out) != pl || fwrite(payload, 1, len, k->out) != len)) return -1;
+    k->entries++;
+    if (mt > k->m->saved) k->m->saved = mt;
+    return 0;
+}
+
 static int pack_save(const char *save, packer *k) {
     CC_SHA256_Init(&k->sha);
     for (int i = 0; i < 2; i++) {
         char dir[PATH_MAX]; folder_path(save, i, dir, sizeof dir);
         int h = has_entries(dir);
         if (h < 0 || (h && walk(dir, FOLDERS[i], k))) return -1;
+    }
+    if (k->m->files) {
+        for (int i = 0; i < 2; i++) {
+            char sp[PATH_MAX], canon[64]; size_t len = 0; int64_t mt = 0;
+            if (size_file_path(save, i, sp, sizeof sp)) return -1;
+            int r = read_size_record(sp, canon, sizeof canon, &len, &mt);
+            if (r < 0 || (r > 0 && pack_size_entry(k, SIZE_FILES[i], canon, len, mt))) return -1;
+        }
     }
     uint8_t d[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_Final(d, &k->sha); hex(d, k->m->hash);
     if (!k->m->files) k->m->hash[0] = 0;   // no save: no hash, so that "nothing here" compares as nothing
@@ -221,7 +293,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
     FILE *f = fopen(bundle, "rb"); if (!f) return -1;
     uint8_t *buf = malloc(CHUNK), hdr[HDR], h[ENT], end[sizeof END], d[CC_SHA256_DIGEST_LENGTH];
     char want[SS_HASH + 1] = "", path[PATH_MAX], guest[1024], out[PATH_MAX];
-    uint32_t version, n; int r = -1, fd = -1;
+    uint32_t version, n; int r = -1, fd = -1; unsigned seen_size = 0;
     CC_SHA256_CTX sha; CC_SHA256_Init(&sha);
     if (!buf || fread(hdr, 1, HDR, f) != HDR || memcmp(hdr, MAGIC, 8)) goto done;
     memcpy(&version, hdr + 8, 4); memcpy(&n, hdr + 12, 4);
@@ -231,10 +303,27 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
         uint16_t pl, gl; uint64_t size; int64_t mt;
         if (fread(h, 1, ENT, f) != ENT) goto done;
         memcpy(&pl, h + 2, 2); memcpy(&gl, h + 4, 2); memcpy(&size, h + 8, 8); memcpy(&mt, h + 16, 8);
-        if ((h[0] != 1 && h[0] != 2) || !pl || pl >= sizeof path || gl > sizeof guest || (h[0] == 1 && size)) goto done;
+        if ((h[0] != 1 && h[0] != 2 && h[0] != 3) || !pl || pl >= sizeof path || gl > sizeof guest || (h[0] == 1 && size)) goto done;
+        if (h[0] == 3 && (gl || !size || size >= 128)) goto done;
         if (fread(path, 1, pl, f) != pl || fread(guest, 1, gl, f) != gl) goto done;
         path[pl] = 0;
-        if (strlen(path) != pl || !path_ok(path)) goto done;
+        if (strlen(path) != pl) goto done;
+        if (h[0] == 3) {
+            int si = size_path_index(path);
+            char sbuf[128]; int64_t ps = 0, pj = 0;
+            if (si < 0 || (seen_size & (1u << si)) || fread(sbuf, 1, (size_t)size, f) != (size_t)size || parse_size_record(sbuf, (size_t)size, &ps, &pj)) goto done;
+            seen_size |= 1u << si;
+            CC_SHA256_Update(&sha, h, 16); CC_SHA256_Update(&sha, path, pl); CC_SHA256_Update(&sha, sbuf, (CC_LONG)size);
+            if (into) {
+                if (snprintf(out, sizeof out, "%s/%s", into, path) >= (int)sizeof out) goto done;
+                if (mkdirs(into) || (fd = open(out, O_WRONLY | O_CREAT | O_EXCL, 0644)) < 0) goto done;
+                if (write_all(fd, sbuf, (size_t)size)) goto done;
+                struct timespec t[2] = {{(time_t)mt, 0}, {(time_t)mt, 0}}; futimens(fd, t);
+                int bad = close(fd); fd = -1; if (bad) goto done;
+            }
+            continue;
+        }
+        if (!path_ok(path)) goto done;
         CC_SHA256_Update(&sha, h, 16); CC_SHA256_Update(&sha, path, pl); CC_SHA256_Update(&sha, guest, gl);
         if (into) {
             if (snprintf(out, sizeof out, "%s/%s", into, path) >= (int)sizeof out) goto done;
@@ -258,6 +347,7 @@ int ss_read(const char *bundle, const char *into, ss_meta *m) {
         }
         if (h[0] == 2) m->files++, m->bytes += (int64_t)size;
     }
+    if (seen_size && !m->files) goto done;
     if (fread(end, 1, sizeof end, f) != sizeof end || memcmp(end, END, sizeof end) || fgetc(f) != EOF) goto done;
     CC_SHA256_Final(d, &sha); hex(d, m->hash);
     if (!m->files) m->hash[0] = 0;
@@ -617,6 +707,21 @@ static void keep_start_copy(const char *save, const ss_meta *known) {
             BRED("%s %s failed (errno=%d): no copy of the save this start", h < 0 ? "reading" : "cloning", from, e); return;
         }
     }
+    for (int i = 0; i < 2; i++) {
+        char from[PATH_MAX], to[PATH_MAX]; struct stat st;
+        if (size_file_path(save, i, from, sizeof from) || snprintf(to, sizeof to, "%s/%s", stage, SIZE_FILES[i]) >= (int)sizeof to) {
+            rm_tree(stage); BRED("start backup path is too long: no copy of the save this start"); return;
+        }
+        if (lstat(from, &st)) {
+            if (errno == ENOENT) continue;
+            int e = errno; rm_tree(stage);
+            BRED("reading %s failed (errno=%d): no copy of the save this start", from, e); return;
+        }
+        if (S_ISREG(st.st_mode) && clonefile(from, to, 0)) {
+            int e = errno; rm_tree(stage);
+            BRED("cloning %s failed (errno=%d): no copy of the save this start", from, e); return;
+        }
+    }
     if (write_start_hash(stage, now)) {
         int e = errno; rm_tree(stage);
         BRED("writing %s/%s failed (errno=%d): no copy of the save this start", stage, START_HASH_FILE, e); return;
@@ -707,14 +812,17 @@ static int fetch_timed(const char *cloud, const char *local, int ms, ss_cloud_id
 // every start and <save>-backups is pruned, and the mount reads it before either (mount_once). An app kill is covered; a power loss is not claimed (the folder renames
 // are not synced to the disk)
 enum { HAD_NONE, HAD_EMPTY, HAD_SAVE };   // what this device had in a folder before the pull
-typedef struct { char kept[PATH_MAX]; int had[2]; uint64_t dev[2], ino[2]; } pull_journal;
+enum { SIZE_UNTRACKED = -1, SIZE_NONE = 0, SIZE_PRESENT = 1 };   // what this device had for a .size record before the pull (-1: legacy journal without size lines)
+typedef struct { char kept[PATH_MAX]; int had[2], had_size[2]; uint64_t dev[2], ino[2], size_dev[2], size_ino[2]; } pull_journal;
 static void journal_path(const char *save, char *out, size_t n) { snprintf(out, n, "%s.pull", save); }
 static int journal_write(const char *save, const pull_journal *j) {
-    char p[PATH_MAX], t[PATH_MAX + 8], b[PATH_MAX + 512], dir[PATH_MAX]; int e = 0;
+    char p[PATH_MAX], t[PATH_MAX + 8], b[PATH_MAX + 768], dir[PATH_MAX]; int e = 0;
     journal_path(save, p, sizeof p); snprintf(t, sizeof t, "%s.tmp", p);
     int L = snprintf(b, sizeof b, "# save sync (dm/host/save_sync.c): a pull of the cloud's save in progress; the next start puts this device's save back\nkept\t%s\n", j->kept);
     for (int i = 0; i < 2 && L > 0 && L < (int)sizeof b; i++)
         L += snprintf(b + L, sizeof b - (size_t)L, "folder\t%d\t%d\t%llu\t%llu\n", i, j->had[i], (unsigned long long)j->dev[i], (unsigned long long)j->ino[i]);
+    for (int i = 0; i < 2 && L > 0 && L < (int)sizeof b; i++)
+        L += snprintf(b + L, sizeof b - (size_t)L, "size\t%d\t%d\t%llu\t%llu\n", i, j->had_size[i], (unsigned long long)j->size_dev[i], (unsigned long long)j->size_ino[i]);
     if (L <= 0 || L >= (int)sizeof b) { errno = ENAMETOOLONG; return -1; }
     int fd = open(t, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return -1;
@@ -727,8 +835,9 @@ static int journal_write(const char *save, const pull_journal *j) {
     return 0;
 }
 static int journal_read(const char *save, pull_journal *j) {   // 1: a pull did not finish; 0: none; -1: a journal that cannot be read
-    char p[PATH_MAX], line[PATH_MAX + 64]; int got = 0;
+    char p[PATH_MAX], line[PATH_MAX + 64]; int got = 0, got_size = 0, bad = 0;
     journal_path(save, p, sizeof p); memset(j, 0, sizeof *j);
+    j->had_size[0] = j->had_size[1] = SIZE_UNTRACKED;
     FILE *f = fopen(p, "r");
     if (!f) return errno == ENOENT ? 0 : -1;
     while (fgets(line, sizeof line, f)) {
@@ -737,14 +846,19 @@ static int journal_read(const char *save, pull_journal *j) {   // 1: a pull did 
         if (!strncmp(line, "kept\t", 5)) { snprintf(j->kept, sizeof j->kept, "%s", line + 5); got |= 4; }
         else if (sscanf(line, "folder\t%d\t%d\t%llu\t%llu", &i, &had, &dev, &ino) == 4 && i >= 0 && i < 2 && had >= HAD_NONE && had <= HAD_SAVE) {
             j->had[i] = had; j->dev[i] = dev; j->ino[i] = ino; got |= 1 << i;
+        } else if (!strncmp(line, "size\t", 5)) {
+            if (sscanf(line, "size\t%d\t%d\t%llu\t%llu", &i, &had, &dev, &ino) == 4 && i >= 0 && i < 2 && (had == SIZE_NONE || had == SIZE_PRESENT)) {
+                j->had_size[i] = had; j->size_dev[i] = dev; j->size_ino[i] = ino; got_size |= 1 << i;
+            } else bad = 1;
         }
     }
     fclose(f);
-    return got == 7 ? 1 : -1;
+    return !bad && got == 7 && (got_size == 0 || got_size == 3) ? 1 : -1;
 }
 static int is_folder(const char *p, uint64_t dev, uint64_t ino) { struct stat st; return !lstat(p, &st) && S_ISDIR(st.st_mode) && (uint64_t)st.st_dev == dev && (uint64_t)st.st_ino == ino; }
+static int is_reg_file(const char *p, uint64_t dev, uint64_t ino) { struct stat st; return !lstat(p, &st) && S_ISREG(st.st_mode) && (uint64_t)st.st_dev == dev && (uint64_t)st.st_ino == ino; }
 // This device's save back as it was before the pull the journal describes, from wherever that pull stopped; then the journal goes. Run again after it stopped itself,
-// it goes on from there. What it removes is only ever the cloud's (still in the cloud): a folder that is not the one the journal names, or one where this device had none.
+// it goes on from there. What it removes is only ever the cloud's (still in the cloud): a folder or size record that is not the one the journal names, or one where this device had none.
 // 0: back (the journal removed); -1: not (the journal kept, and with it what this device's save is made of)
 static int recover(const char *save, const pull_journal *j) {
     int ok = 1;
@@ -762,22 +876,38 @@ static int recover(const char *save, const pull_journal *j) {
             if (ok && j->had[i] == HAD_EMPTY && mkdirs(here)) ok = 0;
         }
     }
+    for (int i = 0; i < 2; i++) {
+        if (j->had_size[i] == SIZE_UNTRACKED) continue;
+        char here[PATH_MAX], old[PATH_MAX];
+        if (size_file_path(save, i, here, sizeof here)) { ok = 0; continue; }
+        if (*j->kept && snprintf(old, sizeof old, "%s/%s", j->kept, SIZE_FILES[i]) >= (int)sizeof old) { ok = 0; continue; }
+        if (j->had_size[i] == SIZE_PRESENT) {
+            if (is_reg_file(here, j->size_dev[i], j->size_ino[i])) {   // in place: a size record in the backups is the cloud's, on its way in
+                if (*j->kept && !access(old, F_OK) && unlink(old)) ok = 0;
+            } else if (*j->kept && is_reg_file(old, j->size_dev[i], j->size_ino[i])) {   // in the backups: swapped back over the cloud's, which then goes
+                if (access(here, F_OK) ? rename(old, here) : (renamex_np(old, here, RENAME_SWAP) || unlink(old))) ok = 0;
+            } else { SRED("%s: this device's size record is neither in place nor in %s", here, *j->kept ? j->kept : "the backups"); ok = 0; }
+        } else {   // no size record of this device's here: remove any cloud record put in place
+            if (!access(here, F_OK) && unlink(here)) ok = 0;
+        }
+    }
     if (!ok) return -1;
     if (*j->kept) rmdir(j->kept);   // empty now, unless the player put something there
     char p[PATH_MAX]; journal_path(save, p, sizeof p);
     return unlink(p) && errno != ENOENT ? -1 : 0;
 }
-// The cloud's save replaces this one. It is unpacked beside it first (<save>.sync-tmp/in), the journal written, then each of its folders moved into this device's
-// backup folder and swapped from there with the live one (renamex_np, as a Commit swaps): one step puts the cloud's folder in place and leaves this device's in the
-// backups, so the staging folder, which every start clears, never holds the only copy of this device's save. A folder the cloud's save does not have goes to the
+// The cloud's save replaces this one. It is unpacked beside it first (<save>.sync-tmp/in), the journal written, then each of its folders and size records moved into this device's
+// backup folder and swapped from there with the live one (renamex_np, as a Commit swaps): one step puts the cloud's copy in place and leaves this device's in the
+// backups, so the staging folder, which every start clears, never holds the only copy of this device's save. A folder or size record the cloud's save does not have goes to the
 // backups too, so both hold the same. A step that fails puts everything back (recover, as the next start would after a kill). The older backups of this device's
 // saves are pruned only once this one is complete. kept: the backup of this device's save, "" when it had none.
 // 0: the cloud's save is in place. -1: this device's save is as it was. -2: it could not be put back: the journal stays, and the next start tries again (until then
 // the save is not mounted). errno: the first failure's
 static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, size_t kn) {
-    char tmp[PATH_MAX], here[2][PATH_MAX], incoming[2][PATH_MAX], old[2][PATH_MAX], jp[PATH_MAX];
+    char tmp[PATH_MAX], here[2][PATH_MAX], incoming[2][PATH_MAX], old[2][PATH_MAX];
+    char here_sz[2][PATH_MAX], incoming_sz[2][PATH_MAX], old_sz[2][PATH_MAX], jp[PATH_MAX];
     pull_journal j; memset(&j, 0, sizeof j);
-    int fresh[2], e = 0;
+    int fresh[2], fresh_sz[2], e = 0;
     snprintf(tmp, sizeof tmp, "%s.sync-tmp/in", save);
     kept[0] = 0;
     if (rm_tree(tmp) || mkdirs(tmp) || ss_read(bundle, tmp, r)) { e = errno; rm_tree(tmp); errno = e; return -1; }
@@ -790,7 +920,24 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         j.had[i] = none ? HAD_NONE : h ? HAD_SAVE : HAD_EMPTY;
         if (j.had[i] == HAD_SAVE) { j.dev[i] = (uint64_t)st.st_dev; j.ino[i] = (uint64_t)st.st_ino; }
     }
-    if ((j.had[0] == HAD_SAVE || j.had[1] == HAD_SAVE) && backup_dir(save, "local", kept, kn)) { e = errno; kept[0] = 0; rm_tree(tmp); errno = e; return -1; }
+    for (int i = 0; i < 2; i++) {
+        struct stat st;
+        if (size_file_path(save, i, here_sz[i], sizeof here_sz[i]) || snprintf(incoming_sz[i], sizeof incoming_sz[i], "%s/%s", tmp, SIZE_FILES[i]) >= (int)sizeof incoming_sz[i]) {
+            e = ENAMETOOLONG; rm_tree(tmp); errno = e; return -1;
+        }
+        fresh_sz[i] = !access(incoming_sz[i], F_OK);
+        if (lstat(here_sz[i], &st)) {
+            if (errno != ENOENT) { e = errno; rm_tree(tmp); errno = e; return -1; }
+            j.had_size[i] = SIZE_NONE;
+        } else if (!S_ISREG(st.st_mode)) {
+            e = EINVAL; rm_tree(tmp); errno = e; return -1;
+        } else {
+            j.had_size[i] = SIZE_PRESENT;
+            j.size_dev[i] = (uint64_t)st.st_dev; j.size_ino[i] = (uint64_t)st.st_ino;
+        }
+    }
+    int need_kept = j.had[0] == HAD_SAVE || j.had[1] == HAD_SAVE || j.had_size[0] == SIZE_PRESENT || j.had_size[1] == SIZE_PRESENT;
+    if (need_kept && backup_dir(save, "local", kept, kn)) { e = errno; kept[0] = 0; rm_tree(tmp); errno = e; return -1; }
     snprintf(j.kept, sizeof j.kept, "%s", kept);
     if (journal_write(save, &j)) { e = errno; if (*kept) rmdir(kept); kept[0] = 0; rm_tree(tmp); errno = e; return -1; }   // nothing of this device's has moved
     for (int i = 0; i < 2; i++) {
@@ -799,6 +946,16 @@ static int pull(const char *save, const char *bundle, ss_meta *r, char *kept, si
         else if (j.had[i] == HAD_SAVE) { if (rename(here[i], old[i])) { e = errno; goto undo; } }
         else if (fresh[i]) {   // no save in this folder: an empty one is swapped into the staging folder, which is cleared
             if (access(here[i], F_OK) ? rename(incoming[i], here[i]) : renamex_np(incoming[i], here[i], RENAME_SWAP)) { e = errno; goto undo; }
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        if (*kept && snprintf(old_sz[i], sizeof old_sz[i], "%s/%s", kept, SIZE_FILES[i]) >= (int)sizeof old_sz[i]) { e = ENAMETOOLONG; goto undo; }
+        if (j.had_size[i] == SIZE_PRESENT && fresh_sz[i]) {
+            if (rename(incoming_sz[i], old_sz[i]) || renamex_np(old_sz[i], here_sz[i], RENAME_SWAP)) { e = errno; goto undo; }
+        } else if (j.had_size[i] == SIZE_PRESENT) {
+            if (rename(here_sz[i], old_sz[i])) { e = errno; goto undo; }
+        } else if (fresh_sz[i]) {
+            if (rename(incoming_sz[i], here_sz[i])) { e = errno; goto undo; }
         }
     }
     journal_path(save, jp, sizeof jp);
@@ -825,12 +982,21 @@ static int send_save(const char *save, const char *title, const char *cloud) {
     snprintf(tmp, sizeof tmp, "%s.sync-tmp/out", save); snprintf(snap, sizeof snap, "%s/s", tmp);
     snprintf(packed, sizeof packed, "%s/save.dmsync", tmp); snprintf(theirs, sizeof theirs, "%s/cloud.dmsync", tmp);
     if (rm_tree(tmp) || mkdirs(tmp)) { SRED("cannot make %s (errno=%d)", tmp, errno); goto done; }
-    // A clone of the committed folders, taken while no Commit can swap them: the game may commit again while this packs
+    // A clone of the committed folders and any capacity records, taken while no Commit or ExtendSaveData can swap them: the game may commit again while this packs
     for (int i = 0; i < 2; i++) {
         char from[PATH_MAX], to[PATH_MAX]; folder_path(save, i, from, sizeof from); folder_path(snap, i, to, sizeof to);
         int h = has_entries(from);
         if (h < 0) { SRED("%s cannot be read (errno=%d): not sent", from, errno); goto done; }   // not packed as no save: the cloud's copy of it would go
         if (h && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
+    }
+    for (int i = 0; i < 2; i++) {
+        char from[PATH_MAX], to[PATH_MAX]; struct stat st;
+        if (size_file_path(save, i, from, sizeof from) || size_file_path(snap, i, to, sizeof to)) { SRED("save size path is too long: not sent"); goto done; }
+        if (lstat(from, &st)) {
+            if (errno == ENOENT) continue;
+            SRED("%s cannot be read (errno=%d): not sent", from, errno); goto done;
+        }
+        if (S_ISREG(st.st_mode) && dm_fs_clone_committed(from, to)) { SRED("cloning %s failed (errno=%d)", from, errno); goto done; }
     }
     if (ss_pack(snap, title, packed, &mine)) { SRED("packing %s failed (errno=%d)", save, errno); goto done; }
     read_base(save, base);

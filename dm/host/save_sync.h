@@ -1,6 +1,6 @@
 // Saves through a cloud folder (iCloud Drive), so the Mac app and the iPhone app of one game play on from the same save. Off unless DM_SAVE_SYNC names the folder
 // (each app's launcher sets the folder the player chose in its Cloud saves: dm/mac/launcher.c from the Mac settings window, CloudSaves.m on the iPhone; "icloud" is iCloud Drive/nxnative Saves).
-// The folder holds one file per game, <folder>/<title ID>/save.dmsync (a folder named after the title ID is taken as the game's own): the committed save (DM_SAVE and DM_SAVE_device) packed into one file. iCloud replaces a file as a
+// The folder holds one file per game, <folder>/<title ID>/save.dmsync (a folder named after the title ID is taken as the game's own): the committed save (DM_SAVE, DM_SAVE_device, and any DM_SAVE.size / DM_SAVE_device.size capacity records) packed into one file. iCloud replaces a file as a
 // whole but syncs a folder file by file, and a save that is half one device's and half the other's is worse than either.
 // When: the cloud's copy comes in at the game's first save mount (hle_fs.c, before the work directory is cloned from the committed save); the committed save goes out a few
 // seconds after a Commit, on a thread of its own (the game never waits), when the iPhone app goes to the background, and from the Mac launcher once the host has exited.
@@ -32,7 +32,7 @@ typedef struct {
 int ss_scan(const char *save, ss_meta *m);
 // Packs the save into one file. 0 on success; m receives what was packed
 int ss_pack(const char *save, const char *title, const char *out, ss_meta *m);
-// Reads a packed save and checks all of it (the header, every entry, the hash, the end marker); with `into`, unpacks it there as into/save and into/save_device.
+// Reads a packed save and checks all of it (the header, every entry, the hash, the end marker); with `into`, unpacks it there as into/save, into/save_device, and any into/save.size / into/save_device.size.
 // 0 on success; a damaged or cut-off file, or a path that leaves the save, fails
 int ss_read(const char *bundle, const char *into, ss_meta *m);
 typedef enum { SS_KEEP, SS_PULL, SS_PUSH, SS_ASK } ss_way;

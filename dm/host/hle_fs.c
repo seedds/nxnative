@@ -880,6 +880,18 @@ static int save_size_nacp_max(int device, int64_t *size, int64_t *journal) {
     *size = bs; *journal = bj;
     return 0;
 }
+// Effective maximum save size shared by GetSaveDataSizeMax and ExtendSaveData/ExtendDeviceSaveData:
+// explicit NACP max (clamped >= base), else NACP base, else fallback 256 MB / 16 MB.
+static void save_size_max_limit(int device, int64_t *size, int64_t *journal, const char **from) {
+    int m = save_size_nacp_max(device, size, journal);
+    if (m < 0) {
+        *size = SAVE_FALLBACK_SIZE;
+        *journal = SAVE_FALLBACK_JOURNAL;
+    }
+    if (from) *from = m == 1 ? "the control data's max"
+                    : m == 0 ? "the control data's base size"
+                             : "no control data: 256 MB / 16 MB";
+}
 static int save_size_path(char *out, size_t cap, int device, int user) {
     const char *d = getenv("DM_SAVE");
     if (!d || !*d) return -1;
@@ -943,9 +955,11 @@ static Result save_size_get(int64_t *size, int64_t *journal, int device, int use
     return RES_OK;
 }
 // Follows Horizon's ExtendApplicationSaveData + ExtendSaveDataIfNeeded:
-// checks NACP max bounds (ResultExtensionSizeTooLarge), grows monotonically per dimension
-// without shrinking (so e.g. journal=0 keeps the current journal), requires 1 MiB alignment on
-// each growing dimension (ResultExtensionSizeInvalid), and fails if persisting the record fails.
+// enforces the same limit GetSaveDataSizeMax reports (NACP max, else NACP base, else 256 MB / 16 MB)
+// on any growing dimension (ResultExtensionSizeTooLarge) while grandfathering already-recorded oversized
+// capacity as monotonic no-ops, grows monotonically per dimension without shrinking (so e.g. journal=0
+// keeps the current journal), requires 1 MiB alignment on each growing dimension (ResultExtensionSizeInvalid),
+// and fails if persisting the record fails.
 static Result save_size_extend(int device, int user, int64_t size, int64_t journal) {
     if (size < 0 || journal < 0) return RES_INVALID_SIZE;
     char p[1100];
@@ -954,11 +968,7 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
         return RES_FAIL;
     }
     int64_t max_s = 0, max_j = 0;
-    if (save_size_nacp_max(device, &max_s, &max_j) >= 0 && (size > max_s || journal > max_j)) {
-        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)",
-            device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
-        return RES_EXT_SIZE_TOO_LARGE;
-    }
+    save_size_max_limit(device, &max_s, &max_j, NULL);
     pthread_mutex_lock(&g_lock);
     int64_t cur_s = 0, cur_j = 0;
     save_size_current_locked(p, device, &cur_s, &cur_j, NULL);
@@ -967,6 +977,12 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
         LOG("fs extend %s save data to %lld bytes (journal %lld): already %lld / %lld",
             device ? "device" : "account", (long long)size, (long long)journal, (long long)cur_s, (long long)cur_j);
         return RES_OK;
+    }
+    if ((size > cur_s && size > max_s) || (journal > cur_j && journal > max_j)) {
+        pthread_mutex_unlock(&g_lock);
+        LOG("fs extend %s save data (%lld bytes, journal %lld) exceeds max (%lld, %lld)",
+            device ? "device" : "account", (long long)size, (long long)journal, (long long)max_s, (long long)max_j);
+        return RES_EXT_SIZE_TOO_LARGE;
     }
     if ((size > cur_s && size % SAVE_EXT_UNIT) || (journal > cur_j && journal % SAVE_EXT_UNIT)) {
         pthread_mutex_unlock(&g_lock);
@@ -979,6 +995,7 @@ static Result save_size_extend(int device, int user, int64_t size, int64_t journ
     int bad = save_size_put_locked(p, device, new_s, new_j);
     pthread_mutex_unlock(&g_lock);
     if (bad) return RES_FAIL;
+    if (device || user == 0) save_sync_committed();
     LOG("fs extend %s save data to %lld bytes (journal %lld)", device ? "device" : "account", (long long)new_s, (long long)new_j);
     return RES_OK;
 }
@@ -993,10 +1010,8 @@ HLE_FORCE("_ZN2nn2fs15GetSaveDataSizeEPlS1_RKNS_7account3UidE", "fsp-srv; save d
 // fsp-srv object the host never made, SIGSEGV at GetSaveDataSizeMax+0xbc): UserAccountSaveDataSizeMax / JournalSizeMax (s64 at 0x3148 / 0x3150, clamped >= base), else
 // UserAccountSaveDataSize / JournalSize (0x3080 / 0x3088) when the title declares no separate max, else 256 MB data + 16 MB journal
 HLE_FORCE("_ZN2nn2fs18GetSaveDataSizeMaxEPlS1_", "fsp-srv; largest save data size from control.nacp", Result, h_fs_SaveSizeMax, int64_t *size, int64_t *journal) {
-    int64_t s = 0, j = 0;
-    int m = save_size_nacp_max(0, &s, &j);
-    const char *from = m == 1 ? "the control data's max" : m == 0 ? "the control data's base size" : "no control data: 256 MB / 16 MB";
-    if (m < 0) { s = SAVE_FALLBACK_SIZE; j = SAVE_FALLBACK_JOURNAL; }
+    int64_t s = 0, j = 0; const char *from = NULL;
+    save_size_max_limit(0, &s, &j, &from);
     if (size) *size = s;
     if (journal) *journal = j;
     LOG("fs save data size max: %lld bytes, journal %lld (%s)", (long long)s, (long long)j, from);

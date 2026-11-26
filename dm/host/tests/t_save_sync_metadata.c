@@ -887,6 +887,132 @@ static void start_backup_cases(const char *folder) {
 
     rm_tree(root);
 }
+static void size_record_recovery_cases(const char *folder) {
+    static const char *TID = "0100000000010000";
+    const char *name = "size record pull, recovery, and backup faults";
+    char root[PATH_MAX], save[PATH_MAX], dev[PATH_MAX], s0[PATH_MAX], s1[PATH_MAX], backups[PATH_MAX], kept[PATH_MAX], p[PATH_MAX];
+    char b_with[PATH_MAX], b_old[PATH_MAX], src_with[PATH_MAX], src_old[PATH_MAX];
+    ss_meta m; struct fault none = {0};
+    snprintf(root, sizeof root, "%s/size-rec", folder);
+    snprintf(save, sizeof save, "%s/save", root);
+    snprintf(dev, sizeof dev, "%s/save_device", root);
+    snprintf(s0, sizeof s0, "%s.size", save);
+    snprintf(s1, sizeof s1, "%s_device.size", save);
+    snprintf(backups, sizeof backups, "%s-backups", save);
+    rm_tree(root); mkdirs(root);
+    unsetenv("DM_SAVE_SYNC"); unsetenv("DM_SAVE_BACKUPS");
+
+    // Pack two cloud bundles: one with account + device size records, one older bundle without any size records
+    snprintf(src_with, sizeof src_with, "%s/c-with/save", root); mkdirs(src_with);
+    snprintf(p, sizeof p, "%s/a", src_with); put(p, "cloud 0");
+    snprintf(p, sizeof p, "%s_device", src_with); mkdirs(p);
+    snprintf(p, sizeof p, "%s_device/b", src_with); put(p, "cloud 1");
+    snprintf(p, sizeof p, "%s.size", src_with); put(p, "117440512 8388608\n");
+    snprintf(p, sizeof p, "%s_device.size", src_with); put(p, "67108864 4194304\n");
+    snprintf(b_with, sizeof b_with, "%s/with.dmsync", root);
+    CHECK(!ss_pack(src_with, TID, b_with, &m), "pack cloud bundle with size records");
+
+    snprintf(src_old, sizeof src_old, "%s/c-old/save", root); mkdirs(src_old);
+    snprintf(p, sizeof p, "%s/a", src_old); put(p, "cloud 0");
+    snprintf(b_old, sizeof b_old, "%s/old.dmsync", root);
+    CHECK(!ss_pack(src_old, TID, b_old, &m), "pack older cloud bundle without size records");
+
+    // 1. Interrupted pull recovery at every rename/swap step (including mid-recovery kill) across local/cloud size combinations
+    for (int local_sz = 0; local_sz < 2; local_sz++) {
+        for (int cloud_sz = 0; cloud_sz < 2; cloud_sz++) {
+            const char *bundle = cloud_sz ? b_with : b_old;
+            int steps = 0;
+            for (int k = 1; k < 20; k++) {
+                rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+                snprintf(p, sizeof p, "%s.pull", save); unlink(p);
+                mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+                mkdirs(dev);  snprintf(p, sizeof p, "%s/b", dev);  put(p, "original 1");
+                if (local_sz) { put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n"); }
+                faults[0] = faults[1] = none; crash_after = k;
+                if (!setjmp(crash_jmp)) { int r = pull(save, bundle, &m, kept, sizeof kept); crash_after = -1; CHECK(!r, "uninterrupted size pull completes"); steps = k - 1; break; }
+                snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "journal exists after kill during size pull");
+                if (k == 6) {   // killed again mid-recovery (while putting back size records)
+                    crash_after = 1; pull_journal j;
+                    if (!setjmp(crash_jmp)) { CHECK(journal_read(save, &j) == 1, "size journal reads back"); recover(save, &j); }
+                    crash_after = -1;
+                }
+                CHECK(mount_once(save, TID) == 0, "next mount recovers save and size records");
+                snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "original 0"), "account save recovered");
+                snprintf(p, sizeof p, "%s/b", dev);  CHECK(is(p, "original 1"), "device save recovered");
+                if (local_sz) {
+                    CHECK(is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"), "local size records recovered intact");
+                } else {
+                    CHECK(access(s0, F_OK) == -1 && access(s1, F_OK) == -1, "cloud size records removed when local had none");
+                }
+                snprintf(p, sizeof p, "%s.pull", save); CHECK(access(p, F_OK) == -1, "journal removed after size recovery");
+                char newest[PATH_MAX]; newest_start_copy(save, newest, sizeof newest);
+                CHECK(*newest != 0, "start copy created after recovery");
+                snprintf(p, sizeof p, "%s/save.size", newest);
+                CHECK(local_sz ? is(p, "100663296 4194304\n") : access(p, F_OK) == -1, "start copy reflects recovered save.size");
+                snprintf(p, sizeof p, "%s/save_device.size", newest);
+                CHECK(local_sz ? is(p, "50331648 4194304\n") : access(p, F_OK) == -1, "start copy reflects recovered save_device.size");
+            }
+            CHECK(steps >= 3, "size pull exercises multiple crash points");
+        }
+    }
+
+    // 2. Completed pull of older bundle over existing save explicitly backs up and clears prior size records
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n");
+    faults[0] = faults[1] = none;
+    CHECK(pull(save, b_old, &m, kept, sizeof kept) == 0, "pull older bundle succeeds");
+    CHECK(access(s0, F_OK) == -1 && access(s1, F_OK) == -1, "older bundle pull clears live size records");
+    snprintf(p, sizeof p, "%s/save.size", kept); CHECK(is(p, "100663296 4194304\n"), "prior save.size kept in local backup");
+    snprintf(p, sizeof p, "%s/save_device.size", kept); CHECK(is(p, "50331648 4194304\n"), "prior save_device.size kept in local backup");
+
+    // 3. Injected EIO on size record swap rolls back folders and size records; double failure keeps journal for next mount
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n"); put(s1, "50331648 4194304\n");
+    snprintf(staging, sizeof staging, "%s.sync-tmp", save); staging_held = 0;
+    faults[0] = (struct fault){2, "local/save_device.size", "/save_device.size", 0}; faults[1] = none;
+    CHECK(pull(save, b_with, &m, kept, sizeof kept) == -1 && !faults[0].op && !staging_held, "EIO on size swap rolls back cleanly");
+    *staging = 0;
+    snprintf(p, sizeof p, "%s/a", save); CHECK(is(p, "original 0") && is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"),
+                                               "rolled-back pull leaves save and both size records intact");
+    // Swap fails and swap-back of save.size also fails -> -2, journal stays, next start recovers
+    faults[0] = (struct fault){2, "local/save_device.size", "/save_device.size", 0};
+    faults[1] = (struct fault){2, "local/save.size", "/save.size", 1};
+    CHECK(pull(save, b_with, &m, kept, sizeof kept) == -2 && !faults[0].op && !faults[1].op, "failed size rollback returns -2");
+    snprintf(p, sizeof p, "%s.pull", save); CHECK(!access(p, F_OK), "journal kept when size rollback fails");
+    CHECK(mount_once(save, TID) == 0 && is(s0, "100663296 4194304\n") && is(s1, "50331648 4194304\n"),
+          "next mount finishes recovering both size records");
+
+    // 4. Legacy .pull journal without size lines leaves existing .size intact; corrupted size line refuses mount
+    rm_tree(save); rm_tree(dev); rm_tree(backups); unlink(s0); unlink(s1);
+    mkdirs(save); snprintf(p, sizeof p, "%s/a", save); put(p, "original 0");
+    put(s0, "100663296 4194304\n");
+    struct stat st; stat(save, &st);
+    snprintf(p, sizeof p, "%s.pull", save);
+    {
+        FILE *jf = fopen(p, "w");
+        fprintf(jf, "kept\t\nfolder\t0\t2\t%llu\t%llu\nfolder\t1\t0\t0\t0\n", (unsigned long long)st.st_dev, (unsigned long long)st.st_ino);
+        fclose(jf);
+    }
+    CHECK(mount_once(save, TID) == 0 && is(s0, "100663296 4194304\n"), "legacy journal without size lines preserves existing save.size");
+    put(p, "kept\t\nfolder\t0\t1\t0\t0\nfolder\t1\t0\t0\t0\nsize\t0\t99\t0\t0\n");
+    CHECK(mount_once(save, TID) == -1 && !access(p, F_OK), "corrupted size line in journal refuses mount");
+    unlink(p);
+
+    // 5. Start backup clonefile failure on save.size cleans up staging and preserves existing start backups
+    rm_tree(backups);
+    for (int i = 1; i <= KEEP_BACKUPS; i++) {
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 start/save", backups, i); mkdirs(p);
+        snprintf(p, sizeof p, "%s/2020-01-%02d 00.00.00 start/save/mark.txt", backups, i); put(p, "old");
+    }
+    // Let directory clone succeed, fail only when cloning .size into .start-stage
+    fail_start_clone = 1;
+    CHECK(mount_once(save, TID) == 0 && !has_start_stage(save) && count_start_backups(save) == KEEP_BACKUPS,
+          "start backup clone failure with size record cleans up staging without pruning");
+
+    rm_tree(root);
+}
 int main(void) {
     char folder[] = "/tmp/dm-save-sync-metadata-XXXXXX", save[PATH_MAX], path[PATH_MAX];
     if (!mkdtemp(folder)) return 1;
@@ -923,6 +1049,7 @@ int main(void) {
     conflict_cloud_backup_cases(folder);
     xattr_failure_cases(folder);
     start_backup_cases(folder);
+    size_record_recovery_cases(folder);
     rmdir(folder);
     printf("save-sync metadata: %d checks, %d failed\n", checks, failures);
     return failures != 0;

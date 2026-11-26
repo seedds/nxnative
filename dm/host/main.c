@@ -1,10 +1,14 @@
 // Bootstrap: after loading the modules, initialize the SDK runtime in the real order of nn::init::Start (sdk+0x2b0470) in the SDK, then enter nnMain.
 #include "dm.h"
 #include "front.h"
+#include "dm_input.h"
 #include "../gfx/nvn/dmsh_chain.h"
 #include <CoreFoundation/CoreFoundation.h>
+#include <limits.h>
 #include <stdatomic.h>
+#include <strings.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -98,10 +102,41 @@ static int profile_modules(const char *dir, const char **names) {
 static pthread_key_t g_race_keys[512];
 static unsigned g_race_n, g_race_want;
 static void *keyrace_thread(void *unused);
+static int g_pad_font_auto, g_pad_ov_auto;
+
+// Controller layout (DM_PAD_LAYOUT=xbox|playstation): pick matching shared-font button glyphs ($DM_FONT_DIR/nintendo_ext_<layout>.ttf) and
+// a per-game ($DM_ROOT/overlay_<layout>) or bundled (<res>/dm/overlay_<layout>) RomFS icon overlay when DM_ROMFS_OVERLAY is not already set.
+static void pad_layout_env(void) {
+    int layout = dm_pad_face_layout();
+    if (layout == DM_PAD_LAYOUT_SWITCH) return;
+    const char *lname = layout == DM_PAD_LAYOUT_PLAYSTATION ? "playstation" : "xbox";
+    const char *fd = getenv("DM_FONT_DIR"), *root = getenv("DM_ROOT");
+    char p[PATH_MAX]; struct stat st;
+    if (fd && *fd && (!getenv("DM_SHARED_FONT_EXT") || g_pad_font_auto)) {
+        snprintf(p, sizeof p, "%s/nintendo_ext_%s.ttf", fd, lname);
+        if (!stat(p, &st) && S_ISREG(st.st_mode)) { setenv("DM_SHARED_FONT_EXT", p, 1); g_pad_font_auto = 1; }
+    }
+    if (!getenv("DM_ROMFS_OVERLAY") || g_pad_ov_auto) {
+        if (root && *root) {
+            snprintf(p, sizeof p, "%s/overlay_%s", root, lname);
+            if (!stat(p, &st) && S_ISDIR(st.st_mode)) { setenv("DM_ROMFS_OVERLAY", p, 1); g_pad_ov_auto = 1; return; }
+        }
+        if (fd && *fd) {
+            char dir[PATH_MAX]; snprintf(dir, sizeof dir, "%s", fd);
+            char *s = strrchr(dir, '/');
+            if (s) {
+                *s = 0; snprintf(p, sizeof p, "%s/overlay_%s", dir, lname);
+                if (!stat(p, &st) && S_ISDIR(st.st_mode)) { setenv("DM_ROMFS_OVERLAY", p, 1); g_pad_ov_auto = 1; }
+            }
+        }
+    }
+}
+
 static void host_preload(int argc, char **argv) {
     g_t0_ns = proc_start_mono_ns();
     flags_init();
     { void dm_diag_samplers_start(void); dm_diag_samplers_start(); }   // DM_MEMSTAT / DM_THRCPU (memstat.m): after the iOS front end has set the env files' switches
+    pad_layout_env();
     if (argc < 2) die("usage: dmhost <dir> [mod...] [-- game arguments...]");
     // Time zone: a game gets local time from nn::time (ToCalendarTime / ToPosixTime, hle_time.c), which converts with the host's zone, so its screens show this machine's time.
     // The guest C library's localtime / mktime stay UTC, as on a Switch. Only deterministic comparison (DM_FIXED_TIME) pins the host to UTC: the same replay must convert to the same
@@ -180,6 +215,7 @@ int main(int argc, char **argv) {
         void crash_thread_init(void); crash_thread_init();   // The signal alternate stack is per thread: loading installed it on another thread, so add it for this thread
         LOG("host loading already finished early in the background (dm_host_preload_start)");
     } else host_preload(argc, argv);
+    pad_layout_env();
     { void dm_fps_state_apply(void); dm_fps_state_apply(); }   // frame rate and render scale into the frame step state page (loader.c): the iOS launcher sets them after the loading began
     front_run(guest_main);
     return 0;

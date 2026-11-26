@@ -32,6 +32,7 @@ DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
 DM_PAD_PRESS_TO_JOIN	toggle	-	0	always	Controls	Press a button to join
+DM_PAD_LAYOUT	choice	switch=Nintendo Switch,xbox=Xbox,playstation=PlayStation	switch	always	Controls	Controller layout	Uses Xbox or PlayStation face-button labels and matching button icons instead of Switch positions.
 DM_SW2	toggle	-	0	platform:mac	Controls	Switch 2 controllers	Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.
 DM_MIC	toggle	-	0	mac-mic	Controls	Microphone	Lets the game hear your microphone. macOS asks for access when you launch with this enabled.	level=basic
 DM_MIC_GAIN	range	1:8:0.5	1	mac-mic	Controls	Microphone gain		needs=DM_MIC=1

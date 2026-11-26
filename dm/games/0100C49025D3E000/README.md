@@ -4,6 +4,10 @@ Update 1.8d.310c (v393216), SDK 22.2.0, on NVN (API 55.15). **Frostbite** 2025.1
 
 On the Mac (2026-10-29): the accessibility settings, the EA SPORTS and FC 27 logos, the title, the offline notice (no EA servers), the user agreement, the favourite-team setup, the main menu over its 3D training ground, Kick Off, and a Classic Match (Atlanta United v Orlando City at Mercedes-Benz Stadium): the stadium and crowd, the pre-match presentation (tifo, coaches, line-ups), kick-off, and the first half and into the second (67 minutes of match time) played with the pad (passing, shooting, a goal for Orlando, a corner, the in-game tactics tutorial). The game runs at 30 fps on the Switch; here menus and the match run at 60 ([Frame rate](#frame-rate)): frame time p50 16.7 ms, the match clock at its 30 fps rate. Resident memory stays at about 3.5 GB, GPU allocated 1.9 GB.
 
+## Updates 1.8d.6523 (v458752) and 1.8d.f570 (v524288)
+
+`game.tsv` registers both builds (`main` `570dc9f1750fa7ea9df20b95b482d039` and `464512b32a94dd3b6517a5b5d711d0d0`; the `sdk` `fed212d6…` and the renderer NRO `d924da0d…` are the same in both and in 1.8d.310c) and packs v524288, whose shaders number 7,883: `shader_map.tsv` has the two update builds' ten extra `vs_patch.bin` / `ps_patch.bin` rows, and the compute facts and pair tables are unchanged. Neither build needs a row for 60 fps: `hle_fpslock.c` finds the frame regulator on any build (`fb_find`); its pattern run over 1.8d.f570's rewritten `main` selects one global, `[main+0xda5d0f8]` (the store at `main+0x5d75db8`). Open: a full match at 60 fps on current `main` with the log's `Frostbite frame regulator` line read.
+
 ## What it needs
 
 | Setting | Where | Why |

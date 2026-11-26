@@ -946,7 +946,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
                      'legacy paks (version 4, DRAGON QUEST XI S) and version 11 paks without shader code archives (OCTOPATH TRAVELER II) keep them inline in the cooked packages, which the shader split reads file by file')
     if extra: notes.append('modules besides main / sdk: {}; the provisional profile loads {} (load order main, subsdk*, sdk)'.format(", ".join(f'{n} ({mods[n]["kind"]})' for n in extra), G["modules"][0])
                            + ('; the build adds {}: the NROs import from {}'.format(', '.join(nro_add), 'it' if len(nro_add) == 1 else 'them') if nro_add else ''))
-    if rom['mags']['UnityFS'] or 'Unity IL2CPP' in F['markers']: notes.append('Unity: the shaders are Shader objects in UnityFS bundles and data.unity3d, which shader_split.py reads through unityfs.py (written for Unity 2020.3\'s Switch format, also read for 2017.4, 2018.3, 2019.4, 2021.2, 2021.3, 2022.3, 6000.0 and 6000.3; check other Unity versions first)')
+    if rom['mags']['UnityFS'] or 'Unity IL2CPP' in F['markers']: notes.append('Unity: the shaders are Shader objects in UnityFS bundles and data.unity3d, which shader_split.py reads through unityfs.py (written for Unity 2020.3\'s Switch format, also read for 2017.2, 2017.4, 2018.3, 2019.4, 2021.2, 2021.3, 2022.3, 6000.0 and 6000.3; check other Unity versions first)')
     if F['glslc']: notes.append(f'main has {F["glslc"]} GLSLC compiler output magics (0x19866891): shader_split.py takes those that are whole outputs (13 Sentinels and the KTGL games compile their shaders into main; Unity\'s player has 11 of its own)')
     if rom['mags']['Trinity pack']: notes.append('Trinity packs (Game Freak, arc/data.trpfs with its index data.trpfd): the shaders are BNSH inside Oodle Mermaid streams; shader_split.py decodes them with the game\'s own OodleLZ_Decompress in the Mac host, which dm/host/hle_oodle.c finds by the library\'s name string')
     elif rom['mags']['PlatinumGames PKZ']: notes.append('PlatinumGames PKZ archives (pkzl; Bayonetta 3): DAT archives inside, compressed per entry (OodleKraken, ZStandard or None); the shaders are shader objects (VSO / PSO / CSO …) in DATs, which shader_split.py reads (pkz_entries, pg_shader), Oodle Kraken through the game\'s own streaming decoder in the Mac host (dm/host/hle_oodle.c)')
@@ -1715,11 +1715,21 @@ def patch_files(repo, exe_dir, mods, game_id=None):
             if p in shared or p.parent.name == selected or any(i in p.read_text(errors='replace') for i in ids)]
 
 
+def _nrr_files(romfs):
+    out = []
+    for dp, _, fs in rfs.walk(romfs):
+        for name in fs:
+            if not name.endswith('.nrr'): continue
+            p = rfs.Path(dp) / name
+            if p.is_file(): out.append(p)
+    return sorted(out)
+
+
 def collect_nros(py, repo, romfs, dst, env, logs):
     """The NROs a game registers in NRR files (RomFS *.nrr) and loads at run time with nn::ro, found by their SHA-256 as loose files or inside the RomFS's archives (dm/tools/nro_collect.py):
     {module name: NRO path}, {} for a game without NRRs. The host maps their rewritten copies at start and loads one when the game asks (loader.c "NRO modules"; Super Smash Bros. Ultimate:
     98 in data.arc). Reused while the NRRs, RomFS tree and collection tools are unchanged"""
-    nrrs = sorted(p for p in romfs.rglob('*.nrr') if p.is_file())   # Super Smash Bros. Ultimate keeps them in a folder named .nrr
+    nrrs = _nrr_files(romfs)   # Super Smash Bros. Ultimate keeps them in a folder named .nrr
     kf = dst.with_name(dst.name + '.key')
     if not nrrs:
         rmtree(dst); rmtree(kf)   # an update can remove its NRRs: do not carry the previous manifest into the rewrite
@@ -2055,8 +2065,51 @@ def check_glslc_coverage(observed, g):
 UE_DECODE_SECS = 300   # the longest Oodle decode run: Octopath Traveler 0's 10,596 shaders take about 10 s, the boot up to nnMain included
 
 
-def ue_stamp(d):   # what an extraction's decoded shader archives were made from: its paks and IoStore TOCs (paths and sizes)
-    return 'ue-archives-v2\n' + ''.join(f'{p.relative_to(rfs.source(d))}\t{p.stat().st_size}\n' for p in sorted([*(rfs.source(d)).rglob('*.pak'), *(rfs.source(d)).rglob('*.utoc')]))
+def _ue_file_id(path):
+    try: return romfs_image.file_identity(path)
+    except OSError: return 'missing'
+
+
+def _ue_decoder_key(repo):
+    tools = python_tool_files(repo, 'dm/gfx/tools/uepak.py', ('dm/gfx/tools', 'dm/tools'))
+    oodle = repo / 'dm/host/hle_oodle.c'
+    return fingerprint(('files', tools + ([oodle] if oodle.is_file() else [])))
+
+
+def ue_stamp(d, repo=None):
+    """Identity of an extraction's Unreal shader decode inputs: containing RomFS.img identity when packed, or participating pak/TOC/UCAS/Manifest identities when loose,
+    plus the source ExeFS/main used to select keys and the versions of the applicable decoder inputs."""
+    r = Path(repo) if repo is not None else Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(r / 'dm/gfx/tools')); import uepak
+    d = Path(d)
+    src = rfs.source(d)
+    if rfs.is_image(src):
+        romfs_sig = {'kind': 'image', 'image': _ue_file_id(src)}
+    else:
+        files = {}
+        src_path = Path(src)
+        if src_path.is_dir():
+            for dp, _, fs in os.walk(src_path):
+                for name in fs:
+                    if name.endswith(('.pak', '.utoc', '.ucas')):
+                        p = Path(dp) / name
+                        rel = p.relative_to(src_path).as_posix()
+                        files[rel] = _ue_file_id(p)
+                        if name.endswith('.utoc'):
+                            for up in uepak.toc_ucas_paths(p):
+                                upath = Path(up)
+                                urel = upath.relative_to(src_path).as_posix()
+                                files.setdefault(urel, _ue_file_id(upath))
+            for p in src_path.iterdir():
+                if p.name.startswith('Manifest_') and p.name.endswith('.txt') and p.is_file():
+                    files[p.relative_to(src_path).as_posix()] = _ue_file_id(p)
+        romfs_sig = {'kind': 'loose', 'files': [[k, files[k]] for k in sorted(files)]}
+    payload = {
+        'romfs': romfs_sig,
+        'main': _ue_file_id(d / 'ExeFS/main'),
+        'decoder': _ue_decoder_key(r),
+    }
+    return 'ue-archives-v3\n' + json.dumps(payload, separators=(',', ':'), sort_keys=True) + '\n'
 
 
 def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
@@ -2065,15 +2118,22 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
     (DM_OODLE_JOB, dm/host/hle_oodle.c: right before nnMain, then the host exits), and the decoded archives go to <version dir>/ue_shaders, where shader_split.py reads them.
     The job runs the packed version's code (Oodle's format does not change between builds). Unreal Engine 4.26 and later compress shaders with LZ4 by default (DRAGON QUEST VII Reimagined),
     which uepak.py decodes itself, as it does with Zlib in version 1 archives. Unreal Engine 5.6 (FINAL FANTASY RESONANCE) keeps its shader libraries in the IoStore container instead, two layers
-    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its paks is reused"""
+    of Oodle (container blocks, then each shader group): uepak.py reads them through the game's Oodle in the host's tool mode (uepak.OodleHost), with no boot. A folder whose stamp matches its inputs is reused"""
     sys.path.insert(0, str(repo / 'dm/gfx/tools')); import uepak
-    todo = {v: d for v, d in dirs.items() if not ((d / 'ue_shaders/stamp').exists() and (d / 'ue_shaders/stamp').read_text() == ue_stamp(d))}
+    stamps = {v: ue_stamp(d, repo) for v, d in dirs.items()}
+    todo = {}
+    for v, d in dirs.items():
+        sf = d / 'ue_shaders/stamp'
+        try: ok = sf.is_file() and sf.read_text() == stamps[v]
+        except OSError: ok = False
+        if not ok: todo[v] = d
     PROG.stage('UE shader decode')
     if not todo:
         say(f'reusing the decoded shader archives: {", ".join(str(d / "ue_shaders") for d in dirs.values())}')
         PROG.end('reused'); return
     t0, total, host = time.time(), 0, None
     for v, d in todo.items():
+        before = stamps[v]
         jd, rd, log = work / f'tmp/ue_job_{v}', work / 'tmp/ue_run', logs / f'ue_decode_{v}.log'
         rmtree(jd); rmtree(rd)
         for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
@@ -2103,7 +2163,11 @@ def decode_ue_shaders(repo, dirs, pkg_ver, patched, work, env, logs, g):
                 PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=20)).rstrip('\n'))
                 raise BuildError(f'the Oodle decode run stopped with exit {rc} (host output: {log})')
         out = d / 'ue_shaders.partial'; rmtree(out)
-        uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(ue_stamp(d))
+        uepak.finish(str(jd), str(out)); (out / 'stamp').write_text(before)
+        if ue_stamp(d, repo) != before:
+            rmtree(out); rmtree(jd); rmtree(rd)
+            PROG.end(ok=False)
+            raise BuildError(f'{v}: Unreal shader inputs changed while decoding; run again when inputs are stable')
         swap_in(out, d / 'ue_shaders'); rmtree(jd); rmtree(rd); total += sum(x['shaders'] for x in listing)
     PROG.end(f'{total:,} shaders in {hms(time.time() - t0)}')
 

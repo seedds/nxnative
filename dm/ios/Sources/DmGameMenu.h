@@ -1,4 +1,4 @@
-// The in-game menu: GameMenu.swift builds it, the gamepad's menu button at the top centre opens it (DmGamepad.m). It holds the controller layout and the launcher
+// The in-game menu: GameMenu.swift builds it, and the gamepad's menu button opens it (DmGamepad.m). It holds the controller layout and the launcher
 // settings the running game takes at once (front_ios.m dm_setting_live); the other settings stay on the settings screen before the game starts.
 #pragma once
 #include <stdbool.h>
@@ -11,6 +11,8 @@ int dm_pad_layout(void);   // DmGamepad.m: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_
 bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
 void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
+void dm_gamepad_menu_button(const char *mode);   // DM_MENU_BUTTON: fade or off
+void dm_gamepad_reset_menu_position(void);
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
 #ifdef __cplusplus
 }

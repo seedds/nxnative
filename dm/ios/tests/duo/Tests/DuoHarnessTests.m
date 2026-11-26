@@ -48,6 +48,23 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
 @end
 
+@interface UIView (DuoMenuDragTest)
+- (void)dragMenu:(UIPanGestureRecognizer *)pan;
+- (void)fadeMenu;
+- (void)menuOpen:(BOOL)open;
+@end
+
+@interface DuoMenuPan : UIPanGestureRecognizer
+@property (nonatomic) CGPoint delta;
+@property (nonatomic) UIGestureRecognizerState phase;
+@end
+
+@implementation DuoMenuPan
+- (UIGestureRecognizerState)state { return self.phase; }
+- (CGPoint)translationInView:(UIView *)view { (void)view; return self.delta; }
+- (void)setTranslation:(CGPoint)translation inView:(UIView *)view { (void)view; self.delta = translation; }
+@end
+
 @interface DuoLiveButton : NSObject
 @property (nonatomic, getter=isPressed) BOOL pressed;
 - (DuoLiveButton *)pressedInput;
@@ -171,6 +188,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 @interface DuoHarnessTests : XCTestCase
 @property (nonatomic, strong) id savedLayout;
+@property (nonatomic, strong) id savedMenuPosition;
 @property (nonatomic) BOOL controllerListOverridden;
 - (void)setHarnessControllers:(NSArray<GCController *> * _Nullable)controllers notification:(NSNotificationName _Nullable)notification;
 - (UIViewController *)harnessRootViewController;
@@ -182,6 +200,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [super setUp];
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     self.savedLayout = [defaults objectForKey:@"DmPadLayout"];
+    self.savedMenuPosition = [defaults objectForKey:@"DmMenuPosition"];
+    [defaults removeObjectForKey:@"DmMenuPosition"];
     [defaults setObject:@1 forKey:@"DmPadLayout"];
     [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
     duo_harness_clear();
@@ -191,6 +211,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
     else [defaults removeObjectForKey:@"DmPadLayout"];
+    if (self.savedMenuPosition) [defaults setObject:self.savedMenuPosition forKey:@"DmMenuPosition"];
+    else [defaults removeObjectForKey:@"DmMenuPosition"];
     if (self.controllerListOverridden) {
         @synchronized (GCController.class) {
             Method original = class_getClassMethod(GCController.class, @selector(controllers));
@@ -720,6 +742,170 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(duo_harness_input().buttons, 0);
 }
 
+- (void)testEnabledMenuButtonDimsAndBrightensOnlyWhenUsed {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    UIButton *menu = [self menuButtonInPad:pad];
+    dm_gamepad_menu_button(NULL);
+    XCTAssertFalse(menu.hidden);
+    XCTAssertEqual(menu.alpha, 1);
+    CGPoint start = menu.center;
+
+    [pad fadeMenu];
+    XCTAssertEqual(menu.alpha, 0.25);
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"The dimmed gear is still a touch target");
+    DuoFakeTouch *touch = [self touchAt:[self faceDiamondCenterInPad:pad] time:1];
+    [self beginTouches:@[touch] onPad:pad];
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    XCTAssertEqual(menu.alpha, 0.25, @"A gamepad touch leaves the gear dimmed");
+    [menu sendActionsForControlEvents:UIControlEventTouchDown];
+    XCTAssertEqual(menu.alpha, 1);
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+
+    [pad menuOpen:YES];
+    [pad fadeMenu];
+    XCTAssertEqual(menu.alpha, 1);
+    [pad menuOpen:NO];
+    DuoMenuPan *pan = [DuoMenuPan new];
+    pan.phase = UIGestureRecognizerStateBegan;
+    [pad dragMenu:pan];
+    [pad fadeMenu];
+    XCTAssertEqual(menu.alpha, 1, @"The gear stays visible during a drag");
+    pan.phase = UIGestureRecognizerStateEnded;
+    pan.delta = CGPointMake(100, 110);
+    [pad dragMenu:pan];
+    [pad fadeMenu];
+    XCTAssertEqual(menu.alpha, 0.25, @"The gear can dim again once the drag ends");
+    XCTAssertNotNil([NSUserDefaults.standardUserDefaults objectForKey:@"DmMenuPosition"]);
+    dm_gamepad_menu_button("fade");
+    XCTAssertFalse(CGPointEqualToPoint(menu.center, start), @"Reapplying the same mode keeps the position");
+
+    dm_gamepad_menu_button("off");
+    XCTAssertTrue(CGPointEqualToPoint(menu.center, start));
+    XCTAssertNil([NSUserDefaults.standardUserDefaults objectForKey:@"DmMenuPosition"]);
+    [self beginTouches:@[touch] onPad:pad];
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    XCTAssertTrue(menu.hidden, @"Off stays hidden after a touch");
+    XCTAssertEqual([pad hitTest:menu.center withEvent:nil], pad);
+    dm_gamepad_menu_button("fade");
+    XCTAssertFalse(menu.hidden);
+    XCTAssertTrue(CGPointEqualToPoint(menu.center, start));
+    XCTAssertEqual(menu.alpha, 1);
+    [pad fadeMenu];
+    XCTAssertEqual(menu.alpha, 0.25);
+}
+
+- (void)testMenuButtonDragMovesItsHitTargetAndPersists {
+    const char *mode = getenv("DM_MENU_BUTTON");
+    NSString *savedMode = mode ? [NSString stringWithUTF8String:mode] : nil;
+    [self addTeardownBlock:^{
+        if (savedMode) setenv("DM_MENU_BUTTON", savedMode.UTF8String, 1);
+        else unsetenv("DM_MENU_BUTTON");
+    }];
+    unsetenv("DM_MENU_BUTTON");
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    UIButton *menu = [self menuButtonInPad:pad];
+    CGPoint start = menu.center;
+    XCTAssertTrue(menu.showsMenuAsPrimaryAction);
+    XCTAssertEqual([pad hitTest:start withEvent:nil], menu);
+
+    DuoMenuPan *pan = [DuoMenuPan new];
+    pan.phase = UIGestureRecognizerStateEnded;
+    pan.delta = CGPointMake(100, 110);
+    [pad dragMenu:pan];
+    CGPoint moved = menu.center;
+    XCTAssertEqualWithAccuracy(moved.x, start.x + 100, 0.01);
+    XCTAssertEqualWithAccuracy(moved.y, start.y + 110, 0.01);
+    XCTAssertEqual([pad hitTest:moved withEvent:nil], menu);
+    XCTAssertEqual([pad hitTest:start withEvent:nil], pad);
+
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSString *saved = [defaults stringForKey:@"DmMenuPosition"];
+    CGPoint a = [self faceAIn:layout bounds:bounds];
+    pan.phase = UIGestureRecognizerStateChanged;
+    pan.delta = CGPointMake(a.x - moved.x, a.y - moved.y);
+    [pad dragMenu:pan];
+    XCTAssertEqual([pad hitTest:a withEvent:nil], pad, @"A drag preview does not claim another finger's A press");
+    pan.phase = UIGestureRecognizerStateEnded;
+    [pad dragMenu:pan];
+    XCTAssertTrue(CGPointEqualToPoint(menu.center, moved), @"A blocked destination keeps the previous position");
+    XCTAssertEqualObjects([defaults stringForKey:@"DmMenuPosition"], saved);
+
+    pan.phase = UIGestureRecognizerStateChanged;
+    pan.delta = CGPointMake(-100, 50);
+    [pad dragMenu:pan];
+    XCTAssertFalse(CGPointEqualToPoint(menu.center, moved));
+    pan.phase = UIGestureRecognizerStateCancelled;
+    [pad dragMenu:pan];
+    XCTAssertTrue(CGPointEqualToPoint(menu.center, moved), @"Cancelling rolls back the preview");
+    XCTAssertEqualObjects([defaults stringForKey:@"DmMenuPosition"], saved);
+
+    UIView *reopened = [self padForLayout:layout bounds:bounds];
+    UIButton *reopenedMenu = [self menuButtonInPad:reopened];
+    XCTAssertEqualWithAccuracy(reopenedMenu.center.x, moved.x, 0.01);
+    XCTAssertEqualWithAccuracy(reopenedMenu.center.y, moved.y, 0.01);
+
+    pan.phase = UIGestureRecognizerStateEnded;
+    pan.delta = CGPointMake(2000, 2000);
+    [reopened dragMenu:pan];
+    XCTAssertTrue(CGRectContainsRect(bounds, reopenedMenu.frame));
+    CGRect portrait = CGRectMake(0, 0, 390, 844);
+    DmLayout split = [self separatedLayout:portrait];
+    UIView *rotated = [self padForLayout:split bounds:portrait];
+    UIButton *rotatedMenu = [self menuButtonInPad:rotated];
+    XCTAssertTrue(CGRectContainsRect(split.controls, rotatedMenu.frame));
+    XCTAssertEqual([rotated hitTest:rotatedMenu.center withEvent:nil], rotatedMenu);
+
+    dm_gamepad_reset_menu_position();
+    UIView *reset = [self padForLayout:layout bounds:bounds];
+    XCTAssertTrue(CGPointEqualToPoint([self menuButtonInPad:reset].center, start));
+
+    setenv("DM_MENU_BUTTON", "off", 1);
+    UIView *hidden = [self padForLayout:layout bounds:bounds];
+    UIButton *hiddenMenu = [self menuButtonInPad:hidden];
+    XCTAssertTrue(hiddenMenu.hidden);
+    XCTAssertEqual([hidden hitTest:hiddenMenu.center withEvent:nil], hidden);
+}
+
+- (void)testControllerOnlyMenuPositionIsUsedAgainWhenTouchControlsHide {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    UIButton *menu = [self menuButtonInPad:pad];
+    CGPoint start = menu.center, a = [self faceAIn:layout bounds:bounds];
+    GCController *controller = [GCController controllerWithExtendedGamepad];
+    [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+    XCTestExpectation *connected = [self expectationWithDescription:@"Layout after connecting controller"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [pad layoutIfNeeded]; [connected fulfill]; });
+    [self waitForExpectations:@[connected] timeout:5];
+
+    DuoMenuPan *pan = [DuoMenuPan new];
+    pan.phase = UIGestureRecognizerStateEnded;
+    pan.delta = CGPointMake(a.x - start.x, a.y - start.y);
+    [pad dragMenu:pan];
+    XCTAssertEqualWithAccuracy(menu.center.x, a.x, 0.01);
+    XCTAssertEqualWithAccuracy(menu.center.y, a.y, 0.01);
+    NSString *saved = [NSUserDefaults.standardUserDefaults stringForKey:@"DmMenuPosition"];
+    XCTAssertNotNil(saved);
+
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    XCTestExpectation *disconnected = [self expectationWithDescription:@"Layout after disconnecting controller"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [pad layoutIfNeeded]; [disconnected fulfill]; });
+    [self waitForExpectations:@[disconnected] timeout:5];
+    XCTAssertTrue(CGPointEqualToPoint(menu.center, start));
+    XCTAssertEqual([pad hitTest:a withEvent:nil], pad);
+    XCTAssertEqualObjects([NSUserDefaults.standardUserDefaults stringForKey:@"DmMenuPosition"], saved);
+
+    [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+    XCTestExpectation *reconnected = [self expectationWithDescription:@"Layout after reconnecting controller"];
+    dispatch_async(dispatch_get_main_queue(), ^{ [pad layoutIfNeeded]; [reconnected fulfill]; });
+    [self waitForExpectations:@[reconnected] timeout:5];
+    XCTAssertEqualWithAccuracy(menu.center.x, a.x, 0.01);
+    XCTAssertEqualWithAccuracy(menu.center.y, a.y, 0.01);
+}
+
 - (void)testMenuLayoutPickReleasesHeldKeysAndIsSaved {
     dm_set_opmode(0);
     CGRect bounds = CGRectMake(0, 0, 844, 390);
@@ -762,7 +948,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [root.view layoutIfNeeded];
     UIView *game = [root valueForKey:@"game"];
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL) && dm_setting_live("DM_OPMODE", NULL) && dm_setting_live("DM_RUMBLE", NULL)
-                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
+                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL) && dm_setting_live("DM_MENU_BUTTON", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
     XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
 

@@ -52,6 +52,7 @@ final class LauncherModel: ObservableObject {
     let fixed: Set<String>      // set by an env file or by the launch environment: shown, not changed
     let fromLaunch: Set<String>   // of those, the ones the launch environment set (a front end's launch overrides, Xcode; DM_ENV_LAUNCH_KEYS from launcher.c or main.m)
     let ignoreSaved: Bool   // DM_SAVED_CHOICES=0: start from the defaults, and leave the saved choices as they are
+    let skipsLauncher: Bool
     @Published var values: [String: String] = [:]
 
     private let defaults: UserDefaults
@@ -63,6 +64,7 @@ final class LauncherModel: ObservableObject {
         fromLaunch = Set((env["DM_ENV_LAUNCH_KEYS"] ?? "").split(separator: " ").map(String.init))
         fixed = fromLaunch.union((env["DM_ENV_FILE_KEYS"] ?? "").split(separator: " ").map(String.init))
         ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
+        skipsLauncher = env["DM_LAUNCHER"] == "0"
         if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
         for s in settings {
             if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
@@ -128,9 +130,9 @@ final class LauncherModel: ObservableObject {
         fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
     }
 
-    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
+    // Keep the menu reachable without a launcher. Only an explicit environment setting may hide it in that mode.
     func applySaved() {
-        for s in settings where !fixed.contains(s.env) {
+        for s in settings where !fixed.contains(s.env) && s.env != "DM_MENU_BUTTON" {
             let v = values[s.env] ?? s.def
             if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
         }

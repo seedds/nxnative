@@ -88,7 +88,7 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
   4. saved choices;
   5. the tested defaults (the host's own, from the game's profile).
 - **Launch overrides are temporary.** A front end that starts the game with a variable in its environment overrides the saved choice for that start only. It writes the store only when the player means to keep the choice.
-- **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
+- **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** skips the settings screen and applies saved choices. On iOS only an explicit `DM_MENU_BUTTON=off` in the environment or `env.txt` hides the gear when the launcher is skipped.
 - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
 
 ### The cloud saves folder

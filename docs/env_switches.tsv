@@ -132,6 +132,7 @@ DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: 
 DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
 DM_MEMSTAT_WALK	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, walks VM regions for the class breakdown every N seconds (default 1; walking every second costs about 9 M cycles a frame on another core in OoT), while the totals stay per second and intermediate lines repeat the last walk's class columns
 DM_MEM_CAP_GB	switch	`=<GB>`: the memory watchdog exits when resident memory exceeds that many GB (default 24 on the Mac, none on iOS; `0` turns it off)
+DM_MENU_BUTTON	player	`fade` (default) dims the draggable iOS in-game menu button after three idle seconds. Touching the button restores full opacity. `off` hides it completely. Toggling it in the launcher or in-game menu resets its position. A saved `off` is ignored when the launcher is skipped
 DM_METAL_CAPTURE	diagnostic	`=1` makes `build_ipa.sh` produce a build that can write GPU frame captures (`MetalCaptureEnabled` in `Info.plist`), for `DM_GPU_CAPTURE`
 DM_METAL_HUD	player	`1` shows Apple's Metal performance HUD over the game (frame rate, frame and GPU time, memory)
 DM_MIC	player	`1` lets a game use the Mac's microphone through SDK polling input streams, after macOS grants access. Off by default. A packed Mac app asks before launching the host, including with the settings window hidden

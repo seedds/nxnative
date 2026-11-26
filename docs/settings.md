@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Texture filtering](#texture-filtering), [Game language](#game-language), [Picture](#picture), [Rotation](#rotation), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Menu button](#menu-button), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -111,6 +111,10 @@ Shows the frames per second at the top left.
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Menu button
+
+iPhone and iPad. The switch is on by default. The gear dims to 25% opacity after three seconds of being idle. Touch the gear to restore full opacity, which stays while its menu is open or while you drag it. Toggling the switch resets the gear's position to the top centre. Switching it off hides the gear and gives its touch area back to the game or controls. To turn it back on, fully close the app and use **Menu button** in **Controls** on the start screen.
 
 ### Game rumble
 
@@ -268,7 +272,9 @@ Each time the game starts, with or without cloud saves, the save it starts from 
 
 ## In-game menu
 
-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture**, **Rotation** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+On the iPhone and iPad the gear starts at the top centre of the touch controls. Tap it to open the menu or drag it within the safe area. Dropping it where it would block a touch control returns it to its previous position. The app remembers the position per game and uses the top centre if that position would block a control in the current layout. [Menu button](#menu-button) controls its visibility, including when a controller is connected.
+
+The menu holds **Console mode**, **Picture**, **Rotation** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback**, **Menu button** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
@@ -294,6 +300,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Rotation (iPhone and iPad) | `DM_ROTATION` | `auto` as the device turns, `landscape`, `portrait` |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Menu button (iPhone and iPad) | `DM_MENU_BUTTON` | `fade` (default), `off` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
@@ -308,4 +315,4 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Hold frames when late | `DM_FPS_HOLD` | `on`, `off` |
 | Performance HUD | `DM_METAL_HUD` | `1`, `0` |
 
-`DM_LAUNCHER=0` skips the settings screen; the choices you saved there still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).
+`DM_LAUNCHER=0` skips the settings screen. On iPhone and iPad, the gear stays available and the in-game menu omits its switch in this mode. Setting `DM_MENU_BUTTON=off` in the environment or `env.txt` still hides the gear explicitly. Other saved choices still apply. `DM_SAVED_CHOICES=0` starts with the tested defaults and keeps your saved choices for later. How the settings are listed for each game: [dm/games/settings.tsv](../dm/games/settings.tsv).

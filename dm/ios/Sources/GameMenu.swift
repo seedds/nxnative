@@ -1,4 +1,4 @@
-// The in-game menu, opened by the gamepad's menu button at the top centre (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
+// The in-game menu, opened by the gamepad's menu button (DmGamepad.m): the controller layout, then the settings-screen settings the running game takes at once
 // (front_ios.m dm_setting_live), grouped as on the settings screen but without its headings, one row each, so the menu stays short over the game (its text size is fixed: front_ios.m
 // startGame). A pick is saved as Play saves it (LauncherModel.choose), so the settings screen shows it at the next start; a setting an env file fixes is shown, not changed. Settings
 // that need the next start (language, pipelines, the frame rate and so on), and the sliders, stay on the settings screen, which the menu's title points to.
@@ -48,7 +48,10 @@ private func gameMenuItems() -> [UIMenuElement] {
         for section in m.sections {
             var rows: [UIMenuElement] = section == "Controls" ? [layout] : []
             if section == "Controls" { placed = true }
-            for s in m.rows(in: section) where (s.kind == "choice" || s.kind == "toggle") && dm_setting_live(s.env, nil) { rows.append(gameMenuRow(m, s)) }
+            for s in m.rows(in: section) where s.kind == "choice" || s.kind == "toggle" {
+                if m.skipsLauncher && s.env == "DM_MENU_BUTTON" { continue }
+                if dm_setting_live(s.env, nil) { rows.append(gameMenuRow(m, s)) }
+            }
             if !rows.isEmpty { items.append(UIMenu(options: .displayInline, children: rows)) }
         }
     }

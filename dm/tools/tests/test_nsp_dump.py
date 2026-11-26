@@ -1,6 +1,7 @@
 """NSP script with a dump folder (scripts/pack_dump.py): the folder's layout is read and packed into what the script's later steps read, and the script asks for no keys.
 The run stops at the prerequisite check; no game files, keys or Xcode needed."""
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -13,6 +14,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
+import nacp
 import romfs_image
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
@@ -29,6 +31,16 @@ def npdm(tid):
     struct.pack_into('<II', d, 0x70, 0x80, 0x20)
     d[0x80:0x84] = b'ACI0'
     struct.pack_into('<Q', d, 0x90, tid)
+    return bytes(d)
+
+
+def make_nacp(title, display='1.0.0', lang_mask=0b101):
+    d = bytearray(0x4000)
+    raw = title.encode('utf-8')
+    d[:len(raw)] = raw
+    struct.pack_into('<I', d, 0x302C, lang_mask)
+    ver = display.encode('ascii')
+    d[0x3060:0x3060 + len(ver)] = ver
     return bytes(d)
 
 
@@ -137,6 +149,95 @@ class Pack(Base):
         names = romfs_image.read_index(self.out() / 'RomFS.img')
         self.assertIn('dir/new', names)
         self.assertNotIn('dir/old', names)   # an update's RomFS is the patched tree, never laid over the base
+
+    def test_extracted_control_and_edition_identity(self):
+        src = self.dump / f'updates/{VER}'
+        (src / 'control/Acd_1').mkdir(parents=True)
+        std_nacp = make_nacp('Standard Title', '1.0.0', 0b01)
+        ed_nacp = make_nacp('Edition Title', '1.2.1', 0b101)
+        (src / 'control/control.nacp').write_bytes(std_nacp)
+        (src / 'control/icon_AmericanEnglish.dat').write_bytes(b'normal icon')
+        (src / 'control/Acd_1/control.nacp').write_bytes(ed_nacp)
+        (src / 'control/Acd_1/icon_AmericanEnglish.dat').write_bytes(b'edition icon')
+        (src / 'control.nacp').write_bytes(make_nacp('Legacy Loose'))
+        # Switch 1 (0100) program uses control/, ignoring Acd_1/.
+        (src / 'exefs/main.npdm').write_bytes(npdm(0x010015100B514000))
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Standard Title')
+        self.assertEqual(nacp.display_version(self.out() / 'control.nacp'), '1.0.0')
+        self.assertEqual(nacp.languages(self.out() / 'control.nacp'), ['en-US'])
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'normal icon')
+        # Ounce (0400) program prefers Acd_1/ for both NACP and icon; pack_version and survey_dump agree.
+        (src / 'exefs/main.npdm').write_bytes(npdm(0x040015100B514001))
+        pack_dump.pack_version(src, 0x040015100B514001, self.out(), say=lambda s: None)
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Edition Title')
+        self.assertEqual(nacp.display_version(self.out() / 'control.nacp'), '1.2.1')
+        self.assertEqual(nacp.languages(self.out() / 'control.nacp'), ['en-US', 'ja'])
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'edition icon')
+        survey = self.dump / 'survey'
+        nsp.survey_dump(src, survey)
+        self.assertEqual(nacp.name(survey / 'control.nacp'), 'Edition Title')
+        self.assertEqual((survey / 'icon.jpg').read_bytes(), b'edition icon')
+        # Partial Acd_1: missing Acd_1 icon falls back to control/ icon; missing Acd_1 NACP falls back to control/ NACP.
+        (src / 'control/Acd_1/icon_AmericanEnglish.dat').unlink()
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Edition Title')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'normal icon')
+        (src / 'control/Acd_1/icon_BritishEnglish.dat').write_bytes(b'edition uk icon')
+        (src / 'control/Acd_1/control.nacp').unlink()
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Standard Title')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'edition uk icon')
+
+    def test_icon_locale_priority_matches_nx_extract(self):
+        src = self.dump / f'updates/{VER}'
+        (src / 'control').mkdir()
+        (src / 'control/icon_BrazilianPortuguese.dat').write_bytes(b'pt-br')
+        (src / 'control/icon_BritishEnglish.dat').write_bytes(b'en-gb')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'en-gb')   # BritishEnglish beats alphabetically earlier BrazilianPortuguese
+        (src / 'control/icon_BritishEnglish.dat').unlink()
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'pt-br')
+        (src / 'control/icon_BrazilianPortuguese.dat').unlink()
+        (src / 'control/icon_CustomLocale.dat').write_bytes(b'custom')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'custom')   # unknown locale caught by sorted fallback
+
+    def test_control_removal_clears_stale_without_parent_fallback(self):
+        src = self.dump / f'updates/{VER}'
+        # Place decoy metadata in top-level dump/ and updates/ parents: must never be read for src.
+        (self.dump / 'control').mkdir()
+        (self.dump / 'control/control.nacp').write_bytes(make_nacp('Wrong Top-Level'))
+        (self.dump / 'control/icon_AmericanEnglish.dat').write_bytes(b'wrong top icon')
+        (self.dump / 'updates/control.nacp').write_bytes(make_nacp('Wrong Parent'))
+        (self.dump / 'updates/icon.jpg').write_bytes(b'wrong parent icon')
+        (src / 'control').mkdir()
+        (src / 'control/control.nacp').write_bytes(make_nacp('Chosen Version', '2.0.0'))
+        (src / 'control/icon_German.dat').write_bytes(b'de icon')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Chosen Version')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'de icon')
+        # Unchanged rerun keeps existing files in place; read-only destination still updates cleanly on change.
+        before_ino = (self.out() / 'icon.jpg').stat().st_ino
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').stat().st_ino, before_ino)
+        os.chmod(self.out() / 'icon.jpg', 0o444)
+        (src / 'control/icon_German.dat').write_bytes(b'de icon v2')
+        with mock.patch.object(pack_dump.subprocess, 'run', return_value=subprocess.CompletedProcess(['cp'], 1)):
+            pack_dump.copy_control(src, self.out())
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'de icon v2')
+        # Moving/deleting src/control removes stale outputs instead of falling back to parent directories.
+        shutil.rmtree(src / 'control')
+        pack_dump.copy_control(src, self.out())
+        self.assertFalse((self.out() / 'control.nacp').exists())
+        self.assertFalse((self.out() / 'icon.jpg').exists())
+        # Loose src/control.nacp and src/icon.jpg still work when present in src itself.
+        (src / 'control.nacp').write_bytes(make_nacp('Loose Title', '3.0.0'))
+        (src / 'icon.jpg').write_bytes(b'loose icon')
+        pack_dump.copy_control(src, self.out())
+        self.assertEqual(nacp.name(self.out() / 'control.nacp'), 'Loose Title')
+        self.assertEqual((self.out() / 'icon.jpg').read_bytes(), b'loose icon')
 
     def test_other_title_refused(self):
         with self.assertRaisesRegex(pack_dump.Error, 'the base is'): pack_dump.pack_version(self.dump / f'updates/{VER}', TID + 0x2000, self.out(), say=lambda s: None)
@@ -311,6 +412,30 @@ class Main(Base):
         events, said, kept_calls = run_to_say_game(in_programs=True)
         self.assertEqual(kept_calls, [])
         self.assertEqual(events, [])
+
+    def test_packed_update_control_name_beats_base(self):
+        out_app = self.dump.parent / 'Game.app'
+        seen = []
+        args = nsp.parse_args([str(self.dump), '--platform', 'mac-app', '-o', str(out_app)])
+        def fake_extract(ex, ver, src, app):
+            d = ex / ver; (d / 'ExeFS').mkdir(parents=True, exist_ok=True); (d / 'RomFS').mkdir(exist_ok=True)
+            title = 'Update Edition Name' if ver == f'v{VER}' else 'Base Name'
+            (d / 'control.nacp').write_bytes(make_nacp(title, '1.2.1' if ver == f'v{VER}' else '1.0.0'))
+            return d
+        src_stub = {'graphics': ('vulkan', 'Vulkan'), 'glslc_capture': (False, ''), 'vk_capture': (False, ''),
+                    'gl_capture': (False, ''), 'gl_fixed': (False, ''), 'ue_decode': (False, ''),
+                    'oodle_packs': (False, ''), 'ue_legacy': (False, '')}
+        with mock.patch.object(nsp, 'find_repo', return_value=REPO), mock.patch.object(nsp, 'WORK_DIR', ''), \
+             mock.patch.object(nsp, 'PROD_KEYS', ''), mock.patch.object(nsp, 'ICON', ''), mock.patch.object(nsp, 'FALLBACK_ICON', ''), \
+             mock.patch.object(nsp, 'apple_silicon', return_value=True), mock.patch.object(nsp, 'check_prereqs'), \
+             mock.patch.object(nsp, 'extract_dump', side_effect=fake_extract), mock.patch.object(nsp, 'check_formats'), \
+             mock.patch.object(nsp, 'check_versions_aarch64'), mock.patch.object(nsp, 'build_mismatch', return_value=[]), \
+             mock.patch.object(nsp, 'build_sources', return_value=src_stub), mock.patch.object(nsp, 'extract_aoc', return_value=None), \
+             mock.patch.object(nsp, 'say_game', side_effect=lambda app, name, ver, *a: seen.append((name, ver))), \
+             mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'rewrite', side_effect=Stop()), \
+             mock.patch.object(nsp, 'ask', side_effect=AssertionError('asked')):
+            with self.assertRaises(Stop): nsp.main(args)
+        self.assertEqual(seen, [('Update Edition Name', '1.2.1')])
 
     def test_title_id_must_match(self):
         with mock.patch.object(nsp, 'find_repo', return_value=REPO), self.assertRaisesRegex(nsp.BuildError, 'which holds'):

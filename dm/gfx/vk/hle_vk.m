@@ -3018,18 +3018,20 @@ static uint64_t vk_rem_ns(uint64_t dl) {
 // Snapshot unheld slots and prefer an immediately ready image starting at sc->next, else the unheld image with the oldest pending ticket.
 // Returns 1 if an unheld candidate exists (with *out_ready set when ready now), or 0 if every image is currently held by the guest.
 static int vk_pick_image(VkSwapchainKHR sc, uint32_t *out_idx, uint64_t *out_tk, int *out_ready) {
-    uint8_t held[4]; uint64_t ticket[4]; uint32_t start;
+    uint8_t held[sizeof sc->held]; uint64_t ticket[sizeof sc->ticket / sizeof sc->ticket[0]];
+    const uint32_t n = sc->n;
     pthread_mutex_lock(&sc->mu);
-    start = sc->next % sc->n;
-    for (uint32_t j = 0; j < sc->n; j++) { held[j] = sc->held[j]; ticket[j] = sc->ticket[j]; }
+    const uint32_t start = sc->next;
+    memcpy(held, sc->held, sizeof held);
+    memcpy(ticket, sc->ticket, sizeof ticket);
     pthread_mutex_unlock(&sc->mu);
-    for (uint32_t off = 0; off < sc->n; off++) {
-        uint32_t c = (start + off) % sc->n;
+    for (uint32_t off = 0; off < n; off++) {
+        uint32_t c = (start + off) % n;
         if (!held[c] && g_vk_ticket_ready(ticket[c])) { *out_idx = c; *out_tk = ticket[c]; *out_ready = 1; return 1; }
     }
     int found = 0; uint32_t best = 0; uint64_t best_tk = UINT64_MAX;
-    for (uint32_t off = 0; off < sc->n; off++) {
-        uint32_t c = (start + off) % sc->n;
+    for (uint32_t off = 0; off < n; off++) {
+        uint32_t c = (start + off) % n;
         if (!held[c] && (!found || ticket[c] < best_tk)) { found = 1; best = c; best_tk = ticket[c]; }
     }
     if (found) { *out_idx = best; *out_tk = best_tk; *out_ready = 0; return 1; }

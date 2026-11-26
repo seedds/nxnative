@@ -3940,7 +3940,7 @@ enum { EGL_OPENGL_ES_API = 0x30a0, EGL_OPENGL_API = 0x30a2, EGL_RENDERABLE_TYPE 
        EGL_GL_BIT = 0x8, EGL_ES_BITS = 0x45 };
 static __thread EGLint t_egl_error = 0x3000;
 static __thread EGLenum t_egl_api;
-static const EGLConfig gl_config = (EGLConfig)(uintptr_t)1, es_config = (EGLConfig)(uintptr_t)2;
+static void *const gl_config = (EGLConfig)(uintptr_t)1, *const es_config = (EGLConfig)(uintptr_t)2;
 EGL(eglBindAPI, EGLBoolean, EGLenum api) {
     if (api == 0) return EGL_TRUE;   // SDL can rebind before choosing its API
     if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API) { t_egl_error = 0x300c; return EGL_FALSE; }

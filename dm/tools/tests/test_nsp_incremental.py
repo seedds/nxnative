@@ -1,5 +1,6 @@
 """NSP script reuse across derived and provisional builds. Real fingerprints and mock tool runs; no game files, keys or Xcode needed."""
 import collections
+from functools import partial
 import hashlib
 import importlib.util
 import json
@@ -1325,7 +1326,7 @@ class LayerShaders(Base):
                 roots = [self.ex / 'RomFS', cap] + ([self.ex / 'ExeFS/main'] if api == 'gl' else [])
                 for own in (False, True):
                     sh = self.tmp / f'{api}-{own}'
-                    def go(): build(sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=own)
+                    go = partial(build, sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=own)
                     go(); go()
                     for p in (self.ex / 'RomFS/a.bin', cap / 'shader.bin'):
                         with self.subTest(api=api, own=own, path=p):
@@ -1364,7 +1365,7 @@ class LayerShaders(Base):
                 with self.subTest(provisional=prov):
                     sh = self.tmp / f'gl-img-{prov}'
                     roots = [nsp.rfs.Path(img), self.ex / 'ExeFS/main']
-                    def go(): nsp.build_gl_shaders(sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=prov)
+                    go = partial(nsp.build_gl_shaders, sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=True, provisional=prov)
                     runs.clear()
                     go(); self.assertEqual(len(runs), 1)
                     go(); self.assertEqual(len(runs), 1)   # untouched image reuses

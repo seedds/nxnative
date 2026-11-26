@@ -54,7 +54,8 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[1], "--handoff")) {
             UserHandle users[8];
             h_acc_PopOpen(&n, users, 8);
-            assert(n == 2 && getenv("DM_OPEN_USERS") && !strcmp(getenv("DM_OPEN_USERS"), "5"));
+            const char *open_users = getenv("DM_OPEN_USERS");
+            assert(n == 2 && open_users && !strcmp(open_users, "5"));
             assert(dm_uid_user(&users[0]) == 0 && dm_uid_user(&users[1]) == 2 && users[0].v[2] != users[1].v[2]);
             Uid u3 = user_uid(2);
             assert(h_acc_LastOpened(&out) == RES_OK && !memcmp(&out, &u3, 16));

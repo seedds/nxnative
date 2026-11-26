@@ -466,6 +466,7 @@ int main(void) {
     // g_gippads is prepended: GIP watched first, then XUSB watched second, so XUSB is at head and GIP is next
     gip_pad *xpad = g_gippads, *gpad = g_gippads ? g_gippads->next : NULL;
     CHECK(gpad && xpad && gpad->xusb == 0 && xpad->xusb == 1);
+    if (!gpad || !xpad) return 1;
     CHECK(pad_slot_of(&g_slots, gpad) == 0 && pad_slot_of(&g_slots, xpad) == 1);
     CHECK(pad_in_pipe(xpad) != nil && pad_out_pipe(xpad) == nil);
     CHECK(pad_in_pipe(gpad) != nil && pad_out_pipe(gpad).pendingHandlers.count == 1);   // GIP power-on sent, XUSB sends none

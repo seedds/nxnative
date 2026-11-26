@@ -944,6 +944,7 @@ static void test_nvn_interop(void) {
     // Hold the initial GL work on the GPU to distinguish queue waits from
     // immediate success and to exercise a deleted GL name's imported fence.
     id<MTLSharedEvent> gate = [g_dev newSharedEvent];
+    assert(gate);
     [cb_get() encodeWaitForEvent:gate value:1];
     void *first = h_glFenceSync(0x9117, 0);
     NVNsync imported = {0}, nv_done = {0};
@@ -963,14 +964,15 @@ static void test_nvn_interop(void) {
     h_glDeleteSync(converted);
     void *last = h_glFenceSync(0x9117, 0);
     h_glFlush();
-    GLint fence_status;
-    GLsizei count;
+    GLint fence_status = 0;
+    GLsizei count = 0;
     h_glGetSynciv(last, GL_SYNC_STATUS, 1, &count, &fence_status);
     assert(count == 1 && fence_status == GL_UNSIGNALED);
     assert(h_glClientWaitSync(last, 0, 0) == GL_TIMEOUT_EXPIRED);
     gate.signaledValue = 1;
     GLenum waited = h_glClientWaitSync(last, 0, 5000000000);
     assert(waited == GL_CONDITION_SATISFIED || waited == GL_ALREADY_SIGNALED);
+    count = 0;
     h_glGetSynciv(last, GL_SYNC_STATUS, 1, &count, &fence_status);
     assert(count == 1 && fence_status == GL_SIGNALED);
     h_glDeleteSync(last);

@@ -65,17 +65,25 @@ int main(void) {
             .tiling = VK_IMAGE_TILING_LINEAR, .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
         };
         VkImage im = NULL;
-        CHECK(h_vkCreateImage(dev, &ici, NULL, &im) == VK_SUCCESS && im, "R4G4 linear image created");
+        VkDeviceMemory mem = NULL;
+        VkResult result = h_vkCreateImage(dev, &ici, NULL, &im);
+        CHECK(result == VK_SUCCESS && im, "R4G4 linear image created");
+        if (result != VK_SUCCESS || !im) goto cleanup;
         VkMemoryRequirements mr = {0};
         h_vkGetImageMemoryRequirements(dev, im, &mr);
         VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = 1};
-        VkDeviceMemory mem = NULL;
-        CHECK(h_vkAllocateMemory(dev, &mai, NULL, &mem) == VK_SUCCESS && mem, "R4G4 memory allocated");
-        CHECK(h_vkBindImageMemory(dev, im, mem, 0) == VK_SUCCESS && im->tex, "R4G4 image bound");
+        result = h_vkAllocateMemory(dev, &mai, NULL, &mem);
+        CHECK(result == VK_SUCCESS && mem, "R4G4 memory allocated");
+        if (result != VK_SUCCESS || !mem) goto cleanup;
+        result = h_vkBindImageMemory(dev, im, mem, 0);
+        CHECK(result == VK_SUCCESS && im->tex, "R4G4 image bound");
+        if (result != VK_SUCCESS || !im->tex) goto cleanup;
         CHECK(im->conv_synced == 0, "R4G4 starts unsynced before first submit");
 
         void *mapped = NULL;
-        CHECK(h_vkMapMemory(dev, mem, 0, im->size, 0, &mapped) == VK_SUCCESS && mapped, "R4G4 memory mapped");
+        result = h_vkMapMemory(dev, mem, 0, im->size, 0, &mapped);
+        CHECK(result == VK_SUCCESS && mapped, "R4G4 memory mapped");
+        if (result != VK_SUCCESS || !mapped) goto cleanup;
         memset(mapped, 0xA5, im->size);
 
         submit_empty();
@@ -103,28 +111,37 @@ int main(void) {
 
         h_vkDestroyImage(dev, im, NULL);
         h_vkFreeMemory(dev, mem, NULL);
+        im = NULL;
+        mem = NULL;
 
         // 4. Also verify a 16-bit converted format (B4G4R4A4_UNORM_PACK16) filled with 0xA5 bytes uploads on first submit.
         ici.format = VK_FORMAT_B4G4R4A4_UNORM_PACK16;
-        VkImage im16 = NULL;
-        CHECK(h_vkCreateImage(dev, &ici, NULL, &im16) == VK_SUCCESS && im16, "B4G4R4A4 linear image created");
-        h_vkGetImageMemoryRequirements(dev, im16, &mr);
+        result = h_vkCreateImage(dev, &ici, NULL, &im);
+        CHECK(result == VK_SUCCESS && im, "B4G4R4A4 linear image created");
+        if (result != VK_SUCCESS || !im) goto cleanup;
+        h_vkGetImageMemoryRequirements(dev, im, &mr);
         mai.allocationSize = mr.size;
-        VkDeviceMemory mem16 = NULL;
-        CHECK(h_vkAllocateMemory(dev, &mai, NULL, &mem16) == VK_SUCCESS && mem16, "B4G4R4A4 memory allocated");
-        CHECK(h_vkBindImageMemory(dev, im16, mem16, 0) == VK_SUCCESS && im16->tex, "B4G4R4A4 image bound");
-        void *mapped16 = NULL;
-        CHECK(h_vkMapMemory(dev, mem16, 0, im16->size, 0, &mapped16) == VK_SUCCESS && mapped16, "B4G4R4A4 memory mapped");
-        memset(mapped16, 0xA5, im16->size);
+        result = h_vkAllocateMemory(dev, &mai, NULL, &mem);
+        CHECK(result == VK_SUCCESS && mem, "B4G4R4A4 memory allocated");
+        if (result != VK_SUCCESS || !mem) goto cleanup;
+        result = h_vkBindImageMemory(dev, im, mem, 0);
+        CHECK(result == VK_SUCCESS && im->tex, "B4G4R4A4 image bound");
+        if (result != VK_SUCCESS || !im->tex) goto cleanup;
+        mapped = NULL;
+        result = h_vkMapMemory(dev, mem, 0, im->size, 0, &mapped);
+        CHECK(result == VK_SUCCESS && mapped, "B4G4R4A4 memory mapped");
+        if (result != VK_SUCCESS || !mapped) goto cleanup;
+        memset(mapped, 0xA5, im->size);
 
         submit_empty();
         uint8_t got4[W * H * 4] = {0};
-        readback_tex(im16->tex, 4, got4);
+        readback_tex(im->tex, 4, got4);
         const uint8_t want_b4[4] = {0xAA, 0x55, 0xAA, 0x55};
         check_all_texels(got4, 4, want_b4, "all-0xA5 B4G4R4A4 texture uploads on first submit");
 
-        h_vkDestroyImage(dev, im16, NULL);
-        h_vkFreeMemory(dev, mem16, NULL);
+    cleanup:
+        h_vkDestroyImage(dev, im, NULL);
+        h_vkFreeMemory(dev, mem, NULL);
     }
     printf("Vulkan converted texture upload: %d checks, %d failed\n", checks, fails);
     return fails != 0;

@@ -2287,7 +2287,7 @@ static void nvn_acq_ref(uint64_t handle) {
     if (!handle) return;
     acq_wait_t *aw = (acq_wait_t *)(uintptr_t)handle;
     pthread_mutex_lock(&acq_mu);
-    aw->refs++;
+    aw->refs++;   // NOLINT(clang-analyzer-unix.Malloc): nq_mu protects the sync's reference while the waiter adds its own; ending a wait only drops the waiter's reference
     pthread_mutex_unlock(&acq_mu);
 }
 static uint64_t nvn_acq_unref_take_ticket(uint64_t handle, uint64_t *next) {

@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import types
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -231,6 +232,7 @@ class EndToEndBuildOrder(unittest.TestCase):
             out.mkdir(parents=True, exist_ok=True)
 
         def fake_build_ipa(cmd, log, env=None, **kw):
+            assert env is not None
             events.append(('build_ipa', env.get('GAME'), env.get('PROGRAMS_TSV'), env.get('DM_GAMES_DIR', '')))
             out_ipa = Path(cmd[-1])
             out_ipa.write_bytes(b'ipa')
@@ -252,7 +254,7 @@ class EndToEndBuildOrder(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             pr = stack.enter_context(mock.patch.object(nsp, 'package_reader'))
             pr.return_value.__enter__.return_value = types.SimpleNamespace(contents=lambda p: {}, check_keys=lambda f: None)
-            for attr, kw in (
+            patches: tuple[tuple[str, dict[str, Any]], ...] = (
                 ('find_repo', {'return_value': REPO}), ('WORK_DIR', {'new': ''}), ('PROFILE_OUT', {'new': ''}),
                 ('apple_silicon', {'return_value': True}), ('check_native_python', {}), ('check_capstone', {}),
                 ('_importable', {'return_value': True}), ('scan_nsps', {'return_value': (APP, fam)}),
@@ -267,7 +269,8 @@ class EndToEndBuildOrder(unittest.TestCase):
                 ('discover_sibling_programs', {'side_effect': fake_discover}),
                 ('mac_host', {'side_effect': fake_mac_host}), ('mac_app', {'side_effect': fake_mac_app}),
                 ('run', {'side_effect': fake_build_ipa}), ('say', {'side_effect': said.append}),
-            ):
+            )
+            for attr, kw in patches:
                 stack.enter_context(mock.patch.object(nsp, attr, **kw))
             stack.enter_context(mock.patch.object(nsp.PROG, 'say', side_effect=said.append))
             nsp.main(args)

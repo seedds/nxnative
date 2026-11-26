@@ -194,10 +194,6 @@ ruff	dm/tools/sdis.py	F841	1	Local variable `lo` is assigned to but never used
 ruff	dm/tools/tests/test_gpuprof.py	F401	1	`os` imported but unused
 ruff	dm/tools/tests/test_gpuprof.py	F401	1	`sys` imported but unused
 ruff	dm/tools/tests/test_image_atomic_bounds.py	B023	1	Function definition does not bind loop variable `dependencies`
-ruff	dm/tools/tests/test_nsp_incremental.py	B023	1	Function definition does not bind loop variable `build`
-ruff	dm/tools/tests/test_nsp_incremental.py	B023	1	Function definition does not bind loop variable `own`
-ruff	dm/tools/tests/test_nsp_incremental.py	B023	1	Function definition does not bind loop variable `roots`
-ruff	dm/tools/tests/test_nsp_incremental.py	B023	1	Function definition does not bind loop variable `sh`
 ruff	dm/tools/tests/test_nsp_nsz.py	F401	1	`sys` imported but unused
 ruff	dm/tools/tests/test_spin_waits.py	F401	1	`sys` imported but unused
 ruff	scripts/bench.py	B023	1	Function definition does not bind loop variable `ok`

@@ -17,11 +17,14 @@ from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 TOOLS = HERE.parent / 'tools'
+sys.path.insert(0, str(HERE.parents[1] / 'tools'))
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(HERE))
 import dmsh_abi as abi
 import dmsh_ampere
 import dmsh_rt_compile as rt
+import romfs
+import shader_lib
 from dmsh_rt import InvalidModule
 from dmsh_rt_build import make_job
 from test_dmsh_rt_build import record
@@ -305,24 +308,23 @@ class RtCompile(unittest.TestCase):
 
     def test_partial_image_drops_old_rt_and_preserves_unselected_ordinary_library(self):
         with tempfile.TemporaryDirectory(prefix='dm-rt-publish-test-') as tmp:
-            old, out = (Path(tmp) / label for label in ('old', 'new'))
-            old.mkdir(); out.mkdir()
-            for name in ('rt_library_b.metallib', 'a' * 16 + '_b.metallib', 'b' * 16 + '_b.metallib', 'inputs.tsv'):
-                (old / name).write_text('old artifact')
-            new_rt = out / 'rt_library_b.json'
-            new_rt.write_text('new catalog')
-            store = SimpleNamespace(names=lambda prefix: [], delete_prefix=Mock())
-            writer = Mock()
+            out = Path(tmp) / 'library'
+            out.mkdir()
+            image = shader_lib.image_of(out)
+            keep = 'b' * 16 + '_b.metallib'
+            shader_lib.write({'rt_library_b.metallib': b'old RT library', 'a' * 16 + '_b.metallib': b'old selected library',
+                              keep: b'old unselected library', 'inputs.tsv': b'stamp'}, image)
+            (out / 'rt_library_b.json').write_bytes(b'new catalog')
+            store = SimpleNamespace(blob_ids=lambda prefix: {}, delete_prefix=Mock())
             env = lift('owned_output', 'publish_library', want={'a' * 16}, dmsh_rt_compile=rt,
                        label_dir=lambda label: str(out), STAGE='stage/test',
-                       shader_lib=SimpleNamespace(image_of=lambda d: d + '.img', write=writer),
-                       OLD_IMAGE={'mac': old}, OUT_KEY=re.compile(r'([0-9a-f]{16}|rt_library)_b'),
+                       shader_lib=shader_lib, romfs=romfs, OLD_IMAGE={'mac': romfs.Path(image)},
+                       OUT_KEY=re.compile(r'([0-9a-f]{16}|rt_library)_b'),
                        dmsh_chain=SimpleNamespace(STAMP='inputs.tsv'), STAMP_BEFORE='same', INPUTS='same',
                        STORE=store, os=os, shutil=shutil)
             env['publish_library']('mac')
-            published = writer.call_args.args[0]
-            self.assertEqual(set(published), {'b' * 16 + '_b.metallib', 'inputs.tsv', 'rt_library_b.json'})
-            self.assertEqual(published['rt_library_b.json'], str(new_rt))
+            published = {p.name: p.read_bytes() for p in romfs.Path(image).iterdir()}
+            self.assertEqual(published, {keep: b'old unselected library', 'inputs.tsv': b'stamp', 'rt_library_b.json': b'new catalog'})
 
 
 if __name__ == '__main__':

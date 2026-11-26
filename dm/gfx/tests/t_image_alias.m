@@ -306,7 +306,7 @@ static void pool_serials(void) {
         uint64_t sg=atomic_load(&g_ser_gen);
         fam_set_valid(o,wh); fam_set_valid(o,0);   // a size switch to the ID's size and away: each notes only the live serial
         uint64_t notes=atomic_load(&g_ser_gen)-sg;
-        CHECK(notes==2 && notes<SER_NOTES,"a size round trip notes only the live serial (2 notes), not obsolete serials");
+        CHECK(notes==2,"a size round trip notes only the live serial (2 notes), not obsolete serials");
         // Grow capacity via a burst of live IDs, unregister them all, then insert one new serial: all burst serials must drop immediately without waiting to refill capacity.
         tex_t burst[BURST];
         for (int i=0;i<BURST;i++) {

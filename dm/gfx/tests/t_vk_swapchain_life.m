@@ -31,7 +31,10 @@ static void one_cycle(__weak id<MTLTexture> *weak) {
         if (result != VK_SUCCESS || !sc) return;
         for (uint32_t i = 0; i < sc->n; i++) weak[i] = sc->img[i]->tex;
         for (int f = 0; f < FRAMES; f++) {
-            uint32_t k; h_vkAcquireNextImageKHR(&g_device, sc, UINT64_MAX, NULL, NULL, &k);
+            uint32_t k;
+            result = h_vkAcquireNextImageKHR(&g_device, sc, UINT64_MAX, NULL, NULL, &k);
+            CHECK(result == VK_SUCCESS, "acquire failed: %d", result);
+            if (result != VK_SUCCESS) break;
             VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &k};
             h_vkQueuePresentKHR(NULL, &pi);
         }
@@ -92,10 +95,14 @@ static void test_ownership_and_timeouts(void) {
                                        .imageExtent = {64, 32}, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
                                        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = VK_PRESENT_MODE_FIFO_KHR};
         VkSwapchainKHR sc = NULL;
-        CHECK(h_vkCreateSwapchainKHR(&g_device, &ci, NULL, &sc) == VK_SUCCESS && sc && sc->n == 3, "create 3-image swapchain");
+        VkResult result = h_vkCreateSwapchainKHR(&g_device, &ci, NULL, &sc);
+        CHECK(result == VK_SUCCESS && sc && sc->n == 3, "create 3-image swapchain");
+        if (result != VK_SUCCESS || !sc) return;
+        if (sc->n != 3) { h_vkDestroySwapchainKHR(&g_device, sc, NULL); return; }
         VkFence f = NULL;
         VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         CHECK(h_vkCreateFence(&g_device, &fci, NULL, &f) == VK_SUCCESS && f, "create unsignaled fence");
+        if (!f) { h_vkDestroySwapchainKHR(&g_device, sc, NULL); return; }
 
         hooks_install();
         // 1. Hold image 0 while repeatedly acquiring and presenting the other two: held index 0 is never returned
@@ -107,6 +114,7 @@ static void test_ownership_and_timeouts(void) {
             uint32_t k = 99;
             VkResult r = h_vkAcquireNextImageKHR(&g_device, sc, UINT64_MAX, NULL, NULL, &k);
             CHECK(r == VK_SUCCESS && k < sc->n, "blocking acquire succeeds while image 0 is held");
+            if (r != VK_SUCCESS || k >= sc->n) break;
             if (k == held0) seen_held++;
             if (k == 1) seen1++;
             if (k == 2) seen2++;

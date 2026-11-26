@@ -43,8 +43,9 @@ static void log_capture_end(char *buf, size_t cap) {
     if (dup2(g_saved_stderr, STDERR_FILENO) < 0) abort();
     close(g_saved_stderr);
     g_saved_stderr = -1;
-    rewind(g_cap_file);
+    if (fseek(g_cap_file, 0, SEEK_SET)) abort();
     size_t n = fread(buf, 1, cap - 1, g_cap_file);
+    if (ferror(g_cap_file)) abort();
     buf[n] = '\0';
     fclose(g_cap_file);
     g_cap_file = NULL;

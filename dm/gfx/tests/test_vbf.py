@@ -92,7 +92,7 @@ class Vbf(unittest.TestCase):
     def test_effect_keeps_the_parent_archive_budget(self):
         effect = b'RYHP' + bytes(9) + program('ps')
         with self.assertRaisesRegex(SystemExit, 'archive members add up to more than'):
-            split.scan_blob(effect, '/member', [], left=[1, 1])
+            split.scan_blob(effect, '/member', [], left=([1], [1]))
 
     def test_phyre_programs_in_main(self):
         """FFXII TZA: Phyre code area + control section pairs in main, unaligned, outside any RYHP container and referenced by nothing: raw_shaders takes the code area that ends at each"""

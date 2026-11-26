@@ -1210,7 +1210,7 @@ class HostAndGL(unittest.TestCase):
                 root = Path(td); tree = root / 'tree'
                 self._make_host_tree(tree, 'shared', legacy=legacy)
                 games = [NS(id=gid, env=lambda t, gid=gid: dict(os.environ, DM_GAME=gid)) for gid in ('010015100B514000', '0100535012974000')]
-                with patch.object(regress, 'game_root', side_effect=lambda g: root / 'regress' / g.id), patch.object(regress, 'say'):
+                with patch.object(regress, 'game_root', side_effect=lambda g, root=root: root / 'regress' / g.id), patch.object(regress, 'say'):
                     with cf.ThreadPoolExecutor(max_workers=2) as pool:
                         futs = [pool.submit(regress.host_for, NS(path=tree, id='rev'), g, 1) for g in games]
                         results = {g.id: fut.result()[0] for g, fut in zip(games, futs)}
@@ -1236,7 +1236,7 @@ class HostAndGL(unittest.TestCase):
                    romfs=lambda: build / 'extract/v1/RomFS',
                    shader_roots=lambda: [build / 'extract/v1/RomFS'],
                    env=lambda tree: dict(os.environ, DM_GAME='0100000000000001'))
-            with patch.object(regress, 'load_module', side_effect=lambda name, path: NS(build_sources=lambda e, r, m: {'gl_fixed': (True, 'fixed')}) if name == 'regress_profile_guess' else importlib.util.module_from_spec(importlib.util.spec_from_file_location(name, path))):
+            with patch.object(regress, 'load_module', return_value=NS(build_sources=lambda e, r, m: {'gl_fixed': (True, 'fixed')})):
                 self.assertTrue(regress.gl_fixed_mode(g))
             with patch.object(regress, 'load_module', side_effect=lambda name, path: NS(build_sources=lambda e, r, m: {'gl_fixed': (False, 'shader')})):
                 self.assertFalse(regress.gl_fixed_mode(g))

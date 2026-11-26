@@ -3421,14 +3421,25 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
         PROG.end('failed, the app is packed without one', warn=True)
         say(f'[RED] pipeline archive: pso_offline.py failed (see {logs / "pso_offline_mac.log"}); the app is packed without one and builds its pipeline bases on its first start (--gpu none skips this step)')
         return None
-    if not any(out.glob('*.mtl4a')):   # no pair (a header-only table, #338), or every eligible pair declares function constants (the host specializes them on the device, rest_pairs.tsv)
-        PROG.end('no base to bundle'); say('pipeline archive: none (no shader pair, or every eligible one has function constants): the app builds what it needs on its first start'); return None
-    PROG.end(f'{arch}, {amount(sum(f.stat().st_size for f in out.iterdir() if f.is_file() and "-prewarm-" not in f.name), "B")}')   # the archives, not the prewarm pipelines an earlier build linked there
+    if not has_mtl4a(out, prewarm=False):   # no pair (a header-only table, #338), or every eligible pair declares function constants (the host specializes them on the device, rest_pairs.tsv)
+        drop_prewarm(out)
+        PROG.end('no base to bundle')
+        say('pipeline archive: none (no shader pair, or every eligible one has function constants): the app builds what it needs on its first start')
+        return None
+    PROG.end(f'{arch}, {amount(sum(f.stat().st_size for f in out.iterdir() if f.is_file() and not f.name.startswith("._") and "-prewarm-" not in f.name), "B")}')   # the archives, not the prewarm pipelines an earlier build linked there
     return out
 
 
+def has_mtl4a(pso, *, prewarm=True):
+    """Whether a pipeline archive folder still holds any .mtl4a file (optionally excluding -prewarm- files)."""
+    return pso.is_dir() and any(f.is_file() and not f.name.startswith('._') and (prewarm or '-prewarm-' not in f.name) for f in pso.glob('*.mtl4a'))
+
+
 def drop_prewarm(pso):   # the prewarm pipelines in an archive folder, with their indexes (.keys) and stamp: an earlier build's, when this one makes none
-    for old in pso.glob('*-prewarm-*'): old.unlink()
+    if not pso.is_dir():
+        return
+    for old in pso.glob('*-prewarm-*'):
+        old.unlink()
     (pso / 'prewarm.tsv').unlink(missing_ok=True)
 
 
@@ -3546,6 +3557,8 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     pso = mac_pso(py, repo, work, lib, g, gpus, env, logs) if gfx == 'nvn' and g.table('shader_pairs.tsv').is_file() else None   # a stage of its own, before the app's
     if prebake and pso: pso = mac_prebake(py, repo, work, msl, g, host, pso, env, logs)   # --prebake: a stage of its own, after the archive
     elif pso: drop_prewarm(pso)   # what an earlier build with --prebake left
+    if pso and not has_mtl4a(pso):
+        pso = None
     PROG.stage('Mac app', step='starting')
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)

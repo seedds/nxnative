@@ -1134,6 +1134,8 @@ class Script(unittest.TestCase):
             if str(cmd[1]).endswith('dm/games/settings.py'):   # the launcher settings, before the packer
                 self.settings_env = env; Path(cmd[-1]).write_text('{}'); return
             if not on_line:   # pso_offline.py: its archive, or none when every eligible pair has function constants
+                if kw.get('pso_runner'):
+                    return kw['pso_runner'](cmd)
                 o = Path(cmd[cmd.index('--out') + 1]); o.mkdir(parents=True, exist_ok=True)
                 if kw.get('pso_fail'):   # metal-tt failed
                     self.assertFalse(fatal); (o / 'applegpu_g14s.mtl4a.partial').write_bytes(b'half'); return 1
@@ -1149,11 +1151,12 @@ class Script(unittest.TestCase):
         real_run = subprocess.run
         def sw_vers(cmd, *a, **k): return subprocess.CompletedProcess(cmd, 0, '26.1\n', '') if cmd[0] == 'sw_vers' else real_run(cmd, *a, **k)   # pso_offline.os_min_default
         with mock.patch.object(nsp, 'run', fake_run), mock.patch.object(nsp, 'PROG', self.prog), mock.patch.object(subprocess, 'run', sw_vers), mock.patch.object(nsp, 'chain_of', lambda repo: '0123456789ab'), \
-             mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: 'applegpu_g14s'), mock.patch.object(nsp, 'say', self.said.append):
+             mock.patch.object(nsp, 'mac_gpu_arch', lambda *a: kw.get('arch', 'applegpu_g14s')), mock.patch.object(nsp, 'say', self.said.append):
             nsp.mac_app(sys.executable, REPO, out, 0x01008CF01BAAC000, tmp, tmp / 'ex', tmp / 'patched', tmp / 'dmhost', tmp / 'font', tmp / 'shader/cache' if gfx == 'nvn' else tmp / 'shader',
                         kw.get('aoc'), gfx, 'en-US', g, 'Game', '1.0.0', 'org.nxnative.01008cf01baac000', None, kw.get('sign', ''), {}, tmp, gpus=kw.get('gpus', ''), prebake=kw.get('prebake', False))
         self.pso_cmd = next((c for c in ran if len(c) > 1 and c[1].endswith('pso_offline.py')), None)   # before the packer
         self.settings_cmd = next(c for c in ran if len(c) > 1 and c[1].endswith('dm/games/settings.py'))
+        self.pack_cli = ran[-1]
         c = ran[-1]; return {c[i]: c[i + 1] for i in range(3, len(c) - 1) if c[i].startswith('--')}, tmp
 
     def test_pack_command(self):
@@ -1192,6 +1195,74 @@ class Script(unittest.TestCase):
         shutil.rmtree(tmp / 'pso')
         o, _ = self.pack_cmd('nvn', work=tmp, no_bases=True)   # every eligible pair has function constants: pso_offline.py makes no archive, the app is packed without one
         self.assertNotIn('--pso', o); self.assertIsNotNone(self.pso_cmd)
+
+    def test_stale_prewarm_ignored_without_base_archive(self):
+        # 0 offline pairs with real pso_offline.py leaves stale *-prewarm-* files and writes prebuilt.tsv; mac_pso must drop stale prewarm, return None, and pack_app must succeed without --pso.
+        sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+        import pso_offline as po
+        for prebake in (False, True):
+            with self.subTest(prebake=prebake):
+                self.tool_env = None
+                tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT))
+                self.addCleanup(shutil.rmtree, tmp)
+                for d in ('profile', 'pso/mac', 'shader/cache/b-0123456789ab', 'ex/RomFS', 'patched', 'font'):
+                    (tmp / d).mkdir(parents=True, exist_ok=True)
+                (tmp / 'ex/RomFS/a').mkdir(parents=True, exist_ok=True)
+                (tmp / 'ex/RomFS/a/b').write_bytes(b'ok')
+                (tmp / 'ex/control.nacp').write_bytes(b'nacp')
+                (tmp / 'dmhost').write_bytes(b'host')
+                (tmp / 'patched/main.patched.bin').write_bytes(b'code')
+                (tmp / 'patched/main.fixups.tsv').write_bytes(b'fixups')
+                (tmp / 'font/nintendo_ext.ttf').write_bytes(b'font')
+                (tmp / 'shader/cache/b-0123456789ab/k.metallib').write_bytes(b'lib')
+                (tmp / 'profile/shader_map.tsv').write_text('package\tindex\tstage\tkey\tsource\n')
+                (tmp / 'profile/shader_pairs.tsv').write_text('# header only\n')
+                (tmp / 'profile/pso_manifest.tsv').write_text('R\t00aa\n')
+                (tmp / 'pso/mac/applegpu_g13s-prewarm-00.mtl4a').write_bytes(b'stale prewarm')
+                (tmp / 'pso/mac/applegpu_g13s-prewarm-00.keys').write_bytes(b'DMPSOIX1')
+                (tmp / 'pso/mac/prewarm.tsv').write_text('chain\told\n')
+
+                def run_real_pso_offline(cmd):
+                    args = []
+                    skip = False
+                    for item in cmd[2:]:
+                        if skip:
+                            skip = False
+                            continue
+                        if str(item) == '--game':
+                            skip = True
+                            continue
+                        args.append(str(item))
+                    args += ['--pairs', str(tmp / 'profile/shader_pairs.tsv'), '--shader-map', str(tmp / 'profile/shader_map.tsv'), '--os-min', '26.0']
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        return po.main(args)
+
+                o, _ = self.pack_cmd('nvn', work=tmp, prebake=prebake, arch='applegpu_g13s', pso_runner=run_real_pso_offline)
+                self.assertNotIn('--pso', o)
+                self.assertIn(mock.call('no base to bundle'), self.prog.end.call_args_list)
+                self.assertTrue(any('pipeline archive: none' in m for m in self.said))
+                self.assertIsNone(self.tool_env if hasattr(self, 'tool_env') else None)
+                self.assertEqual(list((tmp / 'pso/mac').glob('*-prewarm-*')), [])
+                self.assertFalse((tmp / 'pso/mac/prewarm.tsv').exists())
+                self.assertTrue((tmp / 'pso/mac/prebuilt.tsv').is_file())
+                pack_app.selected_inputs(pack_app.parse(self.pack_cli[2:]))
+
+    def test_mac_app_drops_pso_when_empty_after_drop_prewarm(self):
+        tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT))
+        self.addCleanup(shutil.rmtree, tmp)
+        pso = tmp / 'pso/mac'
+        pso.mkdir(parents=True)
+        (pso / 'applegpu_g13s-prewarm-00.mtl4a').write_bytes(b'stale prewarm')
+        (pso / 'applegpu_g13s-prewarm-00.keys').write_bytes(b'DMPSOIX1')
+        (pso / 'prewarm.tsv').write_text('chain\told\n')
+        (pso / 'prebuilt.tsv').write_text('chain\t0123456789ab\n')
+        (tmp / 'profile').mkdir(parents=True)
+        (tmp / 'profile/shader_pairs.tsv').write_text('v\tf\n')
+        with mock.patch.object(nsp, 'mac_pso', return_value=pso):
+            o, _ = self.pack_cmd('nvn', work=tmp, prebake=False)
+        self.assertNotIn('--pso', o)
+        self.assertEqual(list(pso.glob('*-prewarm-*')), [])
+        self.assertFalse((pso / 'prewarm.tsv').exists())
 
     def prebake_work(self):
         tmp = Path(tempfile.mkdtemp(dir=TEST_ROOT)); self.addCleanup(shutil.rmtree, tmp); self.tool_env = None

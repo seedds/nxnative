@@ -1021,6 +1021,168 @@ class SplitShaders(Base):
         self.assertEqual(self.go(g), k); self.assertEqual(self.splits, 1)
 
 
+class UeShaderDecodeStamp(Base):
+    def setUp(self):
+        super().setUp()
+        sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
+        sys.path.insert(0, str(REPO / 'dm/tools/tests'))
+        import uepak
+        import test_uepak_iostore as io_fix
+        import test_uepak_v8 as v8_fix
+        self.uepak = uepak
+        self.io_fix = io_fix
+        self.v8_fix = v8_fix
+        self.work = self.tmp / 'work'; self.work.mkdir()
+        self.logs = self.tmp / 'logs'; self.logs.mkdir()
+        self.patched = self.tmp / 'patched'; self.patched.mkdir()
+        self.g = game.Game(self.src)
+
+    def _decode(self, d):
+        class FakeOodle:
+            def __init__(self, *a, **kw): pass
+            def __call__(self, data, size): return data
+            def close(self): pass
+        with mock.patch.object(nsp, 'build_mac_host', return_value=self.tmp / 'dmhost'), \
+             mock.patch.object(self.uepak, 'OodleHost', FakeOodle), \
+             mock.patch.object(self.uepak, 'nso_image', return_value=(b'', 0, 0)), \
+             mock.patch.object(nsp, 'say'):
+            nsp.decode_ue_shaders(REPO, {'v0': d}, 'v0', self.patched, self.work, {}, self.logs, self.g)
+
+    def _outputs(self, d):
+        out = d / 'ue_shaders'
+        return {p.name: p.read_bytes() for p in sorted(out.iterdir()) if p.name != 'stamp'}
+
+    def _make_iostore(self, d, raw, *, part_size=0, packed=False):
+        rdir = d / 'RomFS'
+        if rdir.exists(): shutil.rmtree(rdir)
+        (d / 'RomFS.img').unlink(missing_ok=True)
+        rdir.mkdir(parents=True)
+        self.io_fix.container(rdir, 'Game.utoc', [(self.io_fix.LIB, self.io_fix.library([(self.io_fix.GROUP, raw, raw)])),
+                                                  (self.io_fix.GROUP, raw)], part_size=part_size)
+        if packed:
+            import romfs_image
+            romfs_image.pack(rdir, d / 'RomFS.img')
+            shutil.rmtree(rdir)
+
+    def _make_pak(self, d, shader_bytes):
+        rdir = d / 'RomFS'
+        if rdir.exists(): shutil.rmtree(rdir)
+        (d / 'RomFS.img').unlink(missing_ok=True)
+        rdir.mkdir(parents=True)
+        arch = self.v8_fix.v1_archive([(b'\x01' * 20, shader_bytes, len(shader_bytes), 3)])
+        self.v8_fix.pak(rdir / 'Game.pak', [('Game/Content/ShaderArchive-Game-GLSL_SWITCH.ushaderbytecode', arch, False)])
+
+    def test_equal_length_ucas_and_pak_replacements_match_clean_decode(self):
+        # 1. Loose equal-length UCAS replacement
+        d_inc = self.tmp / 'inc_ucas'; (d_inc / 'ExeFS').mkdir(parents=True); (d_inc / 'ExeFS/main').write_bytes(b'main-v1')
+        d_clean = self.tmp / 'clean_ucas'; (d_clean / 'ExeFS').mkdir(parents=True); (d_clean / 'ExeFS/main').write_bytes(b'main-v1')
+        raw1, raw2 = b'LSLG-shader-AAAA', b'LSLG-shader-BBBB'
+        self.assertEqual(len(raw1), len(raw2))
+        self._make_iostore(d_inc, raw1)
+        self._decode(d_inc)
+        # Unchanged rerun reuses without calling uepak.job
+        with mock.patch.object(self.uepak, 'job', side_effect=AssertionError('should reuse unchanged UE shaders')):
+            self._decode(d_inc)
+        # Replace UCAS bytes with equal length and same mtime (ctime still changes via rewrite/replace)
+        ucas = d_inc / 'RomFS/Game.ucas'
+        old_data = ucas.read_bytes()
+        st = ucas.stat()
+        new_data = old_data.replace(raw1, raw2)
+        self.assertEqual(len(new_data), len(old_data))
+        ucas.write_bytes(new_data)
+        os.utime(ucas, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self._decode(d_inc)
+        self._make_iostore(d_clean, raw2)
+        self._decode(d_clean)
+        self.assertEqual(self._outputs(d_inc), self._outputs(d_clean))
+
+        # 2. Loose equal-length pak replacement
+        d_pak_inc = self.tmp / 'inc_pak'; (d_pak_inc / 'ExeFS').mkdir(parents=True); (d_pak_inc / 'ExeFS/main').write_bytes(b'main-v1')
+        d_pak_clean = self.tmp / 'clean_pak'; (d_pak_clean / 'ExeFS').mkdir(parents=True); (d_pak_clean / 'ExeFS/main').write_bytes(b'main-v1')
+        p1, p2 = b'LSLG-pak-1111111', b'LSLG-pak-2222222'
+        self.assertEqual(len(p1), len(p2))
+        self._make_pak(d_pak_inc, p1)
+        self._decode(d_pak_inc)
+        self._make_pak(d_pak_inc, p2)
+        self._decode(d_pak_inc)
+        self._make_pak(d_pak_clean, p2)
+        self._decode(d_pak_clean)
+        self.assertEqual(self._outputs(d_pak_inc), self._outputs(d_pak_clean))
+
+    def test_numbered_partition_packed_image_warm_check_and_legacy_stamp(self):
+        # Numbered _s1.ucas partition replacement invalidates stamp
+        d = self.tmp / 'split_ucas'; (d / 'ExeFS').mkdir(parents=True); (d / 'ExeFS/main').write_bytes(b'main-v1')
+        raw1 = b'LSLG-part-payload-' + b'A' * 64
+        raw2 = b'LSLG-part-payload-' + b'B' * 64
+        self._make_iostore(d, raw1, part_size=128)
+        part1 = d / 'RomFS/Game_s1.ucas'
+        self.assertTrue(part1.is_file())
+        self._decode(d)
+        first_out = self._outputs(d)
+        part1.write_bytes(part1.read_bytes().replace(b'A', b'B'))
+        self._decode(d)
+        self.assertNotEqual(self._outputs(d), first_out)
+        self.assertIn(raw2, next(iter(self._outputs(d).values())))
+
+        # Legacy ue-archives-v2 stamp is treated as a miss and migrated
+        (d / 'ue_shaders/stamp').write_text('ue-archives-v2\nGame.utoc\t10\n')
+        with mock.patch.object(self.uepak, 'job', wraps=self.uepak.job) as job_spy:
+            self._decode(d)
+        self.assertEqual(job_spy.call_count, 1)
+        self.assertTrue((d / 'ue_shaders/stamp').read_text().startswith('ue-archives-v3\n'))
+
+        # Packed RomFS.img warm check does not scan full image payload and still invalidates on replacement
+        d_img = self.tmp / 'packed_ucas'; (d_img / 'ExeFS').mkdir(parents=True); (d_img / 'ExeFS/main').write_bytes(b'main-v1')
+        self._make_iostore(d_img, b'LSLG-img-AAAA', packed=True)
+        self._decode(d_img)
+        img_out1 = self._outputs(d_img)
+        real_open = open
+        img_path = str((d_img / 'RomFS.img').resolve())
+        reads = []
+        def tracking_open(file, *a, **kw):
+            f = real_open(file, *a, **kw)
+            if isinstance(file, (str, os.PathLike)) and os.path.abspath(os.fspath(file)) == img_path:
+                orig_read = f.read
+                def counted_read(n=-1):
+                    data = orig_read(n)
+                    reads.append(len(data))
+                    return data
+                f.read = counted_read
+            return f
+        with mock.patch('builtins.open', side_effect=tracking_open), \
+             mock.patch.object(self.uepak, 'job', side_effect=AssertionError('should reuse packed image decode')):
+            self._decode(d_img)
+        self.assertLessEqual(sum(reads), 16, 'warm check must not scan full RomFS.img payload')
+        self._make_iostore(d_img, b'LSLG-img-BBBB', packed=True)
+        self._decode(d_img)
+        self.assertNotEqual(self._outputs(d_img), img_out1)
+
+    def test_mid_decode_input_replacement_preserves_previous_good_output(self):
+        d = self.tmp / 'toctou_ucas'; (d / 'ExeFS').mkdir(parents=True); (d / 'ExeFS/main').write_bytes(b'main-v1')
+        raw1, raw2, raw3 = b'LSLG-good-1111', b'LSLG-mid--2222', b'LSLG-new--3333'
+        self._make_iostore(d, raw1)
+        self._decode(d)
+        prev_out = self._outputs(d)
+        prev_stamp = (d / 'ue_shaders/stamp').read_text()
+
+        # Trigger a decode for raw2, then replace the source with raw3 after finish() but before swap_in()
+        self._make_iostore(d, raw2)
+        real_finish = self.uepak.finish
+        def finish_then_replace(jd, out):
+            res = real_finish(jd, out)
+            self._make_iostore(d, raw3)
+            return res
+        with mock.patch.object(self.uepak, 'finish', side_effect=finish_then_replace):
+            with self.assertRaisesRegex(nsp.BuildError, 'changed while decoding'):
+                self._decode(d)
+        self.assertEqual(self._outputs(d), prev_out)
+        self.assertEqual((d / 'ue_shaders/stamp').read_text(), prev_stamp)
+        self.assertFalse((d / 'ue_shaders.partial').exists())
+        # Subsequent run decodes raw3 cleanly and publishes its matching stamp
+        self._decode(d)
+        self.assertIn(raw3, next(iter(self._outputs(d).values())))
+
+
 class RewriteWorkers(Base):
     def test_explicit_workers_override_the_automatic_module_budget(self):
         g = game.Game(self.src)

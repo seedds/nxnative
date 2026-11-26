@@ -82,6 +82,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)](#metal-gear-solid-peace-walker---master-collection-version-game) | 0 | 0 | 3 | 0 | 0 | `game` |
 | [Monster Hunter Rise](#monster-hunter-rise) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](#naruto-x-boruto-ultimate-ninja-storm-connections) | 0 | 0 | 6 | 0 | 0 | `game` |
 | [Need For Speed™ Hot Pursuit Remastered](#need-for-speed-hot-pursuit-remastered) | 1 | 0 | 0 | 0 | 5 | `build` → `game`, `build` → `engine` |
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
@@ -414,6 +415,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **16.0.2 `main`** `c9a3dd77…`
   - host [hle_fpslock.c:35](../../dm/host/hle_fpslock.c#L35): engine frame limit set to fps_target: RE Engine frame limit
+
+### NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS
+
+[NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](../../dm/games/0100D2D0190A4000/README.md), `0100D2D0190A4000`, [patches.py](../../dm/games/0100D2D0190A4000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: startup setter, logo clock and stage selection lifecycle disassembled on 1.0.0 and 1.7.1: Storm Connections native 60 fps, logo clock and stage selection. The title selects its own rate and owns its logo clock and stage selector. The host already honors the one-refresh present interval.
+
+- **function-matched stub** (`main` of builds without STUBS): Storm Connections native 60 fps, logo clock and stage selection: a function of 0x84 bytes, `+0x0` in it
+- **function-matched stub** (`main` of builds without STUBS): Storm Connections native 60 fps, logo clock and stage selection: a function of 0x88 bytes, `+0x0` in it
 
 ### Need For Speed™ Hot Pursuit Remastered
 

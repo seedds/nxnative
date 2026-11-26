@@ -490,6 +490,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
 - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
 
+### Gzip-wrapped BNSH records in Fenrir shader packages
+
+- **Symptom:** the shader split finds no shaders although the CRI CPK entries are readable and an HSG shader package starts with `HSPK`.
+- **Cause:** Fenrir stores its BNSH containers compressed: each `NSGZ    ` record has a 64-bit little-endian compressed length at +8 and one gzip stream at +16. Searching the stored package for BNSH magic cannot see them.
+- **Fix:** `shader_split.py` passes `NSGZ    ` files through the loose-file prefilter and `nxcx_shaders` fallback, and `scan_blob` dispatches them to `nsgz_shaders`. Inside `HSPK` packages every magic is validated strictly; in other blobs (such as `main`) literal magic strings whose length does not fit or whose payload does not start with a gzip header are skipped, while matching gzip records are validated strictly. Top-level scans allow up to `max(NSGZ_MAX, 256 * len(d))` decoded bytes (sparse BNSH controls compress past 16×), while nested archive scans debit `scan_blob`'s shared `left[1]` budget. Each decoded record is checked for gzip completion, `BNSH\0\0\0\0` magic and exact BNSH length before calling `bnsh_shaders`, keeping the record offset in the source label.
+- **Found on:** Valkyria Chronicles 4, Japanese release `0100C11009378000`, version 1.0.1: `FENRIR_SHADER_NEW_NX64_.HSG` in `FEN_0000.CPK`, 6,712 NSGZ records (3,356 vertex and 3,356 pixel shaders), plus 158 records embedded in main. All 33 shaders captured during startup match the decoded main records byte for byte. A 30-second windowless startup reached frame 600 without missing shader captures. Gameplay and profile bring-up remain separate.
+- **Check:** `dm/tools/tests/test_split_nsgz.py` uses synthetic BNSH records for loose files, nested archives, embedded `main` records (including literal magic strings), high-ratio packages, distinct source labels, truncated records, invalid or incomplete gzip streams, trailing bytes, invalid BNSH payloads and top-level/nested expansion bounds.
+
 ### CRI CPK archives with the table of contents at the end
 
 - **Symptom:** `[RED] the shader split found no shaders in main or the RomFS` on a game whose RomFS is CRI CPK archives, with many `[RED] /<archive>.cpk/<file>: not CRILAYLA; not scanned` lines; entries the TOC lists as stored start with another file's bytes (`CRILAYLA`, `DXBC`, path or name text).

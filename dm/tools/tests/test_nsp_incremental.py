@@ -987,6 +987,20 @@ class SplitShaders(Base):
         for n in self.NAMES[:3]: (self.src / n).write_text(self.table(n))
         with self.assertRaisesRegex(nsp.BuildError, r'^2 file\(s\) could not be read'): self.go(game.Game(self.src), own=False)
 
+    def test_allow_damaged_registered_split_still_requires_matching_tables(self):
+        self.log = '[RED] 1 file(s) could not be read (first: archive: bad compressed texture)\nshaders: 3 (3 vertex)\n'
+        for n in self.NAMES: (self.src / n).write_text(self.table(n))
+        g = game.Game(self.src)
+        with mock.patch.object(nsp, 'ALLOW_DAMAGED', True):
+            self.go(g, own=False)
+            self.go(g, own=False)
+            self.assertEqual(self.splits, 1)
+            self.rows = 'missing shader'; (self.ex / 'RomFS/b.bin').write_bytes(b'changed')
+            with self.assertRaisesRegex(nsp.BuildError, 'differ from game profile'):
+                self.go(g, own=False)
+        with self.assertRaisesRegex(nsp.BuildError, r'^1 file\(s\) could not be read'):
+            self.go(g, own=False)
+
     def test_mode_is_in_the_key(self):   # the same files split as an own profile, then checked against them as a registered one
         g = self.own(); self.go(g)
         self.assertEqual(self.go(g, own=False), nsp.package_key(self.pkg)); self.assertEqual(self.splits, 2)

@@ -808,6 +808,14 @@
 - **Fix:** a damaged copy is keyed as the same extraction: its RomFS by its files' times (`('stat', …)`, which an extraction writes again; inside `RomFS.img`, the image's) and by `check_formats`' list of damaged files (`RomFS.img.formats`). A build of the same extraction reuses the split and the shaders; a new extraction (a repaired copy, other options: `extraction_key`) or another damage list splits again. The Vulkan and OpenGL steps key a damaged copy by times as well (their `provisional` keying). An undamaged build's key is as before, and damaged and undamaged builds never take each other's split.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), v131072 built with `--allow-damaged`, which a contributor kept on after replacing a NUP with three damaged textures ([A damaged file in a NUP or a dump has no hash to fail](#a-damaged-file-in-a-nup-or-a-dump-has-no-hash-to-fail)): the option alone, with no file damaged, took this path. `dm/tools/tests/test_nsp_incremental.py` (`SplitShaders.test_damaged_reuses_only_the_same_extraction`).
 
+### Build anyway stops on an unreadable archive despite matching shader tables
+
+- **Symptom:** a registered game's extraction succeeds with `--allow-damaged`, but shader splitting stops with `file(s) could not be read; the profile's tables hold every file's shaders`, even when every generated shader table matches its registered table.
+- **Cause:** the shader step rejected unreadable archive data before comparing the tables, independently of the explicit extraction override. A corrupt non-shader resource can produce that warning without losing any required shader.
+- **Fix:** allow the explicit override past the unreadable-file guard, retaining the warning and all registered shader-table comparisons. Missing or changed shaders still stop the build, and a normal build still rejects unreadable files. This does not repair corrupted game assets.
+- **Found on:** [Xenoblade Chronicles 3](../../dm/games/010074F013262000/README.md), 2.2.1: `bf3.ard` failed its NCA integrity check and one zlib stream failed decompression, while all 27,055 shader keys and all generated profile tables matched.
+- **Check:** `test_nsp_incremental.py` covers matching tables, reuse, a mismatched table under the override and refusal without the override.
+
 ### An update's offline HTML pages reported as a damaged NSP
 
 - **Symptom:** the NSP script stops at the offline HTML pages (`logs/extract_html_<version>.log`) with `[RED] the NSP is damaged: <n> files fail the NCA's hash check` and a list under `/html-document/`, although the program extracted cleanly and the NSZ tool verified every NCA of the update.

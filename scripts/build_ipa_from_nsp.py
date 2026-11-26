@@ -2708,7 +2708,7 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)
     bad = re.search(r'^\[RED\] (\d+) file\(s\) could not be read.*$', text, re.M)   # the split leaves out a file no reader reads (its own red line per file in the log) and goes on
-    if bad and not provisional:   # the profile's tables were split from every file: one that does not read now is a reader change
+    if bad and not provisional and not ALLOW_DAMAGED:   # --allow-damaged still has to pass every registered shader-table comparison below
         raise BuildError(f'{bad.group(0).removeprefix("[RED] ")}; the profile\'s tables hold every file\'s shaders (each file in {logs / "shader_split.log"})')
     if bad: say(f'{bad.group(0)}; the IPA goes without them (each file in {logs / "shader_split.log"})')
     if m and m.group(1) == '0':   # dmsh_build.py would make no library, and the iOS shader step stop with no word of why

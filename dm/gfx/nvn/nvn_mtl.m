@@ -5265,6 +5265,43 @@ static int mem_any(const uint8_t *p, uint64_t n) {   // whether any byte is non-
     for (; i < n; i++) if (p[i]) return 1;
     return 0;
 }
+// Stale storage read as floating-point texels. A render target placed in CPU_NO_ACCESS memory that held other data (Splatoon 3 12.0.0's environment-probe arrays, RG11B10F, over
+// reused storage) starts as that data on the Switch too; the game renders faces with SRC_ALPHA / ONE_MINUS_SRC_ALPHA blending and alpha 1, and Maxwell's float blender (SET_BLEND_FLOAT_OPTION:
+// zero times anything is zero) drops the old value even where it decodes as NaN. Metal computes NaN x 0 = NaN, so any stale NaN stays and spreads through reflections. Workaround for Metal's
+// fixed-function blender: if a non-COMPRESSIBLE float texture's first-use storage in a CPU_NO_ACCESS pool holds any NaN or infinite element, skip the fill and start from zeros instead.
+// Only CPU_NO_ACCESS pools are checked: in CPU-visible pools the storage holds what the CPU wrote (t_direct_upload writes NaN and infinity on purpose).
+static int storage_float_size(MTLPixelFormat pf) {   // element size in bytes, 0 for a format this does not check
+    switch (pf) {
+        case MTLPixelFormatRG11B10Float: return 4;
+        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatR16Float: return 2;
+        case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG32Float: case MTLPixelFormatR32Float: return 4;
+        default: return 0;
+    }
+}
+static int storage_has_nonfinite(const tex_t *t, MTLPixelFormat pf) {
+    int size = storage_float_size(pf);
+    if (!size) return 0;
+    const uint8_t *p = t->mem;
+    if (pf == MTLPixelFormatRG11B10Float) {
+        for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+            uint32_t v; memcpy(&v, p + i, 4);
+            if (((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31) return 1;
+        }
+        return 0;
+    }
+    if (size == 2) {
+        for (size_t i = 0; i + 2 <= t->L.size; i += 2) {
+            uint16_t v; memcpy(&v, p + i, 2);
+            if ((v & 0x7c00) == 0x7c00) return 1;
+        }
+        return 0;
+    }
+    for (size_t i = 0; i + 4 <= t->L.size; i += 4) {
+        uint32_t v; memcpy(&v, p + i, 4);
+        if ((v & 0x7f800000) == 0x7f800000) return 1;
+    }
+    return 0;
+}
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     if (!t->mem || !t->pool || (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) || t->has_layout) return 0;
     if (t->d.samples > 1 || ((int)mt.pixelFormat >= 250 && (int)mt.pixelFormat <= 262)) return 0;   // 250..262: Depth16Unorm … X24_Stencil8 (some names are macOS-only)
@@ -5276,6 +5313,13 @@ static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
     static int flush_fill = -1; if (flush_fill < 0) { const char *e = getenv("DM_NVN_FLUSH_FILL"); flush_fill = !e || atoi(e) != 0; }
     if (!no_cpu && !uncached && (!flush_fill || !nvn_flushed(t->mem, t->L.size))) return 0;
     if (!atomic_load(&g_sub_thread_set) || !on_sub_thread() || !mem_any(t->mem, t->L.size)) return 0;   // the upload batch belongs to the submit thread
+    static int stale_keep = -1; if (stale_keep < 0) { const char *e = getenv("DM_NVN_STALE_FLOAT"); stale_keep = e && atoi(e) == 1; }
+    if (no_cpu && !stale_keep && storage_has_nonfinite(t, mt.pixelFormat)) {
+        static uint64_t ns;
+        if (ns++ < 8 || !(ns & (ns - 1))) MLOG("initial content: ser=%llu %ux%ux%u format %#x: its storage holds non-finite float texels; starts from zeros (%llu so far; DM_NVN_STALE_FLOAT=1 keeps it)",
+                                               (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)ns);
+        return 0;
+    }
     if (pkg_upload(t, NULL, mt, 0, nil, NULL, 0, NULL) != mt) return 0;
     int why = no_cpu ? 0 : uncached ? 1 : 2;
     static uint64_t n[3]; if (n[why]++ < 4) MLOG("initial content: ser=%llu %ux%ux%u format %#x filled from its storage, %s (%llu so far)", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format,

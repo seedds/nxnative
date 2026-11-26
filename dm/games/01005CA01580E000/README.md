@@ -2,7 +2,7 @@
 
 Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NVN, with CRI middleware. Modules `main`, `subsdk0` (NintendoSDK_movie) and `sdk`.
 
-**Current:** opening casino gameplay tested on Mac with the complete shader library. The unsigned 1.0.2 IPA is built (15,969,549,546 bytes, about 14.9 GiB). iOS and later battles have not been tested.
+**Current:** opening casino gameplay tested on Mac with the complete shader library. The unsigned 1.0.2 IPA is built (15,969,549,546 bytes, about 14.9 GiB). iOS gameplay and later battles have not been tested. An independent earlier-chain build was installed on an iPhone and its launch request was accepted; see the additional checkpoint below.
 
 The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac app was built from `P5R [01005ca01580e000].nsp`, the only NSP, through a profile derived from this one (which registers 1.0.2 alone). Boot, the Thieves Guild network prompt, the opening movie, the title screen, the main menu, the load screen's existing saves, New Game with English voices and the opening casino cutscene rendered at 30 fps with no red line; movement in the casino was not exercised. Its 30,646 shader keys match 1.0.2's, and its shaders were compiled for the Mac with Xcode 27.3's Metal (`--allow-other-metal`, not the chain's tested 27.2).
 
@@ -40,6 +40,17 @@ The packed app's first launch took about four minutes ([A Mac app](../../../docs
 
 On 2026-10-25, update 1.0.2 was tested on an M4 Pro Mac with Metal API validation enabled. Boot, startup movies, title and language menus, opening dialogue, and casino gameplay rendered. Movement, camera control and the first two platform jumps were exercised. The full-library run exceeded 35 minutes without a crash, missing shader or Metal validation error. Recent casino frame-time windows measured p50 33.33 ms and p95 33.36 ms (about 30 fps); occasional longer frames occurred during the run. Resident memory was about 1.9 GB and GPU allocations about 1.75 GB. This is an opening-sequence check, not a full playthrough.
 
+### Additional build and device checkpoint (2026-10-25)
+
+An independent local build based on `93578abad6704ae95fbf60e80027469f145b02cf`, with local linear-render-target and bounded adjacent-record extraction fixes, used update 1.0.2 on an Apple M4 Mac, macOS 27.2 and Xcode 27.1. This predates the integrated Needle reader and current upstream chain; it is not validation of the current upstream recipe or chain.
+
+- All 30,646 base shaders compiled for Mac and iPhoneOS, with 27,501 variants, on chain `dec5ee141a9f`, local profile-input stamp `9e4a5b34f911`. There were no undecoded binding slots or unfillable driver reads. An independent standard archive scan reproduced the local shader key, compute-fact and stage-pair sets.
+- The self-contained Mac app passed signature verification and loaded its bundled resources. Title animation, keyboard input, audio, casino lighting, movement and the first two platform jumps were checked. The player subsequently reported apparent successful operation; no full-playthrough claim is made.
+- The unsigned iPhone IPA was 15,968,248,825 bytes (14.87 GiB), with 88,832 entries. ZIP integrity, required RomFS files, complete shader count and iPhoneOS platform metadata passed verification.
+- A Release app built from that same local source was development-signed with the Increased Memory Limit entitlement. The provisioning profile covered the connected iPhone, the bundle passed deep/strict signature verification, Apple's device installer reported successful installation, and the device accepted a launch request. This confirms signing and installation only: no on-device picture, controls, gameplay, battle or save/reload has been verified.
+
+The local extraction differs from the upstream descriptor-based Needle reader. Keep the existing current-chain rebuild and gameplay checks open; do not substitute this earlier-chain artifact for a fresh upstream build. No game assets, keys, signing identities, provisioning profiles or device identifiers accompany this report.
+
 Build with `scripts/build_ipa_from_nsp.py` pointed at the NSP folder and the local keys file. The output is `Persona5Royal.ipa`; it contains no code signature or provisioning profile. For Mac testing use the generated `<title ID>_build/tools/dmhost` and `patched_v65536`, with `DM_ROOT` set to the build directory, `DM_ROMFS` to `extract/v65536/RomFS`, `DM_MSL_DIR` to `shader/cache`, and `DM_FONT_DIR` to `font`. Set `DM_NVN_SHMAP` to this profile's `shader_map.tsv`, `DM_LANG=en-US`, and writable `DM_SAVE` / `DM_TEMP` directories under the NSP folder. See the [control-file recipe](../../../docs/agents/05-debugging.md) for `DM_CTL`.
 
 Choose offline mode at the network prompt, then New Game and English voices. Advance the opening dialogue; Plus shows and confirms movie skipping. In the casino, the left stick moves, the right stick controls the camera, and A jumps at marked platform edges.
@@ -58,4 +69,4 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 - Rebuild the complete game libraries and host on the current upstream chain, then repeat gameplay validation.
 - Test battles, later story scenes and save/load over a longer playthrough.
 - `SetRenderEnableConditional` still reports that the host draws unconditionally. No visual failure was identified in the tested opening; conditional rendering remains unvalidated.
-- Device validation remains for the user after sideloading.
+- Validate on-device rendering, controls and gameplay after sideloading; the earlier-chain installation checkpoint above does not cover these.

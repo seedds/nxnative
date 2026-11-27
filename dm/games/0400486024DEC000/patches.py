@@ -26,9 +26,9 @@ frame_ratio = (   # after the ADRP of the state page into x16; the ADRP into x17
     0x1e230200,   # ucvtf s0,w16
     0x1e201908,   # fdiv s8,s8,s0          / the unit
     0x1e201828)   # orig: fdiv s8,s1,s0
-def frame_step(ctx):
+def frame_step_at(ctx, at):
     here, emit, fs_site, fs_put, FS_STATE_OFF, base = ctx.here, ctx.emit, ctx.site, ctx.put, ctx.state, ctx.base
-    site = base + 0xe4
+    site = base + at
     fs_site(site, '2818201e')   # fdiv s8,s1,s0
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in frame_ratio[:7]: emit(w)
@@ -41,6 +41,10 @@ def frame_step(ctx):
     dynamic_resolution(ctx)
     render_scale(ctx)
     screen_shape(ctx)
+# The division's place in each build's function: +0xe4 on v131072; +0x108 on v0 (1.0.0, main+0x6b5900, 0x9a8 bytes), whose function loads three more globals into x21, x23 and x24
+# before it and saves x23 to x25 for them. The rest is the same: s1 the base rate, s0 written again on every path before it is read, neither x16 nor x17 used
+def frame_step(ctx): frame_step_at(ctx, 0xe4)
+def frame_step_v0(ctx): frame_step_at(ctx, 0x108)
 
 # The game's dynamic resolution (game__gfx__DynamicResolutionParam: LoadThreshold, ReduceCounterMax, IncreaseCounterMax and a list of levels, each a ResolutionReduceScale and a
 # Priority; on v131072 levels 0..9 at 0.75..0.333 of 2048x1152, 1536x864 to 683x384). Its update (main+0x805aa0) reads the frame's GPU load (about 0.2 ms a unit) into +0x8, subtracts
@@ -463,6 +467,12 @@ MATCH_FRAME_STEP = {'main': [
                 'dynamic resolution update': {'size': 0xb24, 'fingerprints': ['5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4']},   # main+0x805aa0
                 'render scale': {'size': 0xfc8, 'fingerprints': ['2c1804f08798ceee012ae30a1ba6b177a6b6a61ce732185bad28e9989d05e165']},   # main+0x31d3200, the 3D view size update
                 **screen_shape_functions}},
+    # v0 (1.0.0): the same frame ratio and dynamic resolution, their data addresses moved (the level function's blocks laid out differently, the same fields and constants, a leaf,
+    # called twice from the update; the update stores the load at +0x8 and keeps the level at +0x174). Its view-size update and display setup differ from v131072's, so there is
+    # no render scale or screen shape on it. Without this the game's own dynamic resolution runs and drops the 3D views toward its floor (game note, Dynamic resolution)
+    {'name': 'frame ratio from the host\'s step', 'size': 0x9a8, 'fingerprints': ['777177e79e876b03bb01e602619c9fbde6b80741d9a256fca0dddb3cabb760d8'], 'stub': frame_step_v0,   # v0 main+0x6b5900
+     'others': {'dynamic resolution': {'size': 0x2a8, 'fingerprints': ['92b72f56e192953782067be61941ecccc148cdc86b5775cc568c3f999877d478']},   # v0 main+0x7e8920
+                'dynamic resolution update': {'size': 0xb30, 'fingerprints': ['07ef7eb8ba36414cd381174d378c640288e3b82b81fe58ca230f5889556f933b']}}},   # v0 main+0x7e7de0
 ]}
 
 # The movie player's pictures per frame. Once a frame the player's update (main+0x3b5ca60 on v131072) adds the frame's time (the time object's +0x18, the frame ratio / 60 s, times
@@ -517,10 +527,10 @@ BINDING = [
      'checked': 'v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player\'s +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16)'},
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
-     'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08); the stub in ticks of 1/120 s (state +0x38) run natively at 2 / 3 / 4 ticks and without a unit (test_frame_ratio_stub.py) and disassembled in the rewritten main (2026-11-14)'},
+     'checked': 'v131072 and v0 mains: one function with each fingerprint, the sites (+0xe4, +0x108) and free registers read by disassembly (2026-11-08, v0 2026-11-27); the stub in ticks of 1/120 s (state +0x38) run natively at 2 / 3 / 4 ticks and without a unit (test_frame_ratio_stub.py) and disassembled in the rewritten main (2026-11-14)'},
     {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
-     'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); 30 fps threshold scaling checked in test_ocarina_drs.py and in play at 30 fps on an M2 Air (PR #1954, 2026-11-16)'},
+     'checked': 'v131072 and v0 mains: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields (+0x8, +0x10, +0x174, +0x1a0) read by disassembly, the fields read in play (2026-11-08, v0 2026-11-27); the climb run natively against a model of the update and in play to full size (2026-11-09); 30 fps threshold scaling checked in test_ocarina_drs.py and in play at 30 fps on an M2 Air (PR #1954, 2026-11-16)'},
     {'what': 'render scale: the 3D views at a fraction of the game\'s own size (DM_RENDER_SCALE)', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
      'why': "the game's own view-size update (its test of the dynamic-resolution status and its scale store), found by its function's fingerprint on any build that keeps it; the level function's stub above holds level 0 under a scale",
      'checked': 'v131072 main: one function with this fingerprint (main+0x31d3200, 0xfc8 bytes, one caller main+0x31c00cc); the status ubfx at +0xce4, the store at +0xd48 (the only float store to #0xe5c in main; s0 computed from the update\'s w0 at +0xd34, never reread from +0xe5c) and the size loop clearing bit 3 of +0xe2c read by disassembly (2026-11-09, 2026-11-23); guard, status and store stubs executed natively on ARM64 in test_ocarina_drs.py'},

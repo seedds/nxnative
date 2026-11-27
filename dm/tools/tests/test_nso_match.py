@@ -234,6 +234,33 @@ class Matching(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stub'): locate_stub(moved, 0x2000, [dict(stub, stub=None)], messages.append)
         with self.assertRaisesRegex(ValueError, 'name, size'): locate_stub(moved, 0x2000, [dict(stub, cuts=[])], messages.append)
 
+    def test_frame_step_alternative_implementations_resolve_only_their_own_others(self):
+        # Multiple same-name implementations (e.g. two game builds): only the matched one's others are located, with no red lines for the other build's extras; none or two matches fail closed
+        from nso_match import locate_stub
+        alt_words = [ADRP(8, 0x900, 0x2980), ADDI(8, 8, 0x980), NOP, MOV, B(0x910, 0x1200) | 0x80000000, 0x54000040, NOP, RET]
+        v1 = image({0x800: caller(0x800, 0x1200, 0x2980), 0x1200: [0xd2800020, RET], 0x1400: [0xd2800060, RET]})
+        v0 = image({0x900: alt_words, 0x1200: [0xd2800020, RET]})
+        p1, p0 = Image(v1, 0x2000), Image(v0, 0x2000)
+        leaf, extra = p1.fingerprint(0x1200), p1.fingerprint(0x1400)
+        r1 = dict(name='step', size=28, fingerprints=[p1.fingerprint(0x800)], stub=lambda ctx: None,
+                  others={'leaf': dict(size=8, fingerprints=[leaf]), 'extra': dict(size=8, fingerprints=[extra])})
+        r0 = dict(name='step', size=32, fingerprints=[p0.fingerprint(0x900)], stub=lambda ctx: None,
+                  others={'leaf': dict(size=8, fingerprints=[leaf])})
+        for img, want_rule, want_start, want_others in (
+            (v1, r1, 0x800, {'leaf': 0x1200, 'extra': 0x1400}),
+            (v0, r0, 0x900, {'leaf': 0x1200}),
+        ):
+            messages = []
+            self.assertEqual(locate_stub(img, 0x2000, [r1, r0], messages.append), (want_rule, want_start, want_others, None))
+            self.assertFalse([m for m in messages if m.startswith('[RED]')], messages)
+        for img, why in (
+            (image({0x100: [RET]}), '0 matching'),
+            (image({0x800: caller(0x800, 0x1200, 0x2980), 0x900: alt_words, 0x1200: [0xd2800020, RET]}), '2 implementations match'),
+        ):
+            messages = []
+            self.assertIsNone(locate_stub(img, 0x2000, [r1, r0], messages.append))
+            self.assertTrue(messages[0].startswith('[RED] frame step') and why in messages[0], messages)
+
     def test_stub_rule_supports_called_by(self):
         # MATCH_STUBS / MATCH_FRAME_STEP: called_by disambiguates an identical short callee across relocations, with optional others
         from nso_match import locate_stub

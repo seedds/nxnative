@@ -183,7 +183,7 @@
 - **Symptom:** `shader_split.py` stops with `FileNotFoundError` naming only the part of the NSP folder before a comma.
 - **Cause:** the NSP script joined the RomFS, ExeFS and DLC paths with commas, and the splitter used the same character to separate the paths for each game version.
 - **Fix:** the NSP script sends each path list as a JSON array. The direct splitter CLI still accepts its original comma-separated arguments. A synthetic base, update and DLC under a path with a comma verify that all three shader sources reach the split.
-- **Found on:** Pokémon: Let's Go, Pikachu! 1.0.2 (`010003F003A34000`).
+- **Found on:** [Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md#found-on-this-game) 1.0.2 (`010003F003A34000`).
 
 ### The split shader tables differ from a game profile's
 

@@ -2958,8 +2958,17 @@ def stale_shaders(py, repo, env, lib_dirs, chain, g):
 def pack_libraries(sh, chain, pull=None):
     """Each finished library folder as one file, which the host and the tools read in place (shader_lib.py). pull False: nothing reads the iPhone's pulling libraries (ios_wants_pulling), which stay out of its
     image, so the IPA packs that file as it is and reuses it. A build that wants them again compiles them"""
-    shader_lib.pack(sh / 'cache' / f'b-{chain}', say)
-    shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False)
+    def report(step):
+        last = 0.0
+        def on_progress(done, total, size):
+            nonlocal last
+            now = time.monotonic()
+            if done and done < total and now - last < 0.5: return
+            last = now
+            PROG.set(step=step, done=done, total=total, unit='files', note=amount(size, 'B') if size else '')
+        return on_progress
+    shader_lib.pack(sh / 'cache' / f'b-{chain}', say, on_progress=report('writing the Mac library image'))
+    shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False, on_progress=report('writing the iOS library image'))
 
 
 def ios_gpus(gpu_option, g):
@@ -3060,19 +3069,22 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
     if own := re.search(r'^note: (built with this Mac\'s compilers.*)$', t, re.M): say(own.group(1))
     if lost := re.search(r'^\[RED\] lost without failing: .*$', t, re.M): say(f'{lost.group(0)}; each is named in {log}, and the build goes on: a shader the game never reaches costs nothing')
     m, c = re.search(r'shaders (\d+): ok (\d+)', t), re.search(r'shader cache: hit (\d+)', t)
-    note = ''
+    note = summary = ''
     if m:
         total, ok = int(m.group(1)), int(m.group(2))
         failed = f'; {total - ok:,} failed, reasons at the end of {log}' if ok < total else ''
         note = f'{ok:,} of {total:,} shaders ready{failed}'
-        PROG.end(f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + failed)
-    else: PROG.end()
-    if not seen: shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
+        summary = f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + failed
+    if not seen:
+        PROG.set(step='checking for regressions')
+        shader_regressions(py, repo, sh / 'cache', chain, logs)   # before the key: a stopped build is checked again on the next run
     if key:
         for k in (kmac,) if mac else (kf, kmac) if keep_mac else (kf,): k.write_text(f'{key}\n{note}\n')
     if not seen:   # last: a build that stopped before here keeps the old libraries and cache entries
+        PROG.set(step='pruning old libraries and cache entries')
         prune_stale_chains(sh, chain); prune_shader_cache(sh, chain); pack_libraries(sh, chain, None if mac else pull)
         if mac: rmtree(sh / 'partial')   # the whole library replaces a partial one; partial-keys.txt stays
+    PROG.end(summary)
     return out
 
 
@@ -3175,6 +3187,33 @@ def build_gl_shaders(py, repo, roots, sh, env, logs, g, reuse=True, mac=False, p
     return layer_shaders(py, repo, 'gl', 'GL', [*roots, *dlc_roms], sh, key, logs, env, mac, ('--fixed-function',) if fixed else (), mac_out=mac_out)
 
 
+class PsoLines:
+    """Progress of pso_offline.py (both mac_pso and IpaWatch): batch counts ("<arch>: batch i/n: ready (...)", counting ready lines because compute batches finish in any order),
+    "<arch>: merging n batches" (metal-pack), and "prewarm: ..." steps. Returns True when the line was handled"""
+    BATCH = re.compile(r'^pso_offline: (\w+): batch \d+/(\d+): (ready)?')
+    MERGE = re.compile(r'^pso_offline: (\w+): merging (\d+) batches')
+
+    def __init__(self): self.ready, self.started = collections.Counter(), set()
+
+    def __call__(self, line):
+        if m := self.BATCH.match(line):
+            arch, total = m.group(1), int(m.group(2))
+            if m.group(3):
+                self.ready[arch] += 1; self.started.add(arch)
+                PROG.set(step=f'{arch}: compiling', done=self.ready[arch], total=total, unit='batches')
+            elif arch not in self.started:
+                self.started.add(arch)
+                PROG.set(step=f'{arch}: compiling', done=self.ready[arch], total=total, unit='batches')
+            return True
+        if m := self.MERGE.match(line):
+            PROG.set(step=f'{m.group(1)}: merging {int(m.group(2)):,} batches (metal-pack)')
+            return True
+        if line.startswith('pso_offline: prewarm:'):
+            PROG.set(step=line.removeprefix('pso_offline: ').strip())
+            return True
+        return False
+
+
 class IpaWatch:
     """Progress of build_ipa.sh, from its step lines ("[time] generate Gen/ …", "xcodebuild …", "pack IPA …", then pack_ipa.py's "pack: N entries, X bytes") and the files it writes:
     the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources), then the bytes of the archive pack_ipa.py is
@@ -3185,6 +3224,7 @@ class IpaWatch:
         self.ios, self.o, self.part = repo / 'dm/ios', w / 'build/ios/pkg', out_ipa.with_name(out_ipa.name + '.partial')
         self.last = out_ipa.stat().st_size if out_ipa.is_file() else None   # the last IPA's size: the expected size of the new archive
         self.kept = 0
+        self.pso = PsoLines()
         self.state, self.t, self.off, self.compiled, self.what, self.total, self.most, self.lock = None, 0, 0, 0, '', None, 0, threading.Lock()
 
     def line(self, line):   # a line of build_ipa.sh's output
@@ -3193,6 +3233,7 @@ class IpaWatch:
             if s.startswith('generate Gen/'): self.state = 'gen'; PROG.set(step='generating sources')
             elif s.startswith('[RED] pipeline archive:'): say(s)   # the build goes on without one, and only this says so
             elif s.startswith('pipeline archive for'): PROG.set(step='pipeline archive (metal-tt)')
+            elif self.pso(s): pass
             elif s.startswith('xcodebuild'):
                 units = len(os.listdir(self.ios / 'Gen/src')) + 2 + sum(1 for p in (self.ios / 'Sources').iterdir() if p.suffix in ('.c', '.m'))   # + Gen/main/main.c and Gen/embed.S
                 self.state, self.t = 'xcode', time.time(); PROG.set(step='xcodebuild', done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
@@ -3422,9 +3463,10 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs, host=None):
     if not g.table('pso_pairs.tsv').is_file() and (work / 'shader/pso_pairs.tsv').is_file():   # the split's copy, as the app gets it (--pso-pairs)
         cmd += ['--pairs', g.table('shader_pairs.tsv'), '--pairs', work / 'shader/pso_pairs.tsv']
     if host: cmd += ['--prewarm-host', host]
+    pso_lines = PsoLines()
     def pso_line(ln):
         if ln.startswith('[RED]'): say(ln)
-        elif ln.startswith('pso_offline: prewarm:'): PROG.set(step=ln.removeprefix('pso_offline: ').strip())
+        else: pso_lines(ln)
     if run(cmd, logs / 'pso_offline_mac.log', env=env, fatal=False, on_line=pso_line):   # an optimization: the app builds the bases on its first start without it
         shutil.rmtree(out, ignore_errors=True)
         PROG.end('failed, the app is packed without one', warn=True)
@@ -4133,6 +4175,9 @@ def _main(args, cleanup):
     tree_tar.unpack(xcode_data, say)
     run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env, on_line=watch.line)
     if not out_ipa.is_file(): raise BuildError(f'no IPA at {out_ipa}')
+    if xcode_data.is_dir():
+        PROG.watch(None)
+        PROG.set(step='packing Xcode derived data')
     tree_tar.pack(xcode_data, say)
     PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')

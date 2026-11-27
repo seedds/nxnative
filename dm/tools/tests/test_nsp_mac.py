@@ -308,9 +308,9 @@ class Nvn(Base):
 
     def test_the_iphone_image_leaves_out_what_its_app_does_not_read(self):
         real = nsp.shader_lib.pack
-        def with_pulling(lib, say=print, leave_out=False):   # the stand-in build makes no pulling library: one in the folder, as dmsh_build.py's
+        def with_pulling(lib, say=print, leave_out=False, on_progress=None):   # the stand-in build makes no pulling library: one in the folder, as dmsh_build.py's
             if Path(lib).is_dir(): (Path(lib) / 'k_bp.metallib').write_bytes(b'pull')
-            return real(lib, say, leave_out)
+            return real(lib, say, leave_out, on_progress=on_progress)
         ios = self.sh / 'ios' / f'b-{CHAIN}'
         with mock.patch.object(nsp.shader_lib, 'pack', with_pulling):
             self.build_ios(False)

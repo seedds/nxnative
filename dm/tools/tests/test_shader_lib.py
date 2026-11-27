@@ -204,6 +204,22 @@ class LeaveOutPulling(Base):
         self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull'); self.pack()
         self.assertFalse(shader_lib.left_out_pulling(self.lib)); self.assertIn('k_bp.metallib', self.names())
 
+    def test_pack_reports_progress_only_when_writing(self):
+        self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull')
+        events = []
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 3), (1, 3), (2, 3), (3, 3)])
+        events.clear()
+        with mock.patch.object(shader_lib.romfs, 'Image', side_effect=AssertionError('should not open image')):
+            self.assertTrue(shader_lib.pack(self.lib, self.said.append, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events, [])
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events[0][:2], (0, 3))
+        self.assertEqual(events[-1][:2], (3, 3))
+        events.clear()
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events, [])
+
 
 class AppSubset(Base):
     def test_only_what_the_host_reads(self):

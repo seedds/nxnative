@@ -140,14 +140,15 @@ def _write_part(files, part, on_progress=None, share=None):   # write()'s image,
     romfs.Image(part)   # a read of it, as the host's check: nothing is published that a reader refuses
 
 
-def pack(lib, say=print, leave_out=False):
+def pack(lib, say=print, leave_out=False, on_progress=None):
     """The folder into the image, and the folder removed. Returns whether an image now stands for the library. Without a folder there is nothing to do, unless leave_out finds pulling libraries in the
-    image to take out: leave_out is the iPhone build's when nothing will read them"""
+    image to take out: leave_out is the iPhone build's when nothing will read them. on_progress, when given, is forwarded to write only when an image is actually written"""
     folder, image = folder_of(lib), image_of(lib)
     try:
         before = _names(folder) if os.path.isdir(folder) else None
         if before is not None and not before: os.rmdir(folder); before = None
         if before is None and not os.path.isfile(image): return False
+        if before is None and not leave_out: return True
         files, share = {n: os.path.join(folder, n) for n in before or ()}, {}
         if os.path.isfile(image) and (before is None or STAMP not in before):   # a partial build over a packed library, or the image alone
             old = romfs.Image(image)
@@ -160,7 +161,8 @@ def pack(lib, say=print, leave_out=False):
         if leave_out:
             for n in pulling: del files[n]; share.pop(n, None)
             files[PULLING_LEFT_OUT] = b'the pulling vertex libraries are left out: nothing in this build reads them (dm/tools/shader_lib.py)\n'
-        write(files, image, share=share) if share else write(files, image)
+        kw = {k: v for k, v in (('on_progress', on_progress), ('share', share)) if v}
+        write(files, image, **kw)
         if before is None: return True
         if _names(folder) != before:   # a build wrote to it meanwhile: the folder is the newer one, and the next pack takes it
             say(f'{folder} changed while it was packed: it stays a folder'); return True

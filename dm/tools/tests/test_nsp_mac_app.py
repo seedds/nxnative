@@ -1183,10 +1183,16 @@ class Script(unittest.TestCase):
                          {'--game': '01008CF01BAAC000', '--msl': str(tmp / 'shader/cache/b-0123456789ab'), '--out': str(tmp / 'pso/mac'), '--work': str(tmp / 'pso/mac-work'),
                           '--gpu': 'applegpu_g14s', '--platform': 'macos'})
         self.assertFalse(any('does not name this Mac' in m for m in self.said))
-        o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, pso_lines=['pso_offline: prewarm: 2 R and M rows', '[RED] pso_offline: prewarm: warning'])
+        o, _ = self.pack_cmd('nvn', work=tmp, prebake=True, pso_lines=[
+            'pso_offline: applegpu_g14s: batch 1/1: 10 bases, compiling or checking cache',
+            'pso_offline: applegpu_g14s: batch 1/1: ready (compiled)',
+            'pso_offline: applegpu_g14s: merging 1 batches',
+            'pso_offline: prewarm: 2 R and M rows', '[RED] pso_offline: prewarm: warning'])
         p = self.pso_cmd; assert p is not None
         self.assertEqual({p[i]: p[i + 1] for i in range(2, len(p) - 1) if p[i].startswith('--')}['--prewarm-host'], str(tmp / 'dmhost'))
         self.assertIn('[RED] pso_offline: prewarm: warning', self.said)
+        self.assertIn(mock.call(step='applegpu_g14s: compiling', done=1, total=1, unit='batches'), self.prog.set.call_args_list)
+        self.assertIn(mock.call(step='applegpu_g14s: merging 1 batches (metal-pack)'), self.prog.set.call_args_list)
         self.assertIn(mock.call(step='prewarm: 2 R and M rows'), self.prog.set.call_args_list)
         o, _ = self.pack_cmd('nvn', work=tmp, gpus='g18p')   # PSO_GPUS set for the IPA: built as asked, with a note that this Mac's app builds its own bases
         self.assertEqual(o['--pso'], str(tmp / 'pso/mac'))

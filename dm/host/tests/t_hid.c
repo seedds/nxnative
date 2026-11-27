@@ -307,6 +307,31 @@ static void t_joycons(void) {
     CHECK(g_prompt_calls == calls && dm_players_reported() == 2, "the split pair is enough: no controller prompt, and the prompt's count (dm_players_reported) sees two players"); }
     h_hid_JoyDual(&(uint32_t){0});
 
+    // Joining a pair the game split back into one controller. MergeSingleJoyAsDualJoy on its two npads, either way round; npads that are not the halves of one split pair: no change
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "split for the merge");
+    CHECK(h_hid_Merge(&(uint32_t){0}, &(uint32_t){1}) == RES_OK && h_hid_GetJoyAssign(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && h_hid_GetStyle(&(uint32_t){1}) == 0,
+          "merge: one JoyDual npad again, No2 empty");
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_Merge(&(uint32_t){1}, &(uint32_t){0}) == RES_OK && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL, "merge with the npads the other way round");
+    h_hid_JoySingle(&(uint32_t){0});
+    CHECK(h_hid_Merge(&(uint32_t){2}, &(uint32_t){3}) == RES_OK && h_hid_GetJoyAssign(&(uint32_t){0}) == 1 && h_hid_GetStyle(&(uint32_t){1}) == STYLE_JOYRIGHT, "merge of other npads: still split");
+    // The applet asks for one player while the split pair counts two: it joins the pair back (Mario Kart World split a pair in its 2P screen and kept it split back in 1P)
+    { int8_t one[8] = {1, 1};
+    CHECK(h_hid_ShowCtrl(info, one) == RES_OK && info[0] == 1 && h_hid_GetJoyAssign(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && dm_players_reported() == 1,
+          "the applet for one player joins the split pair");
+    int8_t back[8] = {1, 4}; h_hid_ShowCtrl(info, back); }
+    // L on the left Joy-Con and R on the right one held for 3 s join a pair the game split; a shorter hold, or one let go in between, does not
+    h_hid_JoySingle(&(uint32_t){0});
+    dm_joy_set(0, 0, DM_BTN_L, 0, 0); dm_joy_set(0, 1, DM_BTN_R, 0, 0);
+    motion_now += 2000000000ull; dm_joy_set(0, 1, DM_BTN_R, 0, 0);
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 1, "L + R for 2 s: still split");
+    dm_joy_set(0, 0, 0, 0, 0); motion_now += 2000000000ull; dm_joy_set(0, 0, DM_BTN_L, 0, 0); motion_now += 2000000000ull; dm_joy_set(0, 1, DM_BTN_R, 0, 0);
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 1, "let go in between: the 3 s start again");
+    motion_now += 1500000000ull; dm_joy_set(0, 0, DM_BTN_L, 0, 0);
+    CHECK(h_hid_GetJoyAssign(&(uint32_t){0}) == 0 && h_hid_GetStyle(&(uint32_t){0}) == STYLE_JOYDUAL && h_hid_GetStyle(&(uint32_t){1}) == 0, "L + R held 3 s: one JoyDual npad again");
+    dm_joy_set(0, 0, 0, 0, 0); dm_joy_set(0, 1, 0, 0, 0);
+
     // Handheld mode: player 1's Joy-Cons count as attached to the console (the Handheld npad), and are never split
     g_mode = 0; ids((uint32_t[]){0, 1, NPAD_HANDHELD}, 3);
     CHECK(h_hid_GetStyle(&(uint32_t){NPAD_HANDHELD}) == STYLE_HANDHELD && h_hid_GetStyle(&(uint32_t){0}) == 0, "handheld: player 1's Joy-Cons are the Handheld npad");

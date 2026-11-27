@@ -449,10 +449,27 @@ void dm_joy_attach(int p, uint32_t sides) {
     if (atomic_exchange(&g_joy_sides[p], sides) != sides && !sides) for (int s = 0; s < 2; s++) { atomic_store(&g_joy_btn[p][s], 0); atomic_store(&g_joy_axes[p][s], 0); }
     styles_sync();
 }
+static void joy_assign(uint32_t id, int single, int keep);
+// A pair the game split (single assignment) joins back when L on its left Joy-Con and R on its right one are held together for JOY_REJOIN_NS: the gesture that pairs two single
+// Joy-Cons (s2_gesture), here for a pair only the game had split, as the Switch's Change Grip/Order screen does. The game is not told: it reads one dual npad again, as after
+// SetNpadJoyAssignmentModeDual
+#ifndef JOY_REJOIN_NS
+#define JOY_REJOIN_NS 3000000000ull
+#endif
+static _Atomic uint64_t g_joy_rejoin[DM_PLAYERS];   // since when both have been held (ns); 0 while not
 void dm_joy_set(int p, int side, uint64_t buttons, int32_t sx, int32_t sy) {
     if (p < 0 || p >= DM_PLAYERS || (side != 0 && side != 1)) return;
     uint64_t old = atomic_exchange(&g_joy_btn[p][side], buttons); atomic_fetch_or(&g_joy_latch[p][side], buttons & ~old);
     atomic_store(&g_joy_axes[p][side], pack(sx, sy, 0, 0));
+    if (joy_split(p) && (atomic_load(&g_joy_btn[p][0]) & DM_BTN_L) && (atomic_load(&g_joy_btn[p][1]) & DM_BTN_R)) {
+        uint64_t now = now_ns(), since = atomic_load(&g_joy_rejoin[p]);
+        if (!since) atomic_compare_exchange_strong(&g_joy_rejoin[p], &since, now);
+        else if (now - since >= JOY_REJOIN_NS) {
+            atomic_store(&g_joy_rejoin[p], 0);
+            LOG("hid: player %d's Joy-Cons: L and R held, the pair the game split is one controller again", p + 1);
+            joy_assign((uint32_t)p, 0, 0);
+        }
+    } else atomic_store(&g_joy_rejoin[p], 0);
 }
 static void note_merged(void) {   // logs the players the game does not see, when they change
     static _Atomic uint32_t last; uint32_t m = unsupported_players(), one = (uint32_t)one_player(), b = atomic_load(&g_benched) & m, bone = atomic_load(&g_bench_one), key = m | b << 8 | bone << 30 | one << 31;
@@ -811,6 +828,13 @@ static Result ctrl_support(int32_t *info, const int8_t *arg) {
         }
         canceled = r <= 0 || arg[0] > count;
     } else if (arg) LOG("hid controller applet: %d to %d players wanted, %d connected", arg[0], arg[1], count);
+    // More players than the game takes, and a pair of Joy-Cons the game split (single assignment) counts two: on a Switch the applet holds them as one controller again (the player
+    // attaches them in Change Grip/Order), so a game that split a pair for two players and then asks for one gets the pair back as one dual npad
+    for (int p = 0; arg && arg[1] > 0 && count > arg[1] && p < DM_PLAYERS; p++)
+        if (reported(p) && joy_active(p) && joy_split(p)) {
+            joy_assign((uint32_t)p, 0, 0); count = dm_players_reported();
+            LOG("hid controller applet: %d to %d players wanted: player %d's Joy-Cons are one controller again", arg[0], arg[1], p + 1);
+        }
     for (int p = DM_PLAYERS - 1; arg && arg[1] > 0 && p > 0 && count > arg[1]; p--)
         if (reported(p)) { atomic_fetch_or(&g_benched, 1u << p); count = dm_players_reported(); }
     // The lowest players stay: one left out before takes the place of a higher player that connected since
@@ -1778,7 +1802,20 @@ HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTy
     int q = *id < DM_PLAYERS && joy_active((int)*id) && joy_split((int)*id) ? split_target((int)*id) : -1;
     if (out) *out = q >= 0 ? (uint32_t)q : *id;
     return q >= 0; }
-HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons; ignored by the host, reports success", Result, h_hid_Merge, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; return RES_OK; }
+// Merging two single Joy-Cons: when they are the two halves of a pair the game split (single assignment on the pad's npad, the other half on its split target), the pair is one dual
+// npad again on the pad's own npad. Two Joy-Cons of different pads (split on the controllers, SL + SR) are joined there (s2_gesture), not here: left as they are, reported as merged
+HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "merge single Joy-Cons: a pair the game split joins back into one dual npad", Result, h_hid_Merge, const uint32_t *a, const uint32_t *b) {
+    for (int p = 0; p < DM_PLAYERS; p++) if (joy_active(p) && joy_split(p)) {
+        int q = split_target(p);
+        if (q >= 0 && (((uint32_t)p == *a && (uint32_t)q == *b) || ((uint32_t)p == *b && (uint32_t)q == *a))) {
+            LOG("hid: merge npads %u and %u: player %d's Joy-Cons are one controller again (npad %d)", *a, *b, p + 1, p);
+            joy_assign((uint32_t)p, 0, 0);
+            return RES_OK;
+        }
+    }
+    LOG("hid: merge npads %u and %u: not the two halves of one split pair here: left as they are", *a, *b);
+    return RES_OK;
+}
 // Bound and signalled once when its controller is connected (the hid service reports the controller already attached at start the same way), and again whenever a player's controller
 // comes or goes (dm_pad_players). Link's Awakening reads no controller state until this event has fired: without it GetNpadState was never called and the title's "Press L+R" never saw a press
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "controller style update event: bound, signaled once for a connected controller and on connect / disconnect", void, h_hid_BindStyleEv,

@@ -92,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Pokémon: Let's Go, Pikachu!](#pokémon-lets-go-pikachu) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -539,6 +540,14 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 - **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts: capture demo: the empty result when the weak reference at +0x88 is unset or dead. The game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked
 
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
+
+### Pokémon: Let's Go, Pikachu!
+
+[Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md), `010003F003A34000`, [patches.py](../../dm/games/010003F003A34000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: Pikachu 1.0.0 and 1.0.2 and Eevee 1.0.2 match both functions and the period table offline: one-tick render and simulation periods. The profile selects a faster default while the game's application override sets the simulation period; both functions and the relocated period table must match
+
+- **function-matched** (`main` of builds without CUTS): one-tick render and simulation periods: 2 functions, 2 cuts
 
 ### South Park: The Fractured But Whole
 

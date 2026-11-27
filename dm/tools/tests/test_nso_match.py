@@ -100,6 +100,18 @@ class Matching(unittest.TestCase):
                 with self.assertRaisesRegex(MatchError, '0 matching'):
                     Image(changed, 0x2000).match(self.rule)
 
+    def test_data_check_can_reject_matching_code(self):
+        def check(module, start):
+            self.assertEqual(start, 0x100)
+            if module.image[0x2200] != 1:
+                raise MatchError('unexpected data')
+
+        rule = dict(self.rule, check=check)
+        with self.assertRaisesRegex(MatchError, 'unexpected data'):
+            Image(self.original, 0x2000).match(rule)
+        self.original[0x2200] = 1
+        self.assertEqual(Image(self.original, 0x2000).match(rule)[0][0], 0x108)
+
     def test_call_redirected_to_different_function(self):
         changed = image({0x100: caller(0x100, 0x600), 0x500: [0xd2800020, RET], 0x600: [0xd2800040, RET]})
         with self.assertRaisesRegex(MatchError, '0 matching'): Image(changed, 0x2000).match(self.rule)

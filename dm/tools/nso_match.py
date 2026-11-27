@@ -226,6 +226,8 @@ class Image:
     def match(self, rule):
         validate(rule)
         start = self.locate_rule(rule)
+        if 'check' in rule:
+            rule['check'](self, start)
         cuts = []
         for delta, old, new, reason in rule['cuts']:
             off = start + delta
@@ -371,15 +373,18 @@ def validate(rule):
             raise ValueError('a patch of several functions needs only name, functions and optional alias_only')
         if not isinstance(rule['functions'], (list, tuple)) or len(rule['functions']) < 2: raise ValueError('a patch of several functions needs at least two')
         for fn in rule['functions']:
-            if 'name' in fn or 'functions' in fn or 'alias_only' in fn: raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by')
+            if 'name' in fn or 'functions' in fn or 'alias_only' in fn:
+                raise ValueError('a function of a patch has size, fingerprints, cuts and optional called_by and check')
             validate(dict(fn, name=rule['name']))
         return
     required = {'name', 'size', 'fingerprints', 'cuts'}
-    if not required <= set(rule) <= required | {'called_by', 'alias_only'}:
+    if not required <= set(rule) <= required | {'called_by', 'alias_only', 'check'}:
         raise ValueError('function patch needs name, size, fingerprints and cuts')
     validate_function(rule)
     if 'called_by' in rule:
         validate_called_by(rule['called_by'], rule['name'])
+    if 'check' in rule and not callable(rule['check']):
+        raise ValueError('a function patch check must be callable')
     if not rule['cuts']: raise ValueError('function patch has no cuts')
     used = set()
     for delta, old, new, reason in rule['cuts']:

@@ -284,6 +284,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN | 60 fps target |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN | 60 fps target, [120 fps option](01008D9022462000/README.md#frame-rate) |
 | [The Witcher 3: Wild Hunt — Complete Edition](0100A0800E9C4000/README.md) | `0100A0800E9C4000` | 4.04b | 15.3.0 | CD PROJEKT RED's REDengine 3 (Saber Interactive port) | NVN | 60 fps target |
+| [Thronebreaker: The Witcher Tales](0100E910103B4000/README.md) | `0100E910103B4000` | 1.0.2 (provisional Mac profile) | 8.2.1 | Unity 2018.4.2f1 IL2CPP, Wwise | NVN | — |
 | [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN | — |
 | [TRIANGLE STRATEGY](0100CC80140F8000/README.md) | `0100CC80140F8000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN | 60 fps target |
 | [TSUKIHIME A piece of blue glass moon](010057A01E4D4000/README.md) | `010057A01E4D4000` | 1.0.2 | 17.5.4 | its own (not named) | NVN | — |

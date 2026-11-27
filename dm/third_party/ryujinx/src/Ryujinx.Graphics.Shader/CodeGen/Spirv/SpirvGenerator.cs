@@ -203,6 +203,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             Declarations.DeclareLocals(context, function);
 
+            if (funcIndex == 0 && context.IndexedFragmentInputs != null)
+            {
+                SpvInstruction[] loaded = new SpvInstruction[context.IndexedFragmentInputs.Length];
+
+                for (int i = 0; i < loaded.Length; i++)
+                {
+                    loaded[i] = context.Load(context.IndexedFragmentInputElemType, context.IndexedFragmentInputs[i]);
+                }
+
+                SpvInstruction composite = context.CompositeConstruct(context.IndexedFragmentInputArrayType, loaded);
+                context.Store(context.IndexedFragmentInputArray, composite);
+            }
+
             Generate(context, function.MainBlock);
 
             // Functions must always end with a return.

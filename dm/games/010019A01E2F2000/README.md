@@ -38,6 +38,7 @@ General tool changes first needed here; each applies to every game:
 
 - **60-byte pack entries, zstd program records and `MTRL` forms, and program records whose control length is not a multiple of 0x40**, which the reader had skipped without a word in Metroid Prime Remastered too (28,479 of its shaders) (`rfrm_shaders`, `snvn_records`): [shaders.md](../../../docs/reference/shaders.md#snvn-program-records-in-retro-studios-rfrm-forms).
 - **JoyDual vibration handles routed to FullKey and Handheld controllers** (`vib_valid`, `hle_hid.c`; `main+0xaab6f8` requests only `STYLE_JOYDUAL` handles at boot): [services.md](../../../docs/reference/services.md#joydual-vibration-handles-on-a-whole-controller).
+- **Indexed fragment inputs lost per-location interpolation qualifiers** (`Declarations.TryDeclareSplitIndexedFragmentInputs`, `SpirvGenerator.cs`, `Instructions.cs`; 44,121 indexed fragment shaders here, where interpolating a flat lighting-record selector caused flicker on MacKenzie and spherical decorations, diagnosed in [PR #3408](https://github.com/seedds/nxnative/pull/3408)): [shaders.md](../../../docs/reference/shaders.md#indexed-fragment-inputs-lose-per-location-interpolation).
 
 ## Open
 

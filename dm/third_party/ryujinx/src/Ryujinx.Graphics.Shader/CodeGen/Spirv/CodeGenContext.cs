@@ -44,6 +44,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         public Dictionary<IoDefinition, Instruction> InputsPerPatch { get; } = new();
         public Dictionary<IoDefinition, Instruction> OutputsPerPatch { get; } = new();
 
+        // nxnative: indexed fragment inputs with mixed per-location interpolation modes are split into
+        // individually decorated Input vec4 variables and gathered into a Private array at main entry
+        public Instruction[] IndexedFragmentInputs { get; set; }
+        public Instruction IndexedFragmentInputArray { get; set; }
+        public Instruction IndexedFragmentInputElemType { get; set; }
+        public Instruction IndexedFragmentInputArrayType { get; set; }
+
         public StructuredFunction CurrentFunction { get; set; }
         private readonly Dictionary<AstOperand, Instruction> _locals = new();
         private readonly Dictionary<int, Instruction> _funcArgs = new();
@@ -154,7 +161,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             List<Instruction> mainInterface = [];
 
-            mainInterface.AddRange(Inputs.Values);
+            foreach (Instruction input in Inputs.Values)
+            {
+                if (input != IndexedFragmentInputArray)
+                {
+                    mainInterface.Add(input);
+                }
+            }
+
+            if (IndexedFragmentInputs != null)
+            {
+                mainInterface.AddRange(IndexedFragmentInputs);
+            }
+
             mainInterface.AddRange(Outputs.Values);
             mainInterface.AddRange(InputsPerPatch.Values);
             mainInterface.AddRange(OutputsPerPatch.Values);

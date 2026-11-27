@@ -575,6 +575,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 };
             }
 
+            if (context.Definitions.Stage == ShaderStage.Fragment &&
+                !isOutput &&
+                !isPerPatch &&
+                ioVariable == IoVariable.UserDefined &&
+                context.Definitions.IaIndexing &&
+                !hasComponent &&
+                ioDefinition.Location == 0 &&
+                TryDeclareSplitIndexedFragmentInputs(context, ioDefinition, varType, iq))
+            {
+                return;
+            }
+
             SpvInstruction spvType = context.GetType(varType, IoMap.GetSpirvBuiltInArrayLength(ioVariable));
             bool builtInPassthrough = false;
 
@@ -704,6 +716,81 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 ? (isOutput ? context.OutputsPerPatch : context.InputsPerPatch)
                 : (isOutput ? context.Outputs : context.Inputs);
             dict.Add(ioDefinition, spvVar);
+        }
+
+        // nxnative: when an indexed fragment shader mixes interpolation modes across locations, a single
+        // Input array at location 0 can carry only location 0's qualifier. Declare per-location Input vec4
+        // variables with their SPH qualifiers and gather them into a Private array at main entry; keep the
+        // stock single Input array when all used locations agree with location 0.
+        private static bool TryDeclareSplitIndexedFragmentInputs(
+            CodeGenContext context,
+            IoDefinition ioDefinition,
+            AggregateType varType,
+            PixelImap baseIq)
+        {
+            int count = IoMap.GetSpirvBuiltInArrayLength(IoVariable.UserDefined);
+            PixelImap stockEffective = baseIq == PixelImap.Unused ? PixelImap.Perspective : baseIq;
+            bool needsSplit = false;
+
+            for (int i = 0; i < count; i++)
+            {
+                ImapPixelType imap = context.Definitions.ImapTypes[i];
+                PixelImap mode = imap.GetFirstUsedType();
+
+                if (mode != PixelImap.Unused &&
+                    ((imap.X != PixelImap.Unused && imap.X != mode) ||
+                     (imap.Y != PixelImap.Unused && imap.Y != mode) ||
+                     (imap.Z != PixelImap.Unused && imap.Z != mode) ||
+                     (imap.W != PixelImap.Unused && imap.W != mode)))
+                {
+                    context.Logger.Log($"Indexed fragment input location {i} has mixed component interpolation modes ({imap.X}, {imap.Y}, {imap.Z}, {imap.W}); using {mode}.");
+                }
+
+                if (mode != PixelImap.Unused && mode != stockEffective)
+                {
+                    needsSplit = true;
+                }
+            }
+
+            if (!needsSplit)
+            {
+                return false;
+            }
+
+            SpvInstruction elemType = context.GetType(varType & ~AggregateType.Array);
+            SpvInstruction elemPtrType = context.TypePointer(StorageClass.Input, elemType);
+            SpvInstruction[] splitInputs = new SpvInstruction[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                SpvInstruction elemVar = context.Variable(elemPtrType, StorageClass.Input);
+                context.Decorate(elemVar, Decoration.Location, (LiteralInteger)i);
+
+                switch (context.Definitions.ImapTypes[i].GetFirstUsedType())
+                {
+                    case PixelImap.Constant:
+                        context.Decorate(elemVar, Decoration.Flat);
+                        break;
+                    case PixelImap.ScreenLinear:
+                        context.Decorate(elemVar, Decoration.NoPerspective);
+                        break;
+                }
+
+                context.AddGlobalVariable(elemVar);
+                splitInputs[i] = elemVar;
+            }
+
+            SpvInstruction arrayType = context.GetType(varType, count);
+            SpvInstruction privatePtrType = context.TypePointer(StorageClass.Private, arrayType);
+            SpvInstruction privateArray = context.Variable(privatePtrType, StorageClass.Private);
+            context.AddGlobalVariable(privateArray);
+
+            context.IndexedFragmentInputs = splitInputs;
+            context.IndexedFragmentInputArray = privateArray;
+            context.IndexedFragmentInputElemType = elemType;
+            context.IndexedFragmentInputArrayType = arrayType;
+            context.Inputs.Add(ioDefinition, privateArray);
+            return true;
         }
     }
 }

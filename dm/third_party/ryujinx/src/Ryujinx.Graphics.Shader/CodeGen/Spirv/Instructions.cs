@@ -2361,6 +2361,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         : (isOutput ? context.Outputs : context.Inputs);
 
                     baseObj = dict[ioDefinition];
+
+                    if (baseObj == context.IndexedFragmentInputArray)
+                    {
+                        storageClass = StorageClass.Private;
+                    }
                     break;
 
                 default:

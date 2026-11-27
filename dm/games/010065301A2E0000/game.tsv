@@ -38,3 +38,6 @@ shader_note	STAR OCEAN THE SECOND STORY R shaders
 
 # Match the NVN near=0 depth mode used at startup when baking pipelines.
 depth_mode	zero
+
+# Exact 1.1.0 guest hooks use the shared launcher picture-shape capability.
+screen_aspect	on

@@ -107,6 +107,18 @@ class LauncherSettingsTests(unittest.TestCase):
                     shape = next(row for row in rows if row['env'] == 'DM_SCREEN_ASPECT')
                     self.assertEqual(shape['default'], 'auto')
 
+    def test_star_ocean_uses_the_shared_manual_shape_choices_after_rewrite(self):
+        gid = '010065301A2E0000'
+        for platform, choice in (('mac', '1.6'), ('ios', '1.43')):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp, patch.dict(
+                os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform},
+            ):
+                self.assertNotIn('DM_SCREEN_ASPECT', build(gid, 'nvn', platform))
+                (Path(tmp) / 'main.fixups.tsv').write_text('# SCREEN_ASPECT\t1\n', encoding='utf-8')
+                rows = {row['env']: row for row in settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']}
+                self.assertIn(choice, dict(rows['DM_SCREEN_ASPECT']['options']))
+                self.assertIn('0', dict(rows['DM_SCREEN_ASPECT']['options']))
+
     def test_malformed_platform_defaults_are_rejected(self):
         for default in ('1|', '|0', '1|0|1'):
             with self.subTest(default=default), tempfile.TemporaryDirectory() as tmp:

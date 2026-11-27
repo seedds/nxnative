@@ -813,6 +813,13 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md#found-on-this-game).
 
 
+### A pool table kept the ID of a retired texture view
+
+- **Symptom:** after a texture is finalized, a current-generation pool table can still name a resource ID whose descriptor no longer has a view. In Cyberpunk 2077 a depth-feedback snapshot could not resolve that ID and fell back to ending the pass at each depth write.
+- **Cause:** `serial_del` can publish its storage change before `treg_retire_serial` takes the registration lock to drop the views. A replay between those steps refreshes the table while the descriptor still looks live, so the table does not list the entry as transient.
+- **Fix:** publish a note for the serial after dropping its registered views, under the registration lock. The next pool table update takes those entries again and tracks any views recreated for this submission.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_notes` replays between removal of the live serial and descriptor retirement, checks the retirement note, and verifies refresh through the next two submissions.
+
 ### Pool shaders taken as depth readers
 
 - **Symptom:** a game that reads textures through a pool runs slower than its draws explain, with passes of one draw each on the same targets. A pass dump (`DM_NVN_PASSDUMP`) shows `SetRenderTargets` going on in the open pass and the pass ending anyway. Ocarina of Time in Kokiri Forest: two frames of four had 219 passes, 127 of them on the 128x128 reflection probe's cube faces, and frame times of 15, 15, 18, 18.5 ms in a cycle.

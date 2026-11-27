@@ -8887,9 +8887,13 @@ static void treg_retire_serial(uint64_t ser) {
     // only their submission keeps a transient view alive. Walk this serial's
     // descriptors, rather than scanning the whole ID space at each Finalize.
     os_unfair_lock_lock(&g_rmu);
-    for (int n = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &ser); n; n = g_treg[n - 1].next) {
+    int head = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &ser);
+    for (int n = head; n; n = g_treg[n - 1].next) {
         treg_t *r = &g_treg[n - 1]; r->retired = 1; treg_drop_views(r);
     }
+    // Replay can consume serial_del's note before the descriptors retire. Notify it again
+    // while holding the descriptor lock so tables pick up the change to view lifetime.
+    if (head) own_note(ser);
     os_unfair_lock_unlock(&g_rmu);
 }
 static void treg_res_check(void) {

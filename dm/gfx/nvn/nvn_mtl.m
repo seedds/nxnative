@@ -2177,6 +2177,8 @@ static void geo_mesh_flush_pass(void);   // a waiting run of mesh draws is drawn
 // Metal 4 conservative barriers (first version): a consumer barrier at the start of an encoder (all prior work → this encoder) and a producer barrier at the end (this encoder and earlier → later encoders).
 // Only the one at the start is not enough: t_rt_range 'pass 1 → pass 2 → copy' read back black, and after adding the end barrier it is 19/19. Old-queue encoders (upload / diagnostics / present) do not go through these barriers.
 static int g_pass_swrite;   // the open draw pass has shader writes (swrite_note)
+static int g_pass_swst;     // the stages those writes came from (prog_swrites bits: 1 vertex, 2 fragment, 4 another)
+static int g_pass_vbar;     // the open draw pass used an in-pass vertex-stage barrier (order_draw / DM_NVN_VBAR_PASS): task/mesh draws end the pass first
 static int g_pass_order;    // ordering barriers came in the open draw pass after its draws, none of which wrote (1 primitives, 2 fragments): the next draw that writes is ordered after them first (order_draw)
 static int g_pass_late_res; // a draw of the open pass reads memory in a stage after the vertex stage (order_note)
 static uint64_t g_order_vbar;   // ordering barriers kept inside the pass as a vertex-to-vertex barrier (prog_swrites)
@@ -7266,6 +7268,8 @@ static NSUInteger g_rp_aw, g_rp_ah; static void rt_dims(NSUInteger *tw, NSUInteg
 static int rpa_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_RP_AREA"); v = !(e && !strcmp(e, "0")); if (!v) MLOG("DM_NVN_RP_AREA=0: passes on very large targets cover the whole target"); } return v; }
 static int g_rp_whole;   // the pass about to open must cover the whole target (rp_begin)
 static int g_rt_merged;         // The current pass has already been continued (at least one same-target SetRenderTargets was merged in)
+static int g_rt_sub;            // the game's targets are a leading part of the open pass's (g_rt_super): the pass goes on with the others attached and unwritten (rt_prefix)
+static uint64_t g_rt_sub_n;
 static uint64_t g_rt_merge_n;   // Cumulative continuation count
 // DM_NVN_ENC_LABEL=1: label every render encoder with 'p<index of the render pass within the frame> <width>x<height> <first 8 digits of the first draw's fragment key> d<draw count>'; in Instruments (xctrace Game Performance / Metal System Trace)
 // the encoder track and the GPU interval table carry this name directly, and shader_map.tsv maps it back to the shader; off by default (one string allocation per pass)
@@ -7460,7 +7464,7 @@ static void rp_end_at(const char *fn, int line) { if (g_enc) { AP_B; geo_mesh_fl
     if (enc_label_on()) { static uint64_t lf = ~0ull, base; uint64_t f = atomic_load(&g_cur_frame); if (f != lf) { lf = f; base = g_stat_pass - 1; }   // Intra-frame serial: the same pass has the same name every frame, so the table can aggregate by name
         [(id)g_enc setLabel:[NSString stringWithFormat:@"p%02llu %dx%d %s d%d", (unsigned long long)(g_stat_pass - base), g_el_w, g_el_h, g_el_key[0] ? g_el_key : "-", g_el_draws]]; }
     sd_finish(); enc_r_end_pass(g_enc); g_gp_bw_l0 = g_bw_load; g_gp_bw_s0 = g_bw_store;   // the profile's per-pass ledger counts from the previous pass end, profiled or not
-    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_sm_pass = 0; g_fsp_pass = 0; ts_after(); ms_after();
+    g_enc = nil; g_enc_geo_nocolor = 0; g_rt_merged = 0; g_rt_sub = 0; g_sm_pass = 0; g_fsp_pass = 0; ts_after(); ms_after();
     if (g_nubd && g_nubd >= ubd_lazy()) ubd_flush();   // the inline updates deferred in this pass, in order (see mtl_sub_update); across passes they wait for the next copy or dispatch (blit_raw)
     if (g_nbcrt) bcrt_flush();   // blocks drawn into shadows go back into their compressed textures
     if (g_nrtm) rt_mirror_flush();
@@ -7658,7 +7662,7 @@ static void bare_dims(NSUInteger *w, NSUInteger *h);
 static void *rp_begin_ex_(int clear_only) {
     if (g_enc) return (__bridge void *)g_enc;
     if (g_nlc) lc_take_rt();   // waiting lazy clears: this pass's load actions, or landed before it, so none waits past a pass that opens (see lc_take_rt)
-    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_order = g_pass_late_res = 0; g_sm_pass = 0; g_fsp_pass = 0;
+    g_enc_mode = clear_only; g_enc_geo_nocolor = g_geo_omit_colors; g_pass_swrite = g_pass_swst = g_pass_vbar = g_pass_order = g_pass_late_res = 0; g_rt_sub = 0; g_sm_pass = 0; g_fsp_pass = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return NULL; }
     if (g_imfit_npend) img_fit_upgrade();   // no pass is open here: the upgrade's copy may run (img_fit)
     rt_view_upgrade_all(clear_only);   // as above: before any slot is attached (rt_view_upgrade_all)
@@ -10194,7 +10198,7 @@ static int prog_swrites(NvProg *pr) {
     if (pr && pr->c_sw) return pr->c_sw - 1;
     int w = 0;
     for (int st = 0; pr && st < 6; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
-        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_IMGU || sh->rf.b[i].kind == NVN_RB_IMGP || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_GMEM)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
+        for (int i = 0; i < sh->rf.nb; i++) if (sh->rf.b[i].rw && (sh->rf.b[i].kind == NVN_RB_IMG || sh->rf.b[i].kind == NVN_RB_IMGU || sh->rf.b[i].kind == NVN_RB_IMGP || sh->rf.b[i].kind == NVN_RB_SBUFP || sh->rf.b[i].kind == NVN_RB_SBUFU || sh->rf.b[i].kind == NVN_RB_SBUFQ || sh->rf.b[i].kind == NVN_RB_GMEM)) { w |= st == 0 ? 1 : st == 1 ? 2 : 4; break; } }
     if (pr) pr->c_sw = (int8_t)(w + 1);
     return w;
 }
@@ -10207,12 +10211,13 @@ static void order_note(NvProg *pr) {   // after each draw of the pass: does it r
 // orders only primitives (whose fragments NVN leaves unordered too), a barrier inside the pass from the vertex stage to the stages that write keeps the pass and its attachments (the
 // skinning draws come in the middle of Xenoblade Chronicles 2's geometry pass, and ending it there split it about a hundred times a frame). Otherwise, or for a write in another stage,
 // or in a merged or deferred pass, whose encoder holds more than these draws, the pass ends first: Metal has no barrier from the fragment stage back to the vertex stage inside a pass
+static int vbar_pass_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_VBAR_PASS", 1); if (!m) MLOG("DM_NVN_VBAR_PASS=0: a game barrier after vertex-stage shader writes ends the draw pass"); } return sw_on(m); }
 static void order_draw(NvProg *pr, int merged) {   // merged: a merged (readable-tile, slice-merged) or deferred pass
     int w = g_enc && g_pass_order ? prog_swrites(pr) : 0;
     if (!w) return;
     if (!(w & 4) && !((g_pass_order & 2) && g_pass_late_res) && !merged) {
         [g_enc barrierAfterEncoderStages:MTLStageVertex beforeEncoderStages:(w & 1 ? MTLStageVertex : 0) | (w & 2 ? MTLStageFragment : 0) visibilityOptions:resource_vis()];
-        g_pass_order = 0; g_order_vbar++;
+        g_pass_order = 0; g_pass_vbar = 1; g_order_vbar++;
         static int once; if (!once++) MLOG("a shader write after a game barrier in a draw pass: a barrier from the vertex stage in the pass (first case pass %llu)", g_stat_pass);
         PD("M %llu a shader write after an ordering barrier; barrier from the vertex stage in the pass", g_stat_pass);
         return;
@@ -10222,8 +10227,9 @@ static void order_draw(NvProg *pr, int merged) {   // merged: a merged (readable
 }
 static void swrite_note(NvProg *pr) {
     if (!pr) return;
+    int w = prog_swrites(pr); g_pass_swst |= w;
     if (g_pass_swrite) { g_vbuf_write_epoch++; return; }   // further shader writes also invalidate aligned vertex snapshots
-    if (prog_swrites(pr)) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
+    if (w) { g_pass_swrite = 1; g_vbuf_write_epoch++; }
 }
 static void udc_note_draw(NvProg *pr, uint32_t raster_mask) {
     int image_write = pr && pr->c_iw ? pr->c_iw - 1 : 0;
@@ -16814,6 +16820,30 @@ static int view_same(const view_t *x, const view_t *y) {
     return 1;
 }
 static const char *g_rt_diff;   // why the last rt_same said no (the pass dump's M line)
+static p_set_rt g_rt_super;     // the open pass's targets while g_rt_sub
+static int rt_same(const p_set_rt *a, const p_set_rt *b);
+static int rt_ncolor(const p_set_rt *a) { int n = a->n; while (n > 0 && !a->color[n - 1]) n--; return n; }
+// b is a leading part of a: b's colour slots are a's first ones (texture and view), the rest of a's are not in b, the depth / stencil target is the same,
+// and the extra trailing targets did not shrink the open pass's bounds or alter its sample count.
+// Xenoblade Chronicles: Definitive Edition binds its 8-target G-buffer for each character's skinning draw, then the first 5 of them with the same depth for the character's draws
+static int rt_prefix(const p_set_rt *a, const p_set_rt *b) {
+    int na = rt_ncolor(a), nb = rt_ncolor(b);
+    if (nb < 1 || nb >= na) return 0;
+    p_set_rt x = *a; x.n = nb; for (int k = nb; k < 8; k++) { x.color[k] = NULL; x.has_cview[k] = 0; }
+    if (!rt_same(&x, b)) return 0;
+    NSUInteger bw = 0, bh = 0; uint32_t bsamp = 0;
+    for (int k = 0; k < nb; k++) {
+        const tex_t *t = b->color[k]; if (!t || rt_dup_slot(b, k) || nvn_fmt_bc(t->d.format)) continue;
+        uint32_t lv = b->has_cview[k] && b->cview[k].set_levels ? b->cview[k].base_level : 0, w = 0, h = 0;
+        tex_lsize(t, lv, &w, &h, NULL); bw = bw ? MIN(bw, w) : w; bh = bh ? MIN(bh, h) : h; bsamp = t->d.samples > 1 ? (uint32_t)t->d.samples : 1;
+    }
+    if (b->depth) {
+        const tex_t *t = b->depth; uint32_t lv = b->has_dview && b->dview.set_levels ? b->dview.base_level : 0, w = 0, h = 0;
+        tex_lsize(t, lv, &w, &h, NULL); bw = bw ? MIN(bw, w) : w; bh = bh ? MIN(bh, h) : h; bsamp = t->d.samples > 1 ? (uint32_t)t->d.samples : 1;
+    }
+    return bw && g_pass.tw == bw && g_pass.th == bh && g_pass.samples == bsamp;
+}
+static int rtsub_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_RT_SUBSET", 1); if (!m) MLOG("DM_NVN_RT_SUBSET=0: a leading part of the open pass's targets begins a pass of its own"); } return sw_on(m); }
 static int rt_same(const p_set_rt *a, const p_set_rt *b) {   // Same set of targets: compare by texture serial and view (not by object pointer: the game may copy texture objects by value)
     int na = a->n, nb = b->n;   // trailing empty colour slots do not change the set
     while (na > 0 && !a->color[na - 1]) na--;
@@ -18536,6 +18566,25 @@ static int mdx_next(const p_draw *dw, const p_draw_idx *di) {
 #include "nvn_feedback.inc"
 
 static int skip_fs_draw(NvProg *pr);   // DM_NVN_SKIP_FS (diagnostic), also for task / mesh draws
+// While the open pass carries extra trailing targets beyond R.rt (g_rt_sub), a draw must neither write nor read them.
+// Check the full program (including task/mesh/geometry stages before draw_() swaps in a synthetic raster program).
+static void rt_sub_check(NvProg *pr) {
+    if (!g_rt_sub || !g_enc) return;
+    int n = rt_ncolor(&R.rt);
+    NvShader *fs = pr && !S.rast_discard ? pr->sh[1] : nil;
+    const char *why = NULL;
+    if (fs && (!fs->rf.color_known || fs->rf.color_mask >> n || ms_fs_override(fs))) why = "writes past the game's targets";
+    else if (fs && lop_on()) why = "uses a logic operation";
+    else {
+        p_set_rt keep = R.rt, x = g_rt_super;
+        for (int k = 0; k < n; k++) x.color[k] = NULL;
+        x.depth = NULL; x.has_dview = 0;
+        R.rt = x;
+        if (draw_samples_rt(pr)) why = "reads one of the pass's other targets";
+        R.rt = keep;
+    }
+    if (why) { PD("M %llu leading-target continuation ends: the draw %s (%s)", g_stat_pass, why, g_dsr_why ?: "-"); rp_end(); }
+}
 #include "nvn_geometry.inc"
 static int geo_drawing(void) { return g_geo_program != nil || g_geo_mesh.on; }
 #include "nvn_tess.inc"   // patches: vertex capture -> hull kernel -> domain as the vertex stage
@@ -18944,6 +18993,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     g_samples_fb_left = 1;
     int rt_sampled = g_rt_merged && draw_samples_rt(pr); g_samples_fb_left = 0;
+    if (!rt_sampled) rt_sub_check(pr);
     if (rt_sampled) { static int once; if (!once++) MLOG("same-target continuation: a draw in the continued pass samples an attachment; split here (first case pass %llu)", g_stat_pass);
         PD("M %llu a draw in the continued pass samples an attachment (%s); split here", g_stat_pass, g_dsr_why ?: "?"); { static int nw; if (nw++ < 6) MLOG("continued pass split: %s (pass %llu)", g_dsr_why ?: "?", g_stat_pass); } rp_end(); }
     order_draw(pr, g_sm_pass);   // a write after an ordering barrier in the pass
@@ -21581,8 +21631,19 @@ void mtl_exec(const uint8_t *p) {
                 if (g_unb) g_unb = 0;   // targets again: compared with the open pass's below
                 // Do not continue a render pass opened only for a clear; one with fewer depth / stencil attachments can be continued (check the planes before drawing)
                 if (g_enc && R.has_rt && !empty) {
-                    int same = rt_same(&R.rt, r), can_continue = g_enc_mode != 1 && !pend && rtc_on();
-                    if (same && can_continue) { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("same-target continuation: first case pass %llu", g_stat_pass); PD("M %llu same-target continuation pass", g_stat_pass); R.rt = *r; break; }
+                    const p_set_rt *cur_rt = g_rt_sub ? &g_rt_super : &R.rt;
+                    int same = rt_same(cur_rt, r), can_continue = g_enc_mode != 1 && !pend && rtc_on();
+                    if (same && can_continue) {
+                        if (g_rt_sub) { g_rt_sub = 0; PD("M %llu the pass's own targets again", g_stat_pass); }
+                        else { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("same-target continuation: first case pass %llu", g_stat_pass); PD("M %llu same-target continuation pass", g_stat_pass); }
+                        R.rt = *r; break;
+                    }
+                    if (!same && can_continue && rtsub_on() && !g_sm_pass && !g_fsp_pass && !g_nbcrt && rt_prefix(cur_rt, r)) {
+                        if (!g_rt_sub) g_rt_super = R.rt;
+                        g_rt_sub = 1; g_rt_merged = 1; R.rt = *r; g_rt_sub_n++;
+                        if (g_rt_sub_n == 1) MLOG("leading-target continuation: the game's targets are the first %d of the open pass's; it goes on (first case pass %llu)", rt_ncolor(r), g_stat_pass);
+                        PD("M %llu leading-target continuation: the first %d targets of the pass", g_stat_pass, rt_ncolor(r)); break;
+                    }
                     if (!same && can_continue) { static int nd; if (nd++ < 8) MLOG("same-target continuation refused (%s) pass %llu", g_rt_diff ?: "?", g_stat_pass); PD("M %llu new targets (%s)", g_stat_pass, g_rt_diff ?: "?"); }
                     if (same) { static int nw; if (nw++ < 8) MLOG("same targets, no continuation: enc_mode=%d pend=%d rtc=%d pass %llu", g_enc_mode, pend, rtc_on(), g_stat_pass); }
                 }
@@ -21678,9 +21739,22 @@ void mtl_exec(const uint8_t *p) {
             case OP_DISPATCH: if (g_csh_n && csh_take(p)) { PD("H %llu dispatch already run ahead of the pass", g_stat_pass); break; }
                 dispatch(a); break;
             case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4);   // ordered at the next draw pass (barrier_game); inside a pass with shader writes, the pass ends first (swrite_note); in one without, before its next write (prog_swrites)
-                int order = g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT)), split = order && g_pass_swrite;
-                PD("I %llu barrier bits %#x%s", g_stat_pass, bits, split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
-                if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
+                int order = g_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT));
+                int split = g_enc && g_pass_swrite && (order || (bits & NVN_BARRIER_ORDER_INDIRECT_DATA_BIT));
+                // The pass's writes all came from vertex stages (Monolith's skinning draws, one per character, each writing the bone matrices of one shared buffer, then the barrier
+                // before the next one): a barrier inside the pass from the vertex stage to the vertex and fragment stages orders them for every later draw and orders the earlier draws'
+                // vertex reads before a later write. It cannot order fragments back to vertices or indirect draw argument fetch, so ORDER_INDIRECT_DATA or a fragment barrier after draws
+                // that read memory in later stages (order_note) still ends the pass. DM_NVN_VBAR_PASS=0 ends the pass, as before; ab alternates with DM_AB
+                int vbar_keep = split && g_pass_swst == 1 && !(bits & NVN_BARRIER_ORDER_INDIRECT_DATA_BIT)
+                    && !((bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT)) && g_pass_late_res)
+                    && !g_sm_pass && !g_fsp_pass && vbar_pass_on();
+                PD("I %llu barrier bits %#x%s", g_stat_pass, bits, vbar_keep ? " (render pass open; vertex barrier keeps the pass)" : split ? ": ends the pass (shader writes)" : order ? " (render pass open; a later shader write is ordered after its draws)" : g_enc ? " (render pass open)" : "");
+                if (vbar_keep) {
+                    [g_enc barrierAfterEncoderStages:MTLStageVertex beforeEncoderStages:MTLStageVertex | MTLStageFragment visibilityOptions:resource_vis()];
+                    g_order_vbar++; g_pass_vbar = 1;
+                    static int once; if (!once++) MLOG("a game barrier (bits %#x) after vertex-stage shader writes in a draw pass: a barrier from the vertex stage keeps the pass (first case pass %llu)", bits, (unsigned long long)g_stat_pass);
+                    PD("M %llu vertex-stage writes before the barrier: a barrier from the vertex stage, the pass goes on", g_stat_pass);
+                } else if (split) { rp_end(); static int once; if (!once++) MLOG("a game barrier (bits %#x) after shader writes in a draw pass: the pass ends there (first case pass %llu)", bits, (unsigned long long)g_stat_pass); }
                 else if (order) g_pass_order |= (bits & NVN_BARRIER_ORDER_PRIMITIVES_BIT ? 1 : 0) | (bits & (NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT) ? 2 : 0);
                 if (g_tf_enc && (bits & (NVN_BARRIER_ORDER_PRIMITIVES_BIT | NVN_BARRIER_ORDER_FRAGMENTS_BIT | NVN_BARRIER_ORDER_FRAGMENTS_TILED_BIT))) g_tf_bar = 1;   // the next capture of the open capture pass waits for its earlier ones (tf_order)
                 if ((bits & GAME_BARRIER_FULL) && g_mdx_wr != ~0ull && g_mdx_wr != g_vbuf_write_epoch) g_mdx_epoch++;   // a draw may have written a record or count that was copied before it (g_mdx_wr)

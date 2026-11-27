@@ -147,7 +147,7 @@ static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
 // The present's own queue (DM_PRESENT_QUEUE, present_copy): a present waits there for its drawable, which the display can hold back for a refresh or more. On g_q4 that
-// wait held back every game command buffer committed after it (issue #2362, @gpu_q_ms). The present reads a copy of the picture made on g_q4
+// wait holds back every game command buffer committed after it (issue #2362, @gpu_q_ms). The present reads a copy of the picture made on g_q4
 static id<MTL4CommandQueue> g_pq4;
 static _Atomic int g_classic_ok;   // mtl_device_classic permits fallback while initialization is in progress
 static int g_classic;   // the device has no Metal 4 and only the classic part started
@@ -163,8 +163,8 @@ static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
 // With DM_PRESENT_QUEUE, ring slot i (ticket % 3, the present allocator's index) holds the copy of the picture the present on g_pq4 reads (present_copy). view: what the present
-// samples, tex itself or a view of it; cb: the copy's command buffer on g_q4; copied: the ticket of the slot's last copy. g_pring_ev: the newest ticket whose copy has run
-static struct { id<MTLTexture> tex, view; id<MTL4CommandBuffer> cb; uint64_t copied; } g_pring[3];
+// samples, tex itself or a view of it; cb: the copy's command buffer on g_q4. g_pring_ev: the newest ticket whose copy has run
+static struct { id<MTLTexture> tex, view; id<MTL4CommandBuffer> cb; } g_pring[3];
 static id<MTLSharedEvent> g_pring_ev;
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct, g_ot;   // g_ot: the object stage of a task / mesh draw (mesh_tasks_draw)
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
@@ -1199,7 +1199,7 @@ static void rop_f16_probe(void) {
     }
 }
 
-// DM_PRESENT_QUEUE=0 keeps the whole present on g_q4, as before g_pq4 (no copy, no second queue)
+// DM_PRESENT_QUEUE=0: the whole present on g_q4, with no copy and no second queue
 static int g_present_queue_on = -1;
 static int present_queue_on(void) {
     if (g_present_queue_on < 0) {
@@ -3561,7 +3561,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[182];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[181];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -22726,6 +22726,14 @@ static void present_gpu_note(double s, int fx) {
     MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? "through MetalFX" : "through the bilinear pass", a[299], a[569], a[599]);
     n[fx] = 0;
 }
+// A present command buffer completed on the GPU (its feedback): its ticket and its allocator are done, one present fewer is in flight, and the external textures released
+// while presents were in flight retire once none is. gpu_s: its GPU time for present_gpu_note (not a time: none)
+static void present_completed(uint64_t ticket, int alloc_i, double gpu_s, int fx_kind) {
+    pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
+    NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
+    present_gpu_note(gpu_s, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+    if (retire) ext_retire(retire);
+}
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
 // External presents wait on g_q4, but diagnostic readback can use another queue. Wait for the producer before any read of that frame.
 static id<MTLSharedEvent> g_ext_ev;
@@ -22742,8 +22750,8 @@ static void present_shot(id<MTLTexture> src, const char *path, const int crop[4]
 // Returns what the present samples, or nil, and that present stays on g_q4, when the slot cannot be made or the source is not a single-sample 2D texture (the present's texture2d
 // binding takes no other kind either).
 // The copy is all of level 0, the only level the present samples (its sampler has no mip filter); the crop applies to it as to the source. Sampling decodes nothing the source
-// would not: a view of the slot takes the source's swizzle and, for sRGB, the non-sRGB format present_raw_src gives. The caller has waited for the slot's last present and copy
-// (its last readers and writer) and reset the slot's allocator, which encodes this copy and then the present: a remade slot's old texture can go at once
+// would not: a view of the slot takes the source's swizzle and, for sRGB, the non-sRGB format present_raw_src gives. The caller has waited for the slot's last present, which ran
+// after the slot's last copy (its last reader and writer), and reset the slot's allocator, which encodes this copy and then the present: a remade slot's old texture can go at once
 static id<MTLTexture> present_copy(id<MTLTexture> src, int k, uint64_t ticket) {
     if (src.textureType != MTLTextureType2D || src.sampleCount != 1) {
         static int once; if (!once++) MLOG("present: a source of texture type %lu with %lu samples is presented on the game's queue", (unsigned long)src.textureType, (unsigned long)src.sampleCount);
@@ -22760,7 +22768,7 @@ static id<MTLTexture> present_copy(id<MTLTexture> src, int k, uint64_t ticket) {
         g_pring[k].tex = g_pring[k].view = nil;
         MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
         d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead | (need_view ? MTLTextureUsagePixelFormatView : 0);
-        if (!(t = [g_dev newTextureWithDescriptor:d])) { RED_ONCE(180, "present: no texture for the copy's ring slot %d (%lux%lu format %lu); presented on the game's queue", k, (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat); return nil; }
+        if (!(t = [g_dev newTextureWithDescriptor:d])) { RED_ONCE(179, "present: no texture for the copy's ring slot %d (%lux%lu format %lu); presented on the game's queue", k, (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat); return nil; }
         t.label = @"present copy"; res_add(t); res_commit(); g_pring[k].tex = t;
         MLOG("present: copy ring slot %d %lux%lu format %lu", k, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
     }
@@ -22769,7 +22777,7 @@ static id<MTLTexture> present_copy(id<MTLTexture> src, int k, uint64_t ticket) {
     if (!need_view) v = t;
     else if (!v || v == t || v.pixelFormat != vf || memcmp(&vs, &sw, sizeof sw)) {
         v = [t newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
-        if (!v) { RED_ONCE(181, "present: no view of the copy's ring slot %d (format %lu); presented on the game's queue", k, (unsigned long)vf); return nil; }
+        if (!v) { RED_ONCE(180, "present: no view of the copy's ring slot %d (format %lu); presented on the game's queue", k, (unsigned long)vf); return nil; }
     }
     g_pring[k].view = v;
     id<MTL4CommandBuffer> cb = g_pring[k].cb;
@@ -22793,7 +22801,6 @@ static id<MTLTexture> present_copy(id<MTLTexture> src, int k, uint64_t ticket) {
     [g_q4 signalEvent:g_pring_ev value:ticket];
     pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "present_copy (present copy)");
-    g_pring[k].copied = ticket;
     return v;
 }
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], uint64_t ev_val, id<CAMetalDrawable> supplied, double target_ts, double latch_ts) {
@@ -22873,14 +22880,13 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
     }
-    // A copy whose present was not committed (!kind below) is the slot's last user: its allocator and texture wait for it too
-    if (g_pq4 && g_pring[alloc_i].copied > g_pring_ev.signaledValue && ![g_pring_ev waitUntilSignaledValue:g_pring[alloc_i].copied timeoutMS:10000])
-        RED_ONCE(179, "present: the copy of ticket %llu did not finish on the GPU within %d s", (unsigned long long)g_pring[alloc_i].copied, 10);
     if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
-    // With its own queue, the present reads a copy made on g_q4 and waits on g_pq4 for that copy and for the drawable; the game's later work on g_q4 waits for neither
+    // With its own queue, the present reads a copy made on g_q4 and waits on g_pq4 for that copy and for the drawable; the game's later work on g_q4 waits for neither.
+    // Every copy is followed by a present command buffer on g_pq4, counted in g_pq_inflight and the slot's g_present_alloc_done: a crop the present refuses is refused first
     id<MTL4CommandQueue> q = g_q4; id<MTLTexture> show = src;
     if (g_pq4) {
+        NSUInteger cr[4]; if (!present_crop_rect(src, crop, cr)) return 0;
         if ((show = present_copy(src, alloc_i, ticket))) { q = g_pq4; [q waitForEvent:g_pring_ev value:ticket]; }
         else {   // on g_q4 for once: the presents still on g_pq4 run first, as they share the scaler's textures (g_fx_present)
             show = src;
@@ -22894,7 +22900,18 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
     int kind = present_encode_m4(cb, show, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     id<MTLResidencySet> drs = ((CAMetalLayer *)dr.layer).residencySet;   // the drawable's
-    if (!kind) { cb_end(cb, drs); [q signalDrawable:dr]; return 0; }
+    id<MTL4CommandBuffer> buffers[] = {cb};
+    if (!kind) {
+        cb_end(cb, drs);
+        if (q == g_pq4) {   // its copy is on g_q4 and reads the game's texture: this command buffer behind it keeps the ticket in flight until then (g_ext_retire, the slot)
+            MTL4CommitOptions *eo = [MTL4CommitOptions new];
+            [eo addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; present_completed(ticket, alloc_i, -1, 0); }];
+            pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+            [q commit:buffers count:1 options:eo];
+            g_present_alloc_fence[alloc_i] = ticket;
+        }
+        [q signalDrawable:dr]; return 0;
+    }
     int fx_kind = kind == PRESENT_METALFX;
     cb_end(cb, drs);
     MTL4CommitOptions *o = [MTL4CommitOptions new];
@@ -22903,12 +22920,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
         else if (gpu_time_valid(f.GPUStartTime, f.GPUEndTime) && f.GPUStartTime >= committed) nvn_queue_history_put(&g_present_history, ticket, (f.GPUStartTime - committed) * 1e3);
         if (latch_ts > 0 && f.GPUEndTime > latch_ts) atomic_fetch_add(&g_link_latch_late_gpu, 1);
-        pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
-        NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
-        present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind); pthread_mutex_unlock(&g_pq_mu);
-        if (retire) ext_retire(retire);
+        present_completed(ticket, alloc_i, f.GPUEndTime - f.GPUStartTime, fx_kind);
     }];
-    id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
     committed = CACurrentMediaTime();
     [q commit:buffers count:1 options:o];
@@ -23352,8 +23365,13 @@ static void present_suspend_wait(void) {
     g_pq_done = g_pq_in;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
-    // A present's copy is on g_q4 outside any submission: those of the presents waited for above have run before them, one whose present was not committed may not have
-    for (int k = 0; g_pq4 && k < 3; k++) if (g_pring[k].copied && ![g_pring_ev waitUntilSignaledValue:g_pring[k].copied timeoutMS:2000]) RED_ONCE(179, "present: the copy of ticket %llu did not finish on the GPU within %d s", (unsigned long long)g_pring[k].copied, 2);
+    // Every copy runs before a present command buffer counted in g_pq_inflight, so the copy ring is idle now: it goes while the game is suspended and is made again at the next
+    // present. None is running (above), and none starts until the resume clears g_present_suspended (present_now returns at it)
+    if (g_pq4 && atomic_load(&g_present_suspended)) {
+        int freed = 0;
+        for (int k = 0; k < 3; k++) if (g_pring[k].tex) { res_remove(g_pring[k].tex); g_pring[k].tex = g_pring[k].view = nil; freed = 1; }
+        if (freed) res_commit();
+    }
 }
 static void *present_main(void *arg) {
     (void)arg;

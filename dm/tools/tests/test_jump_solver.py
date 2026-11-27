@@ -118,6 +118,66 @@ class Bounds(Solver):
         w = self.base() + [ldr_w(18), sub_w(0, 18, 0xd1), cmp_w(0, 0x31), bcond(HI, 20, 40), ldrsw(18, 4, 0), ADDR(18, 18, 4), BR(18)] + [RET] * 55
         self.assertEqual(self.site(w), t)
 
+    def test_masked_copy_wider_than_the_low_bits(self):
+        # DRAGON BALL FighterZ 1.50 main+0x252b60: and w18,w8,#0xffff; cmp w18,#0x10; b.hi; and x18,x8,#0xffff; ldrsw x18,[x14,x18,lsl #2].
+        # A guard on a mask wider than 12 bits records its range on (root & mask), so any subsequent or earlier mask of the same root inherits the bound.
+        def run(load, copy, again, between=()):
+            head = self.base() + [load(8), copy, cmp_w(copy & 31, 16)]
+            at = 4 * len(head)   # the b.hi
+            body = list(between) + [again, ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)]
+            start = at + 4 + 4 * len(body)
+            t = [start + 4 * i for i in range(17)]; self.table(t)
+            return self.site(head + [bcond(HI, at, start + 4 * 17)] + body + [RET] * 18), t
+        for load, copy in ((ldr_w, and_w(18, 8, 16)),    # the copy in x18 itself, overwritten by the index (FighterZ)
+                           (ldr_w, and_w(16, 8, 16)),    # the copy in another register
+                           (ldr_x, and_w(18, 8, 16))):   # a 64-bit x8: the copy reads w8 (w, and 0xffff), the index x8 (and 0xffff)
+            found, t = run(load, copy, and_x(18, 8, 16))
+            self.assertEqual(found, t)
+        # Checked register clobbered before the second mask: the bound lives on x8's root, not on the temporary copy
+        found, t = run(ldr_w, and_w(18, 8, 16), and_x(18, 8, 16), [movz(18, 0)])
+        self.assertEqual(found, t)
+        # Narrower submasks (15-bit and 8-bit) inherit the 16-bit bound
+        for bits in (15, 8):
+            found, t = run(ldr_x, and_w(18, 8, 16), and_x(18, 8, bits))
+            self.assertEqual(found, t)
+        # Pre-check mask on a 64-bit root: x6 is masked before the guard on w18
+        head = self.base() + [ldr_x(8), and_x(6, 8, 16), and_w(18, 8, 16), cmp_w(18, 16)]
+        at = 4 * len(head); body = [ldrsw(18, 4, 6), ADDR(18, 18, 4), BR(18)]
+        start = at + 4 + 4 * len(body); t = [start + 4 * i for i in range(17)]; self.table(t)
+        self.assertEqual(self.site(head + [bcond(HI, at, start + 4 * 17)] + body + [RET] * 18), t)
+        # Phi root after an if/else join: masked bounds attach to phi roots too
+        phi = self.base() + [ldr_w(0), cbz(0, 12, 24), ldr_w(8), B(20, 28), ldr_w(8), and_w(18, 8, 16), cmp_w(18, 16)]
+        at = 4 * len(phi); body = [and_x(18, 8, 16), ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)]
+        start = at + 4 + 4 * len(body); t = [start + 4 * i for i in range(17)]; self.table(t)
+        self.assertEqual(self.site(phi + [bcond(HI, at, start + 4 * 17)] + body + [RET] * 18), t)
+        # Post-mask offset check: sub w0, w18, #5; cmp w0, #16; b.hi; and x18, x8, #0xffff; sub w18, w18, #5
+        off = self.base() + [ldr_x(8), and_w(18, 8, 16), sub_w(0, 18, 5), cmp_w(0, 16)]
+        at = 4 * len(off); body = [and_x(18, 8, 16), sub_w(18, 18, 5), ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)]
+        start = at + 4 + 4 * len(body); t = [start + 4 * i for i in range(17)]; self.table(t)
+        self.assertEqual(self.site(off + [bcond(HI, at, start + 4 * 17)] + body + [RET] * 18), t)
+        # Refusals: wider mask, x8 overwritten after check, and an unchecked path joining before the load
+        found, _ = run(ldr_w, and_w(16, 8, 16), and_x(18, 8, 17))
+        self.assertIsNone(found)
+        for copy in (and_w(18, 8, 16), and_w(16, 8, 16)):
+            found, _ = run(ldr_w, copy, and_x(18, 8, 16), [ldr_w(8)])
+            self.assertIsNone(found)
+        unchecked = self.base() + [ldr_w(0), ldr_w(8), cbz(0, 16, 32), and_w(18, 8, 16), cmp_w(18, 16), bcond(HI, 28, 48 + 4 * 17),
+                                   and_x(18, 8, 16), ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)]
+        t = [48 + 4 * i for i in range(17)]; self.table(t)
+        self.assertIsNone(self.site(unchecked + [RET] * 18))
+
+    def test_masked_range_soundness(self):
+        # Non-contiguous mask must not collapse into full range or filter low 12 bits; submask loses its lower bound if a cleared bit may be set
+        c = jump_solver._mk(5, 10, jump_solver.FULL, ((0xff00, 0, 0),))
+        self.assertEqual(c[:2], (5, 10))
+        self.assertEqual(c[2], jump_solver._pattern(5, 10))
+        self.assertEqual(c[3], ((0xff00, 0, 0),))
+        c2 = jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((0xffff, 5, 0x9000),))
+        self.assertEqual(jump_solver._mrange(c2, 0x7fff), (0, 0x7fff))
+        c3 = jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((0xffff, 5, 0x10),))
+        self.assertEqual(jump_solver._mrange(c3, 0x7fff), (5, 0x10))
+        self.assertEqual(jump_solver._mrange(c3, 0x1ffff), (0, 0x1ffff))
+
     def test_64_bit_compare_and_32_bit_values(self):
         # OCTOPATH TRAVELER main+0x1676f30: cmp x22,#0x10 bounds the 64-bit index. A 32-bit compare bounds it only where the upper half is known zero
         t = [36 + 4 * i for i in range(5)]; self.table(t)
@@ -137,9 +197,16 @@ class Bounds(Solver):
 
     def test_widening_keeps_the_parts_that_held(self):
         # ASTRAL CHAIN main+0x6db1a4: w12 - 2 checked against 3 on four paths of a loop; the root's full range grows past the visits allowed, its low 32 bits do not
-        r = ('p', 1, 12, 64); old = jump_solver._mk(2, 5, jump_solver.FULL, 2, 5); new = jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, 2, 5)
-        self.assertEqual(jump_solver._widen(old, new, r)[3:], (2, 5))
-        self.assertEqual(jump_solver._widen(new, jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, 0, 9), r), jump_solver._default(r))
+        r = ('p', 1, 12, 64)
+        old = jump_solver._mk(2, 5, jump_solver.FULL, ((jump_solver.M32, 2, 5),))
+        new = jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((jump_solver.M32, 2, 5),))
+        self.assertEqual(jump_solver._mrange(jump_solver._widen(old, new, r), jump_solver.M32), (2, 5))
+        self.assertEqual(jump_solver._widen(new, jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((jump_solver.M32, 0, 9),)), r), jump_solver._default(r))
+        # A 16-bit masked range widens independently of the full range as well
+        old16 = jump_solver._mk(0, 16, jump_solver.FULL, ((0xffff, 0, 16),))
+        new16 = jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((0xffff, 0, 16),))
+        self.assertEqual(jump_solver._mrange(jump_solver._widen(old16, new16, r), 0xffff), (0, 16))
+        self.assertEqual(jump_solver._widen(new16, jump_solver._mk(0, jump_solver.M64, jump_solver.FULL, ((0xffff, 0, 32),)), r), jump_solver._default(r))
 
     def test_guard_root_keeps_w_register_width_during_widening(self):
         # Timespinner: sub w10,w14,#1; cmp w10,#3; b.hi. The taken interval cannot be inverted across the wrap.
@@ -150,7 +217,7 @@ class Bounds(Solver):
         narrowed = state.regs[10]
         root = narrowed[1]
         self.assertNotEqual(narrowed, value)
-        prior = jump_solver._mk(4, 100, jump_solver.FULL, 4, 100)
+        prior = jump_solver._mk(4, 100, jump_solver.FULL)
         state.cons[root] = jump_solver._widen(prior, state.con(root), root)
         widened = jump_solver._eval(state, narrowed)
         assert widened is not None

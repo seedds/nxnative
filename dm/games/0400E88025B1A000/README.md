@@ -42,6 +42,8 @@ Docked, every 3D target was 768x432 from the first frame of the title to the tut
 
 The shipped Switch 2 configuration sets `render.resolution_scale_console=0.5` and selects NDSR (`render.main_upscaler_console=3`). At a 1920x1080 window and graphics scale tier 0, the game renders its 3D scene at 960x540 and upscales it to 1080p. [Issue #2895](https://github.com/seedds/nxnative/issues/2895#finding-2-why-the-3d-is-960x540-the-games-own-settings)
 
+`DM_UPSCALER=metalfx` draws the dispatched no-curve NDSR variant (`ddc729bcdb4c8df9`, sRGB-encoded `RGBA16F` → `RGBA8_SRGB` image) with MetalFX's spatial scaler ([An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code)). On a base M4 (10-core GPU, 16 GB, 960x540 docked, same-process A/B with `DM_UPSCALER=ab` in [PR #2340](https://github.com/seedds/nxnative/pull/2340)), GPU mean per frame fell 7.32 → 6.69 ms at the title (8 pairs), 10.10 → 8.67 ms in the prologue (6 pairs) and 7.36 → 7.04 ms in the tutorial ring course (2 pairs), with the 60/30 fps cap unchanged (headroom, not frames).
+
 ### Opt-in 4K on the Mac
 
 Create a folder outside the repository with this `veclipse_build.cvar` file in its root. The game reads it after its platform settings. A scale of 1.0 uses the full rendering resolution, and preset 3 requests 3840x2160 for presentation.
@@ -58,7 +60,7 @@ On a display running at 3840x2160 or higher, add `DM_OPMODE=1 DM_ROMFS_OVERLAY="
 
 ## Driving it on the Mac
 
-`python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot: `LDown`, `A` answers no. Before the VI fix, shots of the 3840x2160 swapchain showed the 1920x1080 picture in the top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
+`python3 scripts/build_ipa_from_nsp.py <folder> --platform mac` builds the Mac shaders and the host and prints the run command. Headless, through `DM_CTL`: the title is up about 40 s after boot (45–50 s on a base M4) and `A` starts the game. The prologue cinematic follows, about 4 minutes on every run (a save holds no progress yet, and skipping it was not tried), then the tutorial's first question, about 300 s after boot (330 s on a base M4): `LDown`, `A` answers no. [`bench.tsv`](bench.tsv) holds repeatable `tutorial-flight` and `title` routes for `scripts/bench.py`. Before the VI fix, shots of the 3840x2160 swapchain showed the 1920x1080 picture in the top-left quarter. A `shot` takes about 165 ms: a hitch every few seconds in a run that takes them is the shot's.
 
 DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_KEYS=30:A`, 75 seconds, screenshots at 60 and 68 seconds. The title only creates and resizes the network on this build; the prologue evaluates MetalFX at 960x540 to 960x540, sRGB RGBA8 colour into RGBA16F with an R8 reactive mask. This exposed the [alpha pass taking the original builder's size](../../../docs/reference/rendering.md#metalfxs-dlss-stand-in-preserves-alpha). With its extent matched to RGB, the candidate reached frame 3042 with no new red-line kinds and both screenshots within the harness thresholds against main `233e68b8`. The harness reports PASS with a known baseline issue: profile depth `gl` disagrees with observed `zero`, so this is not clean archive/profile validation. Both runs were marked busy; their frame-time numbers are not a performance comparison. The temporary regression route was not retained.
 
@@ -84,6 +86,7 @@ DLSS alpha control (2026-11-17, M6, macOS 27.2, Xcode 27.2): a fresh save, `DM_K
 - [Compute pipelines outside the bundled archive built at every start](../../../docs/reference/shaders.md#compute-pipelines-outside-the-bundled-archive-built-at-every-start): the second headless start took its 8 from the device's archive.
 - [A frame throttle steered by the layer's flips](../../../docs/reference/frame-rate.md#a-frame-throttle-steered-by-the-layers-flips): the throttle sleeping out its own frame headless: 34.3 → 33.4 ms frames, 27.7 → 28.7 fps in the prologue cinematic.
 - [A covered window's presents follow the host's clock](../../../docs/reference/frame-rate.md#a-covered-windows-presents-follow-the-hosts-clock): 333 ms frames while the player typed in another app.
+- [An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code): `ddc729bcdb4c8df9` (no-curve NDSR variant, sRGB-encoded `RGBA16F` → `RGBA8_SRGB` image) drawn by MetalFX as `UP_COLOR_SAME`.
 
 ## Open
 

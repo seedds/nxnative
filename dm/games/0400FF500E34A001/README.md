@@ -73,6 +73,8 @@ dropped, 268 discarded), while the battle showed none dropped. Not looked into.
   two-image swapchain CPU-GPU race on alternating per-frame constants caused flat-colour frames and NaN exposure.
 - [MetalFX temporal scaler async initialization aborts and dynamic-resolution texture switches](../../../docs/reference/rendering.md#metalfx-temporal-scaler-async-initialization-aborts-and-dynamic-resolution-texture-switches):
   synchronous scaler init avoids the M2 Pro async ANE swap abort and descriptor-keyed caching removes ~88 ms dynamic-resolution stalls.
+- [An upscaler's colour read from its code](../../../docs/reference/rendering.md#an-upscalers-colour-read-from-its-code):
+  `f809de4b7aab2c96` (no-curve NDSR variant, `RGBA8Unorm` → `RGBA8Unorm`, 1920x1080 → 3840x2160 docked) drawn by MetalFX as `UP_COLOR_SAME` ([PR #3399](https://github.com/seedds/nxnative/pull/3399), M2 Pro: GPU 24 → 14.2 ms, 25 → 16.62 ms locked 60 fps).
 
 ## Open
 

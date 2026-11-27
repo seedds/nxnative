@@ -50,7 +50,32 @@ static void same_as_whole(id<MTLBuffer> patched, const char *label) {
     CHECK(same, label);
 }
 
+// The cap is on distinct IDs. A second registration of an existing member must
+// still be recognized when the list is full, including after resetting a sparse list.
+static void check_id_membership(void) {
+    const int base = 20000;
+    pool_ids ids = {0};
+    ids_add(&ids, base + 9000, base);
+    ids_add(&ids, base + 63, base);
+    ids_reset(&ids, base);
+    ids_add(&ids, base + 63, base);
+    ids_add(&ids, base + 9000, base);
+    CHECK(ids.n == 2 && ids.v[0] == base + 63 && ids.v[1] == base + 9000, "sparse reset permits both IDs again in insertion order");
+    ids_reset(&ids, base);
+    for (int i = 0; i < POOL_IDS_MAX; i++) ids_add(&ids, base + i, base);
+    ids_add(&ids, base + 64, base);
+    CHECK(ids.n == POOL_IDS_MAX, "a duplicate at capacity keeps the list");
+    ids_add(&ids, base + POOL_IDS_MAX, base);
+    ids_add(&ids, base, base);
+    CHECK(ids.n == -1, "another distinct ID marks the entire list for a full walk");
+    ids_reset(&ids, base);
+    ids_add(&ids, base, base);
+    CHECK(ids.n == 1 && ids.v[0] == base, "an overflowed list can be rebuilt");
+    ids_release(&ids);
+}
+
 int main(void) { @autoreleasepool {
+    check_id_membership();
     setenv("DM_NVN_RT_RECYCLE", "0", 1);   // textures with allocations of their own: one placed in a recycled heap is resident through its heap, whatever retires it
     mtl_init();
     uint8_t *ma = pages(), *mb = pages(), *mc = pages();
@@ -71,6 +96,11 @@ int main(void) { @autoreleasepool {
     CHECK(entry(b0, 1) != dummy_of(b0) && entry(b0, 2) == dummy_of(b0), "ID 1 holds its texture, ID 2 (no storage) the dummy");
     CHECK(snap() && lists(&snap()->dead, 2) && !lists(&snap()->dead, 1), "the table lists ID 2 as without storage");
 
+    // A sampler note leaves this texture table's dead-ID list intact.
+    int *dead_ids = snap()->dead.v;
+    reg_bump(1, 1);
+    CHECK(table() == b0 && snap()->dead.v == dead_ids && lists(&snap()->dead, 2),
+          "a sampler change preserves the texture table and its missing-storage list");
     // A pool elsewhere: the table holds nothing it changes
     uint64_t kept = g_stat_pool_kept, pchg = g_stat_pool_pchg; mtl_pool_add(mc, LEN);
     id<MTLBuffer> b1 = table();

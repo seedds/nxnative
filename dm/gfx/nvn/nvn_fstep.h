@@ -68,7 +68,7 @@
 #define FSTEP_RAMP 0.05       // the fall in cost from one half of a grace window to the next that shows the clock still rising (the per-frame noise of a 25 ms frame is 4%, of 15 frames 1%)
 #define FSTEP_PROBE_MAX 180   // grace frames a probe may take in all (3 s at 60 fps): a clock that keeps rising without reaching the hold is not waited for longer
 #define FSTEP_GPU_IDLE 0.05   // GPU time (in the frame's unit) under which nothing is being drawn: 0.8 ms at 60 fps (Ocarina of Time's progress screen 0.2–0.3 ms, its scenes 12 ms)
-#define FSTEP_UHOLD_MAX 3600.0   // the longest hold-off before a probe of a hold the GPU does not explain (nvn_fstep_unpaced), doubled after each such probe fails: 60 s
+#define FSTEP_UHOLD_MAX 3600.0   // maximum backoff for a probe based on spare GPU time: 60 s
 // A stall is a frame that stayed up longer than any hold could explain: a pause (focus lost, Home), a covered window, a fullscreen switch, a silent display link. What it took
 // is not what the scene costs, and the frames right after it run late for host reasons (GPU clocks fell while idle, display link resettling). So a stall is not counted as late,
 // its pause time does not inflate hold-duration timers or the 30-frame average, and the FSTEP_GRACE frames after it do not count toward a step up, fine mode, or trial completion
@@ -104,7 +104,7 @@ typedef struct {
     double ccur; int ck, cn;  // the cost of the frames on time at the longer hold ck (running mean) and their count
     int gpu_on; double gpu;   // set by the caller before each call, then cleared: 1 = gpu is the frame's GPU time (the latest finished frame's, in the unit of shown); 0 = not reported
     int urun;                 // frames in a row at a hold above kmin whose GPU time fits k − 1 and that waited for nothing in the host's pacing (nvn_fstep_unpaced)
-    int ilate_run, uprobe;    // late frames in a row, those with the GPU idle included; 1 = the probe running was started by nvn_fstep_unpaced alone
+    int ilate_run, uprobe;    // late frames in a row, those with the GPU idle included; 1 = probe based on measured headroom, subject to uhold
     int up_idle;              // 1 = the last step up came from FSTEP_RUN late frames with the GPU idle among them (for the caller's log)
     double uhold;             // vsyncs since the last step up before such a probe: 1 s, doubled after each one fails up to FSTEP_UHOLD_MAX, back to 1 s when kmin holds
     int ckmin;                // the kmin run, crun and cref belong to
@@ -239,8 +239,14 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->k >= kmax && (s->late_run >= 3 || s->ilate_run >= FSTEP_RUN)) { if (!s->fine) s->fines++; s->fine = 1; s->fine_ok = 0; }
     else if (s->fine) { if (!sgrace) s->fine_ok = late && !idle ? 0 : s->fine_ok + dt; if (s->k < kmax || s->fine_ok >= hold_max) s->fine = 0; }
     if (!late) s->fit_run = s->k > kmin && fitc <= FSTEP_FIT * (s->k - q) ? s->fit_run + 1 : 0;
+    // Under positive pacing wait, work near the shorter deadline can miss the fit margin
+    // while already satisfying the lateness test at the shorter hold. Try it with the
+    // existing capped probe and failed-probe backoff, only at the adjacent target.
+    int near_target = held == kmin + q && gpu_on && gpu > gpu_idle && gpu <= kmin &&
+        s->ck == held && s->cn >= FSTEP_RUN && s->ccur <= kmin + late_by &&
+        !sgrace && !late && cost < shown - late_by && !s->no_payback;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k -= q; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
-    else if ((slow || nvn_fstep_same(s) || (nvn_fstep_unpaced(s) && s->since >= s->uhold)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
+    else if ((slow || nvn_fstep_same(s) || ((nvn_fstep_unpaced(s) || near_target) && s->since >= s->uhold)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->uprobe = !slow && !nvn_fstep_same(s);
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = s->ilate_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // urun ends with the next frame at kmin (kept for the caller's log)
     }

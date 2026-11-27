@@ -297,6 +297,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_pool_notes`: a pool change, a finalized pool, a retired ID across submissions, a takeover, a registration past the budget and a read written in place each patch or keep the table, and the patched tables hold what tables built whole do. The notes and the patching were measured on the host of [PR #1387](https://github.com/seedds/nxnative/pull/1387) (MacBook Pro M5 Pro, a six-minute walk through Kokiri Forest): tables built whole about 9,600 (26 s) with only pool changes noted, 14 (0.3 s) with all three. Open: the counts on this walk, which also has the read bitmap and the budget, are not measured yet. The table patching and the first notes are [PR #1299](https://github.com/seedds/nxnative/pull/1299)'s; the unnoted takeover was found in [issue #1326](https://github.com/seedds/nxnative/issues/1326).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md).
 
+### Patching a texture pool table rebuilt its retry lists
+
+- **Symptom:** a draw that uses a texture pool spends replay-thread time updating a few entries of an existing table, even when its missing-storage and retired-view lists still apply.
+- **Cause:** each incremental patch allocated new lists and inserted every retained ID into fresh membership stamps. A registration between draws repeated the copy for all retired views still valid in that submission.
+- **Fix:** keep the ordered ID list and its membership bitmap with each table snapshot. After collecting the old IDs to retry, clear the missing-storage list on a pool change and the retired-view list on a submission change. Other patches append any newly discovered IDs in place. Full walks replace both lists, and more than 8,192 distinct members still request a full walk. GPU table buffers follow the existing copy-on-write path.
+- **Check:** `t_pool_notes` covers retention on an unrelated registration, agreement with a full table rebuild, sparse resets and duplicate IDs at the list limit.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
+
 ### A patched pool table copied whole
 
 - **Symptom:** the submit thread spends a tenth of a millisecond or more a frame in `memcpy` under `pool_walk` in a game that patches its pool tables often (0.13-0.18 ms on an Apple M6; PR #2663 measured about 1 ms of submit and present on an M1 at 30 patches a frame). Ocarina of Time patches 16 to 24 tables a frame of 33,025 entries while Link walks through Kokiri Forest (one per texture type, [Pool tables that held only their own texture type](#pool-tables-that-held-only-their-own-texture-type)), about 5 MB of copies a frame for a few hundred changed entries each; [PR #2663](https://github.com/seedds/nxnative/pull/2663) saw about 30 a frame on an older host.

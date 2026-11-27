@@ -14543,7 +14543,8 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 // A list holds as many IDs as one patch takes (pool_gpu): with 1,024 as its limit, each submission behind that menu built the table whole (1,927 of about 2,000 builds,
 // 1.4-1.6 a frame of 9 ms, 50-55 fps for five seconds; PR #2389)
 enum { POOL_IDS_MAX = 8192 };   // the IDs a patch takes at most, and a list holds
-typedef struct { int *v, n, cap; } pool_ids;
+// Each snapshot retains insertion order for budgeted retries and membership for incremental patches.
+typedef struct { int *v, n, cap; uint64_t *bits; size_t words; } pool_ids;
 typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub, sync_sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // sync_sub: last submission in which this table was validated; over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
 // Each table's log of the entries written into it since its build: the patches' (pool_walk) and the scan updates' (pool_seen_scan, pool_stand_scan), so a spare the table left at log
@@ -14566,26 +14567,44 @@ static uint64_t g_stat_pool_why[5];   // why a table was built whole: no table o
 // [2] resized, [3] a change without a note, [4] a new submission over more than POOL_IDS_MAX retired IDs. pchg / schg: of those patched or kept, the ones over memory pool changes
 // and over a new submission
 static uint64_t g_stat_pool_patched, g_stat_pool_kept, g_stat_pool_nopatch[5], g_stat_pool_pchg, g_stat_pool_schg;
-static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is dropped (n -1)
+// Entries store absolute IDs. The bitmap is indexed relative to the table's base. A slot reused
+// for a different table gets fresh lists in the full walk.
+static void ids_release(pool_ids *l) {
+    free(l->bits);
+    free(l->v);
+    *l = (pool_ids){0};
+}
+static void ids_reset(pool_ids *l, int base) {
+    if (l->n > 0 && (size_t)l->n < l->words) {
+        for (int i = 0; i < l->n; i++) l->bits[(unsigned)(l->v[i] - base) / 64] = 0;
+    } else if (l->n > 0) {
+        memset(l->bits, 0, l->words * sizeof *l->bits);
+    }
+    l->n = 0;
+}
+static void ids_add(pool_ids *l, int id_, int base) {
     if (l->n < 0) return;
-    if (l->n == POOL_IDS_MAX) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
-    if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 16; l->v = realloc_or_die(l->v, (size_t)l->cap * sizeof *l->v, "the pool tables' ID lists"); }
+    unsigned slot = (unsigned)(id_ - base);
+    size_t word = slot / 64;
+    uint64_t mask = UINT64_C(1) << (slot % 64);
+    if (word < l->words && (l->bits[word] & mask)) return;
+    if (l->n == POOL_IDS_MAX) {
+        ids_release(l);
+        l->n = -1;   // retrying this list requires a full walk
+        return;
+    }
+    if (word >= l->words) {
+        size_t words = MAX(word + 1, l->words ? 2 * l->words : 1);
+        l->bits = realloc_or_die(l->bits, words * sizeof *l->bits, "pool ID membership");
+        memset(l->bits + l->words, 0, (words - l->words) * sizeof *l->bits);
+        l->words = words;
+    }
+    if (l->n == l->cap) {
+        l->cap = l->cap ? 2 * l->cap : 16;
+        l->v = realloc_or_die(l->v, (size_t)l->cap * sizeof *l->v, "the pool tables' ID lists");
+    }
+    l->bits[word] |= mask;
     l->v[l->n++] = id_;
-}
-// A list being made: each ID once (a stamp per ID, one stamp table per kind of list: [0] dead, [1] trans)
-static struct { uint32_t *stamp; int cap; uint32_t cur; } g_pids[2];
-static void ids_begin(int k) { if (!++g_pids[k].cur) { if (g_pids[k].stamp) memset(g_pids[k].stamp, 0, (size_t)g_pids[k].cap * sizeof *g_pids[k].stamp); g_pids[k].cur = 1; } }
-static void ids_add(int k, pool_ids *l, int id_) {
-    if (l->n < 0 || id_ < 0) return;
-    if (id_ >= g_pids[k].cap) { int c = id_ + 4096; g_pids[k].stamp = realloc_or_die(g_pids[k].stamp, (size_t)c * sizeof *g_pids[k].stamp, "the pool tables' ID lists");
-        memset(g_pids[k].stamp + g_pids[k].cap, 0, (size_t)(c - g_pids[k].cap) * sizeof *g_pids[k].stamp); g_pids[k].cap = c; }
-    if (g_pids[k].stamp[id_] == g_pids[k].cur) return;
-    g_pids[k].stamp[id_] = g_pids[k].cur;
-    ids_push(l, id_);
-}
-static void ids_keep(int k, pool_ids *l, const pool_ids *old) {   // an earlier list carried over
-    if (old->n < 0) { free(l->v); *l = (pool_ids){NULL, -1, 0}; return; }
-    for (int i = 0; i < old->n; i++) ids_add(k, l, old->v[i]);
 }
 // Whether a registered texture's storage still exists, before pool_gpu makes a texture no draw has bound: a game leaves IDs registered after it is done with their textures, and the
 // first pool walk in Mario Party Superstars crashed once in nvn_sparse_protect (pkg_upload ← tex_by_id ← pool_gpu) on a garbage pool->vp, which ID it was was not caught, as FINAL
@@ -14898,7 +14917,7 @@ static void pool_seen_scan(void) {
                     er = pool_bridge_pair((int)tt, q->dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, q->dtt) : 0;
                     if (!er) { pool_type_note(id_, (int)tt, q->dtt); continue; } }
                 pool_snap_set(q, (uint32_t)at, er, &forked);
-                if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
+                if (trans) { ids_add(&q->trans, id_, q->base); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
         }
     }
 }
@@ -15152,21 +15171,22 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         if (nid >= POOL_IDS_MAX) { g_stat_pool_nopatch[0]++; break; }
         uint64_t *e = (uint64_t *)((uint8_t *)p->buf.contents + DMSH_POOL_HEAD), dummy = e[nn], room = samp ? UINT64_MAX : pool_room(), spent = g_walk_spent;
         int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL, lpos = 0;   // lpos: the log position the old buffer holds, where this patch's entries begin
-        pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
-        if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
-        if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
+        // The worklist above already contains the old members for each invalidated list.
+        // Keep the other list intact; fresh resolutions may append to it.
+        if (pools) ids_reset(&p->dead, base);
+        if (stale) ids_reset(&p->trans, base);
         for (size_t k = 0; k < nid; k++) {
             int i = ids[k] - base; if (i < 0 || i >= nn || (samp && !i)) continue;
             uint64_t used = g_walk_spent - spent, limit = used < room ? room - used : 0;   // what this patch made comes off the room
             int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, ids[k], limit, &gone, &left, &left_req, &t, &d, NULL); r = r ? r : dummy;
-            if (d) ids_add(0, &nd, ids[k]);
-            if (t) ids_add(1, &nt, ids[k]);
+            if (d) ids_add(&p->dead, ids[k], base);
+            if (t) ids_add(&p->trans, ids[k], base);
             if (r == (be ? be[i] : e[i])) continue;
             if (!b) { b = pool_patch_take(p); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); lpos = g_plog[p - g_psnap].n; }
             be[i] = r; plog_add(p, (uint32_t)i, r);
         }
-        g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
-        p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->sync_sub = g_sub_serial; p->dead = nd; p->trans = nt;
+        g_stat_pool_pchg += pools; g_stat_pool_schg += stale;
+        p->reg = rg; p->ser = sg; p->sub = p->trans.n ? g_sub_serial : 0; p->sync_sub = g_sub_serial;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
         if (!b) { g_stat_pool_kept++; *out = p->buf; return p->gpu; }
         pool_table_give(p->buf, (int)(p - g_psnap), lpos); p->buf = b; p->gpu = b.gpuAddress;
@@ -15191,16 +15211,16 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
     if (leads) memset(leads, 0, metadata);
     uint64_t *e = (uint64_t *)(c + DMSH_POOL_HEAD), dummy = samp ? dummy_samp_rid() : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0, left = 0, left_req = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
-    pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
+    pool_ids nd = {0}, nt = {0};
     if (samp) { e[0] = samp_pool_zero() ? g_samp_zero_rid : dummy; real += e[0] != dummy; }
     for (int i = samp ? 1 : 0; i < n; i++) {
         int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, base + i, limit, &gone, &left, &left_req, &t, &d, leads ? leads + i : NULL);
-        if (d) ids_add(0, &nd, base + i);
-        if (t) ids_add(1, &nt, base + i);
+        if (d) ids_add(&nd, base + i, base);
+        if (t) ids_add(&nt, base + i, base);
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
-    pool_table_give(p->buf, -1, 0); free(p->dead.v); free(p->trans.v); plog_build(p, n);   // the spares of the table's earlier build, or of another table in this slot, are of no live table now
+    pool_table_give(p->buf, -1, 0); ids_release(&p->dead); ids_release(&p->trans); plog_build(p, n);   // the spares of the table's earlier build, or of another table in this slot, are of no live table now
     // Retired registrations drop their views at submission end; their resource IDs cannot outlive that submission (trans, taken again by the next one)
     *p = (pool_snap){b, b.gpuAddress, rg, sg, atomic_load(&g_cur_frame), nt.n ? g_sub_serial : 0, g_sub_serial, samp, dtt, dpf, base, left, left_req, nd, nt, samp || g_walk_over};
     g_psnap_gen++;

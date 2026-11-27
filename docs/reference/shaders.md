@@ -490,6 +490,13 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [Bayonetta 2](../../dm/games/01007960049A0000/README.md): 1,856 distinct keys (1,547 pixel, 309 vertex) in `shader.dat`, `shader2.dat` and `shadereff.dat` of `data000.cpk` (the split about 2.5 minutes); [Bayonetta](../../dm/games/010076F0049A2000/README.md): 458 distinct keys (236 pixel, 222 vertex), the members of `shader.dat` in `data00.cpk` (about 1.7 minutes). All build for both.
 - **Not checked:** 13 Sentinels and Catherine: Full Body's CPKs (no files on the drives).
 
+### BNSH in EMZ archives
+
+- **Symptom:** the screen goes black after first-launch region setup, and the host reports that the shader map is missing vertex and pixel shaders. The shader split finds only programs in `main`.
+- **Cause:** the `#EMZ` wrapper hides the BNSH records in a raw Deflate stream. Its little-endian words at `+0x08` and `+0x0c` give the decoded size and the stream offset. The decoded `#EMB` holds the individual BNSH files.
+- **Fix:** `shader_split.py` recognizes `#EMZ` by its magic in loose files and inside archives. It bounds inflation, checks the stream ends at its declared size, and passes the result to the existing BNSH scan. Synthetic fixtures cover loose and nested input, expansion limits, and truncated streams.
+- **Found on:** [Dragon Ball Xenoverse 2 for Nintendo Switch 1.26.01](../../dm/games/010078D000F88000/README.md). The shader archives in `data.cpk` and `data2.cpk` added 4,051 distinct keys (1,518 vertex, 2,525 pixel, and 8 compute) to the 3,963 from `main`. All four missing shaders requested after region confirmation match the decoded `data2.cpk` archives by key and code bytes.
+
 ### Gzip-wrapped BNSH records in Fenrir shader packages
 
 - **Symptom:** the shader split finds no shaders although the CRI CPK entries are readable and an HSG shader package starts with `HSPK`.

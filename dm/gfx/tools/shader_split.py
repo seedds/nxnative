@@ -4279,6 +4279,22 @@ def nested_zstd(d, label, limit):
         parts.append(chunk); rem -= len(chunk); view = dec.unused_data
     return parts[0] if len(parts) == 1 else b''.join(parts)
 
+EMZ = b'#EMZ'
+
+
+def emz_decode(d, label, limit):
+    """Decode the raw Deflate stream in an EMZ wrapper, within the archive budget."""
+    size, start = field(d, '<II', 8, f'{label} EMZ header')
+    if not 16 <= start < len(d): red(f'{label}: invalid EMZ stream offset {start:#x}')
+    if size > limit: red(f'{label}: EMZ expands beyond the archive byte budget')
+    stream = zlib.decompressobj(-zlib.MAX_WBITS)
+    try: decoded = stream.decompress(d[start:], size + 1)
+    except zlib.error as e: red(f'{label}: invalid EMZ Deflate stream ({e})')
+    if len(decoded) != size or not stream.eof or stream.unused_data:
+        red(f'{label}: EMZ stream does not end at its declared size ({size} bytes)')
+    return decoded
+
+
 def frame_size(f):
     """The uncompressed size a zstd or LZ4 frame header records, None when it records none"""
     if f[:4] == LZ4_FRAME_MAGIC:   # FLG, BD, then the 8-byte content size when FLG bit 3 is set
@@ -4595,7 +4611,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     for m in re.finditer(b'SLCT\x03\x10\0\0', d): out.extend(slct_shaders(d, m.start(), label))
     stored = len(d)   # what the member takes up in its archive
-    compressed = d[:4] in (b'Yaz0', ZSTD_MAGIC)
+    compressed = d[:4] in (b'Yaz0', ZSTD_MAGIC, EMZ)
     if d[:4] == b'Yaz0':
         if left is not None:   # charged by its header before it is decoded
             left[1][0] -= int.from_bytes(d[4:8], 'big')
@@ -4603,6 +4619,9 @@ def scan_blob(d, label, out, depth=0, left=None):
         d = yaz0(d, label)
     elif d[:4] == ZSTD_MAGIC:
         d = nested_zstd(d, label, left[1][0] if left is not None else max(16 << 20, 256 * stored))
+        if left is not None: left[1][0] -= len(d)
+    elif d[:4] == EMZ:
+        d = emz_decode(d, label, left[1][0] if left is not None else max(16 << 20, 256 * stored))
         if left is not None: left[1][0] -= len(d)
     if left is None: n = NEST * len(d); left = ([n], [n])   # the file itself: traversal bytes and compressed-member expansion
     else:
@@ -5271,7 +5290,7 @@ def scan_file_in(args):
     if head[:4] == ZSTD_MAGIC: d = unzs(path)   # by the magic: Paper Mario: The Thousand-Year Door names its zstd files .zst (8,726, its shaders among them)
     else:
         with open(path, 'rb') as f: d = f.read()
-    if d[:4] == b'SHN!' or d[:8] == CIVBSF:
+    if d[:4] in (b'SHN!', EMZ) or d[:8] == CIVBSF:
         scan_blob(d, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs

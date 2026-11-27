@@ -338,6 +338,7 @@ DM_PRESENT_SCREEN	switch	`0` turns off the acquire's wait for the screen of `DM_
 DM_PRESENT_SNAP	player	`=<n>`: present snapshots, a ring of n host textures (2 to 4; `1` = 2) the presents are copied to so the game's swapchain texture is free at once; `0` off (default: the profile's `present_snap`)
 DM_PRESENT_UPSCALE	player	`metalfx` scales a picture smaller than its rectangle on the screen through MetalFX's spatial scaler; `off` (the default) scales it bilinearly
 DM_PREV_PROGRAM	switch	What `oe::GetPreviousProgramIndex` answers (default -1, started from HOME); `oe::ExecuteProgram` sets it for the program it starts; a relaunch removes it
+DM_PREWARM_UPLOAD_URL	switch	`=<url>` (`pack_app.py`, `build_ipa.sh`): overrides `dm/services/prewarm-inbox/endpoint.txt` as `DMPrewarmUploadURL` in the packaged app's `Info.plist` for automatic NVN `pso_user.tsv` uploads (empty disables embedding a URL)
 DM_PROBE	diagnostic	`=module:offset,…` (Mac only): puts a `brk` at each guest address and on every hit prints the thread, registers, strings they point to and a backtrace, then runs the original instruction
 DM_PROBE_ALL	diagnostic	Set: probe hits (`DM_PROBE`) also print x8–x18
 DM_PROBE_DUMP	diagnostic	`=module:offset:length[:file]`: on the first hit of any probe, writes that range of guest memory to a file (default `run/<platform>/probe_dump.bin`)

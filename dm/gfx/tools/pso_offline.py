@@ -324,8 +324,8 @@ def run_key(a, archs, text, osmin):
 
 
 def outputs(out, work, archs):
-    """What a run left: each file of the output folder that is its own (not the prewarm pipelines the NSP script links there after it) by size and time, and each architecture's key"""
-    files = {f.name: [f.stat().st_size, f.stat().st_mtime_ns] for f in sorted(out.iterdir()) if f.is_file() and '-prewarm-' not in f.name and f.name != 'prewarm.tsv'}
+    """What a run left: each file of the output folder that is its own (not the prewarm pipelines, and not AppleDouble detritus) by size and time, and each architecture's key"""
+    files = {f.name: [f.stat().st_size, f.stat().st_mtime_ns] for f in sorted(out.iterdir()) if f.is_file() and not f.name.startswith('._') and '-prewarm-' not in f.name and f.name != 'prewarm.tsv'}
     return {'files': files, 'keys': {arch: (work / f'key.{arch}').read_text() if (work / f'key.{arch}').is_file() else None for arch in archs}}
 
 
@@ -634,7 +634,7 @@ def prewarm_host_key(host, rows, tables, lib_dir, zero, os_build, mwa=True):
     return h.hexdigest()
 
 
-def prewarm_host(host, lib_dir, shader_map, rows, work, zero, mwa=True):
+def prewarm_host(host, lib_dir, shader_map, rows, work, zero, mwa=True, need_scripts=True):
     """The host's prebuild tool on rows (prewarm_rows): → (its output folder, this Mac's architecture as its files name it, reused). The folder holds <arch>-prewarm-<NN>.mtl4a and .keys
     and prewarm-<NN>.mtl4-json per flush period and prewarm.tsv; it is kept while its key holds, and the tool's work folder (its captures) while an unfinished run's key holds, so a run
     killed part way goes on from there. Raises PrewarmFailed"""
@@ -644,8 +644,10 @@ def prewarm_host(host, lib_dir, shader_map, rows, work, zero, mwa=True):
     if not srcs: raise PrewarmFailed(f'no shader map at {shader_map}')
     os_build = subprocess.run(['sysctl', '-n', 'kern.osversion'], capture_output=True, text=True).stdout.strip()
     key = prewarm_host_key(host, rows, srcs, lib_dir, zero, os_build, mwa)
-    def mac(): return sorted({f.name.split('-prewarm-')[0] for f in made.glob('applegpu_*-prewarm-*.keys')})
-    if (made / 'key').is_file() and (made / 'key').read_text().strip() == key and list(made.glob('prewarm-*.mtl4-json')) and len(mac()) == 1: return made, mac()[0], True
+    def mac(): return sorted({f.name.split('-prewarm-')[0] for f in made.glob('applegpu_*-prewarm-*.mtl4a')})
+    cached_archives, cached_scripts = sorted(made.glob('applegpu_*-prewarm-*.mtl4a')), sorted(made.glob('prewarm-*.mtl4-json'))
+    if (made / 'key').is_file() and (made / 'key').read_text().strip() == key and cached_archives and len(mac()) == 1 and (not need_scripts or len(cached_scripts) == len(cached_archives)):
+        return made, mac()[0], True
     shutil.rmtree(made, ignore_errors=True)
     if not ((stage / 'key').is_file() and (stage / 'key').read_text().strip() == key): shutil.rmtree(stage, ignore_errors=True)   # another run's captures: not these inputs'
     shutil.rmtree(tables, ignore_errors=True); tables.mkdir(parents=True); stage.mkdir(parents=True, exist_ok=True); (stage / 'key').write_text(key + '\n')
@@ -661,7 +663,7 @@ def prewarm_host(host, lib_dir, shader_map, rows, work, zero, mwa=True):
     except OSError as e: raise PrewarmFailed(f'cannot run the prewarm host {host}: {e}') from e
     text = log.read_text(errors='replace') if log.is_file() else ''
     scripts, archives = sorted(made.glob('prewarm-*.mtl4-json')), sorted(made.glob('applegpu_*-prewarm-*.mtl4a'))
-    if r.returncode or not scripts or len(scripts) != len(archives) or len(mac()) != 1:
+    if r.returncode or not archives or len(mac()) != 1 or (need_scripts and len(scripts) != len(archives)):
         shutil.rmtree(made, ignore_errors=True)
         raise PrewarmFailed(f'the host\'s prebuild tool made {len(archives)} files and {len(scripts)} scripts (exit {r.returncode}; a host of another chain than the libraries takes none of them; '
                             f'{log}): ' + '\n'.join(ln for ln in text.splitlines() if 'prebuild' in ln or '[RED]' in ln)[-1500:])
@@ -751,13 +753,22 @@ def prewarm_script_key(js, arch, platform, osmin, toolchain):
 
 
 def prewarm_compile(made, mac, out, archs, platform, osmin, toolchain, work, lib_dir, batch_size):
-    """The host's scripts (prewarm_host's folder made, its files named for this Mac's architecture mac) compiled for each of archs into out as <arch>-prewarm-<NN>.mtl4a, each with the
-    index of its period (<mac>-prewarm-<NN>.keys: the same pipelines, so the same keys), and the tool's stamp prewarm.tsv. A script already compiled for these inputs is taken from
-    the cache (prewarm/<arch>/). → ({arch: files}, [(arch, script name, kind, why)] of pipelines left out). Raises PrewarmFailed (out then holds no prewarm file)"""
-    pw, out = Path(work) / 'prewarm', Path(out)
-    scripts = sorted(Path(made).glob('prewarm-*.mtl4-json'))
-    todo = []
-    for arch in archs:
+    """The host's prewarm outputs (prewarm_host's folder made, its files named for this Mac's architecture mac) published for each of archs into out as <arch>-prewarm-<NN>.mtl4a, each
+    with the index of its period (<mac>-prewarm-<NN>.keys: the same pipelines, so the same keys), and the tool's stamp prewarm.tsv. On macOS, this Mac's own GPU publishes the host's
+    native captures directly without metal-tt; every other GPU (and every iOS GPU) compiles the pipelines scripts with metal-tt, cached under prewarm/<arch>/.
+    → ({arch: files}, [(arch, script name, kind, why)] of pipelines left out). Raises PrewarmFailed (out then holds no prewarm file)"""
+    pw, out, made = Path(work) / 'prewarm', Path(out), Path(made)
+    native = platform == 'macos' and mac in archs
+    other_archs = [arch for arch in archs if not (platform == 'macos' and arch == mac)]
+    archives = sorted(made.glob(f'{mac}-prewarm-*.mtl4a'))
+    scripts = sorted(made.glob('prewarm-*.mtl4-json'))
+    if other_archs and (not scripts or len(scripts) != len(archives)):
+        msg = f'the host wrote {len(scripts)} pipelines scripts for {len(archives)} files'
+        if not native: raise PrewarmFailed(msg)
+        print(f'[RED] pso_offline: prewarm for {", ".join(other_archs)}: {msg}; those GPUs build them on their first start', flush=True)
+        other_archs = []
+    todo, skip_other = [], set()
+    for arch in other_archs:
         for js in scripts:
             cache = pw / arch / f'{js.stem}.mtl4a'; kf = cache.with_suffix('.key'); key = prewarm_script_key(js, arch, platform, osmin, toolchain)
             if not (cache.is_file() and cache.stat().st_size and kf.is_file() and kf.read_text().strip() == key): todo.append((arch, js, key, cache, kf))
@@ -765,20 +776,39 @@ def prewarm_compile(made, mac, out, archs, platform, osmin, toolchain, work, lib
         real_js = pw / 'scripts'; shutil.rmtree(real_js, ignore_errors=True); real_js.mkdir(parents=True)
         for js in dict.fromkeys(js for _, js, _, _, _ in todo): shutil.copyfile(js, real_js / js.name)
         try: script_libraries(sorted(real_js.iterdir()), lib_dir, pw / 'libraries')
-        except (LookupError, OSError, ValueError) as e: raise PrewarmFailed(str(e)) from e
-        try:
-            for arch, js, key, cache, kf in todo:
-                kf.unlink(missing_ok=True); cache.parent.mkdir(parents=True, exist_ok=True)
-                print(f'pso_offline: prewarm: {arch}: {js.name}, metal-tt ...', flush=True); t0 = time.time()
-                bad = compile_script(json.loads((real_js / js.name).read_text()), cache, pw / arch / f'{js.stem}.work', arch, platform, osmin, batch_size)
-                cache.with_suffix('.failed').write_text(''.join(f'{k}\t{compiler_line(why)}\n' for k, _, why in bad))
-                kf.write_text(key + '\n')
-                print(f'pso_offline: prewarm: {arch}: {js.name}: {cache.stat().st_size / 2**20:.0f} MB in {time.time() - t0:.0f} s' + (f', {len(bad)} pipelines left out' if bad else ''), flush=True)
-        finally: shutil.rmtree(pw / 'libraries', ignore_errors=True); shutil.rmtree(real_js, ignore_errors=True)
+        except (LookupError, OSError, ValueError) as e:
+            shutil.rmtree(pw / 'libraries', ignore_errors=True); shutil.rmtree(real_js, ignore_errors=True)
+            if not native: raise PrewarmFailed(str(e)) from e
+            print(f'[RED] pso_offline: prewarm for {", ".join(other_archs)}: {e}; those GPUs build them on their first start', flush=True)
+            other_archs = []; todo = []
+        if todo:
+            try:
+                for arch, js, key, cache, kf in todo:
+                    kf.unlink(missing_ok=True); cache.parent.mkdir(parents=True, exist_ok=True)
+                    print(f'pso_offline: prewarm: {arch}: {js.name}, metal-tt ...', flush=True); t0 = time.time()
+                    try:
+                        bad = compile_script(json.loads((real_js / js.name).read_text()), cache, pw / arch / f'{js.stem}.work', arch, platform, osmin, batch_size)
+                    except PrewarmFailed as e:
+                        if not native: raise
+                        cache.unlink(missing_ok=True); skip_other.add((arch, js.stem))
+                        print(f'[RED] pso_offline: prewarm: {arch}: {js.name} failed ({e}); that GPU builds those pipelines on its first start', flush=True)
+                        continue
+                    cache.with_suffix('.failed').write_text(''.join(f'{k}\t{compiler_line(why)}\n' for k, _, why in bad))
+                    kf.write_text(key + '\n')
+                    print(f'pso_offline: prewarm: {arch}: {js.name}: {cache.stat().st_size / 2**20:.0f} MB in {time.time() - t0:.0f} s' + (f', {len(bad)} pipelines left out' if bad else ''), flush=True)
+            finally: shutil.rmtree(pw / 'libraries', ignore_errors=True); shutil.rmtree(real_js, ignore_errors=True)
     files, failed, publish = {}, [], {}
-    for arch in archs:
+    if native:
+        for src in archives:
+            publish[src.name] = src
+            keys = src.with_suffix('.keys')
+            if keys.is_file(): publish[keys.name] = keys
+            files.setdefault(mac, []).append(out / src.name)
+    for arch in other_archs:
         for js in scripts:
-            cache = pw / arch / f'{js.stem}.mtl4a'; keys = Path(made) / f'{mac}-{js.stem}.keys'
+            if (arch, js.stem) in skip_other: continue
+            cache = pw / arch / f'{js.stem}.mtl4a'; keys = made / f'{mac}-{js.stem}.keys'
+            if not cache.is_file(): continue
             fl = cache.with_suffix('.failed')
             omitted = fl.read_text().splitlines() if fl.is_file() else []
             # The host's complete index describes its original capture, including any pipelines metal-tt omitted for this GPU. Such a key would shadow the device's later capture:
@@ -788,8 +818,8 @@ def prewarm_compile(made, mac, out, archs, platform, osmin, toolchain, work, lib
             files.setdefault(arch, []).append(out / f'{arch}-{js.stem}.mtl4a')
             failed += [(arch, js.name, *row.split('\t', 1)) for row in omitted]
     for arch in [p.name for p in pw.iterdir() if p.is_dir() and p.name.startswith('applegpu_')] if pw.is_dir() else ():   # architectures no longer asked for
-        if arch not in archs: shutil.rmtree(pw / arch)
-    if (Path(made) / 'prewarm.tsv').is_file(): publish['prewarm.tsv'] = Path(made) / 'prewarm.tsv'
+        if arch not in other_archs: shutil.rmtree(pw / arch)
+    if (made / 'prewarm.tsv').is_file(): publish['prewarm.tsv'] = made / 'prewarm.tsv'
     publish_prewarm(out, publish)
     return files, failed
 
@@ -807,13 +837,14 @@ def publish_prewarm(out, sources):
 
 
 def clear_prewarm(out):
-    for f in Path(out).glob('*-prewarm-*'): f.unlink()
-    (Path(out) / 'prewarm.tsv').unlink(missing_ok=True)
+    out = Path(out)
+    if not out.is_dir(): return
+    for f in out.glob('*-prewarm-*'): f.unlink()
+    (out / 'prewarm.tsv').unlink(missing_ok=True)
 
 
 def update_prewarm(a, lib_dir, out, work, archs, zero):
-    """Validate the independent prewarm cache even when the pair archive uses its fast path. The Mac packer's separate mac_prebake stage owns its files when no host is supplied here"""
-    if a.platform == 'macos' and not a.prewarm_host: return
+    """Validate and publish prewarm archives for both iOS and macOS, even when the pair archive uses its fast path; clears stale prewarm files whenever --prewarm-host is omitted or unused"""
     rows = prewarm_rows(a.manifest) if a.prewarm_host else ''
     prewarm = 'none (no --prewarm-host)' if not a.prewarm_host else 'none (the prewarm lists have no R or M rows)'
     if rows and not Path(a.prewarm_host).is_file(): prewarm = f'none (no host at {a.prewarm_host})'; print(f'[RED] pso_offline: prewarm: no host at {a.prewarm_host}: the device builds the prewarm lists\' pipelines')
@@ -821,9 +852,11 @@ def update_prewarm(a, lib_dir, out, work, archs, zero):
         try:
             t1 = time.time(); n = rows.count('\n'); print(f'pso_offline: prewarm: {n} R and M rows, the host\'s prebuild tool (minutes when its inputs changed) ...', flush=True)
             osmin = a.os_min or os_min_default(a.platform)
-            made, mac, reused = prewarm_host(a.prewarm_host, lib_dir, a.shader_map[0] if a.shader_map else '', rows, work, zero, mwa_on(a.platform, osmin))
+            made, mac, reused = prewarm_host(a.prewarm_host, lib_dir, a.shader_map[0] if a.shader_map else '', rows, work, zero, mwa_on(a.platform, osmin), need_scripts=a.platform != 'macos')
             if reused: print('pso_offline: prewarm: the host\'s files reused (inputs unchanged)')
-            files, pfailed = prewarm_compile(made, mac, out, archs, a.platform, osmin, tool_version(a.platform), work, lib_dir, a.batch_size)
+            need_tt = any(not (a.platform == 'macos' and arch == mac) for arch in archs)
+            tv = tool_version(a.platform) if need_tt else ''
+            files, pfailed = prewarm_compile(made, mac, out, archs, a.platform, osmin, tv, work, lib_dir, a.batch_size)
             size = sum(f.stat().st_size for fs in files.values() for f in fs)
             prewarm = f'{sum(map(len, files.values()))} files ({size / 2**20:.0f} MB) from {n} rows, {len(pfailed)} pipelines left out (metal-tt could not compile them: left to the device)'
             for arch, name, kind, why in pfailed: print(f'[RED] pso_offline: prewarm: {arch}: metal-tt cannot compile a pipeline of {name} ({kind}: {why}): left out, the device builds it', flush=True)
@@ -929,6 +962,7 @@ def main(argv=None):
         os.replace(part, dst); kf.write_text(key + '\n')
         print(f'pso_offline: {arch}: {dst.stat().st_size / 2**20:.0f} MB in {time.time() - t1:.0f} s')
     for f in out.glob('*.mtl4a'):   # a prewarm-only build has no pair archives, but still has the requested target GPUs; keep their files for publication to reuse
+        if f.name.startswith('._'): continue
         keep = f.stem.split('-prewarm-')[0] in gpus if '-prewarm-' in f.name else f.stem in archs
         if not keep: f.unlink()
     write_changed(out / 'prebuilt.tsv', st)

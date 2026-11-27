@@ -441,15 +441,17 @@ class Build(BuildCase):
         self.assertTrue(self.reads()); self.assertEqual(len(self.calls), 2)
         self.assertFalse(self.reads())
 
-    def test_an_architectures_prewarm_pipelines_stay(self):
-        # the NSP script links them into the output folder after a run (mac_prebake) and takes them away: a run that removed them gave the files the app packs new change times
+    def test_macos_without_prewarm_host_clears_stale_prewarm(self):
+        # Without --prewarm-host, macOS clears stale prewarm files just like iOS (no split ownership with build_ipa_from_nsp.py).
         self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p,g17p')
-        for gpu in ('applegpu_g18p', 'applegpu_g17p'): (self.out / f'{gpu}-prewarm-00.mtl4a').write_bytes(b'bases'); (self.out / f'{gpu}-prewarm-00.keys').write_bytes(b'index')
+        for gpu in ('applegpu_g18p', 'applegpu_g17p'):
+            (self.out / f'{gpu}-prewarm-00.mtl4a').write_bytes(b'bases')
+            (self.out / f'{gpu}-prewarm-00.keys').write_bytes(b'index')
         (self.out / 'prewarm.tsv').write_text('stamp\n')
-        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p,g17p')
-        self.assertEqual(sorted(p.name for p in self.out.glob('*-prewarm-*.mtl4a')), ['applegpu_g17p-prewarm-00.mtl4a', 'applegpu_g18p-prewarm-00.mtl4a'])
-        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p')   # an architecture no longer asked for goes with its prewarm pipelines
-        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g18p-prewarm-00.mtl4a', 'applegpu_g18p.mtl4a'])
+        self.main('--platform', 'macos', '--os-min', '27.0', '--gpu', 'g18p')
+        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g18p.mtl4a'])
+        self.assertFalse(list(self.out.glob('*-prewarm-*')))
+        self.assertFalse((self.out / 'prewarm.tsv').exists())
 
     def test_chain_move_reuses_binary_and_refreshes_metadata_for_both_platforms(self):
         for platform in ('macos', 'ios'):
@@ -839,7 +841,7 @@ class Prewarm(BuildCase):
         (self.prof / 'pso_manifest.tsv').write_text('# list\nS\tv\t0\nR\tr1\nC\tc_b\nM\t-\tm1\nR\tr1\nR\tr2\n')
         self.host = self.t / 'dmhost'; self.host.write_bytes(b'host 1')
         self.vbp = hashlib.sha256((self.lib / 'v_bp.metallib').read_bytes()).hexdigest().upper()
-        self.host_runs, self.tt, self.periods, self.host_exit, self.tt_fail = [], [], 2, 0, ()
+        self.host_runs, self.tt, self.periods, self.host_exit, self.tt_fail, self.write_scripts = [], [], 2, 0, (), True
 
     def fake_run(self, cmd, **kw):
         cmd = [str(c) for c in cmd]
@@ -848,14 +850,15 @@ class Prewarm(BuildCase):
             env = kw['env']; self.host_runs.append(env); made = Path(env['DM_PSO_PREBUILD_OUT']); made.mkdir(parents=True, exist_ok=True)
             for k in range(self.periods if not self.host_exit else 0):
                 (made / f'{self.MAC}-prewarm-{k:02d}.mtl4a').write_bytes(b'mac'); (made / f'{self.MAC}-prewarm-{k:02d}.keys').write_bytes(b'DMPSOIX2' + bytes([k]))
-                rp = [{'vertex_function_descriptor': f'fnd:F{k}{i}', 'label': f'p{k}{i}'} for i in range(3)]
-                (made / f'prewarm-{k:02d}.mtl4-json').write_text(json.dumps({'libraries': [{'label': self.vbp, 'path': '_Path_not_available_for_lib_from_data_with_UUID_' + self.vbp}],
-                    'function_descriptors': {'library_function_descriptors': [{'label': f'F{k}{i}', 'name': 'main0', 'library': self.vbp} for i in range(3)]},
-                    'pipeline_descriptors': {'render_pipeline_descriptors': rp, 'mesh_render_pipeline_descriptors': [{'mesh_function_descriptor': f'fnd:F{k}0', 'label': f'm{k}'}]}}))
+                if self.write_scripts:
+                    rp = [{'vertex_function_descriptor': f'fnd:F{k}{i}', 'label': f'p{k}{i}'} for i in range(3)]
+                    (made / f'prewarm-{k:02d}.mtl4-json').write_text(json.dumps({'libraries': [{'label': self.vbp, 'path': '_Path_not_available_for_lib_from_data_with_UUID_' + self.vbp}],
+                        'function_descriptors': {'library_function_descriptors': [{'label': f'F{k}{i}', 'name': 'main0', 'library': self.vbp} for i in range(3)]},
+                        'pipeline_descriptors': {'render_pipeline_descriptors': rp, 'mesh_render_pipeline_descriptors': [{'mesh_function_descriptor': f'fnd:F{k}0', 'label': f'm{k}'}]}}))
             if not self.host_exit: (made / 'prewarm.tsv').write_text('chain\tX\n')
             print('[dm] [nvn-mtl] pipeline prebuild: the prewarm lists\' 3 lines in 1.0 s: 2 render pipelines', file=kw['stdout'])
             return subprocess.CompletedProcess(cmd, self.host_exit)
-        if 'metal-tt' in cmd and '-ios-version-min' in cmd and 'pipelines.mtl4-json' in cmd[8]:
+        if 'metal-tt' in cmd and ('-ios-version-min' in cmd or '-macos-version-min' in cmd) and 'pipelines.mtl4-json' in cmd[8]:
             d = json.loads(Path(cmd[8]).read_text()); labels = [x['label'] for k in po.PIPELINE_KINDS for x in d['pipeline_descriptors'].get(k, [])]
             self.tt.append((cmd[5], labels)); self.assertTrue(Path(d['libraries'][0]['path']).is_file())   # the library found by its bytes
             if set(labels) & set(self.tt_fail): return subprocess.CompletedProcess(cmd, 1)
@@ -977,14 +980,59 @@ class Prewarm(BuildCase):
             self.main()
             self.assertFalse(list(self.out.glob('*-prewarm-*')) + list(self.out.glob('prewarm.tsv')))
 
-    def test_mac_pair_step_preserves_separately_baked_prewarm(self):
-        self.main('--platform', 'macos')
-        archive = self.out / 'applegpu_g18p-prewarm-00.mtl4a'; archive.write_bytes(b'mac prewarm')
-        keys = archive.with_suffix('.keys'); keys.write_bytes(b'index')
-        (self.out / 'prewarm.tsv').write_text('mac stamp\n')
-        self.main('--platform', 'macos')
-        self.assertEqual(archive.read_bytes(), b'mac prewarm')
-        self.assertEqual(keys.read_bytes(), b'index')
+    def test_macos_native_prewarm_skips_metal_tt_and_compiles_other_gpus(self):
+        self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g', '--prewarm-host', str(self.host)), 0)
+        self.assertEqual(self.tt, [])   # this Mac's GPU publishes the host's native captures directly
+        archive = self.out / 'applegpu_g16g-prewarm-00.mtl4a'
+        self.assertEqual(archive.read_bytes(), b'mac')
+        self.assertEqual(archive.stat().st_ino, (self.work / 'prewarm/host/applegpu_g16g-prewarm-00.mtl4a').stat().st_ino)
+        before = (archive.stat().st_ino, archive.stat().st_ctime_ns)
+        self.host_runs.clear()
+        self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g', '--prewarm-host', str(self.host)), 0)
+        self.assertEqual(self.host_runs, [])
+        self.assertEqual((archive.stat().st_ino, archive.stat().st_ctime_ns), before)
+        # Adding another Mac GPU compiles only that GPU's scripts with metal-tt and keeps this Mac's native files.
+        self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g,g17p', '--prewarm-host', str(self.host)), 0)
+        self.assertEqual(sorted(a for a, _ in self.tt), ['applegpu_g17p'] * 2)
+        self.assertEqual((self.out / 'applegpu_g17p-prewarm-00.mtl4a').read_bytes(), b'archive applegpu_g17p')
+        self.assertEqual((self.out / 'applegpu_g17p-prewarm-00.keys').read_bytes(), b'DMPSOIX2\x00')
+        self.assertEqual((archive.stat().st_ino, archive.stat().st_ctime_ns), before)
+        # Dropping --prewarm-host clears prewarm files while keeping the pair archive.
+        self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g'), 0)
+        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g16g.mtl4a'])
+        self.assertFalse(list(self.out.glob('*-prewarm-*')) + list(self.out.glob('prewarm.tsv')))
+
+    def test_macos_prewarm_only_bundle_without_base_or_metal_tt(self):
+        (self.prof / 'shader_pairs.tsv').write_text('# cover: single-stage padding pairs\nv\tf\n')
+        self.out.mkdir(parents=True, exist_ok=True)
+        (self.out / 'applegpu_g16g-prewarm-99.mtl4a').write_bytes(b'stale')
+        with mock.patch.object(po, 'tool_version', side_effect=AssertionError('native macOS prewarm-only must not require metal-tt')):
+            self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g', '--no-compute', '--prewarm-host', str(self.host)), 0)
+        self.assertEqual(sorted(p.name for p in self.out.glob('*.mtl4a')), ['applegpu_g16g-prewarm-00.mtl4a', 'applegpu_g16g-prewarm-01.mtl4a'])
+        self.assertTrue((self.out / 'prebuilt.tsv').is_file())
+        self.assertTrue((self.out / 'prewarm.tsv').is_file())
+        # Without --prewarm-host on a 0-base profile, stale prewarm files are cleared completely.
+        self.assertEqual(self.main('--platform', 'macos', '--gpu', 'g16g', '--no-compute'), 0)
+        self.assertEqual(list(self.out.glob('*.mtl4a')), [])
+        self.assertFalse((self.out / 'prewarm.tsv').exists())
+
+    def test_macos_other_gpu_prewarm_failure_keeps_native_files(self):
+        self.tt_fail = ('p00', 'p01', 'p02', 'm0', 'p10', 'p11', 'p12', 'm1')
+        out = io.StringIO()
+        with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            r = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--platform', 'macos', '--gpu', 'g16g,g17p', '--os-min', '27.0', '--prewarm-host', str(self.host)])
+        self.assertEqual(r, 0)
+        self.assertEqual(sorted(p.name for p in self.out.glob('*-prewarm-*.mtl4a')), ['applegpu_g16g-prewarm-00.mtl4a', 'applegpu_g16g-prewarm-01.mtl4a'])
+        self.assertIn('[RED] pso_offline: prewarm: applegpu_g17p:', out.getvalue())
+        # Without scripts at all, this Mac's native files still publish while the other GPU warns.
+        shutil.rmtree(self.work / 'prewarm')
+        self.write_scripts, self.tt_fail = False, ()
+        out = io.StringIO()
+        with mock.patch.object(po.subprocess, 'run', self.fake_run), mock.patch.dict(os.environ, DM_GAMES_DIR=str(self.prof.parent)), contextlib.redirect_stdout(out):
+            r = po.main(['--game', '0100000000001000', '--msl', str(self.lib), '--out', str(self.out), '--work', str(self.work), '--platform', 'macos', '--gpu', 'g16g,g17p', '--os-min', '27.0', '--prewarm-host', str(self.host)])
+        self.assertEqual(r, 0)
+        self.assertEqual(sorted(p.name for p in self.out.glob('*-prewarm-*.mtl4a')), ['applegpu_g16g-prewarm-00.mtl4a', 'applegpu_g16g-prewarm-01.mtl4a'])
+        self.assertIn('wrote 0 pipelines scripts', out.getvalue())
 
     def test_a_failed_host_leaves_the_archive(self):
         self.out.mkdir(); (self.out / 'applegpu_g18p-prewarm-07.mtl4a').write_bytes(b'old')

@@ -10,7 +10,9 @@ import unittest
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / 'dm/mac'))
 sys.path.insert(0, str(REPO / 'dm/games'))
+import pack_app
 import settings
 
 
@@ -32,8 +34,8 @@ class LauncherStorageTests(unittest.TestCase):
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'clang', '-fobjc-arc', '-I', str(REPO / 'dm/host'), '-c', '-o', str(sync_apple), str(REPO / 'dm/host/save_sync_apple.m')], capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)
             compile_result = subprocess.run(['xcrun', '-sdk', 'macosx', 'swiftc', '-swift-version', '5', '-parse-as-library', '-module-cache-path', str(tmp / 'module-cache'),
-                            '-o', str(exe), str(REPO / 'dm/ios/Sources/LauncherSettings.swift'), str(REPO / 'dm/ios/Sources/LauncherRow.swift'), str(REPO / 'dm/ios/Sources/SaveSyncReport.swift'),
-                            str(REPO / 'dm/mac/Launcher.swift'), str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync), str(sync_apple),
+                            '-o', str(exe), *map(str, pack_app.swift_sources()),
+                            str(Path(__file__).with_name('launcher_layout_check.swift')), str(Path(__file__).with_name('launcher_storage_check.swift')), str(sync), str(sync_apple),
                             '-framework', 'Foundation'],
                             capture_output=True, text=True, timeout=300)
             self.assertEqual(compile_result.returncode, 0, compile_result.stdout + compile_result.stderr)

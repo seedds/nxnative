@@ -172,7 +172,7 @@ static int check_solid_3d_planes(const tex_t *t, int level, int lo, int hi, cons
     id<MTLTexture> mt=tex_mtl(t); NSUInteger w=MAX(t->d.width>>level,1u), h=MAX(t->d.height>>level,1u), img=w*h*4;
     int n=hi-lo+1; id<MTLBuffer> out=[g_dev newBufferWithLength:(NSUInteger)n*img options:MTLResourceStorageModeShared]; if(!out) return 1;
     id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
-    for(int z=0;z<n;z++) [e copyFromTexture:mt sourceSlice:0 sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,(NSUInteger)(lo+z)) sourceSize:MTLSizeMake(w,h,1) toBuffer:out destinationOffset:(NSUInteger)z*img destinationBytesPerRow:w*4 destinationBytesPerImage:img];
+    for(int z=0;z<n;z++) [e copyFromTexture:mt sourceSlice:0 sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,(NSUInteger)lo+z) sourceSize:MTLSizeMake(w,h,1) toBuffer:out destinationOffset:(NSUInteger)z*img destinationBytesPerRow:w*4 destinationBytesPerImage:img];
     [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
     const uint8_t *bytes=out.contents;
     for(NSUInteger i=0;i<(NSUInteger)n*w*h;i++) if(memcmp(bytes+4*i,want,4)) return 1;

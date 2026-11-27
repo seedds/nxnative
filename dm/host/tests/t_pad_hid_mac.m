@@ -5,11 +5,13 @@
 // regardless of their vendor, or be read as HID after the wait (Steam Link, issue #2465).
 #import <Foundation/Foundation.h>
 #import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 #import <GameController/GameController.h>
 #import <GameController/GCSyntheticDeviceKeys.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include "../dm_input.h"
 
 @interface TestDev : NSObject
@@ -18,6 +20,7 @@
 @property NSNumber *virtualDevice; @property BOOL synthetic;
 @property IOHIDValueCallback valueCallback; @property void *valueContext;
 @property NSString *name; @property NSArray *elements;
+@property IOReturn refuse; @property int opened, scheduled;   // refuse: IOHIDDeviceOpen return (0: opens); opened/scheduled: balanced open/close and schedule/unschedule counts
 @end
 @implementation TestDev
 @end
@@ -75,10 +78,34 @@ static IOHIDElementType test_el_type(IOHIDElementRef e) { return ((__bridge Test
 static io_service_t test_service(IOHIDDeviceRef device) { return (io_service_t)((__bridge TestDev *)device).entry; }
 static kern_return_t test_entry_id(io_registry_entry_t e, uint64_t *id) { *id = e; return KERN_SUCCESS; }
 static uint8_t outs[64][3]; static int nouts;   // each output report: its id, subcommand and first argument byte
-static IOReturn test_set_report(IOHIDDeviceRef d, IOHIDReportType t, CFIndex id, const uint8_t *r, CFIndex n) {
-    (void)d; assert(t == kIOHIDReportTypeOutput && id == r[0] && n >= 12 && nouts < 64);
+static int set_report_delay_us;
+static IOReturn test_set_report(IOHIDDeviceRef device, IOHIDReportType t, CFIndex rid, const uint8_t *r, CFIndex n) {
+    TestDev *d = (__bridge TestDev *)device;
+    if (set_report_delay_us) usleep((useconds_t)set_report_delay_us);
+    assert(d.opened == 1);   // must never race with IOHIDDeviceClose
+    assert(t == kIOHIDReportTypeOutput && rid == r[0] && n >= 12 && nouts < 64);
     outs[nouts][0] = r[0]; outs[nouts][1] = r[10]; outs[nouts][2] = r[11]; nouts++; return kIOReturnSuccess;
 }
+static int opens;   // every IOHIDDeviceOpen call, refused or not
+static IOHIDAccessType g_test_access = kIOHIDAccessTypeDenied;
+static IOReturn test_open(IOHIDDeviceRef device, IOOptionBits o) {
+    TestDev *d = (__bridge id)device; assert(o == kIOHIDOptionsTypeNone); opens++;   // nonexclusive
+    if (d.refuse) return d.refuse;
+    assert(!d.opened && !d.scheduled); d.opened++; return kIOReturnSuccess;
+}
+static IOReturn test_close(IOHIDDeviceRef device, IOOptionBits o) {
+    TestDev *d = (__bridge id)device; assert(o == kIOHIDOptionsTypeNone && d.opened == 1 && d.scheduled == 0);
+    d.opened--; return kIOReturnSuccess;
+}
+static void test_schedule(IOHIDDeviceRef device, CFRunLoopRef rl, CFStringRef mode) {
+    TestDev *d = (__bridge id)device; assert(rl == CFRunLoopGetMain() && CFEqual(mode, kCFRunLoopCommonModes));
+    assert(d.opened == 1 && d.scheduled == 0); d.scheduled++;
+}
+static void test_unschedule(IOHIDDeviceRef device, CFRunLoopRef rl, CFStringRef mode) {
+    TestDev *d = (__bridge id)device; assert(rl == CFRunLoopGetMain() && CFEqual(mode, kCFRunLoopCommonModes));
+    assert(d.opened == 1 && d.scheduled == 1); d.scheduled--;
+}
+static IOHIDAccessType test_access(IOHIDRequestType t) { assert(t == kIOHIDRequestTypeListenEvent); return g_test_access; }
 
 static uint64_t tick = 1000000000;
 uint64_t now_ns(void) { return tick; }
@@ -120,6 +147,11 @@ static void advance_timers(uint64_t ns) {
 #define IOHIDDeviceGetService test_service
 #define IORegistryEntryGetRegistryEntryID test_entry_id
 #define IOHIDDeviceSetReport test_set_report
+#define IOHIDDeviceOpen test_open
+#define IOHIDDeviceClose test_close
+#define IOHIDDeviceScheduleWithRunLoop test_schedule
+#define IOHIDDeviceUnscheduleFromRunLoop test_unschedule
+#define IOHIDCheckAccess test_access
 #define IOHIDElementGetUsagePage test_el_page
 #define IOHIDElementGetUsage test_el_usage
 #define IOHIDElementGetReportID test_el_report
@@ -195,20 +227,27 @@ static void gc_fallback(void) {
     for (TestDev *d in virtuals) hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
     // Missing and false virtual flags both retain physical-controller trust, including a HID name that differs from GameController's.
     NSArray *physical = @[pro(0x41, 104, @"Bluetooth"), virtual_pad(@"Wireless Controller", 0x054c, 105), virtual_pad(@"Xbox pad", 0x045e, 106)];
-    for (TestDev *d in physical) { d.virtualDevice = d.vid == 0x054c ? @NO : nil; hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d)); assert(find(d) && !d.valueCallback); }
-    // Apple's synthetic devices stay excluded; a device removed during the wait must never acquire a reader.
+    for (TestDev *d in physical) {
+        d.virtualDevice = d.vid == 0x054c ? @NO : nil;
+        hidpad_found(NULL, kIOReturnSuccess, NULL, ref(d));
+        assert(find(d) && !d.valueCallback);
+        // Only twin-able devices (Switch Pro) are opened for report listening; physical Xbox/Sony pads are never opened.
+        if (d.vid == 0x057e) assert(d.opened == 1 && d.scheduled == 1);
+        else assert(d.opened == 0 && d.scheduled == 0);
+    }
+    // Apple's synthetic devices stay excluded; a device removed during the wait must never acquire a reader or be opened.
     TestDev *synthetic = virtual_pad(@"Synthetic pad", 0x045e, 107); synthetic.synthetic = YES;
-    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(synthetic)); assert(!find(synthetic));
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(synthetic)); assert(!find(synthetic) && !synthetic.opened && !synthetic.scheduled);
     TestDev *removed = virtual_pad(@"Removed pad", 0x045e, 108);
     hidpad_found(NULL, kIOReturnSuccess, NULL, ref(removed)); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(removed));
-    assert(attached == 0);
+    assert(attached == 0 && !removed.opened && !removed.scheduled);
     wait_ms(2200);
     assert(attached == 4 && !g_hidpads_waiting && !removed.valueCallback && !synthetic.valueCallback);
     for (TestDev *d in virtuals) {
-        assert(find(d) && !find(d)->twin); button(d, 1); button(d, 0);
-        hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); assert(!d.valueCallback);
+        assert(find(d) && !find(d)->twin && d.opened == 1 && d.scheduled == 1); button(d, 1); button(d, 0);
+        hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); assert(!d.valueCallback && !d.opened && !d.scheduled);
     }
-    for (TestDev *d in physical) { assert(!d.valueCallback); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); }
+    for (TestDev *d in physical) { assert(!d.valueCallback); hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(d)); assert(!d.opened && !d.scheduled); }
     assert(attached == 0 && !g_hidpads && !g_hidpads_gc);
 
     // An already usable controller and one published during the wait stay with GameController. An unusable matching controller or an unrelated usable one cannot vouch.
@@ -360,11 +399,77 @@ static void hid_composite_and_wrapped(void) {
     puts("t_pad_hid_mac: composite mouse filtering, wrapped unsigned axes and Consumer AC Back passed");
 }
 
+// Per-device open isolation: a keyboard/mouse-class device refused for Input Monitoring (kIOReturnNotPermitted) or seized by another app
+// (kIOReturnExclusiveAccess) costs only that device; an ordinary raw HID pad discovered alongside it still opens, schedules and delivers input.
+static void refused_open(void) {
+    int a0 = attached, o0 = opens; BOOL supports = g_supports; g_supports = NO;
+    TestDev *kbd = [TestDev new]; kbd.vid = 0x3434; kbd.pid = 0xd030; kbd.name = @"Keyboard receiver"; kbd.entry = 300; kbd.refuse = kIOReturnNotPermitted;
+    TestDev *seized = [TestDev new]; seized.vid = 0x2dc8; seized.pid = 0x3010; seized.name = @"Seized pad"; seized.entry = 301; seized.refuse = kIOReturnExclusiveAccess;
+    g_test_access = kIOHIDAccessTypeDenied;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(kbd));
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(seized));
+    for (TestDev *t in @[kbd, seized]) assert(!find(t) && !t.callback && !t.valueCallback && !t.opened && !t.scheduled);
+    assert(opens == o0 + 2 && attached == a0 && !g_hidpads_waiting);
+
+    // A second ordinary raw HID pad with real button and axis elements works normally alongside the denied devices.
+    TestElem *btn = elem(0, 1, kHIDPage_Button, 1);
+    TestElem *lx = elem(0, 1, kHIDPage_GenericDesktop, 0x30); lx.min = 0; lx.max = 255; lx.reportSize = 8;
+    TestElem *ly = elem(0, 1, kHIDPage_GenericDesktop, 0x31); ly.min = 0; ly.max = 255; ly.reportSize = 8;
+    TestDev *pad = [TestDev new]; pad.vid = 0x2dc8; pad.pid = 0x3011; pad.name = @"8BitDo Raw Pad"; pad.entry = 302;
+    pad.elements = @[btn, lx, ly];
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(pad));
+    hid_pad *hp = find(pad);
+    assert(hp && pad.opened == 1 && pad.scheduled == 1 && pad.valueCallback && attached == a0 + 1);
+    push_value(pad, btn, 1); assert(buttons == DM_BTN_B);
+    push_value(pad, btn, 0); assert(buttons == 0);
+    push_value(pad, lx, 255); push_value(pad, ly, 0);
+    int32_t s[4]; pad_hid_sticks(&hp->st, s); assert(s[0] == DM_STICK_MAX && s[1] == DM_STICK_MAX);
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(pad));
+    assert(!find(pad) && !pad.valueCallback && !pad.opened && !pad.scheduled && attached == a0);
+    for (TestDev *t in @[kbd, seized]) hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(t));
+
+    // A denied device that GameController initially claimed (gc_hint=YES) fails cleanly after the wait without attaching.
+    g_supports = YES; g_test_access = kIOHIDAccessTypeUnknown;
+    TestDev *delayed = [TestDev new]; delayed.vid = 0x3434; delayed.pid = 0xd031; delayed.name = @"Delayed denied pad"; delayed.entry = 303; delayed.refuse = kIOReturnNotPermitted;
+    int o1 = opens;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(delayed));
+    assert(opens == o1 && !delayed.opened && !delayed.scheduled);   // not opened while waiting on GameController
+    wait_ms(2200);
+    assert(opens == o1 + 1 && !find(delayed) && !delayed.opened && !delayed.scheduled && !delayed.valueCallback && attached == a0 && !g_hidpads_waiting);
+
+    // A GameController-listed twin-able device refused during hidpad_listen stays unopened in g_hidpads_gc and never counts as live.
+    g_test_access = kIOHIDAccessTypeGranted;
+    controller(@"Composite GC Pad", 1);
+    TestDev *gc_denied = [TestDev new]; gc_denied.vid = 0x2dc8; gc_denied.pid = 0x3012; gc_denied.name = @"Composite GC Pad"; gc_denied.entry = 304; gc_denied.refuse = kIOReturnNotPermitted;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(gc_denied));
+    assert(find(gc_denied) && !gc_denied.opened && !gc_denied.scheduled && !gc_denied.callback && !hidpad_live(find(gc_denied), now_ns()));
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(gc_denied));
+    [g_gc removeAllObjects];
+
+    // Closing a device with an async output report queued on g_hidpad_out drains the queue before IOHIDDeviceClose runs.
+    g_supports = NO;
+    g_hidpad_out = dispatch_queue_create("dm.hidpad.test.out", DISPATCH_QUEUE_SERIAL);
+    set_report_delay_us = 20000;
+    TestDev *led = [TestDev new]; led.vid = 0x0000; led.pid = 0x0000; led.name = @"Async out pad"; led.entry = 305;
+    led.elements = @[elem(0, 0x3F, 9, 1), elem(0, 0x21, 0xFF00, 1), elem(1, 0x01, 0xFF00, 1)];
+    int b0 = nouts;
+    hidpad_found(NULL, kIOReturnSuccess, NULL, ref(led));   // enqueues LED output report on g_hidpad_out
+    hidpad_removed(NULL, kIOReturnSuccess, NULL, ref(led)); // must drain g_hidpad_out before closing
+    assert(nouts == b0 + 1 && !led.opened && !led.scheduled);
+    set_report_delay_us = 0;
+    g_hidpad_out = NULL;
+
+    assert(!g_hidpads && !g_hidpads_gc && !g_hidpads_waiting);
+    g_supports = supports; g_test_access = kIOHIDAccessTypeDenied;
+    puts("t_pad_hid_mac: per-device open isolation and async close drain passed");
+}
+
 int main(void) { @autoreleasepool {
     g_gc = [NSMutableArray new];
     gc_fallback();
     hid_layouts();
     hid_composite_and_wrapped();
+    refused_open();
     TestGC *gc = [TestGC new]; gc.productCategory = @"Switch Pro Controller"; gc.vendorName = @"Pro Controller"; gc.extendedGamepad = @1;
     // issue #2237: one Pro Controller over Bluetooth, which GameController lists, and a second entry of its model at location 0 that sends nothing
     [g_gc addObject:gc];

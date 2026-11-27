@@ -6,6 +6,9 @@
 // seconds for a GCController of its name; without one it is read as HID, and given back if that GCController connects later. Microsoft's, Sony's and Nintendo's pads
 // (hidpad_gc_native) are trusted without the wait only for physical devices: GameController supports them itself, under names that need not be their HID product strings.
 // A virtual device can reuse those vendors without GameController publishing it (Steam Link, GitHub issue #2465), so it needs the same usable-controller check and wait.
+// Each device is opened and scheduled on its own (kIOHIDManagerOptionIndependentDevices, hidpad_open) only when read or monitored for twins, never globally via
+// IOHIDManagerOpen, which fails as a whole when any single matched device is refused (e.g. kIOReturnNotPermitted on a composite keyboard/mouse device without Input
+// Monitoring, or kIOReturnExclusiveAccess when another app seized it).
 // DM_HID_PADS=0 turns this off.
 // Identical pads (GitHub issue #1218): GameController can list fewer pads of one model than IOKit has; two Switch Pro Controllers over USB are listed as one (their USB serial
 // numbers match, which may be why; over Bluetooth both are listed). So a device GameController reads is kept, unread, in g_hidpads_gc, to count each model's pads. When IOKit
@@ -27,6 +30,7 @@
 // later (a wake) is read from it again and asked again.
 #pragma once
 #import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/hidsystem/IOHIDLib.h>   // IOHIDCheckAccess
 #import <GameController/GameController.h>
 #import <GameController/GCSyntheticDeviceKeys.h>
 #include <os/lock.h>
@@ -40,6 +44,7 @@
 
 typedef struct hid_pad {
     IOHIDDeviceRef hid; pad_hid st; char name[64]; int vid, pid, gc_hint; struct hid_pad *next;
+    int opened;            // hidpad_open opened and scheduled it on the main run loop: unscheduled and closed when dropped
     int twin, twin_want;   // twin: read here although GameController lists its model; twin_want: hidpad_twins_eval's choice for it
     uint64_t heard; int streams, shown;   // heard: its last input report; streams: it sends a Pro Controller's 0x30 (hidpad_live); shown: 1 / 2 logged as not counted / counted
     pad_pro pro; uint64_t pro_m; int32_t pro_s[4]; pro_motion motion; uint8_t pro_counter; int pro_logged;   // from its report 0x30 (a twin Pro Controller, or full), not from st
@@ -296,16 +301,51 @@ static void hidpad_stop(hid_pad *d) {
     IOHIDDeviceRegisterInputValueCallback(d->hid, NULL, NULL);
     IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, NULL, NULL);
 }
+// Opens and schedules one device nonexclusively (GameController and other apps keep it; output reports serve twin Pro calibration reads and Nintendo's protocol).
+// A refusal costs this device only. kIOReturnNotPermitted (0xe00002e2): macOS gates keyboard/mouse-class HID devices behind Input Monitoring (IOHIDDeviceOpen requests
+// access itself on the first refusal and lists the app under Input Monitoring, off; an ad hoc signed app is authorized by cdhash, so a rebuild must be removed and re-allowed).
+static int hidpad_open(hid_pad *d) {
+    if (d->opened) return 1;
+    IOReturn r = IOHIDDeviceOpen(d->hid, kIOHIDOptionsTypeNone);
+    if (r == kIOReturnSuccess) {
+        IOHIDDeviceScheduleWithRunLoop(d->hid, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+        return d->opened = 1;
+    }
+    if (r != kIOReturnNotPermitted) {
+        LOG("[RED] controller '%s' (HID, %04x:%04x): not read: cannot open it (0x%x); other controllers still work", d->name, d->vid, d->pid, r);
+        return 0;
+    }
+    IOHIDAccessType a = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent);
+    LOG("[RED] controller '%s' (HID, %04x:%04x): not read: macOS requires Input Monitoring for this device (%s; it may also declare a keyboard or mouse). "
+        "Other controllers still work; to use this device, allow this game in System Settings > Privacy & Security > Input Monitoring and start it again "
+        "(if it is already allowed there, remove it with (-), start it and allow it again)",
+        d->name, d->vid, d->pid,
+        a == kIOHIDAccessTypeGranted ? "on for this game, yet refused" : a == kIOHIDAccessTypeDenied ? "off for this game" : "macOS asks for it now");
+    return 0;
+}
 // Its reports stamp heard while it may still be counted as one of its model: always for a Pro Controller (its 0x30 says it is there), another model until its first
 static void hidpad_listen(hid_pad *d) {
-    if (!g_twins_off && hidpad_twin_able(d) && (hidpad_is_pro(d) || !d->heard)) IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
+    if (g_twins_off || !hidpad_twin_able(d) || (!hidpad_is_pro(d) && d->heard)) return;
+    if (!hidpad_open(d)) return;
+    IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
 }
-static void hidpad_drop(hid_pad *d) { hidpad_stop(d); CFRelease(d->hid); free(d); }
+static void hidpad_drop(hid_pad *d) {
+    if (d->opened) {
+        hidpad_stop(d);
+        if (g_hidpad_out) dispatch_sync(g_hidpad_out, ^{});   // drain queued output reports before closing the device (as pad_jc1_mac.h)
+        IOHIDDeviceUnscheduleFromRunLoop(d->hid, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+        IOHIDDeviceClose(d->hid, kIOHIDOptionsTypeNone);
+        d->opened = 0;
+    }
+    CFRelease(d->hid); free(d);
+}
 static void hidpad_keep_gc(hid_pad *d) {
-    hidpad_stop(d); d->twin = d->twin_want = 0; d->proto = d->talks = d->full = d->steps = 0; d->next = g_hidpads_gc; g_hidpads_gc = d; hidpad_listen(d);
+    if (d->opened) hidpad_stop(d);
+    d->twin = d->twin_want = 0; d->proto = d->talks = d->full = d->steps = 0; d->next = g_hidpads_gc; g_hidpads_gc = d; hidpad_listen(d);
     hidpad_rumble_sync();
 }
 static void hidpad_use(hid_pad *d) {
+    if (!hidpad_open(d)) { hidpad_drop(d); return; }
     d->next = g_hidpads; g_hidpads = d;
     IOHIDDeviceRegisterInputValueCallback(d->hid, hidpad_value, d);
     d->proto = pad_hid_nin_protocol(d->nin); d->lights = -1;
@@ -368,6 +408,7 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(HIDPAD_GC_WAIT * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         hid_pad *w = hidpad_unlink(&g_hidpads_waiting, hid); if (!w) return;   // removed meanwhile
         if (hidpad_gc_listed(w->name)) { hidpad_keep_gc(w); hidpad_models_changed(); return; }
+        if (!hidpad_open(w)) { hidpad_drop(w); return; }
         LOG("controller '%s' (HID, %04x:%04x): GameController says it lists it but has not after %g s, so it is read as HID", w->name, w->vid, w->pid, HIDPAD_GC_WAIT);
         hidpad_use(w);
     });
@@ -478,7 +519,9 @@ static void hidpad_twins_take(GCController *gone) {
             if (!at || l < loc) { at = link; loc = l; }
         }
         if (!at) return;
-        hid_pad *d = *at; *at = d->next; int read, n = hidpad_model_count(d, now_ns(), &read, NULL);
+        hid_pad *d = *at; *at = d->next;
+        if (!hidpad_open(d)) { hidpad_drop(d); continue; }
+        int read, n = hidpad_model_count(d, now_ns(), &read, NULL);
         int pro = hidpad_is_pro(d);
         LOG("[hid] '%s' (%04x:%04x) at USB location 0x%lx, %s, registry entry 0x%llx: GameController lists %d of %d pads of this model: read here, from its %s", d->name, d->vid, d->pid, loc,
             hidpad_transport(d), (unsigned long long)hidpad_entry(d->hid), hidpad_gc_count(d, gone), n + 1, pro ? "report 0x30" : "HID elements");
@@ -500,7 +543,7 @@ static void hidpad_start(void) {
     e = getenv("DM_HID_LOG"); g_hidpad_log = e && atoi(e);
     e = getenv("DM_PAD_IDENTICAL"); g_twins_off = e && !atoi(e);
     e = getenv("DM_MOTION"); const char *h = getenv("DM_MOTION_HID"); g_hidpad_motion = !(e && !atoi(e)) && !(h && !atoi(h));   // a twin's gyro is HID motion, as motion_pro_mac.h's
-    g_hidpad_manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone); if (!g_hidpad_manager) return;
+    g_hidpad_manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDManagerOptionIndependentDevices); if (!g_hidpad_manager) return;
     g_hidpad_out = dispatch_queue_create("dm.hidpad.out", DISPATCH_QUEUE_SERIAL);   // Nintendo's protocol's output reports, in order
     g_hidpad_rumble_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());   // resumed while a pad rumbles (hidpad_rumble_sync)
     dispatch_source_set_timer(g_hidpad_rumble_timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)HIDPAD_RUMBLE_TICK_NS), HIDPAD_RUMBLE_TICK_NS, 1000000);
@@ -511,11 +554,5 @@ static void hidpad_start(void) {
         @{@kIOHIDVendorIDKey: @0x057E, @kIOHIDProductIDKey: @0x2009}]);   // the Pro Controller, whatever usage it declares, so that identical ones are counted
     IOHIDManagerRegisterDeviceMatchingCallback(g_hidpad_manager, hidpad_found, NULL);
     IOHIDManagerRegisterDeviceRemovalCallback(g_hidpad_manager, hidpad_removed, NULL);
-    IOHIDManagerScheduleWithRunLoop(g_hidpad_manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-    IOReturn r = IOHIDManagerOpen(g_hidpad_manager, kIOHIDOptionsTypeNone);   // nonexclusive: GameController and other apps keep their devices; output reports: a twin Pro Controller's calibration read, Nintendo's protocol's subcommands and rumble
-    if (r != kIOReturnSuccess) {
-        LOG("[RED] HID gamepads: cannot open HID (0x%x); only GameController controllers are read", r);
-        IOHIDManagerUnscheduleFromRunLoop(g_hidpad_manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-        CFRelease(g_hidpad_manager); g_hidpad_manager = NULL;
-    }
+    IOHIDManagerScheduleWithRunLoop(g_hidpad_manager, CFRunLoopGetMain(), kCFRunLoopCommonModes);   // independent devices: hidpad_open opens and schedules each device on its own
 }

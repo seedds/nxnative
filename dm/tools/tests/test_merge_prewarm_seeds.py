@@ -14,6 +14,8 @@ VERTEX = '0000000000000001_b'
 COMPUTE = '0000000000000002_b'
 MESH = '0000000000000003_b'
 TASK = '0000000000000004_b'
+GEOMETRY = '0000000000000005_b'
+SECOND_VERTEX = '0000000000000006_b'
 
 
 def key(shader, stage=0):
@@ -30,7 +32,8 @@ class ImportSeeds(unittest.TestCase):
         self.repo = self.root / 'repo'
         self.inbox = self.root / 'inbox'
         self.inbox.mkdir()
-        for path in (SCRIPT, Path('dm/games/game.py'), Path('dm/tools/prewarm_skey.c')):
+        for path in (SCRIPT, Path('dm/games/game.py'), Path('dm/tools/prewarm_skey.c'),
+                     Path('dm/gfx/tools/dmsh_chain.py')):
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPO / path, target)
@@ -42,7 +45,8 @@ class ImportSeeds(unittest.TestCase):
         (profile / 'shader_map.tsv').write_text(''.join(
             f'shaders\t{index}\t{stage}\t{shader[:-2]}\n'
             for index, (stage, shader) in enumerate([('vertex', VERTEX), ('compute', COMPUTE),
-                                                     ('mesh', MESH), ('task', TASK)])))
+                                                     ('mesh', MESH), ('task', TASK), ('geometry', GEOMETRY),
+                                                     ('vertex', SECOND_VERTEX)])))
         self.manifest = profile / 'pso_manifest.tsv'
         self.original = f'# Original header\nR\t{key(VERTEX)}\n'
         self.manifest.write_text(self.original)
@@ -83,8 +87,8 @@ class ImportSeeds(unittest.TestCase):
         self.upload(f'S\t{VERTEX}\t0', corrupt=True)
         self.upload(shader, title='0100000000000001')
         preview = self.run_import().stdout
-        for expected in ('3 added', '2 duplicate', 'invalid pipeline', 'geometry needs shader build',
-                         'missing shader', 'stage mismatch', 'profile package 1.0.0', 'SHA-256 mismatch',
+        for expected in ('3 added', '2 duplicate', 'invalid pipeline', '2 missing shader',
+                         'stage mismatch', 'profile package 1.0.0', 'SHA-256 mismatch',
                          'no repository profile', 'Preview'):
             self.assertIn(expected, preview)
         self.assertEqual(self.manifest.read_text(), self.original)
@@ -93,6 +97,42 @@ class ImportSeeds(unittest.TestCase):
                          + '\n'.join([shader, mesh, compute]) + '\n')
         self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
         self.assertEqual(len(list(self.inbox.glob('*.tsv'))), 3)
+
+    def test_geometry_adds_valid_new_pairs_once_and_keeps_stage_mismatches(self):
+        vertex, geometry = VERTEX[:-2], GEOMETRY[:-2]
+        pair = f'G\t{vertex}\t{geometry}'
+        capture = self.upload(pair, pair)
+        wrong_stage = self.upload(f'G\t{vertex}\t{COMPUTE[:-2]}')
+
+        preview = self.run_import().stdout
+        self.assertIn('1 added, 1 duplicate', preview)
+        self.assertIn('1 stage mismatch', preview)
+        self.assertIn(f'Next shader build: mesh pair {vertex} {geometry}', preview)
+        self.assertIn('1 inbox capture(s) would be deleted', preview)
+        self.assertEqual(self.manifest.read_text(), self.original)
+
+        self.assertIn('Deleted 1 inbox capture(s).', self.run_import('--apply').stdout)
+        self.assertFalse(capture.exists())
+        self.assertTrue(wrong_stage.is_file())
+        self.assertEqual(self.manifest.read_text(), self.original + f'# Inbox captures from 1.0.0.\n{pair}\n')
+
+        capture = self.upload(pair)
+        self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
+        self.assertFalse(capture.exists())
+
+    def test_geometry_pairs_in_build_tables_need_no_manifest_rows(self):
+        generated = f'{VERTEX[:-2]}\t{GEOMETRY[:-2]}'
+        manual = f'{SECOND_VERTEX[:-2]}\t{GEOMETRY[:-2]}'
+        self.manifest.with_name('geo_pairs.tsv').write_text(f'# Generated table\n{generated}\n')
+        self.manifest.with_name('geo_mesh.tsv').write_text(f'# Manually requested pairs\n{manual}\n')
+        capture = self.upload(f'G\t{generated}', f'G\t{manual}')
+
+        applied = self.run_import('--apply').stdout
+        self.assertIn('2 duplicate', applied)
+        self.assertIn('No manifest updates.', applied)
+        self.assertIn('Deleted 1 inbox capture(s).', applied)
+        self.assertFalse(capture.exists())
+        self.assertEqual(self.manifest.read_text(), self.original)
 
     def test_apply_deletes_fully_imported_captures_including_duplicate_only(self):
         seed = f'C\t{COMPUTE}'

@@ -15,8 +15,10 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 REPO = Path(__file__).resolve().parents[1]
 GAMES = REPO / 'dm/games'
 NVN = REPO / 'dm/gfx/nvn'
+SHADER_TOOLS = NVN.parent / 'tools'
 PARSER_SOURCE = REPO / 'dm/tools/prewarm_skey.c'
-sys.path.insert(0, str(GAMES))
+sys.path[:0] = [str(GAMES), str(SHADER_TOOLS)]
+from dmsh_chain import table_pairs
 from game import Game
 
 FILENAME = re.compile(r'([A-F0-9]{16})--([A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63})--([a-f0-9]{64})\.tsv')
@@ -27,6 +29,7 @@ STAGES = {'vertex': '0', 'pixel': '1', 'geometry': '2', 'hull': '3', 'domain': '
           'compute': '5', 'task': '36', 'mesh': '47'}  # NVN2 task and mesh can use guest or host stage numbers.
 HEADER = '# Prewarm seed list (shipped in the app, next to shader_map.tsv). See docs/development.md#prewarm-lists.\n'
 IDENTITY = ('-c', 'user.name=seedds', '-c', 'user.email=seedds@gmail.com')
+GEOMETRY_TABLES = ('geo_pairs.tsv', 'geo_mesh.tsv')
 
 
 @dataclass
@@ -102,6 +105,8 @@ def check_stages(row: str, parsed: dict[str, list[str]], shaders: dict[str, str]
             refs.append((fragment, 'pixel', fs_stage))
         if kind == 'M' and key != '-':
             refs.append((key, 'task', ''))
+    elif kind == 'G':
+        refs = [(key + '_b', 'vertex', ''), (rest[0] + '_b', 'geometry', '')]
     else:
         refs = [(key, 'compute' if kind == 'C' else '', rest[0] if kind == 'S' else '')]
     if any(key not in shaders for key, _, _ in refs):
@@ -136,6 +141,8 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
     existing = [row for row in seed.splitlines() if ROW.fullmatch(row)]
     parsed = parse_pipelines(parser, existing)
     seen = {row_key(row, parsed) for row in existing}
+    for table in GEOMETRY_TABLES:
+        seen.update(('G', *pair) for pair in table_pairs(profile.table(table)))
     package = profile.builds().get(profile.get('package', ''), {}).get('display')
     additions = []
     kinds: Counter[str] = Counter()
@@ -149,8 +156,6 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
                 counts['invalid pipeline'] += 1
             elif key in seen:
                 counts['duplicate'] += 1
-            elif row.startswith('G\t'):
-                counts['geometry needs shader build'] += 1
             elif reason := check_stages(row, parsed, shaders):
                 counts[reason] += 1
             else:
@@ -177,6 +182,10 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
     name = profile.get('name', profile.id)
     breakdown = ', '.join(f'{n:,} {kind}' for kind, n in sorted(kinds.items()))
     print(f'{name} ({profile.id}): {len(additions):,} new rows ({breakdown})')
+    for row in additions:
+        if row.startswith('G\t'):
+            _, vertex, geometry = row.rstrip('\n').split('\t')
+            print(f'  Next shader build: mesh pair {vertex} {geometry}')
     subject = f'game: {name} adds prewarm seeds'
     if len(subject) > 72:
         subject = f'game/{profile.id}: add prewarm seeds'
@@ -258,9 +267,9 @@ def prepare_main() -> str:
     return git('rev-parse', 'HEAD', capture=True).strip()
 
 
-def push(updates: list[Update], base: str) -> None:
+def push(plan: ImportPlan, base: str) -> None:
     paths = []
-    for update in updates:
+    for update in plan.updates:
         path = update.path.relative_to(REPO).as_posix()
         paths.append(path)
         if update.path.read_bytes() != update.content:
@@ -270,18 +279,20 @@ def push(updates: list[Update], base: str) -> None:
         git(*IDENTITY, 'commit', '--only', '-m', update.subject, '-m', update.message, '--', path)
     git('fetch', 'origin', 'main')
     inputs = ['dm/gfx/nvn/nvn_pso_skey.h', 'dm/gfx/nvn/nvn_pso_ds.h', 'dm/gfx/nvn/nvn_obj.h',
-              str(PARSER_SOURCE.relative_to(REPO))]
-    for update in updates:
-        directory = update.path.parent.relative_to(REPO)
-        inputs.extend(str(directory / name) for name in ('game.tsv', 'shader_map.tsv', 'pso_manifest.tsv'))
+              str(PARSER_SOURCE.relative_to(REPO)), str((SHADER_TOOLS / 'dmsh_chain.py').relative_to(REPO))]
+    titles = {update.path.parent.name for update in plan.updates}
+    titles.update(path.name.split('--', 1)[0] for path, _ in plan.captures_to_delete)
+    for title in sorted(titles):
+        directory = GAMES.relative_to(REPO) / title
+        inputs.extend(str(directory / name) for name in ('game.tsv', 'shader_map.tsv', 'pso_manifest.tsv', *GEOMETRY_TABLES))
     if git('diff', '--name-only', base, 'origin/main', '--', *inputs, capture=True):
         raise ValueError('origin/main changed import inputs during the run. The local commits need a fresh audit before pushing')
     git(*IDENTITY, 'rebase', '--no-autostash', 'origin/main')
     change = 'origin/main..HEAD'
     changed = git('diff', '--name-only', change, capture=True).splitlines()
     commits = git('rev-list', '--count', change, capture=True).strip()
-    if (sorted(changed) != sorted(paths) or int(commits) != len(updates)
-            or any(update.path.read_bytes() != update.content for update in updates)):
+    if (sorted(changed) != sorted(paths) or int(commits) != len(plan.updates)
+            or any(update.path.read_bytes() != update.content for update in plan.updates)):
         raise ValueError('the commits to push differ from this import')
     git('diff', '--check', change)
     git('push', 'origin', 'HEAD:main')
@@ -307,7 +318,7 @@ def main() -> int:
             apply(result.updates)
             print(f'Updated {len(result.updates)} manifest(s).', flush=True)
             if base is not None:
-                push(result.updates, base)
+                push(result, base)
         else:
             print(f'Preview: {len(result.updates)} manifest(s) would change.')
         if write:

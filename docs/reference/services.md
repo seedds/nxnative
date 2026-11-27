@@ -1264,6 +1264,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** the host has no startup logo (`hle_oe.c`): `FinishStartupLogo` is a no-op, and `EnableStartupLogoDisappearedMessage` queues message 95 (startup logo disappeared) at once through the notification queue and its event, since the logo is already gone. The number comes from the PR's run (the game popped it and went on); it was not found in the SDK's code.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md); Fit Boxing 3 (`0100AC101BFA2000`, provisional profile, no note; [PR #1973](https://github.com/seedds/nxnative/pull/1973)).
 
+### System gameplay recording with a work buffer
+
+- **Symptom:** a null read in `oe::EnableGamePlayRecording` before the first frame.
+- **Cause:** Splatoon 2 5.5.2 calls this SDK 3.4.1 entry point unconditionally with a 96 MiB work buffer (`main+0x3a3e28`). The SDK creates transfer memory, then dereferences the absent `am::GetApplicationFunctions` proxy at `sdk+0x14f778` to initialize system video recording.
+- **Fix:** `hle_oe.c` handles this overload alongside the other system recording switches. On a host without a system recorder it returns without borrowing the game's buffer.
+- **Found on:** Splatoon 2 5.5.2. The Mac startup probe passed the call, opened the audio renderer and reached frame 1,200.
+
 ### Copyright frame buffer overlay
 
 - **Symptom:** null read in `oe::InitializeCopyrightFrameBuffer`, right after the window setup.

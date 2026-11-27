@@ -320,6 +320,8 @@ HLE_FORCE("_ZN2nn2oe14ExecuteProgramEiPKvm", "end this program and start another
 // Super Smash Bros. Ultimate 13.0.5 calls it after Options > Language > Yes ("the software will restart"), once the new language is saved. The SDK asks the am application proxy, which the
 // host never opens: applet::RequestToLaunchApplication read through the null proxy (sdk+0x804c8, SIGSEGV at address 0)
 HLE_FORCE("_ZN2nn2oe28RequestToRelaunchApplicationEv", "end this application and start it again from its first program, no launch parameter (on the Mac an execve of the host); never returns", void, h_oe_Relaunch, void) { oe_start(0, NULL, 0, 1); }
+// The SDK 3 entry point transfers a work buffer to the am capture applet. The host has no system recorder or application proxy, so leave the caller's buffer alone.
+HLE_FORCE("_ZN2nn2oe23EnableGamePlayRecordingEPvm", "start system video recording with a work buffer; the host has no system recording", void, h_oe_EnableGameplayRec, void *work, size_t size) { (void)work; (void)size; }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "video recording switch; the host has no system recording", void, h_oe_DisableRec, void) {}
 // Silence the game's sound in system video captures (through am; FINAL FANTASY RESONANCE imports both): the host records nothing
 HLE_FORCE("_ZN2nn2oe13MuteRecordingEv", "mute the sound of system video recording; the host has no system recording", void, h_oe_MuteRec, void) {}

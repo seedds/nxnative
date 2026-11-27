@@ -175,11 +175,6 @@ static void rx_mark_locked(void) {   // after a commit on g_q4, under g_res_comm
     atomic_store_explicit(&g_rx_seq, s, memory_order_release);
     [g_q4 signalEvent:ev value:s];
 }
-static void rx_mark(void) {
-    pthread_mutex_lock(&g_res_commit_mu);
-    rx_mark_locked();
-    pthread_mutex_unlock(&g_res_commit_mu);
-}
 static uint64_t rx_inflight(void) {   // commits on g_q4 not yet completed by the GPU (plus any test hold)
     static int fbm = -1; if (fbm < 0) fbm = sw_mode("DM_NVN_SUB_IDLE_FB", 0);
     uint64_t hold = (uint64_t)atomic_load_explicit(&g_rx_busy_hold, memory_order_relaxed);
@@ -551,9 +546,12 @@ static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: REC_CMT_NOW /
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
+    // Under g_res_commit_mu as the encode thread's commits: nothing lands between a present's copy and its signal (nvn_mtl.m present_copy), which the present would wait for too
+    pthread_mutex_lock(&g_res_commit_mu);
     gpu_tag_commit(fb, commit_now());
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit (main command buffer)");
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
@@ -564,8 +562,10 @@ static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
+    pthread_mutex_lock(&g_res_commit_mu);   // as rec_commit's
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit_upload (upload batch)");
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch

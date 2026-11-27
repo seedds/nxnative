@@ -22,6 +22,8 @@ Modules: `main`, `subsdk0` and `sdk`. Other versions are not validated.
 - The game selects NVN near = 0 (`main0_z`). The default near = −w made the Mac reject the bundled Metal pipeline archive and rebuild the bases at first launch. `depth_mode zero` lets the packer bake the matching bases. It does not change the live depth mode or shader translation. See [offline archive depth mismatches](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
 - Mac and iPhone logs report two unimplemented NVN calls, `nvnCommandBufferSetSubpixelPrecisionBias` and `nvnCommandBufferSetConservativeRasterDilate`. No visible problem was observed on the tested route; later effects are unverified.
 
+- **Resolved build validation:** The packer stopped with `shader_pairs.tsv: the same rows in another order` after the split started labeling single-stage padding pairs. The regenerated table keeps the same pair rows and puts the six padding-only pairs in its `# cover:` section. Vertex output padding still uses them; the offline pipeline archive does not prebuild them.
+
 ## Tested routes
 
 - M5 Max, macOS 27.2 (profile with the depth fix): the bundled archive opened from a clean local cache, found 16 of 16 probed pair bases and skipped the full first-launch rebuild. The packed host loaded the copied Sacred Forest save. It still builds individual pipelines for states absent from the offline archive.

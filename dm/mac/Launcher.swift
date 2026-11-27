@@ -167,6 +167,7 @@ struct LauncherView: View {
                 settingSections(basic: true)
                 if m.values["DM_MIC"] == "1" { MicrophoneDevicePicker() }
                 CloudSavesSection()
+                PrewarmUploadSetting()
                 Section {
                     // a Button, not an empty DisclosureGroup: the sections below live outside it, and in a grouped Form a DisclosureGroup does not toggle on row/label clicks (and failed to open on macOS 27)
                     Button { advanced.toggle() } label: {

@@ -53,6 +53,13 @@ private func gameMenuItems() -> [UIMenuElement] {
         }
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
+    if PrewarmUpload.available {
+        let upload = UIAction(title: PrewarmUpload.label, state: PrewarmUpload.enabled ? .on : .off) { _ in
+            PrewarmUpload.setEnabled(!PrewarmUpload.enabled)
+        }
+        upload.subtitle = PrewarmUpload.detail
+        items.append(UIMenu(options: .displayInline, children: [upload]))
+    }
     return items
 }
 

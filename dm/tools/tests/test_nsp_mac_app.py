@@ -141,6 +141,7 @@ class PackReuse(unittest.TestCase):
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
             'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/save_sync_apple.m': b'apple sync', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
+            'ios/Sources/PrewarmUpload.swift': b'upload',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
         for n, content in files.items(): (t / n).write_bytes(content)
@@ -302,7 +303,9 @@ class PackReuse(unittest.TestCase):
         sync_apple = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync_apple.m'))
         self.assertIn('-fobjc-arc', sync_apple)
         self.assertIn(sync_apple[sync_apple.index('-o') + 1], s)   # save_sync_apple.m's object: NSFileCoordinator wrapper shared with host/iOS
-        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift'])
+        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], [
+            'Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift', 'PrewarmUpload.swift',
+        ])
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
         self.pack()

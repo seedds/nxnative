@@ -28,6 +28,7 @@ const char *front_ios_boot_message(void);   // main.m: why a build that keeps th
 const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
 bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+void dm_prewarm_upload_schedule(void);
 
 static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
@@ -173,6 +174,7 @@ static void launcher_done(void) { [g_root startGame]; }
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
+    dm_prewarm_upload_schedule();
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
@@ -691,6 +693,8 @@ void front_ios_focus_event(int ev) {
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();
-            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1); break;
+            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1);
+            dm_prewarm_upload_schedule();
+            break;
     }
 }

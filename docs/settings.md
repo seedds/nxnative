@@ -272,6 +272,10 @@ On the iPhone and iPad the gear at the top centre of the touch controls opens a 
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
+## Prewarm contributions
+
+Apps packed with a contribution inbox show **Contribute prewarm lists automatically** in settings. It is on by default. Turn it off there or in the iPhone and iPad's in-game gear menu. When the game starts, and when the iPhone or iPad app becomes active again, the app checks the game's `pso_user.tsv` and sends a changed list with the game title ID and version to the nxnative inbox. The upload runs in the background, and maintainers review the lists before using them. [Prewarm lists](development.md#prewarm-lists)
+
 ## TV
 
 Connect a TV or monitor by cable, or start Screen Mirroring to an Apple TV or AirPlay TV. The game fills it in 16:9 at up to 1080p and switches to **Docked**; the iPhone or iPad keeps the controls. Disconnect to bring the game back to the device in its earlier mode. AirPlay adds some delay; a cable has almost none.

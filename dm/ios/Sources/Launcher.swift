@@ -182,6 +182,9 @@ private struct LauncherView: View {
             }
             // The background save check reads the selected folder until it returns.
             CloudSavesSection(checking: checking)
+            if PrewarmUpload.available {
+                Section { PrewarmUploadSetting() }
+            }
             Section {
                 HStack {
                     Text("Memory available")

@@ -92,8 +92,9 @@ def min_os(host):   # the host's deployment target (LC_BUILD_VERSION minos): the
     return m.group(1) if m else '14.0'
 
 
-def swift_sources():   # the settings window, with the iOS launcher's model, rows and cloud-save report
-    return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift']
+def swift_sources():   # the settings window, with shared settings and services
+    ios = HERE.parent / 'ios/Sources'
+    return [HERE / 'Launcher.swift', *(ios / name for name in ('LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift', 'PrewarmUpload.swift'))]
 
 
 def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
@@ -123,6 +124,8 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
+    if getattr(a, 'prewarm_upload_url', None) and Path(a.msl).name not in ('vk', 'gl'):
+        p['DMPrewarmUploadURL'] = a.prewarm_upload_url
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
@@ -619,6 +622,9 @@ def parse(argv):
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
+    endpoint = HERE.parent / 'services/prewarm-inbox/endpoint.txt'
+    ap.add_argument('--prewarm-upload-url', default=os.environ.get('DM_PREWARM_UPLOAD_URL',
+                    endpoint.read_text(encoding='utf-8').strip() if endpoint.is_file() else None))
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')

@@ -30,6 +30,7 @@
 extern char **environ;
 void dm_mac_record_launch_keys(void);   // Launcher.swift: records settings from dm/launcher.json already set in the launch environment into DM_ENV_LAUNCH_KEYS
 int dm_mac_launcher(int show_window);   // Launcher.swift: 1 = start the game (resolved settings in the environment), 0 = the player quit
+void dm_prewarm_upload_schedule(void);
 int dm_mac_microphone_consent(void);
 static pid_t g_child;
 static char *g_file_keys;   // the variables the env files set (DM_ENV_FILE_KEYS)
@@ -177,6 +178,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     if (!dm_mac_launcher(window)) return 0;   // Quit: no game
+    dm_prewarm_upload_schedule();
     cloud_saves_folder();
     microphone_at_launch();
     setenv("DM_ROOT", sup, 0); setenv("DM_ROMFS", romfs, 0); setenv("DM_TEMP", temp, 0);

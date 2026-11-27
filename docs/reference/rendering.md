@@ -2814,6 +2814,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `make -C dm/gfx/tests GAME=010029D00E740000 gl-arguments` exercises a fresh capture with legacy GLSL, compiler failure, rebinding an existing shader, uniform writes and GPU readback.
 - **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
 
+### Named uniform blocks found by their members
+
+- **Symptom:** a GL game draws (`draws` in the frame records, no `[RED]` shader lines) but the picture stays black. The log has `UNIMPL glGetActiveUniformsiv` and `GL error 0x501 recorded by h_glGetActiveUniformBlockiv` and `h_glUniformBlockBinding`.
+- **Cause:** the game imports no `glGetUniformBlockIndex`. It finds each block through its members, as GL lists them among the active uniforms: `glGetActiveUniform` gives a member's name (`mtxPVW`), `glGetActiveUniformsiv` its block index and offset, and the block index then goes to `glGetActiveUniformBlockiv` and `glUniformBlockBinding`. The layer listed only the default block's uniforms and had no `glGetActiveUniformsiv`, so the game passed an undefined block index and its constant buffers were never bound.
+- **Fix:** `gl_shaders.py` writes each named block member into the table with its reflected layout (`m:<name>=<block argument ID>:<offset>:<type>:<count>:<array stride>:<matrix stride>:<row major>`, qualifying instanced block members with `<BlockName>.`; an older host skips unknown fields). At link the host merges members per `(block, name)` without a fixed 8-block cap, lists them after default uniforms in `GL_ACTIVE_UNIFORMS` and `glGetActiveUniform`, answers `glGetActiveUniformsiv` (type, size, name length, block index, offset, array and reflected matrix stride, row major; default uniforms get `-1` for block index, offset and strides, and `0` for row major), `GL_ACTIVE_UNIFORM_BLOCKS`, `GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH` and the remaining `glGetActiveUniformBlockiv` queries.
+- **Found on:** Mark of the Ninja: Remastered (`01009A700A538000`, no profile; [PR #3416](https://github.com/seedds/nxnative/pull/3416)): with this fix and the one for a doubled `;` at file scope, its title screen draws.
+- **Check:** `test_gl_shaders.py` (reflected layout, instanced block qualification and scalar matrix strides), `make -C dm/gfx/tests GAME=010029D00E740000 gl-imports gl-arguments` (per-block merging, collisions, `glGetActiveUniformsiv`, `glGetActiveUniformBlockiv` and end-to-end fixture).
+
 ### GL entry points required by FNA
 
 - **Symptom:** FNA stops during startup with `NoSuitableGraphicsDeviceException` and names `glBlendColor` as the first missing entry point.

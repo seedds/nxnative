@@ -92,33 +92,10 @@ static class P {
             Console.WriteLine($"[RED] no Program NCA {tid:x16} in the supplied NSPs");
             return 4;
         }
-        if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
-                      // header does not say: the one it reads with passes the hash check
-            int k = 0; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
-            bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
-                int damaged = g_damaged.Count;
-                try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
-                catch (Exception e) when (e is not KeysMissing) { }
-                g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
-                if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                return false;
-            }
-            foreach (Nca u in updPkg ?? new List<Nca>()) {
-                if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;
-                string dst = Path.Combine(a[3], $"html{k}");
-                bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
-                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; }   // a full NCA: its damage is the NSP's
-                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
-                else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
-            }
-            foreach (Nca b in bases) {
-                // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
-                // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA
-                if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
-                Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
-            }
-            Console.WriteLine($"{k} HtmlDocument NCAs");
-            return Damaged();
+        if (html) {
+            var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            var updates = (updPkg ?? new List<Nca>()).FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            return ExtractHtml(bases, updates, a[3]);
         }
         if (updPkg != null && updProg == null) throw new Exception("no Program NCA of the base game's program in the update NSP");
         // An update can add a program (XCOM 2 Collection: War of the Chosen). Its RomFS can be a BKTR even when every relocation names the update's own storage.
@@ -173,6 +150,56 @@ static class P {
         if (manifest) Manifest(romfs, Path.Combine(outDir, "romfs_manifest.tsv"));
         else if (image) WriteImage(romfs, Path.Combine(outDir, "RomFS.img"));
         else Copy(romfs, Path.Combine(outDir, "RomFS"), cmpDir);
+        return Damaged();
+    }
+
+    // Offline HTML pages (--html): an update's Manual NCA is read alone, or over a base game's Manual NCA when its data section is a patch (a relocation table);
+    // which base NCA it patches the header does not say, so the one it reads cleanly with passes the hash check. A sparse base Manual NCA is skipped only when an
+    // update patch actually read through that exact base NCA; otherwise stop with exit code 4 (as for a sparse base Program NCA without its update) instead of
+    // silently writing an incomplete HTML set.
+    internal static int ExtractHtml(List<Nca> bases, List<Nca> updates, string outDir,
+        Func<Nca, Func<IFileSystem>> openFull = null, Func<Nca, Nca, Func<IFileSystem>> openPatch = null) {
+        openFull ??= n => () => n.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        openPatch ??= (b, u) => () => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        int k = 0, damagedBefore = g_damaged.Count;
+        var patched = new HashSet<Nca>();
+        var created = new List<string>();
+        bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
+            int damaged = g_damaged.Count;
+            try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
+            catch (Exception e) when (e is not KeysMissing) { }
+            g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
+            if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            return false;
+        }
+        foreach (Nca u in updates ?? new List<Nca>()) {
+            string dst = Path.Combine(outDir, $"html{k}");
+            bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
+            if (!patch) { Copy(openFull(u), dst, null); created.Add(dst); k++; }   // a full NCA: its damage is the NSP's
+            else {
+                Nca matched = bases.Find(b => Try(openPatch(b, u), dst));
+                if (matched != null) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); patched.Add(matched); created.Add(dst); k++; }
+                else Console.WriteLine("[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
+            }
+        }
+        bool missing = false;
+        foreach (Nca b in bases) {
+            // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
+            // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA.
+            if (!Sparse(b) || patched.Contains(b)) continue;
+            Console.WriteLine($"[RED] a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes) has no update patch to read it through: its pages are missing; pack the base game with its update NSP");
+            missing = true;
+        }
+        if (missing) {
+            g_damaged.RemoveRange(damagedBefore, g_damaged.Count - damagedBefore);
+            foreach (string dst in created) if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            return 4;
+        }
+        foreach (Nca b in bases) {
+            if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
+            Copy(openFull(b), Path.Combine(outDir, $"html{k++}"), null);
+        }
+        Console.WriteLine($"{k} HtmlDocument NCAs");
         return Damaged();
     }
 

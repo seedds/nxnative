@@ -901,6 +901,14 @@
 - **Fix:** `dm/tools/nx_extract/Program.cs` reads no sparse base HtmlDocument NCA on its own (`a sparse HtmlDocument NCA of the base game (… bytes): read only through the update's patch, not alone`), as Horizon mounts it only through its patch.
 - **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 with update v131072: the update's patch (`accessible-urls`) and its full legal information NCA are read, the base's legal information NCA too.
 
+### Offline pages of a sparse base game are incomplete without its update patch
+
+- **Symptom:** `nx_extract --html` on a base NSP with no update (or an update that does not patch its sparse Manual NCA) prints `a sparse HtmlDocument NCA of the base game (16384 bytes): read only through the update's patch, not alone`, writes only the non-sparse Manual NCAs (`1 HtmlDocument NCAs`) and exits 0, although the sparse HtmlDocument pages are missing.
+- **Cause:** the sparse-base skip above skipped every sparse base Manual NCA unconditionally without checking whether an update patch actually read through that base NCA. Without an update, or when the update only ships an unrelated full Manual NCA (such as LegalInformation) or patches a different base NCA, nothing supplied the sparse NCA's pages.
+- **Fix:** `dm/tools/nx_extract/Program.cs` (`ExtractHtml`) records the exact base Manual NCAs that an update patch successfully read through (`patched`). A sparse base Manual NCA is skipped only when it is in `patched`; otherwise `--html` removes any partial `html<n>` folders it created, prints `[RED] a sparse HtmlDocument NCA of the base game (… bytes) has no update patch to read it through: its pages are missing; pack the base game with its update NSP`, and stops with exit code 4 (the code a sparse base Program NCA without its update already returns). Non-sparse bases and updates whose patch matches the sparse base read identically to before.
+- **Check:** `dm/tools/tests/test_pfs0_storage.py` (`CheckSparseHtmlExtraction` in `Pfs0StorageTests.cs`) covers base-only sparse extraction (including end-to-end `--html` CLI on a synthetic NSP), an unrelated full update Manual NCA, a patch matching a different base NCA, a failed patch alongside a full update NCA, a second unpatched sparse base, a matching patch (3 directories, exit 0), and a non-sparse base alone.
+- **Found on:** [Minecraft Dungeons II](../../dm/games/0100A7C01B792000/README.md), base v0 without its update ([PR #1769](https://github.com/seedds/nxnative/pull/1769)): base-only extraction previously wrote 14 files in one directory and exited 0, against 29 files in three directories with update v131072.
+
 ### Unreal 4.27 shaders with 8-byte hashes, an untagged record or a version 12 pak
 
 - **Symptom:** the shader split for an Unreal 4.27 game finds no shaders or stops on the shader library: `shader library chunk … does not parse`, `pak version 12, only … are read`, or `not an LSLG record`.

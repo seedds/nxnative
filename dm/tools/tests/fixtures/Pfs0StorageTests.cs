@@ -133,25 +133,150 @@ class Pfs0StorageTests {
         }
         return h;
     }
-    static Nca SyntheticProgramNca(KeySet ks, byte[] dataFsHeader, bool includeData = true, bool tamperFsHash = false) {
+    static byte[] SyntheticNcaBytes(KeySet ks, NcaContentType type, int sectionIndex, byte[] fsHeader, bool includeSection = true, bool tamperFsHash = false, ulong tid = 0x0100000000001000UL) {
         const int bodySize = 0xC000;
         byte[] nca = new byte[0xC00 + bodySize];
         "NCA3"u8.CopyTo(nca.AsSpan(0x200));
-        nca[0x205] = (byte)NcaContentType.Program;
+        nca[0x205] = (byte)type;
         BinaryPrimitives.WriteInt64LittleEndian(nca.AsSpan(0x208), nca.Length);
-        BinaryPrimitives.WriteUInt64LittleEndian(nca.AsSpan(0x210), 0x0100000000001000UL);
-        if (includeData) {
-            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x10), 0xC00 / 0x200);
-            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x14), nca.Length / 0x200);
-            byte[] hash = SHA256.HashData(dataFsHeader);
+        BinaryPrimitives.WriteUInt64LittleEndian(nca.AsSpan(0x210), tid);
+        if (includeSection) {
+            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x10 * sectionIndex), 0xC00 / 0x200);
+            BinaryPrimitives.WriteInt32LittleEndian(nca.AsSpan(0x240 + 0x10 * sectionIndex + 4), nca.Length / 0x200);
+            byte[] hash = SHA256.HashData(fsHeader);
             if (tamperFsHash) hash[0] ^= 0xFF;
-            hash.CopyTo(nca, 0x280 + 0x20);
-            dataFsHeader.CopyTo(nca, 0x400 + 0x200);
+            hash.CopyTo(nca, 0x280 + 0x20 * sectionIndex);
+            fsHeader.CopyTo(nca, 0x400 + 0x200 * sectionIndex);
         }
         byte[] plainHeader = nca[..0xC00];
         using (var xts = new Aes128XtsStorage(new SubStorage(new MemoryStorage(nca), 0, 0xC00), ks.HeaderKey, 0x200, true, decryptRead: true))
             for (int off = 0; off < 0xC00; off += 0x200) xts.Write(off, plainHeader.AsSpan(off, 0x200)).ThrowIfFailure();
-        return new Nca(ks, new MemoryStorage(nca));
+        return nca;
+    }
+    static Nca SyntheticProgramNca(KeySet ks, byte[] dataFsHeader, bool includeData = true, bool tamperFsHash = false)
+        => new Nca(ks, new MemoryStorage(SyntheticNcaBytes(ks, NcaContentType.Program, 1, dataFsHeader, includeData, tamperFsHash)));
+    static Nca SyntheticManualNca(KeySet ks, byte[] dataFsHeader)
+        => new Nca(ks, new MemoryStorage(SyntheticNcaBytes(ks, NcaContentType.Manual, 0, dataFsHeader)));
+    static byte[] BuildPfs0(params (string Name, byte[] Data)[] files) {
+        using var names = new MemoryStream();
+        uint[] nameOff = new uint[files.Length];
+        for (int i = 0; i < files.Length; i++) {
+            nameOff[i] = (uint)names.Length;
+            names.Write(Encoding.ASCII.GetBytes(files[i].Name));
+            names.WriteByte(0);
+        }
+        byte[] nameBytes = names.ToArray();
+        int headerSize = 16 + 24 * files.Length + nameBytes.Length;
+        long total = headerSize + files.Sum(f => (long)f.Data.Length);
+        byte[] pfs = new byte[total];
+        "PFS0"u8.CopyTo(pfs);
+        BinaryPrimitives.WriteUInt32LittleEndian(pfs.AsSpan(4), (uint)files.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(pfs.AsSpan(8), (uint)nameBytes.Length);
+        ulong off = 0;
+        for (int i = 0; i < files.Length; i++) {
+            BinaryPrimitives.WriteUInt64LittleEndian(pfs.AsSpan(16 + 24 * i), off);
+            BinaryPrimitives.WriteUInt64LittleEndian(pfs.AsSpan(16 + 24 * i + 8), (ulong)files[i].Data.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(pfs.AsSpan(16 + 24 * i + 16), nameOff[i]);
+            files[i].Data.CopyTo(pfs, headerSize + (int)off);
+            off += (ulong)files[i].Data.Length;
+        }
+        nameBytes.CopyTo(pfs, 16 + 24 * files.Length);
+        return pfs;
+    }
+    static void CheckSparseHtmlExtraction(string tmp) {
+        var ks = new KeySet();
+        ks.HeaderKey.Data[0] = 1;
+        ks.KeyAreaKeys[0][0].Data[0] = 1;
+
+        byte[] fullFs = SyntheticRomFsHeader(patch: false);
+        byte[] sparseFs = (byte[])fullFs.Clone(); new NcaFsHeader(sparseFs).GetSparseInfo().Generation = 1;
+        byte[] patchFs = SyntheticRomFsHeader(patch: true, encEntries: 1);
+
+        Nca baseSparse = SyntheticManualNca(ks, sparseFs);
+        Nca baseSparse2 = SyntheticManualNca(ks, sparseFs);
+        Nca baseLegal = SyntheticManualNca(ks, fullFs);
+        Nca updPatch = SyntheticManualNca(ks, patchFs);
+        Nca updLegalFull = SyntheticManualNca(ks, fullFs);
+
+        byte[] romA = LiteralColonRomFs(Encoding.UTF8.GetBytes("patched-html"));
+        byte[] romB = LiteralColonRomFs(Encoding.UTF8.GetBytes("update-legal"));
+        byte[] romC = LiteralColonRomFs(Encoding.UTF8.GetBytes("base-legal"));
+        Func<Nca, Func<IFileSystem>> openFull = n => () => new RomFsFileSystem(new MemoryStorage(ReferenceEquals(n, updLegalFull) ? romB : romC));
+        Func<Nca, Nca, Func<IFileSystem>> matchOnlySparse = (b, u) => () => {
+            if (ReferenceEquals(b, baseSparse) && ReferenceEquals(u, updPatch)) return new RomFsFileSystem(new MemoryStorage(romA));
+            throw new HorizonResultException(ResultFs.NonRealDataVerificationFailed.Value);
+        };
+        Func<Nca, Nca, Func<IFileSystem>> matchOnlyLegal = (b, u) => () => {
+            if (ReferenceEquals(b, baseLegal) && ReferenceEquals(u, updPatch)) return new RomFsFileSystem(new MemoryStorage(romA));
+            throw new HorizonResultException(ResultFs.NonRealDataVerificationFailed.Value);
+        };
+        Func<Nca, Nca, Func<IFileSystem>> matchNone = (b, u) => () => throw new HorizonResultException(ResultFs.NonRealDataVerificationFailed.Value);
+
+        (int Rc, string Log) RunCase(string name, System.Collections.Generic.List<Nca> bases, System.Collections.Generic.List<Nca> updates, Func<Nca, Nca, Func<IFileSystem>> openPatch) {
+            string dir = Path.Combine(tmp, name);
+            Directory.CreateDirectory(dir);
+            TextWriter saved = Console.Out;
+            using var log = new StringWriter();
+            try { Console.SetOut(log); int rc = P.ExtractHtml(bases, updates, dir, openFull, openPatch); return (rc, log.ToString()); }
+            finally { Console.SetOut(saved); }
+        }
+
+        // 1. Base-only with a sparse Manual NCA stops with exit 4 and writes no html directories (even when a non-sparse base precedes it).
+        var c1 = RunCase("html_base_only_sparse", new() { baseLegal, baseSparse }, new(), matchNone);
+        Check(c1.Rc == 4 && c1.Log.Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(Path.Combine(tmp, "html_base_only_sparse")).Length == 0);
+
+        // 2. An unrelated full update Manual NCA (e.g., LegalInformation) must NOT satisfy a sparse base Manual NCA.
+        var c2 = RunCase("html_unrelated_full_update", new() { baseSparse, baseLegal }, new() { updLegalFull }, matchNone);
+        Check(c2.Rc == 4 && c2.Log.Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(Path.Combine(tmp, "html_unrelated_full_update")).Length == 0);
+
+        // 3. A patch NCA that patches a DIFFERENT base Manual NCA must NOT satisfy an unpatched sparse base NCA.
+        var c3 = RunCase("html_patch_other_base", new() { baseLegal, baseSparse }, new() { updPatch }, matchOnlyLegal);
+        Check(c3.Rc == 4 && c3.Log.Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(Path.Combine(tmp, "html_patch_other_base")).Length == 0);
+
+        // 4. A failed patch NCA alongside a full update Manual NCA must still fail with exit 4 for the unpatched sparse base.
+        var c4 = RunCase("html_failed_patch_plus_full", new() { baseSparse, baseLegal }, new() { updPatch, updLegalFull }, matchNone);
+        Check(c4.Rc == 4 && c4.Log.Contains("patches none of the base game's") && c4.Log.Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(Path.Combine(tmp, "html_failed_patch_plus_full")).Length == 0);
+
+        // 5. Two sparse base Manual NCAs where only one is patched must fail with exit 4 for the second.
+        var c5 = RunCase("html_second_sparse_unpatched", new() { baseSparse, baseSparse2 }, new() { updPatch }, matchOnlySparse);
+        Check(c5.Rc == 4 && c5.Log.Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(Path.Combine(tmp, "html_second_sparse_unpatched")).Length == 0);
+
+        // 6. Matching patch over the sparse base + full update LegalInformation + non-sparse base LegalInformation -> 3 html dirs, exit 0.
+        var c6 = RunCase("html_with_matching_patch", new() { baseSparse, baseLegal }, new() { updPatch, updLegalFull }, matchOnlySparse);
+        Check(c6.Rc == 0 && c6.Log.Contains("a patch of the base game's NCA") && c6.Log.Contains("3 HtmlDocument NCAs"));
+        Check(File.ReadAllText(Path.Combine(tmp, "html_with_matching_patch", "html0", "D:", "sample")) == "patched-html");
+        Check(File.ReadAllText(Path.Combine(tmp, "html_with_matching_patch", "html1", "D:", "sample")) == "update-legal");
+        Check(File.ReadAllText(Path.Combine(tmp, "html_with_matching_patch", "html2", "D:", "sample")) == "base-legal");
+
+        // 7. Non-sparse base Manual NCA with no update still succeeds (exit 0).
+        var c7 = RunCase("html_non_sparse_base_only", new() { baseLegal }, new(), matchNone);
+        Check(c7.Rc == 0 && c7.Log.Contains("1 HtmlDocument NCAs"));
+        Check(File.ReadAllText(Path.Combine(tmp, "html_non_sparse_base_only", "html0", "D:", "sample")) == "base-legal");
+
+        // 8. End-to-end CLI (--html) on a synthetic base-only NSP containing a Program NCA and a sparse Manual NCA.
+        string keysPath = Path.Combine(tmp, "dummy.keys"), baseNsp = Path.Combine(tmp, "sparse_base.nsp"), cliOut = Path.Combine(tmp, "html_cli_out");
+        Directory.CreateDirectory(cliOut);
+        string hkey = Convert.ToHexString(ks.HeaderKey.Data.ToArray()).ToLowerInvariant();
+        string kkey = Convert.ToHexString(ks.KeyAreaKeys[0][0].Data.ToArray()).ToLowerInvariant();
+        File.WriteAllText(keysPath, $"header_key = {hkey}\nkey_area_key_application_00 = {kkey}\n");
+        byte[] progBytes = SyntheticNcaBytes(ks, NcaContentType.Program, 1, fullFs);
+        byte[] sparseManualBytes = SyntheticNcaBytes(ks, NcaContentType.Manual, 0, sparseFs);
+        File.WriteAllBytes(baseNsp, BuildPfs0(("prog.nca", progBytes), ("manual.nca", sparseManualBytes)));
+        TextWriter savedCli = Console.Out;
+        using var cliLog = new StringWriter();
+        int cliRc;
+        try {
+            Console.SetOut(cliLog);
+            cliRc = (int)typeof(P).GetMethod("Main", BindingFlags.NonPublic | BindingFlags.Static)
+                .Invoke(null, new object[] { new[] { keysPath, baseNsp, "-", cliOut, "--html" } });
+        } finally { Console.SetOut(savedCli); }
+        Check(cliRc == 4 && cliLog.ToString().Contains("[RED] a sparse HtmlDocument NCA of the base game"));
+        Check(Directory.GetFileSystemEntries(cliOut).Length == 0);
     }
     static void CheckPatchKeepsData() {
         // Synthetic dummy keys only (no game keys or data). Encrypting the NCA3 header exercises
@@ -269,6 +394,7 @@ class Pfs0StorageTests {
             }
             CheckLiteralRomFsModes(tmp);
             CheckPatchKeepsData();
+            CheckSparseHtmlExtraction(tmp);
         } finally { Console.SetOut(saved); Directory.Delete(tmp, true); }
         Console.WriteLine("PFS0 storage checks passed");
     }

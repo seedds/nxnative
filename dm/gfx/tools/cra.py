@@ -289,25 +289,32 @@ def narc_members(d, where='NARC'):
 
 def lz_undo(d, at):   # kinds 0x50 and 0x60 (nro0+0x1237f04): flag bytes, each negated and read from its high bit (1 a match, 0 a literal); a flag byte 0 is 8 literals; a distance 0 ends
     out = bytearray(); n = len(d)
-    while at < n:
-        f = d[at]; at += 1
-        if not f:
-            out += d[at:at + 8]; at += 8; continue
-        f = -f & 0xff
-        for bit in range(7, -1, -1):
-            if not f >> bit & 1:
-                out.append(d[at]); at += 1; continue
-            lo, hi = d[at], d[at + 1]
-            dist = lo >> 4 | hi << 4
-            if not dist: return bytes(out)
-            ln = lo & 0xf
-            if ln > 1: at += 2
-            elif ln == 1: ln = d[at + 2] + 0x11 + (d[at + 3] << 8) + 0xff; at += 4
-            else: ln = d[at + 2] + 0x10; at += 3
-            s = len(out) - dist
-            if s < 0: raise Error('an LZ distance before the start')
-            for k in range(ln): out.append(out[s + k])
+    try:
+        while at < n:
+            f = d[at]; at += 1
+            if not f:
+                out += d[at:at + 8]; at += 8; continue
+            f = -f & 0xff
+            for bit in range(7, -1, -1):
+                if not f >> bit & 1:
+                    out.append(d[at]); at += 1; continue
+                lo, hi = d[at], d[at + 1]
+                dist = lo >> 4 | hi << 4
+                if not dist: return bytes(out)
+                ln = lo & 0xf
+                if ln > 1: at += 2
+                elif ln == 1: ln = d[at + 2] + 0x11 + (d[at + 3] << 8) + 0xff; at += 4
+                else: ln = d[at + 2] + 0x10; at += 3
+                s = len(out) - dist
+                if s < 0: raise Error('an LZ distance before the start')
+                for k in range(ln): out.append(out[s + k])
+    except IndexError:
+        raise Error('an LZ stream cut inside a token') from None
     return bytes(out)
+
+
+LZ4_RATIO = 255   # an LZ4 block expands at most about 255 times (each extra match-length byte adds 255)
+MMMM_DEPTH = 8
 
 
 def zstd_mod():
@@ -316,20 +323,32 @@ def zstd_mod():
     return zstd
 
 
-def undo(d):
+def undo(d, _depth=0):
     """A member, unpacked by the kind in its first byte, as the game does (nro0+0x1237c80). Anything else is the member itself"""
     if not d: return d
     k = d[0]
     if k == 0x4d and d[:4] == b'MMMM':   # chunks of any kind: u32 total, u32 count, u32 length of each, 16-aligned
+        if _depth >= MMMM_DEPTH: raise Error('MMMM chunks nested too deeply')
+        if len(d) < 12: raise Error(f'an MMMM header cut at {len(d)} of 12 bytes')
         total, n = struct.unpack_from('<II', d, 4)
+        if 12 + 4 * n > len(d): raise Error(f'an MMMM table of {n} chunks past the end')
         at = (12 + 4 * n + 15) & ~15
         out = []
         for i in range(n):
             s = struct.unpack_from('<I', d, 12 + 4 * i)[0]
-            out.append(undo(d[at:at + s])); at += (s + 15) & ~15
+            if at + s > len(d): raise Error(f'MMMM chunk {i} past the end')
+            out.append(undo(d[at:at + s], _depth + 1)); at += (s + 15) & ~15
         return b''.join(out)
-    if k == 0x94 and len(d) >= 8: return lz4.block.decompress(d[8:], uncompressed_size=struct.unpack_from('<I', d, 4)[0])
-    if k == 0x5a and d[:4] == b'Z\0\0\0': return zstd_mod().decompress(d[8:])
+    if k == 0x94 and len(d) >= 8:
+        size = struct.unpack_from('<I', d, 4)[0]
+        if size > LZ4_RATIO * (len(d) - 8): raise Error(f'an LZ4 member of {len(d) - 8} bytes that would expand to {size}')   # more than LZ4 can encode: not an allocation to make
+        try: return lz4.block.decompress(d[8:], uncompressed_size=size)
+        except lz4.block.LZ4BlockError as e: raise Error(f'an LZ4 member: {e}') from None
+    if k == 0x5a and d[:4] == b'Z\0\0\0':
+        if len(d) < 8: raise Error(f'a zstd member header cut at {len(d)} of 8 bytes')
+        zstd = zstd_mod()
+        try: return zstd.decompress(d[8:])
+        except zstd.ZstdError as e: raise Error(f'a zstd member: {e}') from None
     if k == 0x50 and len(d) >= 8: return lz_undo(d, 8)
     if k == 0x60 and len(d) >= 4: return lz_undo(d, 4)
     if k in (0x70, 0x80) and len(d) >= 0x10: return d[0x10:]

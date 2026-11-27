@@ -1679,8 +1679,12 @@ def cra_shaders(path, rel, ents, out):
     import cra
     with open(path, 'rb') as f:
         for e in ents:
-            if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
-            scan_blob(cra.undo(cra.read(f, e)), f'/{rel}/{e[1]}', out)
+            where = f'/{rel}/{e[1]}'
+            try:
+                if cra.head(f, e)[:4] in (b'FSTM', b'\x1aE\xdf\xa3'): continue
+                d = cra.undo(cra.read(f, e))
+            except cra.Error as x: red(f'{where}: {x}')
+            scan_blob(d, where, out)
 
 PDAT, PDAT_PMAP = b'PDAT', b'PMAP'
 PDAT_ZSTD, PDAT_CTL, PDAT_SPAN = b'\x28\xb5\x2f\xfd', CTL_MAGIC + b'\xc9\0\0\0', 1 << 20   # a PMAP frame never takes up 1 MB (the largest of Kirby Air Riders' 27,299: 186 KB inflated); pdat_shaders stops if one does

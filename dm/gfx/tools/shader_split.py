@@ -354,6 +354,9 @@ def nxsh_embedded(d, label):
     return out
 
 def bahs_shaders(d, label):
+    # agl's .sharcfb shares the BAHS magic, but holds reflection and fallback data without NVN control sections.
+    if label.endswith('.sharcfb') and len(d) >= 0x20 and struct.unpack_from('<I', d, 8)[0] == len(d) and CTL_MAGIC not in d:
+        return []
     rsz, region = field(d, '<II', 0x18, f'{label} BAHS header')
     if region + rsz > len(d): red(f'{label} BAHS code region out of bounds')
     found = []
@@ -4218,12 +4221,17 @@ def yaz0(s, label='Yaz0'):
 def sarc_members(d, label='SARC'):
     """(name, bytes) of each member of a SARC: the header, SFAT (its entries), SFNT (the names), then the data, where every member lies. A member range outside the data
     (one spanning the whole archive would be scanned as the archive again, without end) is a damaged archive"""
-    hl, bom, size, doff = field(d, '<HHII', 4, f'{label} SARC header')
-    n = field(d, '<H', hl + 6, f'{label} SFAT header')[0]
+    bom = d[6:8]
+    if bom == b'\xff\xfe': order = '<'
+    elif bom == b'\xfe\xff': order = '>'
+    else: red(f'{label}: invalid SARC byte-order mark {bom.hex()}')
+    hl, _, _, doff = field(d, order + 'HHII', 4, f'{label} SARC header')
+    n = field(d, order + 'H', hl + 6, f'{label} SFAT header')[0]
     names = hl + 12 + 16 * n + 8
     if not names <= doff <= len(d): red(f'{label}: SARC data at {doff:#x}, its {n} entries and the names end at {names:#x}, the archive at {len(d):#x}')
+    entry = struct.Struct(order + 'IIII')
     for i in range(n):
-        h, attr, s, e = struct.unpack_from('<IIII', d, hl + 12 + 16 * i)
+        _, attr, s, e = entry.unpack_from(d, hl + 12 + entry.size * i)
         if not s <= e <= len(d) - doff: red(f'{label}: SARC member {i} at {s:#x}..{e:#x} of the data lies outside its {len(d) - doff:#x} bytes')
         if attr >> 24:   # up to the name's own NUL: splitting the rest of the archive per member was quadratic (Fire Emblem Fortune's Weave's Layout/Common.arc.zst: 6 minutes)
             o = names + (attr & 0xffffff) * 4; z = d.find(b'\0', o)

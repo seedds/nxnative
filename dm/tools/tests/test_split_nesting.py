@@ -215,6 +215,19 @@ class NestedZstd(unittest.TestCase):
 
 
 class MemberNames(unittest.TestCase):
+    def test_big_endian_archive_scans_named_shaders(self):
+        shader = fz.bnsh()
+        name = b'program.bnsh\0'
+        start = 0x38 + len(name)
+        archive = struct.pack('>4sHHII4x', b'SARC', 0x14, 0xfeff, start + len(shader), start)
+        archive += struct.pack('>4sHHI', b'SFAT', 0xc, 1, 0x65)
+        archive += struct.pack('>IIII', 0, 1 << 24, 0, len(shader))
+        archive += struct.pack('>4sHH', b'SFNT', 8, 0) + name + shader
+        out = []
+        ss.scan_blob(archive, '/program.sarc', out)
+        self.assertEqual({where.split('#')[0] for where, *_ in out}, {'/program.sarc/program.bnsh'})
+        self.assertEqual({stage for _, stage, *_ in out}, {'vs', 'ps'})
+
     def test_names_and_time(self):   # each name ends at its own NUL; splitting the rest of the archive per member made Fire Emblem Fortune's Weave's 9.8 MB layout SARC take 6 minutes
         members = [(b'tex%04d.bntx' % i, bytes(0x4000)) for i in range(800)]
         archive = fz.sarc(members)   # built outside the timing: only the member reading is measured (about 1 ms here, 47 s with the per-member split)

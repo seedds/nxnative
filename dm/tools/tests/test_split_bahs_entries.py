@@ -93,5 +93,19 @@ class ControlWordsAreNoEntry(unittest.TestCase):
         self.assertTrue(ss.nvn2_ctl(d[c:c + csz]) and not z and off % 0x100 == 0 and ss.check('f', 'vs', d[c:c + csz], d[REGION + off:REGION + off + CODE]) is None)
 
 
+class FallbackArchive(unittest.TestCase):
+    def test_reflection_archive_has_no_nvn_programs(self):
+        reflection = b'common\0aPosition\0aTexCoord\0'
+        fallback = struct.pack('<4s4IH', b'BAHS', 9, 0x16 + len(reflection), 5, 0, 0x1200) + reflection
+        self.assertEqual(ss.bahs_shaders(fallback, 'common.sharcfb'), [])
+        with self.assertRaisesRegex(SystemExit, 'BAHS code region out of bounds'):
+            ss.bahs_shaders(fallback[:-1], 'common.sharcfb')
+
+    def test_nvn_control_section_keeps_the_binary_reader(self):
+        binary = bytearray(bahs())
+        struct.pack_into('<4sII', binary, 0, b'BAHS', 9, len(binary))
+        self.assertEqual(len(ss.bahs_shaders(bytes(binary), 'common.sharcfb')), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

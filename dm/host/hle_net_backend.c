@@ -32,8 +32,11 @@ _Static_assert(sizeof(nx_addr) == 16, "Horizon sockaddr_in");
 _Static_assert(sizeof(nx_pollfd) == 8, "Horizon pollfd");
 
 // The native descriptor stays open while a guest slot is used. A call borrows a duplicate under the lock, so a Close on another thread never closes a descriptor that is in use,
-// and the slot's generation tells a waiter that its socket was closed (or the slot reused) while it waited
-typedef struct { int native, used, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_slot;
+// and the slot's generation tells a waiter that its socket was closed (or the slot reused) while it waited.
+// type is the socket's (1 stream, 2 datagram) or NET_EVENT for an event descriptor (dm_net_eventfd below): native is then the read end of a local socket pair, peer its write
+// end, and count / efd_flags the counter and its Horizon flags
+enum { NET_EVENT = 0x10 };
+typedef struct { int native, used, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; int peer; uint64_t count; int efd_flags; } net_slot;
 typedef struct { int fd, slot, nonblock, type; uint64_t generation; int64_t send_ms, recv_ms; } net_ref;
 static net_slot g_net[NET_SLOTS];
 static pthread_mutex_t g_net_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -67,17 +70,22 @@ static int net_errno(int e) {   // Darwin's errno as Horizon's (Linux's) number
 static int net_host_result(int result, int err) { return result < 0 ? net_error(net_errno(err)) : result; }
 static uint64_t net_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000 + (uint64_t)t.tv_nsec / 1000000; }
 
-static int net_borrow(int guest, net_ref *r) {
+// Poll, Fcntl and the event descriptor's own waits take any descriptor (net_borrow_any); every socket operation takes only a socket, and an event descriptor fails it with
+// ENOTSOCK (net_borrow)
+static int net_borrow_kind(int guest, net_ref *r, int any) {
     if (!dm_net_owns(guest)) return net_error(9);
     int slot = guest - DM_NET_FD_BASE;
     dm_host_mutex_lock(&g_net_lock);
     if (!g_net[slot].used) { pthread_mutex_unlock(&g_net_lock); return net_error(9); }
+    if (!any && g_net[slot].type == NET_EVENT) { pthread_mutex_unlock(&g_net_lock); return net_error(88); }
     net_slot s = g_net[slot];
     int fd = fcntl(s.native, F_DUPFD_CLOEXEC, 0), err = errno;
     pthread_mutex_unlock(&g_net_lock);
     if (fd < 0) return net_error(net_errno(err));
     *r = (net_ref){fd, slot, s.nonblock, s.type, s.generation, s.send_ms, s.recv_ms}; return 0;
 }
+static int net_borrow(int guest, net_ref *r) { return net_borrow_kind(guest, r, 0); }
+static int net_borrow_any(int guest, net_ref *r) { return net_borrow_kind(guest, r, 1); }
 static int net_live(const net_ref *r) {
     dm_host_mutex_lock(&g_net_lock);
     int live = g_net[r->slot].used && g_net[r->slot].generation == r->generation;
@@ -92,7 +100,7 @@ static int net_register(int fd, int type, int nonblock) {
     }
     dm_host_mutex_lock(&g_net_lock);
     int i = 0; while (i < NET_SLOTS && g_net[i].used) i++;
-    if (i < NET_SLOTS) g_net[i] = (net_slot){fd, 1, nonblock, type, g_net[i].generation + 1, -1, -1};
+    if (i < NET_SLOTS) g_net[i] = (net_slot){.native = fd, .used = 1, .nonblock = nonblock, .type = type, .generation = g_net[i].generation + 1, .send_ms = -1, .recv_ms = -1, .peer = -1};
     pthread_mutex_unlock(&g_net_lock);
     if (i == NET_SLOTS) { close(fd); return net_error(24); }   // EMFILE
     return DM_NET_FD_BASE + i;
@@ -145,8 +153,9 @@ int dm_net_close(int guest) {
     int slot = guest - DM_NET_FD_BASE;
     dm_host_mutex_lock(&g_net_lock);
     if (!g_net[slot].used) { pthread_mutex_unlock(&g_net_lock); return net_error(9); }
-    int fd = g_net[slot].native; g_net[slot].used = 0;
+    int fd = g_net[slot].native, peer = g_net[slot].peer; g_net[slot].used = 0;
     pthread_mutex_unlock(&g_net_lock);
+    if (peer >= 0) close(peer);   // an event descriptor's write end
     // shutdown reaches the socket under every duplicate: a TCP waiter on another thread wakes now rather than at its next slice
     shutdown(fd, SHUT_RDWR); int result = close(fd), err = errno;
     return net_host_result(result, err);
@@ -207,7 +216,7 @@ int dm_net_shutdown(int guest, int how) {
 // Commands as in main's offline service: 1 F_GETFD, 2 F_SETFD, 3 F_GETFL, 4 F_SETFL. Only O_NONBLOCK is a status flag here; the access-mode bits a caller carries over
 // from F_GETFL (NEX passes O_RDWR | O_NONBLOCK, 0x802) are accepted and ignored
 int dm_net_fcntl(int guest, int cmd, int value) {
-    net_ref r; if (net_borrow(guest, &r)) return -1;
+    net_ref r; if (net_borrow_any(guest, &r)) return -1;
     close(r.fd);
     if (cmd == 1) return 1;   // FD_CLOEXEC
     if (cmd == 2) return 0;
@@ -373,7 +382,7 @@ int dm_net_poll(void *fds, uint64_t count, int timeout_ms) {
         int fd = guest[i].fd; uint16_t events = (uint16_t)guest[i].events;
         if (!dm_net_owns(fd)) continue;
         guest[i].revents = 0;
-        if (net_borrow(fd, &refs[i])) { refs[i].fd = -1; guest[i].revents = 0x20; invalid++; continue; }   // POLLNVAL
+        if (net_borrow_any(fd, &refs[i])) { refs[i].fd = -1; guest[i].revents = 0x20; invalid++; continue; }   // POLLNVAL
         host[i].fd = refs[i].fd; host[i].events = net_poll_events(events);
     }
     uint64_t start = net_ms();
@@ -392,6 +401,74 @@ int dm_net_poll(void *fds, uint64_t count, int timeout_ms) {
     }
     for (uint64_t i = 0; i < count; i++) if (refs[i].fd >= 0) close(refs[i].fd);
     free(host); free(refs); return result;
+}
+
+// An event descriptor in network mode (nn::socket::EventFd; gRPC wakes its pollers with one while they poll its sockets, nn::npln). It takes a slot of the socket table, so sockets
+// and event descriptors share one numbering and one host poll, and Poll, Select, Fcntl, Close and the generation checks treat it as any descriptor. Its host descriptor is the read
+// end of a local socket pair that holds one byte while the counter is above zero, so a poll sees it readable exactly then; it is always writable. The flags are Horizon's: bit 0
+// reads one at a time (a semaphore), bits 1 and 2 never block. The counter's lock is the table's
+static net_slot *net_event(int guest, uint64_t generation) {   // with g_net_lock held; sets the errno when it is not a live event descriptor
+    if (!dm_net_owns(guest)) { net_error(9); return NULL; }
+    net_slot *e = &g_net[guest - DM_NET_FD_BASE];
+    if (!e->used || (generation && e->generation != generation)) { net_error(9); return NULL; }
+    if (e->type != NET_EVENT) { net_error(22); return NULL; }
+    return e;
+}
+int dm_net_is_event(int guest) {
+    if (!dm_net_owns(guest)) return 0;
+    dm_host_mutex_lock(&g_net_lock);
+    const net_slot *e = &g_net[guest - DM_NET_FD_BASE]; int event = e->used && e->type == NET_EVENT;
+    pthread_mutex_unlock(&g_net_lock); return event;
+}
+int dm_net_eventfd(uint64_t initial, int flags) {
+    int pair[2], one = 1;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return net_error(net_errno(errno));
+    if (fcntl(pair[1], F_SETFL, O_NONBLOCK) < 0 || fcntl(pair[1], F_SETFD, FD_CLOEXEC) < 0 || setsockopt(pair[1], SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one) < 0) {
+        int e = errno; close(pair[0]); close(pair[1]); return net_error(net_errno(e));
+    }
+    int guest = net_register(pair[0], NET_EVENT, !!(flags & 6));   // closes pair[0] if it fails
+    if (guest < 0) { close(pair[1]); return -1; }
+    dm_host_mutex_lock(&g_net_lock);
+    net_slot *e = &g_net[guest - DM_NET_FD_BASE]; e->peer = pair[1]; e->count = initial; e->efd_flags = flags;
+    if (initial) (void)send(pair[1], "", 1, 0);
+    pthread_mutex_unlock(&g_net_lock); return guest;
+}
+int dm_net_eventfd_read(int guest, uint64_t *value) {
+    uint64_t generation = 0;
+    for (;;) {
+        dm_host_mutex_lock(&g_net_lock);
+        net_slot *e = net_event(guest, generation); if (!e) { pthread_mutex_unlock(&g_net_lock); return -1; }
+        generation = e->generation;
+        if (e->count) {
+            uint64_t take = e->efd_flags & 1 ? 1 : e->count; e->count -= take;
+            if (!e->count) { char byte; (void)recv(e->native, &byte, 1, 0); }
+            pthread_mutex_unlock(&g_net_lock);
+            if (value) *value = take;
+            return 0;
+        }
+        int nonblock = e->nonblock; pthread_mutex_unlock(&g_net_lock);
+        if (nonblock) return net_error(11);
+        net_ref r; if (net_borrow_any(guest, &r)) return -1;
+        if (r.generation != generation) { close(r.fd); return net_error(9); }
+        int waited = net_wait(&r, POLLIN, -1, net_ms()); close(r.fd);
+        if (waited) return -1;   // closed while waiting: EBADF
+    }
+}
+int dm_net_eventfd_write(int guest, uint64_t value) {
+    if (value == UINT64_MAX) return net_error(22);
+    uint64_t generation = 0;
+    for (;;) {
+        dm_host_mutex_lock(&g_net_lock);
+        net_slot *e = net_event(guest, generation); if (!e) { pthread_mutex_unlock(&g_net_lock); return -1; }
+        generation = e->generation;
+        if (value <= UINT64_MAX - 1 - e->count) {   // the counter's largest value is UINT64_MAX - 1
+            if (!e->count && value) (void)send(e->peer, "", 1, 0);
+            e->count += value; pthread_mutex_unlock(&g_net_lock); return 0;
+        }
+        int nonblock = e->nonblock; pthread_mutex_unlock(&g_net_lock);
+        if (nonblock) return net_error(11);
+        dm_thread_native_wait(1); (void)poll(NULL, 0, NET_SLICE_MS); dm_thread_native_wait(0);   // a full counter waits for a read
+    }
 }
 
 // Read again at most once a second: games ask nifm in loops (Hades queries about once a millisecond), and getifaddrs walks every interface

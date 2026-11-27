@@ -41,15 +41,19 @@ static void *blocked_recv(void *p) {
     a->result = h_sk_Recv(a->fd, b, sizeof b, 0); a->error = h_sk_GetLastError(); a->took = ms_now() - t0; return NULL;
 }
 static void *late_event(void *p) { dm_guest_sleep_ns(30000000); h_sk_EventFdWrite((int)(intptr_t)p, 1); return NULL; }
+static void *blocked_event_read(void *p) {
+    wait_arg *a = p; unsigned long c; uint64_t t0 = ms_now();
+    a->result = h_sk_EventFdRead(a->fd, &c); a->error = h_sk_GetLastError(); a->took = ms_now() - t0; return NULL;
+}
 
 int main(void) {
     setenv("DM_NETWORK", "lan", 1);
     CHECK(dm_net_enabled(), "DM_NETWORK=lan turns the transport on");
     uint8_t a[16] = {0}, b[16] = {0}, from[16] = {0}; char data[64]; unsigned n;
 
-    // EventFd stays the offline service's, below the transport's range
+    // EventFd is the transport's too, numbered with its sockets
     int event = h_sk_EventFd(0, 6);
-    CHECK(event >= 0 && event < DM_NET_FD_BASE, "EventFd keeps a small offline descriptor");
+    CHECK(dm_net_owns(event), "EventFd takes a descriptor of the transport's range");
 
     // UDP: Horizon's address layout both ways, data and source, and Linux errno numbers
     int u = bound(2, a), v = bound(2, b);
@@ -116,8 +120,24 @@ int main(void) {
     pthread_create(&th, NULL, late_event, (void *)(intptr_t)event); t0 = ms_now();
     p[0] = (sk_pollfd){v, 1, 0}; p[1] = (sk_pollfd){event, 1, 0};
     int ready = h_sk_Poll(p, 2, 2000); pthread_join(th, NULL);
-    CHECK(ready == 1 && (p[1].revents & 1) && !p[0].revents && ms_now() - t0 < 1000, "a mixed Poll wakes for the EventFd");
+    CHECK(ready == 1 && (p[1].revents & 1) && !p[0].revents && ms_now() - t0 < 1000, "a Poll of a socket and an EventFd wakes for the EventFd");
     unsigned long counter; h_sk_EventFdRead(event, &counter);
+    memset(rs, 0, sizeof rs); rs[event >> 6] |= 1ull << (event & 63); rs[v >> 6] |= 1ull << (v & 63); stv[0] = 0;
+    h_sk_EventFdWrite(event, 2); h_sk_EventFdWrite(event, 3);
+    CHECK(h_sk_Select(1024, rs, NULL, NULL, stv) == 1 && (rs[event >> 6] >> (event & 63) & 1) && !(rs[v >> 6] >> (v & 63) & 1), "Select sees a written EventFd beside a quiet socket");
+    CHECK(h_sk_EventFdRead(event, &counter) == 0 && counter == 5, "a counter read takes the whole count");
+    CHECK(h_sk_EventFdRead(event, &counter) == -1 && h_sk_GetLastError() == 11, "a never-blocking read of a zero counter is EAGAIN 11");
+    uint64_t eight = 1; CHECK(h_nsk_Write(event, &eight, 8) == 8 && h_nsk_Read(event, &eight, 8) == 8 && eight == 1, "Read and Write move the 8-byte counter");
+    CHECK(h_sk_Send(event, "x", 1, 0) == -1 && h_sk_GetLastError() == 88, "a socket call on an EventFd is ENOTSOCK 88");
+    int sem = h_sk_EventFd(2, 1);
+    CHECK(dm_net_owns(sem) && h_sk_EventFdRead(sem, &counter) == 0 && counter == 1 && h_sk_EventFdRead(sem, &counter) == 0 && counter == 1, "a semaphore EventFd reads one at a time");
+    pthread_create(&th, NULL, late_event, (void *)(intptr_t)sem); t0 = ms_now();
+    CHECK(h_sk_EventFdRead(sem, &counter) == 0 && counter == 1 && ms_now() - t0 < 1000, "a blocking read waits for the write");
+    pthread_join(th, NULL);
+    w = (wait_arg){.fd = sem}; pthread_create(&th, NULL, blocked_event_read, &w); dm_guest_sleep_ns(50000000);
+    CHECK(h_sk_Close(sem) == 0, "Close while another thread reads the EventFd");
+    pthread_join(th, NULL);
+    CHECK(w.result == -1 && w.error == 9 && w.took < 1000, "the blocked read ends with EBADF 9");
     int dead = h_sk_Socket(2, 2, 0); h_sk_Close(dead);
     p[0] = (sk_pollfd){dead, 1, 0};
     CHECK(h_sk_Poll(p, 1, 0) == 1 && p[0].revents == 0x20, "a closed descriptor polls POLLNVAL");

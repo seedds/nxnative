@@ -1,5 +1,5 @@
 // Network services stay offline by default. The BSD service additionally supplies process-local UDP and EventFd transports, which offline engines use for their own threads.
-// DM_NETWORK=lan (net_socket.h) puts the game's sockets on the host's own IPv4 TCP/UDP instead (hle_net_backend.c); EventFd stays this service's, and nifm reports the interface.
+// DM_NETWORK=lan (net_socket.h) puts the game's sockets and event descriptors on the host instead (hle_net_backend.c), and nifm reports the interface.
 #include "hle.h"
 #include "hle_net.h"
 #include "net_socket.h"
@@ -52,7 +52,7 @@ static int sk_error(int error) { t_skerr = error; return -1; }
 static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
 int dm_sk_errno(void) { return t_skerr; }
 void dm_sk_set_errno(int error) { t_skerr = error; }
-// Network mode owns every descriptor from DM_NET_FD_BASE up; below it are this service's EventFd counters (and, offline, its local UDP sockets)
+// Network mode owns every descriptor from DM_NET_FD_BASE up, its sockets and its event descriptors; below it are the offline service's EventFd counters and local UDP sockets
 static int sk_net(int fd) { return dm_net_enabled() && dm_net_owns(fd); }
 #define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
 void dm_guest_sleep_ns(int64_t ns);
@@ -273,15 +273,27 @@ long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const vo
 done:
     pthread_mutex_unlock(&g_efd_m); return r;
 }
+// Read / Write on an event descriptor move its 8-byte counter, in either mode
+static long sk_net_read(int fd, void *data, unsigned long size) {
+    if (!dm_net_is_event(fd)) return dm_net_recv(fd, data, size, 0, NULL, NULL);
+    if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
+    uint64_t v; if (dm_net_eventfd_read(fd, &v)) return -1;
+    memcpy(data, &v, sizeof v); return sizeof v;
+}
+static long sk_net_write(int fd, const void *data, unsigned long size) {
+    if (!dm_net_is_event(fd)) return dm_net_send(fd, data, size, 0, NULL, 0);
+    if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
+    uint64_t v; memcpy(&v, data, sizeof v); return dm_net_eventfd_write(fd, v) ? -1 : (long)sizeof v;
+}
 long dm_sk_read(int fd, void *data, unsigned long size) {
-    if (sk_net(fd)) return dm_net_recv(fd, data, size, 0, NULL, NULL);
+    if (sk_net(fd)) return sk_net_read(fd, data, size);
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_recvfrom(fd, data, size, 0, NULL, NULL);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; if (efd_read(fd, &v)) return -1; memcpy(data, &v, sizeof v); return sizeof v;
 }
 long dm_sk_write(int fd, const void *data, unsigned long size) {
-    if (sk_net(fd)) return dm_net_send(fd, data, size, 0, NULL, 0);
+    if (sk_net(fd)) return sk_net_write(fd, data, size);
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_sendto(fd, data, size, 0, NULL, 0);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
@@ -326,22 +338,14 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
     return ready;
 }
 static int sk_poll_local(void *fds, uint64_t n, int ms);
-// Network mode: network descriptors wait in the host's poll (hle_net_backend.c). A set that also holds this service's EventFds alternates a check of those with short
-// host waits (SK_MIXED_MS), so either kind ends the wait; an endless wait returns after 100 ms, as the local one below does
-enum { SK_MIXED_MS = 5 };
+// Network mode: sockets and event descriptors are all the transport's, so one host poll waits on them (hle_net_backend.c). A descriptor below its range is none of this
+// mode's and never becomes ready; an endless wait returns after 100 ms, as the local one below does
 int dm_sk_poll(void *fds, uint64_t n, int ms) {
-    sk_pollfd *p = fds; int net = 0, local = 0;
-    if (dm_net_enabled() && (p || !n)) for (uint64_t i = 0; i < n; i++) { if (dm_net_owns(p[i].fd)) net = 1; else if (p[i].fd >= 0) local = 1; }
+    sk_pollfd *p = fds; int net = 0;
+    if (dm_net_enabled() && (p || !n)) for (uint64_t i = 0; i < n; i++) if (dm_net_owns(p[i].fd)) net = 1;
     if (!net) return sk_poll_local(fds, n, ms);
-    int64_t limit = ms < 0 ? 100 : ms; uint64_t start = guest_ns();
-    if (!local) { for (uint64_t i = 0; i < n; i++) p[i].revents = 0; return dm_net_poll(fds, n, (int)limit); }
-    for (;;) {
-        int ready = sk_poll_local(fds, n, 0);   // clears every revents first, then sets the EventFds'
-        int64_t left = limit - (int64_t)((guest_ns() - start) / 1000000);
-        int more = dm_net_poll(fds, n, ready || left <= 0 ? 0 : (int)(left < SK_MIXED_MS ? left : SK_MIXED_MS));
-        if (more < 0) return -1;
-        if (ready + more || left <= 0) return ready + more;
-    }
+    for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
+    return dm_net_poll(fds, n, ms < 0 ? 100 : ms);
 }
 static int sk_poll_local(void *fds, uint64_t n, int ms) {
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
@@ -406,9 +410,16 @@ SKF("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, i
 // to the host's Poll too
 SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
 SKF("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
-HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "a descriptor of the bsd service that works offline: a host counter", int, h_sk_EventFd, unsigned long v, int f) { return efd_create(v, f); }
-HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int r = efd_read(s, &c); if (!r && v) *v = c; return r; }
-HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) { return efd_write(s, v); }
+// A host counter in either mode: offline this service's table, in network mode a slot of the transport's socket table, so its Poll sees the counter beside the sockets
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "a host counter descriptor: the offline service's, or the transport's in network mode", int, h_sk_EventFd, unsigned long v, int f) {
+    return dm_net_enabled() ? dm_net_eventfd(v, f) : efd_create(v, f);
+}
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter", int, h_sk_EventFdRead, int s, unsigned long *v) {
+    uint64_t c = 0; int r = dm_net_enabled() ? dm_net_eventfd_read(s, &c) : efd_read(s, &c); if (!r && v) *v = c; return r;
+}
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers", int, h_sk_EventFdWrite, int s, unsigned long v) {
+    return dm_net_enabled() ? dm_net_eventfd_write(s, v) : efd_write(s, v);
+}
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "local UDP (offline BSD service)", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_sk_recvfrom(s, b, n, f, NULL, NULL); }

@@ -315,7 +315,8 @@ int main(void) { @autoreleasepool {
     prepare_prebuild();
     EXPECT("adopt: prebuild finished before frame 0", 0, (int)atomic_load(&g_pre_running));
     EXPECT("adopt: both bases built", 2, g_pre_built);
-    EXPECT("adopt: indexed into g_arch_ix", 1, g_arch_ix.n >= 2 && g_arch_ixf.count == 1);
+    // Two shared-VS pairs on multi-core workers can split across 1 or 2 periods if i == n flushes while the second pair is deferred.
+    EXPECT("adopt: indexed into g_arch_ix", 1, g_arch_ix.n >= 2 && g_arch_ixf.count >= 1);
     EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
     EXPECT("adopt: compile=0 lookup finds pulling base in same run", 1, pso_build_ex(pd, FN_OFF_BORDER, nil, 0) != nil);
     EXPECT("adopt: no base recompiled on draw lookup", pb_built0, g_pb_built);

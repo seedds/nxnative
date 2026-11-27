@@ -1289,21 +1289,34 @@ def rgxd_shaders(d, label):
     return out
 
 def d11_pack_shaders(path, label, out):
-    """Double Eleven's resource pack (Red Dead Redemption's d11extra/langselect.pkdswitch, the language selection shown before the game): the data file holds the members one after another, its
-    index beside it (.pkiswitch) is u32 version 3, u32 0, u32 member count (22), then per member {u32 length, u32 stored length, u32 offset in the data file, u32 name hash}; a member whose stored
-    length differs from its length is one zlib stream. Members 4 and 5 are whole GLSLC outputs, the screen's pixel and vertex shader (98664fb56b9c9fdf, 70d4dd8068044bb5): without them the host
-    found no vertex shader for the first program the game draws with. The others are textures ('DFvN') and fonts ('BMF')"""
+    """Double Eleven's resource pack (Red Dead Redemption's d11extra/langselect.pkdswitch, LEGO Harry Potter Collection's launcher_dll/launcher.pkdswitch): the data file holds the members one
+    after another, its index beside it (.pkiswitch) is u32 version 3, u32 0, u32 member count, then per member {u32 length, u32 stored length, u32 offset in the data file, u32 name hash}.
+    Stored length 0 marks an uncompressed (raw) member of `length` bytes at `offset` (LEGO Harry Potter's member 90 of 158: length 8, stored 0, off 0x885b87, member 91 at 0x885b8f); a non-zero
+    stored length differing from `length` is one zlib stream. Every member's decoded or raw bytes are scanned for shaders (whole GLSLC outputs in langselect members 4 and 5 and launcher
+    members 68, 69, 77 and 78; the other members are textures ('DFvN'), fonts ('BMF') and metadata)"""
     with open(path[:-len('.pkdswitch')] + '.pkiswitch', 'rb') as f: idx = f.read()
     with open(path, 'rb') as f: d = f.read()
     if len(idx) < 12: red(f'{label}: the pack index is cut short ({len(idx)} bytes)')
     ver, _, n = struct.unpack_from('<3I', idx)
     if ver != 3: red(f'{label}: pack index version {ver}: only 3 is known')
     if 12 + 16 * n > len(idx): red(f'{label}: the pack index lists {n} members but holds {(len(idx) - 12) // 16}')
-    for k in range(n):
-        size, stored, off, h = struct.unpack_from('<4I', idx, 12 + 16 * k)
-        if off + stored > len(d): red(f'{label}: member {k} runs past the end of the data file')
-        m = d[off:off + stored]
-        if stored != size:
+    ents = [struct.unpack_from('<4I', idx, 12 + 16 * k) for k in range(n)]
+    seen = {}
+    for k, (size, stored, off, h) in enumerate(ents):
+        if stored or size: seen.setdefault((off, size, stored), (k, h))
+    spans = sorted((off, off + (stored or size), size, stored, k, h) for (off, size, stored), (k, h) in seen.items())
+    end, end_k = -1, -1
+    for i, (off, stop, size, stored, k, h) in enumerate(spans):
+        if not stored:
+            if off < end: red(f'{label}: member {k} ({h:08x}) at {off:#x} overlaps member {end_k} ending at {end:#x}')
+            if i + 1 < len(spans) and stop > spans[i + 1][0]:
+                red(f'{label}: member {k} ({h:08x}) has stored length 0 and length {size}, overlapping member {spans[i + 1][4]} at {spans[i + 1][0]:#x}')
+        if stop > end: end, end_k = stop, k
+    for k, (size, stored, off, h) in enumerate(ents):
+        nbytes = stored or size
+        if off + nbytes > len(d): red(f'{label}: member {k} runs past the end of the data file')
+        m = d[off:off + nbytes]
+        if stored and stored != size:
             try: m = zlib.decompress(m)
             except zlib.error as e: red(f'{label}: member {k} ({h:08x}) is no zlib stream: {e}')
             if len(m) != size: red(f'{label}: member {k} ({h:08x}) inflates to {len(m)} bytes, the index says {size}')

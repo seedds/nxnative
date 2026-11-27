@@ -119,8 +119,9 @@ def sources(roots):
 #   · the compatibility colour declared as a plain varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader (DOOM 3): NVIDIA links the two
 #     as GL's fixed pipeline does, so both become one varying, dm_Color, which the host matches by name;
 #   · `sampler` as a name (DOOM 3's helpers take `sampler2D sampler`): a reserved word in Vulkan GLSL, an ordinary name in OpenGL's;
-#   · a function body closed with `};` (Mega Man Legacy Collection's shaders/nx/*.glsl end main that way): GLSL ES has no empty declaration at file scope, so the `;` goes.
-#     A struct's or a block's `};` ends its declaration and stays: only a `{` opened right after a `)` at file scope is a function body
+#   · empty declarations (`;`) at file scope (Mega Man Legacy Collection's `};` after main; Mark of the Ninja: Remastered's semicolon-terminated macros called with `;`, producing `;;`):
+#     glslang allows empty file-scope declarations only from desktop GLSL 4.60 on (never in ES), while NVIDIA accepts them in any version. A struct's, interface block's, or initializer's
+#     `};` ends its declaration and stays (only a `{` opened right after `)` at file scope is a function body); `;;` inside a function body is an empty statement and stays
 OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture3DLod\s*\(', 'textureLod('),
            (r'\btexture2DProj\s*\(', 'textureProj('), (r'\btexture3DProj\s*\(', 'textureProj('),
            (r'\btexture2D\s*\(', 'texture('), (r'\btexture3D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
@@ -145,21 +146,39 @@ def own_name(t, decl, name, new, out=None):
     t = re.sub(decl, out or '', t, flags=re.M)
     return re.sub(rf'\b{name}\b', new, t)
 
-def function_semicolons(t):
-    """t without the `;` right after the `}` that closes a function body at file scope"""
-    out, depth, body, i, k = [], 0, False, 0, 0
-    while k < len(t):
+def empty_declarations(t):
+    """t without empty declarations (`;`) at file scope: after a function body's `}`, doubled/repeated `;;`, or standalone `;` after directives."""
+    out, depth, body, decl_start, last, sol, i, k, n = [], 0, False, True, '', True, 0, 0, len(t)
+    while k < n:
         c = t[k]
-        if c == '{':
-            if depth == 0: body = t[:k].rstrip().endswith(')')
-            depth += 1
-        elif c == '}' and depth:
-            depth -= 1
-            if depth == 0 and body:
-                m = re.match(r'\s*;', t[k + 1:])
-                if m: out.append(t[i:k + 1]); i = k + 1 + m.end(); k = i; continue
+        if sol and c == '#':
+            nl = t.find('\n', k)
+            k = n if nl < 0 else nl + 1
+            sol = True
+            continue
+        if depth == 0:
+            if c == ';':
+                if decl_start:
+                    out.append(t[i:k]); i = k + 1; k += 1; continue
+                decl_start, last, sol = True, ';', False
+            elif c == '{':
+                body, depth, decl_start, last, sol = last == ')', 1, False, '{', False
+            elif c == '\n':
+                sol = True
+            elif c in ' \t\r':
+                pass
+            elif c.isspace():
+                sol = False
+            else:
+                decl_start, last, sol = False, c, False
+        else:
+            if c == '{': depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0: decl_start, last = body, '}'
+            sol = True if c == '\n' else (sol if c in ' \t\r' else False)
         k += 1
-    return ''.join(out) + t[i:]
+    return ''.join(out) + t[i:] if out else t
 
 def rename_identifier(t, name, base, renamed, keep_calls=False):
     """Rename an identifier into a free name, recording only replacements made in this translation."""
@@ -173,7 +192,7 @@ def rename_identifier(t, name, base, renamed, keep_calls=False):
 
 def fixups(t, stage, renamed=None):
     if renamed is None: renamed = {}
-    t = function_semicolons(t)
+    t = empty_declarations(t)
     for a, b in OLD_TEX: t = re.sub(a, b, t)
     t = re.sub(BUILTIN_DECL, '', t, flags=re.M)
     t = rename_identifier(t, 'sampler', 'dm_sampler', renamed)

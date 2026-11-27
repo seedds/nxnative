@@ -2716,8 +2716,16 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 
 - **Symptom:** `gl_shaders.py` reports `does not translate: vert: glslang: ERROR: …: 'extraneous semicolon' : not supported with this profile: es`, and the host skips that program's draws.
 - **Cause:** GLSL ES has no empty declaration at file scope, so a `;` after a function's closing `}` is an error in glslang; NVIDIA's compiler accepts it.
-- **Fix:** `fixups()` drops a `;` right after the `}` that closes a function body at file scope (a `{` opened right after a `)`), and leaves a struct's or a block's `};`.
+- **Fix:** `fixups()` (`empty_declarations()`) drops empty declarations (`;`) at file scope — including any `;` right after the `}` that closes a function body (a `{` opened right after a `)`) — while leaving a struct's, interface block's, or initializer's closing `};`.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): three of its six `.glsl` files end `main` with `};`. Reported in [PR #2726](https://github.com/seedds/nxnative/pull/2726).
+- **Check:** `test_gl_shaders.py`.
+
+### Empty declarations at file scope
+
+- **Symptom:** `gl_shaders.py` reports `does not translate: frag: glslang: ERROR: …: 'extraneous semicolon' : not supported for this version or the enabled extensions` for most captured shaders of a `#version 450` game. Every program that uses one skips its draws, and the window stays black while the sound plays.
+- **Cause:** the game's macros end with `;` and are called with one (`DECL_TEXTURE_REGISTER( FOWTexture, 6 );`), so the preprocessed text has `;;` at file scope (and empty-expanding macros can leave standalone `;`). glslang allows an empty file-scope declaration only from desktop GLSL 4.60 on (never in GLSL ES). NVIDIA's compiler accepts it in any version.
+- **Fix:** `fixups()` (`empty_declarations()`) drops any empty declaration (`;`) at file scope — repeated `;;`/`;;;`, `;` after a function body's `}`, or standalone `;` after directives — while preserving `#` directives, newlines, struct/block/initializer closing `;`, and `;;` empty statements inside function bodies.
+- **Found on:** Mark of the Ninja: Remastered (`01009A700A538000`, no profile): 44 of the 74 shaders its title screen compiles. Reported in [PR #3415](https://github.com/seedds/nxnative/pull/3415).
 - **Check:** `test_gl_shaders.py`.
 
 ### A sampler the shader never reads

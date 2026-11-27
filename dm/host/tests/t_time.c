@@ -208,6 +208,60 @@ int main(void) {
     int64_t tsp[2] = {-1, -1}, tsq[2] = {-1, -1};
     CHECK(net_ts && net_ts(tsp) == 0 && tsp[0] == 1700000000 && tsp[1] == 0 && adj_net_ts && adj_net_ts(tsq) == 0 && tsq[0] == 1700000000 && tsq[1] == 0,
           "the network clocks' real-time getters read the host clock");
+    // Device location name (IANA name): GetDeviceLocationName, ClockSnapshot (+0xa8), and detail::GetDeviceLocationNameAndUpdatedTime
+    Result (*get_loc)(char *) = hook("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE");
+    if (get_loc) {
+        // Guarded buffer and zero-fill past the NUL
+        uint8_t lg[0x44]; memset(lg, 0xa5, sizeof lg);
+        setenv("TZ", "Asia/Tokyo", 1); tzset();
+        CHECK(get_loc((char *)lg + 0x10) == RES_OK && !strcmp((const char *)lg + 0x10, "Asia/Tokyo"), "GetDeviceLocationName honors IANA TZ");
+        int loc_ok = 1;
+        for (int i = 0; i < 0x10; i++) loc_ok &= lg[i] == 0xa5 && lg[0x34 + i] == 0xa5;
+        for (size_t i = strlen("Asia/Tokyo"); i < LOCATION_NAME_SIZE; i++) loc_ok &= lg[0x10 + i] == 0;
+        CHECK(loc_ok, "GetDeviceLocationName writes only 0x24 bytes and zero-fills past the name");
+        // All three hooks agree on the IANA name
+        CHECK(snap(a) == RES_OK && !memcmp(a + 0xa8, lg + 0x10, LOCATION_NAME_SIZE), "ClockSnapshot carries the IANA location name");
+        memset(loc, 0x55, sizeof loc); memset(tp, 0x55, sizeof tp);
+        CHECK(loc_upd && loc_upd(loc, tp) == RES_OK && !memcmp(loc, lg + 0x10, LOCATION_NAME_SIZE), "detail::GetDeviceLocationNameAndUpdatedTime agrees with GetDeviceLocationName");
+        // Accepted TZ forms (plain, leading ':', zoneinfo path, UTC, multi-segment, Etc)
+        static const struct { const char *in, *want; } valid_tz[] = {
+            {"America/Los_Angeles", "America/Los_Angeles"},
+            {":Asia/Tokyo", "Asia/Tokyo"},
+            {"/var/db/timezone/zoneinfo/Europe/Berlin", "Europe/Berlin"},
+            {"/usr/share/zoneinfo/America/Argentina/Buenos_Aires", "America/Argentina/Buenos_Aires"},
+            {"Australia/Lord_Howe", "Australia/Lord_Howe"},
+            {"Etc/GMT+5", "Etc/GMT+5"},
+            {"UTC", "UTC"},
+        };
+        for (size_t i = 0; i < sizeof valid_tz / sizeof *valid_tz; i++) {
+            char buf[LOCATION_NAME_SIZE]; memset(buf, 0x55, sizeof buf);
+            int ok = location_name_from_tz(valid_tz[i].in, buf) && !strcmp(buf, valid_tz[i].want);
+            for (size_t j = strlen(valid_tz[i].want); ok && j < LOCATION_NAME_SIZE; j++) ok &= buf[j] == 0;
+            CHECK(ok, valid_tz[i].in);
+        }
+        // Rejected TZ forms (abbreviations, POSIX rules with or without commas, invalid zone, traversal, too long)
+        static const char *const bad_tz[] = {
+            NULL, "", "PST", "JST", "EST5EDT", "PST8PDT,M3.2.0,M11.1.0", "JST-9", "<+09>-9", "+08",
+            "Not/A_Zone", "/etc/localtime", "../../etc/passwd", "America/A_name_far_too_long_for_LocationName",
+        };
+        for (size_t i = 0; i < sizeof bad_tz / sizeof *bad_tz; i++) {
+            char buf[LOCATION_NAME_SIZE]; memset(buf, 'K', sizeof buf); buf[4] = 0;
+            CHECK(!location_name_from_tz(bad_tz[i], buf) && !strcmp(buf, "KKKK"), bad_tz[i] ? bad_tz[i] : "(null)");
+        }
+        // Live system zone via CoreFoundation when TZ is unset or invalid
+        unsetenv("TZ"); tzset();
+        memset(loc, 0x55, sizeof loc);
+        CHECK(get_loc(loc) == RES_OK && loc[0] && loc[LOCATION_NAME_SIZE - 1] == 0 &&
+              (strchr(loc, '/') != NULL || !strcmp(loc, "UTC")), "unset TZ resolves system IANA zone via CoreFoundation");
+        int sys_zero = 1;
+        for (size_t i = strlen(loc); i < LOCATION_NAME_SIZE; i++) sys_zero &= loc[i] == 0;
+        CHECK(sys_zero, "system IANA location is zero-filled past the NUL");
+        CHECK(snap(a) == RES_OK && !memcmp(a + 0xa8, loc, LOCATION_NAME_SIZE), "ClockSnapshot agrees on live system zone");
+        setenv("TZ", "PST8PDT,M3.2.0,M11.1.0", 1); tzset();
+        char fallback_loc[LOCATION_NAME_SIZE];
+        CHECK(get_loc(fallback_loc) == RES_OK && !memcmp(fallback_loc, loc, LOCATION_NAME_SIZE), "POSIX rule TZ falls back to system IANA zone");
+        setenv("TZ", "UTC", 1); tzset();
+    }
     printf("time: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

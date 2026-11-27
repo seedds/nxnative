@@ -2,12 +2,59 @@
 // Layout follows the public Horizon ABI: PosixTime = int64 seconds; CalendarTime = {s16 year, s8 month/day/hour/minute/second};
 // CalendarAdditionalInfo = {u32 day of week, u32 day of year, char time zone name[8], u32 DST, s32 UTC offset in seconds}.
 #include "hle.h"
+#include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
 #include <time.h>
 
 typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
 typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
 static const int64_t ns_per_second = 1000000000;
+enum { LOCATION_NAME_SIZE = 0x24 };   // nn::time::LocationName: char[0x24], NUL-terminated
+
+// Extract a valid Switch LocationName ("UTC" or a known IANA Area/Location name) from a TZ value or zoneinfo path, zero-filling out.
+// Rejects abbreviations ("PST"), POSIX rules ("PST8PDT,M3.2.0,M11.1.0", "EST5EDT", "JST-9"), path traversal (".."), and names >= 0x24 bytes.
+static int location_name_from_tz(const char *s, char out[LOCATION_NAME_SIZE]) {
+    if (!s) return 0;
+    if (*s == ':') s++;
+    for (const char *z; (z = strstr(s, "zoneinfo/"));) s = z + 9;
+    size_t n = strlen(s);
+    if (!n || n >= LOCATION_NAME_SIZE || *s == '/' || strstr(s, "..")) return 0;
+    if (!strcmp(s, "UTC")) { memset(out, 0, LOCATION_NAME_SIZE); memcpy(out, "UTC", 3); return 1; }
+    if (!strchr(s, '/')) return 0;
+    CFStringRef name = CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
+    if (!name) return 0;
+    CFTimeZoneRef tz = CFTimeZoneCreateWithName(NULL, name, false);
+    CFRelease(name);
+    if (!tz) return 0;
+    CFRelease(tz);
+    memset(out, 0, LOCATION_NAME_SIZE);
+    memcpy(out, s, n);
+    return 1;
+}
+
+// Device location name (char[0x24], NUL-terminated, zero-filled): an IANA name ("Asia/Tokyo", "UTC"), as a Switch reports it.
+// Honors a valid TZ override first (main.c sets TZ=UTC for DM_FIXED_TIME, and unit tests set TZ); otherwise queries CoreFoundation
+// (CFTimeZoneCopySystem, sandbox-safe on both macOS and iOS) and falls back to "UTC".
+static void device_location_name(char out[LOCATION_NAME_SIZE]) {
+    if (location_name_from_tz(getenv("TZ"), out)) return;
+    memset(out, 0, LOCATION_NAME_SIZE);
+    CFTimeZoneRef tz = CFTimeZoneCopySystem();
+    if (tz) {
+        CFStringRef name = CFTimeZoneGetName(tz);
+        char buf[LOCATION_NAME_SIZE];
+        if (name && CFStringGetCString(name, buf, sizeof buf, kCFStringEncodingUTF8) &&
+            buf[0] && (strchr(buf, '/') || !strcmp(buf, "UTC") || !strcmp(buf, "GMT"))) {
+            strlcpy(out, !strcmp(buf, "GMT") ? "UTC" : buf, LOCATION_NAME_SIZE);
+            CFRelease(tz);
+            return;
+        }
+        CFRelease(tz);
+    }
+    memcpy(out, "UTC", 3);
+}
+HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone (IANA name)", Result, h_time_LocName, char *out) {
+    device_location_name(out); return RES_OK;
+}
 
 // DM_FIXED_TIME=seconds (for deterministic comparison): the user clock always returns this value (and main.c pins the host time zone to UTC)
 static int64_t fixed_time(void) {
@@ -162,7 +209,7 @@ HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "sna
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
     memcpy(s + 0x20, s, 0x20); memcpy(s + 0x48, &now, 8); memcpy(s + 0x58, s + 0x50, 8); memcpy(s + 0x78, s + 0x60, 0x18);   // the network clock's context, time, calendar and its info
     write_steady_point(s + 0x90, sample.steady_ns / ns_per_second);
-    tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    device_location_name((char *)s + 0xa8);
     s[0xcd] = 1;   // The SDK passes type 1 for standard snapshots, 2 for adjustable snapshots; 0 is uninitialized.
     return RES_OK;
 }
@@ -208,16 +255,16 @@ HLE_FORCE("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicB
     LOG("time: periodic benefit claim → %u", (unsigned)r);
     return r;
 }
-// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch (a location such as Asia/Tokyo where the
-// host's is its zone abbreviation, automatic correction on) or a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
+// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch in another zone, one saved
+// before the host answered IANA names (a zone abbreviation such as JST), one with automatic correction on, or one from a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
 // no snapshot's, and the claim then uses only the snapshots (it takes the time point only when its source ID is the current snapshot's steady clock's, SDK 6.5's detail:: +0x2e8 and +0x3b0)
 HLE_FORCE("_ZN2nn4time6detail56GetStandardUserSystemClockAutomaticCorrectionUpdatedTimeEPNS0_20SteadyClockTimePointE",
           "when automatic correction was last switched (time service); not known on the host: a time point of no clock", Result, h_time_AutoCorrUpdated, uint8_t *tp) {
     memset(tp, 0, 0x18); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time6detail35GetDeviceLocationNameAndUpdatedTimeEPNS0_12LocationNameEPNS0_20SteadyClockTimePointE",
-          "device location and when it was set (time service): the host's zone, as in its snapshots, and a time point of no clock", Result, h_time_LocUpdated, char *name, uint8_t *tp) {
-    memset(name, 0, 0x24); tzset(); strlcpy(name, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+          "device location and when it was set (time service): the host's zone (IANA name), as in its snapshots, and a time point of no clock", Result, h_time_LocUpdated, char *name, uint8_t *tp) {
+    device_location_name(name);
     memset(tp, 0, 0x18); return RES_OK;
 }
 // The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one

@@ -234,14 +234,15 @@ typedef struct { char name[48]; uint8_t slot, type; } shattr;                   
 typedef struct { char name[48]; uint16_t off, count, stride; uint8_t type; } shuni;   // a default block member (count 0 = not an array)
 typedef struct { char name[48]; uint16_t slot, count; uint8_t type; int sampler, unit; } shsamp;   // combined sampler, count 0 for scalar, unit -1 for implicit binding
 typedef struct { char name[48]; uint16_t slot; uint32_t size; } shblk;               // a named uniform block: its argument ID and size
-typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb; shattr *a; shuni *u; shsamp *t; shblk *b; } shinfo;
+typedef struct { char name[48]; uint16_t slot, count, stride; uint32_t off; uint8_t type; } shbm;   // a named block's member: the block's argument ID, its offset in the block
+typedef struct { char key[17]; int frag, ub_slot, ub_size, arg_slot, nargs, na, nu, nt, nb, nm; shattr *a; shuni *u; shsamp *t; shblk *b; shbm *m; } shinfo;
 static shinfo *g_sh; static int g_nsh;
 static int sh_cmp(const void *a, const void *b) { int c = memcmp(((const shinfo *)a)->key, ((const shinfo *)b)->key, 16); return c ? c : ((const shinfo *)a)->frag - ((const shinfo *)b)->frag; }
 static int sh_read_abi(FILE *f) {
     char line[sizeof "# GL shader ABI 3\n"];
     return fgets(line, sizeof line, f) && (!strcmp(line, "# GL shader ABI 2\n") || !strcmp(line, "# GL shader ABI 3\n"));
 }
-static void sh_free(shinfo *s) { free(s->a); free(s->u); free(s->t); free(s->b); }
+static void sh_free(shinfo *s) { free(s->a); free(s->u); free(s->t); free(s->b); free(s->m); }
 static int sh_read_row(char *line, shinfo *s) {
     char *rest = line, *key = strsep(&rest, "\t"), *stage = strsep(&rest, "\t"), *res = strsep(&rest, "\t\n");
     if (!key || !stage || strlen(key) != 16 || (strcmp(stage, "vert") && strcmp(stage, "frag"))) return 0;
@@ -251,9 +252,10 @@ static int sh_read_row(char *line, shinfo *s) {
         GLOG("[RED] shader %s: invalid argument buffer in the GL shader table", s->key);
         return 0;
     }
-    int na = 0, nu = 0, nt = 0, nb = 0;
-    for (const char *c = res; *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; }
+    int na = 0, nu = 0, nt = 0, nb = 0, nm = 0;
+    for (const char *c = res; *c; c++) if (c == res || c[-1] == ' ') { na += *c == 'a'; nu += *c == 'u'; nt += *c == 't'; nb += *c == 'n'; nm += *c == 'm'; }
     s->a = zalloc((na + 1) * sizeof *s->a); s->u = zalloc((nu + 1) * sizeof *s->u); s->t = zalloc((nt + 1) * sizeof *s->t); s->b = zalloc((nb + 1) * sizeof *s->b);
+    s->m = zalloc((nm + 1) * sizeof *s->m);
     int bad = 0;
     char *save;
     for (char *t = strtok_r(res, " ", &save); t; t = strtok_r(NULL, " ", &save)) {
@@ -278,6 +280,11 @@ static int sh_read_row(char *line, shinfo *s) {
         } else if (t[0] == 'n' && (unsigned)s->nb < (unsigned)nb && sscanf(t, "n:%63[^=]=%u:%u", nm, &a1, &a2) == 3) {
             if (a1 >= (unsigned)s->nargs) { bad = 1; continue; }
             shblk *x = &s->b[s->nb++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->size = a2;
+        } else if (t[0] == 'm' && (unsigned)s->nm < (unsigned)nm) {
+            unsigned a4; int end = 0;
+            if (sscanf(t, "m:%63[^=]=%u:%u:%31[^:]:%u:%u%n", nm, &a1, &a2, ty, &a3, &a4, &end) != 6 || t[end]) continue;
+            if (a1 >= (unsigned)s->nargs) { bad = 1; continue; }
+            shbm *x = &s->m[s->nm++]; strlcpy(x->name, nm, sizeof x->name); x->slot = a1; x->off = a2; x->type = tcode(ty); x->count = a3; x->stride = a4;
         }
     }
     if (bad) { GLOG("[RED] shader %s: invalid argument IDs in the GL shader table", s->key); sh_free(s); }
@@ -514,6 +521,8 @@ typedef struct { pkey_t k; void *pso; } pent_t;   // pso: a retained id<MTLRende
 typedef struct { char name[48]; int index; } abind_t;
 // A named uniform block of a program: its slot in each stage (−1 = not in that stage), its size, and the binding point glUniformBlockBinding gave it (0 by default)
 typedef struct { char name[48]; int slot[2]; uint32_t size, binding; } pblk_t;
+// A member of a named block, as GL lists it after the default uniforms (glGetActiveUniform, glGetActiveUniformsiv): its block (an index in blk) and its offset there
+typedef struct { char name[48]; int blk; uint32_t off; uint16_t count, stride; uint8_t type; } pbm_t;
 // vs, fs: the attached shaders, each counted in its refs; deleted: glDeleteProgram flagged it while current (it goes at the next glUseProgram of another);
 // what the link took from them (si, fn, the uniform table) is the program's own, so attaching, detaching or deleting a shader later leaves the linked program as it is
 typedef struct {
@@ -523,6 +532,7 @@ typedef struct {
     pent_t *pc; int npc, cappc;
     abind_t bind[16]; int nbind; int8_t amap[16];
     pblk_t blk[8]; int nblk;
+    pbm_t *bm; int nbm;
 } prog_t;
 // Shaders and programs share one name space, as in GL
 typedef struct { int is_prog; union { shader_t s; prog_t p; }; } sp_t;
@@ -3574,7 +3584,7 @@ static void prog_clear(prog_t *p) {
     p->validated = 0; p->validation_log[0] = 0;
     for (int i = 0; i < p->npc; i++) if (p->pc[i].pso) CFRelease(p->pc[i].pso);
     free(p->pc); p->pc = NULL; p->npc = p->cappc = 0;
-    free(p->u); p->u = NULL; p->nu = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = 0;
+    free(p->u); p->u = NULL; p->nu = 0; free(p->bm); p->bm = NULL; p->nbm = 0; free(p->ub[0]); free(p->ub[1]); p->ub[0] = p->ub[1] = NULL; p->fn[0] = p->fn[1] = nil; p->linked = 0;
     for (int st = 0; st < 2; st++) { p->ae[st] = nil; p->ub_buf[st] = nil; p->ub_serial[st] = p->ub_written_gen[st] = 0; }
 }
 // Uniforms are merged by name over both stages, as GL links them; a location is (uniform index + 1) × 4096 + array element (uni_loc, uni_of)
@@ -3643,6 +3653,16 @@ GLB(glLinkProgram, void, GLuint pr) {
         if (!x) { if (p->nblk == 8) { RED1("program %u: more than 8 uniform blocks", pr); continue; } x = &p->blk[p->nblk++]; memset(x, 0, sizeof *x); strlcpy(x->name, b->name, sizeof x->name); x->slot[0] = x->slot[1] = -1; }
         x->slot[st] = b->slot; x->size = umax(x->size, b->size);
     }
+    // their members, merged by name: a member's block is the one whose argument ID it names in that stage
+    p->bm = zalloc((size_t)(p->si[0]->nm + p->si[1]->nm + 1) * sizeof *p->bm);
+    for (int st = 0; st < 2; st++) for (int i = 0; i < p->si[st]->nm; i++) {
+        const shbm *m = &p->si[st]->m[i]; int blk = -1;
+        for (int j = 0; j < p->nblk; j++) if (p->blk[j].slot[st] == m->slot) blk = j;
+        if (blk < 0) continue;
+        int dup = 0; for (int j = 0; j < p->nbm; j++) dup |= !strcmp(p->bm[j].name, m->name);
+        if (dup) continue;
+        pbm_t *x = &p->bm[p->nbm++]; strlcpy(x->name, m->name, sizeof x->name); x->blk = blk; x->off = m->off; x->count = m->count; x->stride = m->stride; x->type = m->type;
+    }
     p->serial = ++serials; p->ub_gen[0]++; p->ub_gen[1]++; p->linked = 1;
     OLOG("LinkProgram %u: vs %s fs %s, %d uniforms", pr, vs->key, fs ? fs->key : "none", p->nu);
 }
@@ -3681,8 +3701,13 @@ GL(glGetProgramiv, void, GLuint pr, GLenum p, GLint *v) {
         case GL_LINK_STATUS: *v = g_capture_compiler ? x->linked : 1; return;
         case GL_VALIDATE_STATUS: *v = x->validated; return;
         case GL_INFO_LOG_LENGTH: *v = x->validation_log[0] ? (GLint)strlen(x->validation_log) + 1 : 0; return;
-        case GL_ACTIVE_UNIFORMS: *v = x->nu; return;
-        case GL_ACTIVE_UNIFORM_MAX_LENGTH: { int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4); *v = m; return; }
+        case GL_ACTIVE_UNIFORMS: *v = x->nu + x->nbm; return;
+        case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
+            int m = 0; for (int i = 0; i < x->nu; i++) m = (int)umax(m, (uint32_t)strlen(x->u[i].name) + 4);
+            for (int i = 0; i < x->nbm; i++) m = (int)umax(m, (uint32_t)strlen(x->bm[i].name) + 4);
+            *v = m; return;
+        }
+        case 0x8a36: *v = x->nblk; return;   // ACTIVE_UNIFORM_BLOCKS
         case GL_ATTACHED_SHADERS: *v = (x->vs != 0) + (x->fs != 0); return;
         case GL_ACTIVE_ATTRIBUTES:
         case GL_ACTIVE_ATTRIBUTE_MAX_LENGTH: {
@@ -3740,15 +3765,48 @@ GL(glGetProgramInfoLog, void, GLuint pr, GLsizei size, GLsizei *len, GLchar *log
     if (log && size > 0) { strlcpy(log, p->validation_log, (size_t)size); if (len) *len = (GLsizei)strlen(log); }
 }
 // The uniforms in the order of the program's table (both stages merged, samplers among them): an array's name ends in [0], as GL reports it (LÖVE's mapActiveUniforms)
+// then the members of the named blocks (pbm_t)
+static int active_uniform(const prog_t *p, GLuint index, const char **nm, int *count, int *type) {
+    if (!p || !p->linked || index >= (GLuint)(p->nu + p->nbm)) return 0;
+    if (index < (GLuint)p->nu) { *nm = p->u[index].name; *count = p->u[index].count; *type = p->u[index].type; }
+    else { const pbm_t *m = &p->bm[index - p->nu]; *nm = m->name; *count = m->count; *type = m->type; }
+    return 1;
+}
 GL(glGetActiveUniform, void, GLuint pr, GLuint index, GLsizei size, GLsizei *len, GLint *count, GLenum *type, GLchar *name) {
-    prog_t *p = prog_of(pr);
-    if (!p || !p->linked || index >= (GLuint)p->nu) { if (len) *len = 0; if (name && size > 0) name[0] = 0; return; }
-    const puni_t *u = &p->u[index]; char nm[64];
-    snprintf(nm, sizeof nm, "%s%s", u->name, u->count ? "[0]" : "");
+    const char *un; int ucount, utype;
+    if (!active_uniform(prog_of(pr), index, &un, &ucount, &utype)) { if (len) *len = 0; if (name && size > 0) name[0] = 0; return; }
+    char nm[64];
+    snprintf(nm, sizeof nm, "%s%s", un, ucount ? "[0]" : "");
     if (name && size > 0) strlcpy(name, nm, (size_t)size);
     if (len) *len = name && size > 0 ? (GLsizei)umin((uint32_t)strlen(nm), (uint32_t)size - 1) : 0;
-    if (count) *count = u->count ? u->count : 1;
-    if (type) *type = g_tenums[u->type];
+    if (count) *count = ucount ? ucount : 1;
+    if (type) *type = g_tenums[utype];
+}
+// A property of each of n active uniforms: a default uniform has no block (index, offset and strides -1); a block member has its block's index and its std140 offset and strides
+GL(glGetActiveUniformsiv, void, GLuint pr, GLsizei n, const GLuint *idx, GLenum pname, GLint *v) {
+    if (!SP_CHECK(pr, 1)) return;
+    prog_t *p = prog_of(pr);
+    if (n < 0) { gl_error(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; i++) {
+        const char *nm; int count, type;
+        if (!active_uniform(p, idx[i], &nm, &count, &type)) { gl_error(GL_INVALID_VALUE); return; }
+    }
+    for (GLsizei i = 0; i < n; i++) {
+        const char *nm; int count, type; active_uniform(p, idx[i], &nm, &count, &type);
+        const pbm_t *m = idx[i] >= (GLuint)p->nu ? &p->bm[idx[i] - p->nu] : NULL;
+        int mat = type >= T_MAT2 && type <= T_MAT4;
+        switch (pname) {
+            case 0x8a37: v[i] = (GLint)g_tenums[type]; break;                                       // UNIFORM_TYPE
+            case 0x8a38: v[i] = count ? count : 1; break;                                           // UNIFORM_SIZE
+            case 0x8a39: v[i] = (GLint)strlen(nm) + (count ? 3 : 0) + 1; break;                     // UNIFORM_NAME_LENGTH (with [0] and the NUL)
+            case 0x8a3a: v[i] = m ? m->blk : -1; break;                                             // UNIFORM_BLOCK_INDEX
+            case 0x8a3b: v[i] = m ? (GLint)m->off : -1; break;                                      // UNIFORM_OFFSET
+            case 0x8a3c: v[i] = m ? (count ? (GLint)m->stride : 0) : -1; break;                     // UNIFORM_ARRAY_STRIDE
+            case 0x8a3d: v[i] = m ? (mat ? 16 : 0) : -1; break;                                     // UNIFORM_MATRIX_STRIDE
+            case 0x8a3e: v[i] = 0; break;                                                           // UNIFORM_IS_ROW_MAJOR
+            default: RED1("glGetActiveUniformsiv(%#x) not implemented", pname); gl_error(GL_INVALID_ENUM); return;
+        }
+    }
 }
 GL(glGetShaderPrecisionFormat, void, GLenum stage, GLenum prec, GLint *range, GLint *precision) {   // every precision is a 32-bit float or int
     (void)stage; int fl = prec <= 0x8df2;   // LOW / MEDIUM / HIGH_FLOAT, then the INTs

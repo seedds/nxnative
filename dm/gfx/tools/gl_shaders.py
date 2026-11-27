@@ -379,6 +379,21 @@ def uni_members(refl, ms, prefix, base, f, bools, active):
         if ty not in VEC_TYPES: return f'uniform {name}: type {ty} (structs are not implemented)'
         f.append(f'u:{name}={base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
 
+def block_members(refl, ms, prefix, base, aid, f):
+    """Table rows for a named block's members (m:<name>=<block argument ID>:<offset>:<type>:<count>:<array stride>). GL lists them among the active uniforms with their block
+    index and offset (glGetActiveUniform, glGetActiveUniformsiv); a game that has no glGetUniformBlockIndex finds its blocks that way (Mark of the Ninja: Remastered's cbuffer_wvp
+    is known by its member mtxPVW). A std140 block's members are all active, so every one is listed. A member the host cannot describe (an array of arrays or of structs, an
+    opaque type) is left out: the block itself still works through its name"""
+    for mb in ms:
+        arr = mb.get('array', [])
+        name = prefix + mb['name']
+        if len(arr) > 1: continue
+        if 'members' in refl['types'].get(mb['type'], {}):
+            if not arr: block_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], aid, f)
+            continue
+        ty = glsl_type(mb['type'], refl)
+        if ty in VEC_TYPES: f.append(f'm:{name}={aid}:{base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+
 # GLSL ES 1.00 (#version 100 or unversioned) and legacy desktop GLSL (#version 110 / 120 / 130): `attribute`, `varying`, `texture2D`/`texture3D`, `gl_FragColor`,
 # precision statements and lowp / mediump / highp qualifiers. ES 1.00 promotes to `#version 310 es`; legacy desktop GLSL promotes to `#version 450 core`, preserving
 # desktop implicit int-to-float conversions and sampler types without ES precision qualifiers (such as `sampler3D`). Precision statements/qualifiers and texture
@@ -550,7 +565,9 @@ def translate(src, stage, key, tmp):
         if aid is None: continue
         t = refl['types'][u['type']]
         if t['name'] != 'gl_DefaultUniformBlock':   # a named block: the buffer the game binds to its binding point (glUniformBlockBinding, glBindBufferRange)
-            f.append(f'n:{t["name"]}={aid}:{u["block_size"]}'); continue
+            f.append(f'n:{t["name"]}={aid}:{u["block_size"]}')
+            block_members(refl, t['members'], '', 0, aid, f)
+            continue
         f.append(f'b:{aid}:{u["block_size"]}')
         e = uni_members(refl, t['members'], '', 0, f, bools, active)
         if e: return e
@@ -634,7 +651,7 @@ def main():
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
         if not fixed and not seen: red('no GLSL shaders translated')
         tsv = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
-               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs']
+               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), m: their members (name=block id:offset:type:count:stride), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs']
         if fixed:
             tsv.append('# Fixed-function OpenGL uses the host Metal shaders')
         else:

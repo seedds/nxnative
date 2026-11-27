@@ -2717,6 +2717,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Check:** `make -C dm/gfx/tests GAME=010029D00E740000 gl-arguments` exercises a fresh capture with legacy GLSL, compiler failure, rebinding an existing shader, uniform writes and GPU readback.
 - **Found on:** Timespinner 1.0.0 ([PR #1864](https://github.com/seedds/nxnative/pull/1864)).
 
+### Named uniform blocks found by their members
+
+- **Symptom:** a GL game draws (`draws` in the frame records, no `[RED]` shader lines) but the picture stays black. The log has `UNIMPL glGetActiveUniformsiv` and `GL error 0x501 recorded by h_glGetActiveUniformBlockiv` and `h_glUniformBlockBinding`.
+- **Cause:** the game imports no `glGetUniformBlockIndex`. It finds each block through its members, as GL lists them among the active uniforms: `glGetActiveUniform` gives a member's name (`mtxPVW`), `glGetActiveUniformsiv` its block index and offset, and the block index then goes to `glGetActiveUniformBlockiv` and `glUniformBlockBinding`. The layer listed only the default block's uniforms and had no `glGetActiveUniformsiv`, so the game passed an undefined block index and its constant buffers were never bound.
+- **Fix:** `gl_shaders.py` writes each named block member into the table (`m:<name>=<block argument ID>:<offset>:<type>:<count>:<array stride>`; a host that does not know the field skips it). The host lists the members after the default uniforms in `GL_ACTIVE_UNIFORMS` and `glGetActiveUniform`, answers `glGetActiveUniformsiv` (type, size, name length, block index, offset, array and matrix stride, row major) and `GL_ACTIVE_UNIFORM_BLOCKS`. A default uniform has block index, offset and strides `-1`, as in GL.
+- **Found on:** Mark of the Ninja: Remastered (`01009A700A538000`, no profile): with this fix and the one for a doubled `;` at file scope, its title screen draws.
+- **Check:** `test_gl_shaders.py` (the table rows); the game's title screen.
+
 ### GL entry points required by FNA
 
 - **Symptom:** FNA stops during startup with `NoSuitableGraphicsDeviceException` and names `glBlendColor` as the first missing entry point.

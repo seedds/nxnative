@@ -58,6 +58,14 @@ class Fixups(unittest.TestCase):
         self.assertNotIn('} ;', g); self.assertTrue(g.rstrip().endswith('}'))
         self.assertEqual(gl_shaders.function_semicolons(g), g)
 
+    def test_named_block_members(self):   # Mark of the Ninja: Remastered finds cbuffer_wvp by its member mtxPVW (glGetActiveUniform, glGetActiveUniformsiv)
+        refl = {'types': {'_S': {'name': 'S', 'members': [{'name': 'a', 'type': 'float', 'offset': 0}, {'name': 'b', 'type': 'vec2', 'offset': 8}]}}}
+        ms = [{'name': 'mtxPVW', 'type': 'mat4', 'offset': 0}, {'name': 'arr', 'type': 'vec4', 'offset': 64, 'array': [3], 'array_stride': 16},
+              {'name': 's', 'type': '_S', 'offset': 112}, {'name': 'aa', 'type': 'vec4', 'offset': 128, 'array': [2, 2]}]
+        f = []
+        gl_shaders.block_members(refl, ms, '', 0, 2, f)
+        self.assertEqual(f, ['m:mtxPVW=2:0:mat4:0:0', 'm:arr=2:64:vec4:3:16', 'm:s.a=2:112:float:0:0', 'm:s.b=2:120:vec2:0:0'])
+
 
 # GLSL ES 1.00 as Fate/hollow ataraxia REMASTERED's built shaders write it: a sampler named `texture` (a built-in function from ES 3.00 on) and, as GameMaker's, a variable `sample`
 ES100_FRAG = (b'precision mediump float;\nvarying vec2 v_uv;\nuniform sampler2D texture;\nuniform float sample;\n'

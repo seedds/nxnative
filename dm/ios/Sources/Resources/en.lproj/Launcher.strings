@@ -76,7 +76,7 @@
 "setting.DM_RUMBLE_MIN.label" = "Rumble cutoff";
 "setting.DM_PAD_PRESS_TO_JOIN.label" = "Press a button to join";
 "setting.DM_SW2.label" = "Switch 2 controllers";
-"setting.DM_SW2.note" = "Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.";
+"setting.DM_SW2.note" = "Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it (on iPhone and iPad, after each start). The system asks once for Bluetooth access.";
 "setting.DM_PRESENT_SNAP.label" = "Frame buffering";
 "setting.DM_PRESENT_SNAP.note" = "Up to one frame more display latency.";
 "setting.DM_PSO_MTL4.label" = "Metal 4 pipelines";

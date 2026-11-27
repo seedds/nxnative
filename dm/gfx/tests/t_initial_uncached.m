@@ -44,20 +44,33 @@ static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32
     if (!late_fill) fill(&t,mem,c0);
     mtl_tex_init(&t);
     if (late_fill) {
-        // Bloodstained resolves textures with sparse layout in ordinary CPU-visible storage before filling them.
+        // Bloodstained resolves textures with sparse layout in ordinary CPU-visible storage before filling them;
+        // verify through the registered texture-ID fast path (tex_fast), which must keep view_pkg set for them.
+        mtl_reg_tex(1, &t, NULL);
         mtl_sub_begin();
-        CHECK("unfilled sparse-layout ASTC texture resolves", tex_mtl(&t) != nil);
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> init_img = (__bridge id<MTLTexture>)tex_fast(1);
+        int vp = g_treg[1].view_pkg;
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK("unfilled sparse-layout ASTC texture resolves via tex_fast with view_pkg", init_img != nil && vp);
         finish();
         dm_guest_write_prepare(mem, t.L.size);
         fill(&t,mem,c0);
     }
-    mtl_sub_begin();id<MTLTexture> image=tex_mtl(&t);
+    mtl_sub_begin();
+    id<MTLTexture> image = nil;
+    if (late_fill) { os_unfair_lock_lock(&g_rmu); image = (__bridge id<MTLTexture>)tex_fast(1); os_unfair_lock_unlock(&g_rmu); }
+    else image = tex_mtl(&t);
     CHECK("ASTC texture resolves",image!=nil);finish();
     expect(image,c0,"literal ASTC mip color at first use");
     uint8_t *staging = (uint8_t *)mem + 65536;
     if (late_fill) CHECK("staging holds the first mip", !nvn_deswizzle(&t.d, 0, 0, mem, staging, 32));
     // A later CPU write is the texture's content (a block-compressed texture is never rendered into, and GPU copies into it reach its storage too)
-    dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+1);mtl_sub_begin();id<MTLTexture> again=tex_mtl(&t);finish();
+    dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+1);mtl_sub_begin();
+    id<MTLTexture> again = nil;
+    if (late_fill) { os_unfair_lock_lock(&g_rmu); again = (__bridge id<MTLTexture>)tex_fast(1); os_unfair_lock_unlock(&g_rmu); }
+    else again = tex_mtl(&t);
+    finish();
     expect(again,c0+1,"a later CPU write is re-uploaded");
     if (late_fill) {
         p_copy_b2t copy = {.tex = &t, .src = (uint64_t)(uintptr_t)staging, .r = {.width = 12, .height = 12, .depth = 1}};
@@ -66,6 +79,7 @@ static void run(int format, uint64_t serial, uint32_t pool_flags, int c0, uint32
         finish();
         uint8_t stored[64];
         CHECK("a GPU copy is written back to sparse-layout storage", !nvn_deswizzle(&t.d, 0, 0, mem, stored, 32) && !memcmp(stored, staging, sizeof stored));
+        mtl_reg_tex(1, NULL, NULL);
     }
     // A new texture object with the same description over the rewritten storage (GitHub issue #568): its own upload, not the earlier object's texture
     dm_guest_write_prepare(mem,t.L.size);fill(&t,mem,c0+2);

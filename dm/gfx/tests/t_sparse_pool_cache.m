@@ -44,6 +44,36 @@ static int map(pool_t *virt, pool_t *phys, uint64_t voff, uint64_t poff, uint64_
     map_req req = {.phys = (NVNmemoryPool *)phys, .voff = (int64_t)voff, .poff = (int64_t)poff, .size = size};
     return h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)virt, 1, (const NVNmappingRequest *)&req);
 }
+static uint32_t gpu_read_tex(id<MTLTexture> tex) {
+    static id<MTLComputePipelineState> ps;
+    static id<MTLCommandQueue> queue;
+    if (!ps) {
+        NSError *error = nil;
+        id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+                              "kernel void read_one(texture2d<float> t [[texture(0)]], device uint *out [[buffer(0)]]) { uint4 c = uint4(round(t.read(uint2(0)) * 255.0f)); out[0] = c.x | (c.y << 8) | (c.z << 16) | (c.w << 24); }\n"
+                                                     options:nil error:&error];
+        id<MTLFunction> fn = [lib newFunctionWithName:@"read_one"];
+        ps = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&error] : nil;
+        queue = [g_dev newCommandQueue];
+        CHECK(ps != nil && queue != nil, "the texture reader compiles"); if (!ps || !queue) return 0;
+    }
+    if (!tex) return 0;
+    id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setTexture:tex atIndex:0]; [ce setBuffer:out offset:0 atIndex:0];
+    [ce dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    CHECK(cb.status == MTLCommandBufferStatusCompleted, "the texture readback completes");
+    return *(uint32_t *)out.contents;
+}
+struct bg_fill { uint32_t *dst; uint32_t color; };
+static void *bg_fill_fn(void *arg) {
+    struct bg_fill *f = arg;
+    dm_guest_write_prepare(f->dst, 0x1000);
+    for (unsigned i = 0; i < 0x1000 / 4; i++) f->dst[i] = f->color;
+    return NULL;
+}
 int main(void) { @autoreleasepool {
     mtl_init(); mtl_sub_begin();
     const uint32_t A = 0xff112233, B = 0xff445566, C = 0xff778899;
@@ -146,6 +176,46 @@ int main(void) { @autoreleasepool {
     CHECK(g_ser_gen == sg + 1, "the next submission notes the revived descriptor's serial");
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
     CHECK(gpu_read(table, 1) == B, "the revived descriptor reads the newly mapped page");
+
+    // In-place CPU writes to an already-mapped physical page (no MapVirtual, no registration change):
+    // tex_fast must track nvn_dirty_now via view_pkg, and a write by another thread during a submission
+    // that sparse_checked defers must set g_pkg_kept so the next submission still re-uploads it.
+    {
+        const uint32_t F = 0xff336699, G = 0xffaa5511;
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> t0 = (__bridge id<MTLTexture>)tex_fast(1);
+        int vp = g_treg[1].view_pkg;
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(vp && t0 != nil, "sparse texture ID sets view_pkg");
+        next_sub();
+        dm_guest_write_prepare(mem + 0x10000, 0x1000);
+        for (unsigned i = 0; i < 0x1000 / 4; i++) ((uint32_t *)(mem + 0x10000))[i] = F;
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> t1 = (__bridge id<MTLTexture>)tex_fast(1);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(t1 != nil && t1 != t0, "in-place CPU write to mapped sparse page invalidates cached texture ID");
+        next_sub();
+        CHECK(gpu_read_tex(t1) == F, "tex_fast uploads the in-place CPU write to the mapped sparse page");
+
+        // Mid-submission write from another thread: kept during the open submission, picked up on the next.
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> t2 = (__bridge id<MTLTexture>)tex_fast(1);
+        os_unfair_lock_unlock(&g_rmu);
+        struct bg_fill bf = {.dst = (uint32_t *)(mem + 0x10000), .color = G};
+        pthread_t th; CHECK(!pthread_create(&th, NULL, bg_fill_fn, &bf), "background writer thread starts");
+        pthread_join(th, NULL);
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> t3 = (__bridge id<MTLTexture>)tex_fast(1);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(t3 == t2 && g_pkg_kept, "mid-submission background write keeps the current texture and marks g_pkg_kept");
+        next_sub();
+        os_unfair_lock_lock(&g_rmu);
+        id<MTLTexture> t4 = (__bridge id<MTLTexture>)tex_fast(1);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(t4 != nil && t4 != t3, "deferred mid-submission CPU write to sparse page invalidates on the next submission");
+        next_sub();
+        CHECK(gpu_read_tex(t4) == G, "next submission reads the deferred background CPU write");
+    }
 
     // A scene change finalizes a pool while its descriptor stays registered.
     // Make the freed pool object's page inaccessible, then map the live pool:

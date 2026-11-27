@@ -32,6 +32,10 @@ No code of the game is cut and no frame-rate key is set: the game asks for prese
 - 1.6 GB resident and 812 MB of Metal allocations in the opening book, with 27 live memory pools.
 - The address-region check reached alias +4.04 GB in the first 15 s, leaving about 0.34 GB of the profile's 4.375 GB region; what later chapters map is not measured.
 
+## Found on this game
+
+- [Pair tables split before the `# cover:` sections](../../../docs/reference/packing.md#pair-tables-split-before-the--cover-sections): the profile's `shader_pairs.tsv` came from a splitter before the cover sections, so a build stopped at the split ([issue #3422](https://github.com/seedds/nxnative/issues/3422)). Its three cover rows (pixel shader `28cbc20043e722eb`) are now under `# cover:`.
+
 ## Open
 
 - iPhone: no IPA built.

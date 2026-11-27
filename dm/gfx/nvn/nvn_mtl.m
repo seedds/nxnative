@@ -22086,8 +22086,8 @@ static int dlss_stage_inputs(dlss_scaler *e, p_dlss *a, __strong id<MTLTexture> 
 static void mfx_order(id<MTL4CommandBuffer> cb, id<MTLTexture> src, MTLOrigin o, MTLSize z, id<MTLTexture> dst) {
     static id<MTLBuffer> words; static dispatch_once_t once;
     dispatch_once(&once, ^{ words = [g_dev newBufferWithLength:32 options:MTLResourceStorageModePrivate]; words.label = @"MetalFX order words"; res_add(words); res_commit(); });
-    // The presents' command buffers (on g_pq4 with DM_PRESENT_QUEUE) use the second half: no two queues that run at once write the same bytes (the
-    // temporal MetalFX queue's first half runs between two of g_q4's events, dlss_queue_encode)
+    // The presents' command buffers (on g_pq4 with DM_PRESENT_QUEUE) use the second half. The first half's other writers (g_q4's MetalFX work, the temporal MetalFX queue
+    // of dlss_queue_encode, present_offscreen_m4 on g_q4) can overlap; each copies the same unchanged word, as nothing writes the word a copy reads
     NSUInteger at = 0; for (int i = 0; i < 3; i++) if (cb == g_present_cb[i]) at = 16;
     if (cb == g_cb && g_tf_enc) tf_pass_end();   // no other encoder may be open on the replay's command buffer
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];

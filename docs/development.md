@@ -772,6 +772,16 @@ The lines name shaders by content key and hold no compiled code and nothing pers
 
 Record on the game version you ship. At launch the log names each list it read and its line count (`pipeline prewarm list …: N lines`), or says that `pso_user.tsv` does not exist yet.
 
+For a folder downloaded from the [prewarm inbox](../dm/services/prewarm-inbox/README.md), run one of these commands from the repository. The importer uses `clang` to compile the host's pipeline key parser and requires no game files or GPU.
+
+```sh
+python3 scripts/merge_prewarm_seeds.py ~/Downloads/inbox
+python3 scripts/merge_prewarm_seeds.py ~/Downloads/inbox --apply
+python3 scripts/merge_prewarm_seeds.py ~/Downloads/inbox --push
+```
+
+The first command previews the import. Use `--apply` for local manifest edits or `--push` from a clean worktree to import, commit per game and push to `origin/main`. The importer checks the filename's SHA-256, matches each title to its repository profile, and reports duplicates, bad keys and missing shaders. A capture from a different version can contribute rows whose keys and stages still match the bundled profile. Capture order within each file is preserved and files are read from oldest to newest by modification time. New `G` rows are reported for separate review because they require a shader build. The downloaded files stay in the inbox folder.
+
 During rendering, a pipeline miss compiles and caches the demanded pipeline before scanning subsequent draws for speculative work. Every draw the scan meets with its attachments as they are comes later in the same submission and its pipeline is handed to the background (`pso_pend_kick_next`); guesses with other depth / stencil attachments are admitted at most two at a time (`PSO_PREDICT_BUDGET` / `PSO_PEND_ACTIVE`). Completed predictions remain available by exact key, and a draw whose build is still queued makes it itself (`pso_pend_take`) so it never waits behind the others ([The look-ahead hands every later draw's pipeline to the background](reference/shaders.md#the-look-ahead-hands-every-later-draws-pipeline-to-the-background)). This limit does not apply to the startup warmer. `t_pso_pending` checks scheduling and ownership with a gated compiler; parallel compiles shorten a cold frame but do not remove the cost of compiling an unseen pipeline.
 
 ### The prepare step

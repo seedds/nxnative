@@ -1,0 +1,113 @@
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[3]
+SCRIPT = Path('scripts/merge_prewarm_seeds.py')
+TITLE = '0100000000000000'
+VERTEX = '0000000000000001_b'
+COMPUTE = '0000000000000002_b'
+MESH = '0000000000000003_b'
+TASK = '0000000000000004_b'
+
+
+def key(shader, stage=0):
+    # A single shader in the vertex slot of pso_skey, with zeroed render state.
+    return (shader.encode().ljust(48, b'\0') + bytes([stage]) + bytes(463)).hex()
+
+
+@unittest.skipUnless(shutil.which('clang'), 'the host parser needs clang')
+class ImportSeeds(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.repo = self.root / 'repo'
+        self.inbox = self.root / 'inbox'
+        self.inbox.mkdir()
+        for path in (SCRIPT, Path('dm/games/game.py'), Path('dm/tools/prewarm_skey.c')):
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO / path, target)
+        shutil.copytree(REPO / 'dm/gfx/nvn', self.repo / 'dm/gfx/nvn',
+                        ignore=shutil.ignore_patterns('*.m', '*.c', '*.inc'))
+        profile = self.repo / 'dm/games' / TITLE
+        profile.mkdir()
+        (profile / 'game.tsv').write_text(f'title_id\t{TITLE}\nname\tExample Game\nbuild\tv0\t1.0.0\npackage\tv0\n')
+        (profile / 'shader_map.tsv').write_text(''.join(
+            f'shaders\t{index}\t{stage}\t{shader[:-2]}\n'
+            for index, (stage, shader) in enumerate([('vertex', VERTEX), ('compute', COMPUTE),
+                                                     ('mesh', MESH), ('task', TASK)])))
+        self.manifest = profile / 'pso_manifest.tsv'
+        self.original = f'# Original header\nR\t{key(VERTEX)}\n'
+        self.manifest.write_text(self.original)
+        self.env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, PYTHONDONTWRITEBYTECODE='1')
+
+    def upload(self, *rows, title=TITLE, version='1.0.0', corrupt=False):
+        data = ('\n'.join(rows) + '\n').encode()
+        digest = '0' * 64 if corrupt else hashlib.sha256(data).hexdigest()
+        (self.inbox / f'{title}--{version}--{digest}.tsv').write_bytes(data)
+
+    def run_import(self, *flags, check=True):
+        return subprocess.run([sys.executable, self.repo / SCRIPT, self.inbox, *flags], env=self.env,
+                              text=True, capture_output=True, check=check)
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(['git', '-c', 'user.name=seedds', '-c', 'user.email=seedds@gmail.com', *args],
+                              cwd=cwd or self.repo, env=self.env, text=True, capture_output=True, check=True).stdout.strip()
+
+    def test_preview_and_apply_deduplicate_and_validate(self):
+        shader = f'S\t{COMPUTE}\t5'
+        mesh = f'M\t{TASK}\t{key(MESH, 7)}'
+        compute = f'C\t{COMPUTE}'
+        self.upload(f'R\t{key(VERTEX)[:-16]}', shader, mesh, f'M\t{TASK}\t{key(MESH, 4)}', compute,
+                    f'C\t{"0" * 16}_b', f'S\t{VERTEX}\t1', f'G\t{VERTEX[:-2]}\t{"0" * 16}', 'R\t00',
+                    version='1.0.1')
+        self.upload(f'S\t{VERTEX}\t0', corrupt=True)
+        self.upload(shader, title='0100000000000001')
+        preview = self.run_import().stdout
+        for expected in ('3 added', '2 duplicate', 'invalid pipeline', 'geometry needs shader build',
+                         'missing shader', 'stage mismatch', 'profile package 1.0.0', 'SHA-256 mismatch',
+                         'no repository profile', 'Preview'):
+            self.assertIn(expected, preview)
+        self.assertEqual(self.manifest.read_text(), self.original)
+        self.run_import('--apply')
+        self.assertEqual(self.manifest.read_text(), self.original + '# Inbox captures from 1.0.1.\n'
+                         + '\n'.join([shader, mesh, compute]) + '\n')
+        self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
+        self.assertEqual(len(list(self.inbox.glob('*.tsv'))), 3)
+
+    def test_push_updates_main_without_including_local_commits(self):
+        bare = self.root / 'origin.git'
+        self.git('init', '--bare', '--initial-branch=main', str(bare))
+        self.git('init', '--initial-branch=main')
+        self.git('add', '.')
+        self.git('commit', '-m', 'initial profile')
+        self.git('remote', 'add', 'origin', str(bare))
+        self.git('push', 'origin', 'HEAD:main')
+        peer = self.root / 'peer'
+        self.git('clone', str(bare), str(peer))
+        self.git('commit', '--allow-empty', '-m', 'upstream update', cwd=peer)
+        upstream = self.git('rev-parse', 'HEAD', cwd=peer)
+        self.git('push', 'origin', 'HEAD:main', cwd=peer)
+
+        self.upload(f'C\t{COMPUTE}')
+        self.run_import('--push')
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), upstream)
+        landed = self.git('rev-parse', 'HEAD')
+        self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
+        self.assertEqual(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'),
+                         self.manifest.relative_to(self.repo).as_posix())
+
+        self.git('commit', '--allow-empty', '-m', 'local change')
+        self.upload(f'S\t{VERTEX}\t0')
+        result = self.run_import('--push', check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('local commits', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
+        self.assertNotIn(f'S\t{VERTEX}', self.manifest.read_text())

@@ -71,5 +71,39 @@ int main(void) {
     assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 1, out));
     e[19] = 0x00; e[20] = 0x80; e[25] = 0x00; e[26] = 0x80;   // INT16_MIN on accel z and gyro z
     assert(abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 16000001, out) == 1 && out[0].acc[2] == 8 && out[0].rot[2] < 0);
+
+    // Rest-offset learning (motion_rest): 8BitDo Ultimate 2 Wireless real resting bias (-1.47 deg/s X) ramps to zero after 2 s still
+    pro_motion eb_rest = {0}; uint64_t tr = t;
+    for (int i = 0; i < 190; i++, tr += 16000000) assert(abitdo_motion_decode(&eb_rest, flat, sizeof flat, tr, out) == 1);
+    assert(eb_rest.rest.have);
+    assert(fabsf(out[0].rot[0]) < 1e-4f && fabsf(out[0].rot[1]) < 1e-4f && fabsf(out[0].rot[2]) < 1e-4f);
+
+    // Switch Pro resting bias (~0.7 deg/s) is learned and subtracted, while a real turn keeps its rate minus bias
+    pro_motion pr = {0}; uint8_t prr[49] = {0x30}; tr = t;
+    for (int k = 0; k < 3; k++) { word(prr, k, 2, 4096); word(prr, k, 5, 10); }   // 10 counts * 70 mdps = +0.7 deg/s z bias
+    for (int i = 0; i < 195; i++, tr += 15000000) { prr[1] = (uint8_t)i; assert(pro_motion_decode(&pr, prr, sizeof prr, tr, out) == 3); }
+    assert(pr.rest.have && fabsf(out[2].rot[2]) < 1e-4f);
+    for (int k = 0; k < 3; k++) word(prr, k, 5, 1010);   // real turn (+1000 counts over bias)
+    prr[1] = 200; assert(pro_motion_decode(&pr, prr, sizeof prr, tr, out) == 3);
+    assert(fabsf(out[2].rot[2] - 1000 * 0.070f * (float)M_PI / 180.f) < 1e-4f);
+
+    // A slow deliberate turn above MOTION_REST_FIRST_MAX (2.8 deg/s > 2 deg/s) is never learned as bias
+    pro_motion pr_turn = {0}; uint8_t prt[49] = {0x30}; tr = t;
+    for (int k = 0; k < 3; k++) { word(prt, k, 2, 4096); word(prt, k, 5, 40); }   // 40 counts = 2.8 deg/s
+    for (int i = 0; i < 200; i++, tr += 15000000) { prt[1] = (uint8_t)i; assert(pro_motion_decode(&pr_turn, prt, sizeof prt, tr, out) == 3); }
+    assert(!pr_turn.rest.have && fabsf(out[2].rot[2] - 40 * 0.070f * (float)M_PI / 180.f) < 1e-5f);
+
+    // DualShock 4 resting bias is learned and removed; a gap > 100 ms breaks a pending window, and staleness > 300 ms resets the offset
+    pro_motion ds_rest = {0}; uint8_t dsr[78] = {0x11}; tr = t;
+    int16_t dw[6] = {15, -10, 8, 0, 8192, 0};   // small gyro bias (~0.92 deg/s) + 1 G face up
+    for (int i = 0; i < 6; i++) { dsr[15 + 2 * i] = (uint8_t)dw[i]; dsr[16 + 2 * i] = (uint8_t)((uint16_t)dw[i] >> 8); }
+    for (int i = 0; i < 100; i++, tr += 16000000) assert(ds4_motion_decode(&ds_rest, dsr, sizeof dsr, tr, out) == 1);   // 1.6 s: pending window
+    assert(ds_rest.rest.pending && !ds_rest.rest.have);
+    tr += PRO_MOTION_REST_GAP_NS + 10000000;   // > 100 ms gap breaks pending window
+    assert(ds4_motion_decode(&ds_rest, dsr, sizeof dsr, tr, out) == 1 && !ds_rest.rest.pending && !ds_rest.rest.have);
+    for (int i = 0; i < 190; i++, tr += 16000000) assert(ds4_motion_decode(&ds_rest, dsr, sizeof dsr, tr, out) == 1);
+    assert(ds_rest.rest.have && fabsf(out[0].rot[0]) < 1e-4f && fabsf(out[0].rot[1]) < 1e-4f && fabsf(out[0].rot[2]) < 1e-4f);
+    tr += PRO_MOTION_STALE_NS + 1;   // staleness resets the learned offset
+    assert(ds4_motion_decode(&ds_rest, dsr, sizeof dsr, tr, out) == 1 && !ds_rest.rest.have);
     puts("t_motion_pro: passed");
 }

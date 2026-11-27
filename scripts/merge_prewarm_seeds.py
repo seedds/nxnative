@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit a downloaded prewarm inbox, import seeds, and remove fully imported captures."""
+"""Audit a downloaded prewarm inbox, import seeds, and clean up processed captures."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -50,7 +50,7 @@ class Update:
 @dataclass
 class ImportPlan:
     updates: list[Update] = field(default_factory=list)
-    imported: list[tuple[Path, os.stat_result]] = field(default_factory=list)
+    captures_to_delete: list[tuple[Path, os.stat_result]] = field(default_factory=list)
 
 
 def load_capture(path: Path) -> Capture:
@@ -162,8 +162,10 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
         note = f' (profile package {package})' if package and package != capture.version else ''
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
-        if counts['added'] + counts['duplicate'] == len(capture.rows):
-            result.imported.append((capture.path, capture.file_stat))
+        fully_imported = counts['added'] + counts['duplicate'] == len(capture.rows)
+        only_duplicates_or_missing = counts['duplicate'] + counts['missing shader'] == len(capture.rows)
+        if fully_imported or only_duplicates_or_missing:
+            result.captures_to_delete.append((capture.path, capture.file_stat))
     if not additions:
         return
     # The generated placeholder is obsolete once the manifest contains a recording.
@@ -224,7 +226,7 @@ def apply(updates: list[Update]) -> None:
                 temporary.unlink(missing_ok=True)
 
 
-def delete_imported(captures: list[tuple[Path, os.stat_result]]) -> None:
+def delete_captures(captures: list[tuple[Path, os.stat_result]]) -> None:
     deleted = 0
     for path, original in captures:
         try:
@@ -238,7 +240,7 @@ def delete_imported(captures: list[tuple[Path, os.stat_result]]) -> None:
             continue
         deleted += 1
     if deleted:
-        print(f'Deleted {deleted:,} imported capture(s).')
+        print(f'Deleted {deleted:,} inbox capture(s).')
 
 
 def git(*args: str, capture: bool = False) -> str:
@@ -289,8 +291,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path, help='folder containing downloaded inbox TSVs')
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument('--apply', action='store_true', help='update local manifests and delete fully imported TSVs')
-    modes.add_argument('--push', action='store_true', help='update, commit and push to GitHub main, then delete fully imported TSVs')
+    modes.add_argument('--apply', action='store_true', help='update local manifests and clean up the inbox')
+    modes.add_argument('--push', action='store_true', help='update, commit and push to GitHub main, then clean up the inbox')
     args = parser.parse_args()
     folder = args.folder.resolve()
     if not folder.is_dir():
@@ -309,9 +311,9 @@ def main() -> int:
         else:
             print(f'Preview: {len(result.updates)} manifest(s) would change.')
         if write:
-            delete_imported(result.imported)
-        elif result.imported:
-            print(f'Preview: {len(result.imported):,} imported capture(s) would be deleted.')
+            delete_captures(result.captures_to_delete)
+        elif result.captures_to_delete:
+            print(f'Preview: {len(result.captures_to_delete):,} inbox capture(s) would be deleted.')
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f'[RED] {parser.prog}: {error}', file=sys.stderr)
         return 1

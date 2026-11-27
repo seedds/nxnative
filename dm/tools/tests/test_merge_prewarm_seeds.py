@@ -97,9 +97,9 @@ class ImportSeeds(unittest.TestCase):
     def test_apply_deletes_fully_imported_captures_including_duplicate_only(self):
         seed = f'C\t{COMPUTE}'
         capture = self.upload(seed)
-        self.assertIn('1 imported capture(s) would be deleted', self.run_import().stdout)
+        self.assertIn('1 inbox capture(s) would be deleted', self.run_import().stdout)
         self.assertTrue(capture.is_file())
-        self.assertIn('Deleted 1 imported capture(s).', self.run_import('--apply').stdout)
+        self.assertIn('Deleted 1 inbox capture(s).', self.run_import('--apply').stdout)
         self.assertFalse(capture.exists())
         imported = self.manifest.read_text()
         self.assertIn(seed, imported)
@@ -107,9 +107,32 @@ class ImportSeeds(unittest.TestCase):
         self.upload(seed)
         retry = self.run_import('--apply').stdout
         self.assertIn('No manifest updates.', retry)
-        self.assertIn('Deleted 1 imported capture(s).', retry)
+        self.assertIn('Deleted 1 inbox capture(s).', retry)
         self.assertFalse(capture.exists())
         self.assertEqual(self.manifest.read_text(), imported)
+
+    def test_apply_deletes_captures_with_only_duplicates_or_missing_shaders(self):
+        missing = f'C\t{"0" * 16}_b'
+        captures = (self.upload(missing), self.upload(f'R\t{key(VERTEX)}', missing))
+
+        self.assertIn('2 inbox capture(s) would be deleted', self.run_import().stdout)
+        self.assertTrue(all(capture.is_file() for capture in captures))
+        result = self.run_import('--apply').stdout
+        self.assertIn('No manifest updates.', result)
+        self.assertIn('Deleted 2 inbox capture(s).', result)
+        self.assertFalse(any(capture.exists() for capture in captures))
+        self.assertEqual(self.manifest.read_text(), self.original)
+
+    def test_apply_keeps_capture_with_additions_and_missing_shaders_until_retry(self):
+        seed = f'C\t{COMPUTE}'
+        capture = self.upload(seed, f'C\t{"0" * 16}_b')
+
+        self.run_import('--apply')
+        self.assertTrue(capture.is_file())
+        self.assertIn(seed, self.manifest.read_text())
+
+        self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
+        self.assertFalse(capture.exists())
 
     def test_push_updates_main_without_including_local_commits(self):
         bare = self.init_origin()

@@ -162,6 +162,9 @@ static void dependency(int mode) {
         EXPECT("dependent geometry does not join earlier run",1,g_geo_nrun);
         EXPECT("geometry boundary submits early only when enabled",cut_draws()==1&&geo_cut_on(),g_cuts>cuts);
     }
+    EXPECT("replay retains the fixture program",1,serial_get(cp.serial)==pr);
+    mtl_prog_release(&cp);
+    EXPECT("released fixture program leaves the serial table",1,serial_get(cp.serial)==nil);
     mtl_tex_release(&target);mtl_pool_del(cmd);mtl_drain();free(cmd);
 }
 int main(int argc,char **argv){@autoreleasepool{

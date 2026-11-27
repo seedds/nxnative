@@ -791,7 +791,7 @@ static NSView *g_cp_view; static dispatch_semaphore_t g_cp_done; static int g_cp
 static void cp_buttons(int *a, int *b) {
     *a = *b = 0;
     for (GCController *c in GCController.controllers) { GCExtendedGamepad *g = c.extendedGamepad; if (g) { *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed; } }
-    for (hid_pad *d = g_hidpads; d; d = d->next) { uint64_t m = d->twin && hidpad_is_pro(d) ? d->pro_m : pad_hid_buttons(&d->st); *a |= !!(m & DM_BTN_A); *b |= !!(m & DM_BTN_B); }
+    for (hid_pad *d = g_hidpads; d; d = d->next) { uint64_t m = hidpad_full(d) ? d->pro_m : pad_hid_buttons(&d->st); *a |= !!(m & DM_BTN_A); *b |= !!(m & DM_BTN_B); }
     for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2_pad_ab(&d->st, a, b);   // Switch 2 controllers (pad_switch2_apple.h)
     for (jc1_pad *d = g_jc1_pads; d; d = d->next) jc1_pad_ab(d, a, b);             // original Joy-Cons read from HID (pad_jc1_mac.h)
     for (gip_pad *d = g_gippads; d; d = d->next) { *a |= !!(d->st.buttons & DM_BTN_A); *b |= !!(d->st.buttons & DM_BTN_B); }   // Xbox One pads over USB (pad_gip_mac.h)

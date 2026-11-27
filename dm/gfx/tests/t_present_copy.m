@@ -1,7 +1,7 @@
 // What a present shows when it reads the copy of its picture (nvn_mtl.m present_copy, DM_PRESENT_QUEUE): real Metal 4 queues and offscreen drawables, the display link's
 // callback called by hand, as in t_present_queue.m. Each case reads the drawable back. Cases:
 // 1. An sRGB source shows its stored bytes, as the game's own texture did (the slot's non-sRGB view, present_raw_pf).
-// 2. A swizzled source shows its swizzle once: a texture copy reads the storage as it is, and the slot's view takes the swizzle.
+// 2. A swizzled source shows its swizzle once: the slot's view takes the swizzle, and a texture copy from a swizzled view writes the storage as stored.
 // 3. A new size and then a new format remake each ring slot: the picture is right, and the old textures leave the residency set.
 // 4. A present whose crop lies outside its texture copies nothing.
 // 5. With MetalFX upscaling, the scaler reads the ring slot in place: a held present shows its picture after the game draws over its texture.
@@ -105,12 +105,26 @@ int main(void) { @autoreleasepool {
         CHECK("the present samples the slot through its non-sRGB view", v && v.parentTexture == g_pring[tk % 3].tex && v.pixelFormat == MTLPixelFormatRGBA8Unorm); }
 
     // 2. A swizzled source: (B, G, R, 1) over storage (10, 20, 30) samples as (30, 20, 10). The host's texture lookup drops a view it did not make (own_view_drop_stale), so
-    // the source swizzles as a texture, which a texture copy reads as stored too (as it reads a view)
+    // the presented source swizzles as a texture; the copy from a view is checked on its own below
     g_swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleOne);
     tex_t swz = source_f(MTLPixelFormatRGBA8Unorm, 8, 8, 10, 20, 30, NULL);
     g_swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha);
     present(&swz, NULL, &dr); presents_done();
     bad = wrong(dr.texture, 30, 20, 10, 1); snprintf(name, sizeof name, "a swizzled source shows its swizzle once (%d of 64 pixels wrong)", bad); CHECK(name, bad == 0);
+    {   // the copy present_copy encodes, from a swizzled view of a texture to a plain one, on the game's queue: what it writes is the view's storage, not its swizzle
+        id<MTLTexture> base; source_f(MTLPixelFormatRGBA8Unorm, 8, 8, 10, 20, 30, &base);
+        id<MTLTexture> view = [base newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)
+                                                           swizzle:MTLTextureSwizzleChannelsMake(MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleOne)];
+        id<MTLTexture> dst; source_f(MTLPixelFormatRGBA8Unorm, 8, 8, 0, 0, 0, &dst);
+        id<MTL4CommandAllocator> al = [g_dev newCommandAllocator]; id<MTL4CommandBuffer> cb = [g_dev newCommandBuffer]; id<MTLSharedEvent> ev = [g_dev newSharedEvent];
+        if (!al || !cb || !ev || !view) { CHECK("the copy's command buffer and view are made", 0); return 1; }
+        [cb beginCommandBufferWithAllocator:al];
+        id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce copyFromTexture:view sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(8, 8, 1) toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [ce endEncoding]; cb_end(cb, nil);
+        pthread_mutex_lock(&g_res_commit_mu); [g_q4 commit:&cb count:1]; [g_q4 signalEvent:ev value:1]; pthread_mutex_unlock(&g_res_commit_mu);
+        CHECK("a texture copy from a swizzled view writes the view's storage as stored", [ev waitUntilSignaledValue:1 timeoutMS:2000] && wrong(dst, 30, 20, 10, 0) == 0);   // RGBA bytes 10 20 30, read in wrong's BGRA order
+    }
 
     if (!g_pq4) { printf("DM_PRESENT_QUEUE=0: cases 3-6 need the present's own queue\n"); printf("t_present_copy: %d checks, %d failed\n", checks, failed); return failed != 0; }
 
@@ -138,20 +152,24 @@ int main(void) { @autoreleasepool {
     CHECK("the next present shows its picture", wrong(dr.texture, 60, 60, 60, 1) == 0);
 
     // 5. MetalFX: a 32x32 picture in a 64x64 drawable, held while the game draws over its texture
-    g_fx_mode = 1; g_dsize = 64; mtl_present_layer(32, 32);
+    g_dsize = 64; mtl_present_layer(32, 32);
     id<MTLTexture> fxm; tex_t fxs = source_f(MTLPixelFormatRGBA8Unorm, 32, 32, 120, 120, 120, &fxm);
-    present(&fxs, NULL, NULL); presents_done();   // makes the scaler
-    uint64_t inplace0 = g_fx_present.in_place_n;
-    id<MTLSharedEvent> hold = [g_dev newSharedEvent]; mtl_present_test_hold(hold, 1);
-    present(&fxs, NULL, &dr);
-    mtl_present_test_hold(nil, 0);
-    uint64_t fence = paint(fxm, 220);
-    CHECK("the game's drawing runs while the upscaled present is held", mtl_wait(fence, 500000000ull));
-    hold.signaledValue = 1;
-    CHECK("the upscaled present completes", presents_done());
-    bad = wrong(dr.texture, 120, 120, 120, 4); snprintf(name, sizeof name, "MetalFX scaled the picture the present was given (%d of 4096 pixels wrong)", bad); CHECK(name, bad == 0);
-    snprintf(name, sizeof name, "MetalFX read the ring slot in place (%llu presents in place, no input copy)", (unsigned long long)(g_fx_present.in_place_n - inplace0));
-    CHECK(name, g_fx_present.in_place_n > inplace0 && g_fx_present.in == nil);
+    if (![MTLFXSpatialScalerDescriptor supportsMetal4FX:g_dev]) printf("case 5: no Metal 4 MetalFX on this GPU, skipped\n");
+    else {
+        g_fx_mode = 1;   // DM_PRESENT_UPSCALE=metalfx, which fx_mode reads once
+        present(&fxs, NULL, NULL); presents_done();   // makes the scaler
+        uint64_t inplace0 = g_fx_present.in_place_n;
+        id<MTLSharedEvent> hold = [g_dev newSharedEvent]; mtl_present_test_hold(hold, 1);
+        present(&fxs, NULL, &dr);
+        mtl_present_test_hold(nil, 0);
+        uint64_t fence = paint(fxm, 220);
+        CHECK("the game's drawing runs while the upscaled present is held", mtl_wait(fence, 500000000ull));
+        hold.signaledValue = 1;
+        CHECK("the upscaled present completes", presents_done());
+        bad = wrong(dr.texture, 120, 120, 120, 4); snprintf(name, sizeof name, "MetalFX scaled the picture the present was given (%d of 4096 pixels wrong)", bad); CHECK(name, bad == 0);
+        snprintf(name, sizeof name, "MetalFX read the ring slot in place (%llu presents in place, no input copy)", (unsigned long long)(g_fx_present.in_place_n - inplace0));
+        CHECK(name, g_fx_present.in_place_n > inplace0 && g_fx_present.in == nil);
+    }
 
     // 6. Suspended, the copy ring goes (nvn_mtl.m present_suspend_wait); the next present after the resume makes its slot again
     id<MTLTexture> held[3]; for (int k = 0; k < 3; k++) held[k] = g_pring[k].tex;

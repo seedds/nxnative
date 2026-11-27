@@ -22727,12 +22727,14 @@ static void present_gpu_note(double s, int fx) {
     MLOG("present command buffer GPU time over 600 presents %s: p50 %.3f ms, p95 %.3f ms, max %.3f ms", fx ? "through MetalFX" : "through the bilinear pass", a[299], a[569], a[599]);
     n[fx] = 0;
 }
-// A present command buffer completed on the GPU (its feedback): its ticket and its allocator are done, one present fewer is in flight, and the external textures released
-// while presents were in flight retire once none is. gpu_s: its GPU time for present_gpu_note (not a time: none)
-static void present_completed(uint64_t ticket, int alloc_i, double gpu_s, int fx_kind) {
+// A present command buffer completed on the GPU (its feedback f): its error reported, its ticket and its allocator done, one present fewer in flight, and the external textures
+// released while presents were in flight retired once none is. fx_kind: whether it went through MetalFX, for present_gpu_note (-1: a command buffer that drew nothing, not noted)
+static void present_completed(uint64_t ticket, int alloc_i, id<MTL4CommitFeedback> f, int fx_kind) {
+    if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
     pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
     NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
-    present_gpu_note(gpu_s, fx_kind); pthread_mutex_unlock(&g_pq_mu);
+    if (fx_kind >= 0) present_gpu_note(f.GPUEndTime - f.GPUStartTime, fx_kind);
+    pthread_mutex_unlock(&g_pq_mu);
     if (retire) ext_retire(retire);
 }
 static double g_link_it_tin;   // Enqueue time of the frame the display-link callback is presenting (read and written only on the display-link thread)
@@ -22906,7 +22908,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         cb_end(cb, drs);
         if (q == g_pq4) {   // its copy is on g_q4 and reads the game's texture: this command buffer behind it keeps the ticket in flight until then (g_ext_retire, the slot)
             MTL4CommitOptions *eo = [MTL4CommitOptions new];
-            [eo addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; present_completed(ticket, alloc_i, -1, 0); }];
+            [eo addFeedbackHandler:^(id<MTL4CommitFeedback> f) { present_completed(ticket, alloc_i, f, -1); }];
             pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
             [q commit:buffers count:1 options:eo];
             g_present_alloc_fence[alloc_i] = ticket;
@@ -22918,10 +22920,9 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     __block double committed = 0;   // CACurrentMediaTime right before the commit, the GPU times' base
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
-        if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
-        else if (gpu_time_valid(f.GPUStartTime, f.GPUEndTime) && f.GPUStartTime >= committed) nvn_queue_history_put(&g_present_history, ticket, (f.GPUStartTime - committed) * 1e3);
+        if (!f.error && gpu_time_valid(f.GPUStartTime, f.GPUEndTime) && f.GPUStartTime >= committed) nvn_queue_history_put(&g_present_history, ticket, (f.GPUStartTime - committed) * 1e3);
         if (latch_ts > 0 && f.GPUEndTime > latch_ts) atomic_fetch_add(&g_link_latch_late_gpu, 1);
-        present_completed(ticket, alloc_i, f.GPUEndTime - f.GPUStartTime, fx_kind);
+        present_completed(ticket, alloc_i, f, fx_kind);
     }];
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
     committed = CACurrentMediaTime();
@@ -23414,7 +23415,9 @@ void *mtl_device(void) { mtl_init(); return (__bridge void *)g_dev; }
 void *mtl_nvn_event(void) { return (__bridge void *)g_ev; }
 void mtl_wait_gl_event(void *event, uint64_t value) {
     id<MTLSharedEvent> ev = (__bridge id<MTLSharedEvent>)event;
-    if (value > ev.signaledValue) rec_queue_block(^{ [g_q4 waitForEvent:ev value:value]; });
+    // Under g_res_commit_mu, as the queue's commits: not between a present's copy and its signal (present_copy), where the present would wait for the GL producer too.
+    // Taken in the block, which runs here or on the encode thread (RO_Q_BLOCK), neither holding it
+    if (value > ev.signaledValue) rec_queue_block(^{ pthread_mutex_lock(&g_res_commit_mu); [g_q4 waitForEvent:ev value:value]; pthread_mutex_unlock(&g_res_commit_mu); });
 }
 // GL and Vulkan also accept a device without Metal 4. The classic fallback drops presents.
 void *mtl_device_classic(void) {

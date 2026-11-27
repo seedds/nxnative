@@ -155,7 +155,7 @@ static int g_rx_after, g_rx_want_stamp;   // the last record was a held submissi
 static uint64_t g_rx_ubc;   // the newest uniform shadow the held submissions read (ubc_wait at the commit)
 static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed held commits: made after the real one, in order
 static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main command buffers committed and not reported back (DM_NVN_SUB_IDLE_FB); commits are held (rec_drain waits for them); rec_drain callers waiting; tests: synthetic in-flight commits
-static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark); highest fence a blocking waiter needs committed (rec_wake_for_fence)
+static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark_locked); highest fence a blocking waiter needs committed (rec_wake_for_fence)
 static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions / segments held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int rx_merge_on(void) {

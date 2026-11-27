@@ -9384,18 +9384,23 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     }
     if (!same && id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
     os_unfair_lock_unlock(&g_rmu);
+    // Both lines below give the view's levels and layers as pool_first_read does, "set:first+count", and its target as "set:target": the guest's values (count 0: the rest; a 2D
+    // view or a 3D texture still has one layer, tex_by_id_ref), which say which levels a draw through this ID samples
     {   // DM_NVN_TREG_ID=n logs every registration of texture ID n: what it holds from then on, and when (the frame being recorded)
         static int want = -2; if (want == -2) { const char *e = getenv("DM_NVN_TREG_ID"); want = e ? atoi(e) : -1; }
-        if (want == tid) MLOG("TREG id %d frame %llu %s ser=%llu %ux%u format=%#x target %d view %d", tid, (unsigned long long)atomic_load(&g_cur_frame), same ? "(the same)" : "→",
-                              t ? (unsigned long long)t->serial : 0ull, t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : 0, t ? (int)t->d.target : -1, v != NULL);
+        if (want == tid) MLOG("TREG id %d frame %llu %s ser=%llu %ux%u format=%#x target %d levels %u view %d (levels %d:%u+%u layers %d:%u+%u target %d:%d)", tid, (unsigned long long)atomic_load(&g_cur_frame), same ? "(the same)" : "→",
+                              t ? (unsigned long long)t->serial : 0ull, t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : 0, t ? (int)t->d.target : -1, t ? t->d.levels : 0, v != NULL,
+                              v ? v->set_levels : 0, v ? v->base_level : 0, v ? v->nlevels : 0, v ? v->set_layers : 0, v ? v->min_layer : 0, v ? v->nlayers : 0, v ? v->set_target : 0, v ? v->target : 0);
     }
-    {   // DM_NVN_TEXINFO=WxH also logs registrations of textures of that size: the channel swizzle from the builder and from the view
+    {   // DM_NVN_TEXINFO=WxH also logs registrations of textures of that size: the channel swizzle from the builder and from the view, and the view's levels
         static int ti = -1; static uint32_t tw, th; static uint64_t n;
         if (ti < 0) { const char *e = getenv("DM_NVN_TEXINFO"); ti = e && sscanf(e, "%ux%u", &tw, &th) == 2; }
         if (ti && t && t->d.width == tw && t->d.height == th && (n++ < 40 || n % 600 == 0))
-            MLOG("TEXINFO register id %d ser=%llu format=%#x creation swizzle %d:%d%d%d%d view %d view swizzle %d:%d%d%d%d view format %d:%#x", tid, (unsigned long long)t->serial, t->d.format,
+            MLOG("TEXINFO register id %d ser=%llu format=%#x levels %u creation swizzle %d:%d%d%d%d view %d view swizzle %d:%d%d%d%d view format %d:%#x view levels %d:%u+%u layers %d:%u+%u target %d:%d",
+                 tid, (unsigned long long)t->serial, t->d.format, t->d.levels,
                  t->set_swz, t->swz & 7, t->swz >> 3 & 7, t->swz >> 6 & 7, t->swz >> 9 & 7, v != NULL, v ? v->set_swizzle : 0, v ? v->swz[0] : 0, v ? v->swz[1] : 0, v ? v->swz[2] : 0, v ? v->swz[3] : 0,
-                 v ? v->set_format : 0, v ? v->format : 0);
+                 v ? v->set_format : 0, v ? v->format : 0, v ? v->set_levels : 0, v ? v->base_level : 0, v ? v->nlevels : 0, v ? v->set_layers : 0, v ? v->min_layer : 0, v ? v->nlayers : 0,
+                 v ? v->set_target : 0, v ? v->target : 0);
     }
 }
 // RegisterImage explicitly declares image use. Keep that intent in the host snapshot without changing the guest texture or forcing every render target to lose Metal's compression.

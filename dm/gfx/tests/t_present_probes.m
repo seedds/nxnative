@@ -19,8 +19,8 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
-// 1 while a present's drawable wait is on the Metal 4 queue that carries the game's rendering: a game submission committed behind a held present then waits as long as it
-#define PRESENT_WAIT_ON_GAME_QUEUE 1
+// Whether a present's drawable wait is on the Metal 4 queue that carries the game's rendering (DM_PRESENT_QUEUE=0): a game submission committed behind a held present then waits as long
+#define PRESENT_WAIT_ON_GAME_QUEUE (!g_pq4)
 enum { HOLD_MS = 30, HELD_MS = 25 };   // how long a present is held, and the least wait that counts as held
 static tex_t source(unsigned serial, uint8_t v) {
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
@@ -84,7 +84,7 @@ int main(void) { @autoreleasepool {
     alarm(30); setvbuf(stdout, NULL, _IONBF, 0);
     setenv("DM_PRESENT_HZ", "0", 1); setenv("DM_PRESENT_SNAP", "0", 1);   // the game's texture is presented, not a snapshot of it
     mtl_init();
-    printf("encode thread %s\n", rec_on() ? "on" : "off");
+    printf("encode thread %s, presents on %s\n", rec_on() ? "on" : "off", g_pq4 ? "a queue of their own" : "the game's queue");
     mtl_wait(submit(10), 2000000000ull);   // before there is a layer: with one, the first submission runs the prepare step, which reads the profile's shader map
     g_test_layer = offscreen_layer(); g_layers = [NSMutableArray new];
     mtl_present_layer(8, 8);
@@ -138,6 +138,6 @@ int main(void) { @autoreleasepool {
         CHECK(name, g_rx_merged - merged0 >= 2 && q40 >= 0 && q40 < HELD_MS && q41 >= 0 && q41 < HELD_MS);
     }
 
-    printf("t_present_probes (encode thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
+    printf("t_present_probes (encode thread %s, DM_PRESENT_QUEUE %s): %d checks, %d failed\n", rec_on() ? "on" : "off", g_pq4 ? "on" : "off", checks, failed);
     return failed != 0;
 } }

@@ -61,7 +61,7 @@ int main(void) {
         dispatch_semaphore_signal(allow_device);
         if (dispatch_group_wait(work, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) ||
             atomic_load(&device_requests) != 1 || !g_q || !g_ev || g_classic != classic ||
-            (!classic && (!g_q4 || !g_feedback_q))) {
+            (!classic && (!g_q4 || !g_feedback_q)) || !g_pq4 != (classic || !present_queue_on())) {   // the present's own queue (DM_PRESENT_QUEUE) only with Metal 4
             fputs("FAIL: the callers did not finish with one fully initialized device\n", stderr);
             return 1;
         }

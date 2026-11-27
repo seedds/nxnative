@@ -146,6 +146,9 @@ static NSMutableArray *g_l3_gpu_leaks;
 static int g_nvn_deswz_gpu;
 static id<MTLCommandQueue> g_q;
 static id<MTL4CommandQueue> g_q4;
+// The present's own queue (DM_PRESENT_QUEUE, present_copy): a present waits there for its drawable, which the display can hold back for a refresh or more. On g_q4 that
+// wait held back every game command buffer committed after it (issue #2362, @gpu_q_ms). The present reads a copy of the picture made on g_q4
+static id<MTL4CommandQueue> g_pq4;
 static _Atomic int g_classic_ok;   // mtl_device_classic permits fallback while initialization is in progress
 static int g_classic;   // the device has no Metal 4 and only the classic part started
 static dispatch_queue_t g_feedback_q;
@@ -159,6 +162,10 @@ static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX]; static int g_alloc_n, g_all
 static id<MTL4CommandAllocator> g_up_alloc4[3];
 static id<MTL4CommandAllocator> g_present_alloc4[3];
 static id<MTL4CommandBuffer> g_present_cb[3];
+// With DM_PRESENT_QUEUE, ring slot i (ticket % 3, the present allocator's index) holds the copy of the picture the present on g_pq4 reads (present_copy). view: what the present
+// samples, tex itself or a view of it; cb: the copy's command buffer on g_q4; copied: the ticket of the slot's last copy. g_pring_ev: the newest ticket whose copy has run
+static struct { id<MTLTexture> tex, view; id<MTL4CommandBuffer> cb; uint64_t copied; } g_pring[3];
+static id<MTLSharedEvent> g_pring_ev;
 static id<MTL4ArgumentTable> g_vt, g_ft, g_ct, g_up_ct, g_ot;   // g_ot: the object stage of a task / mesh draw (mesh_tasks_draw)
 static int g_vbuf_cache = 1;   // DM_NVN_VBUF_CACHE=0 restores the uncached path for A/B measurements
 static uint64_t g_vt_addr[31]; static uint32_t g_vt_valid;
@@ -171,7 +178,8 @@ static uint64_t g_present_alloc_fence[3];
 // Under g_pq_mu: per present allocator, the newest ticket its commit feedback reported done on the GPU. present_now resets an allocator only once this reaches the ticket that
 // last used it. g_pq_done is not that: every display-link callback sets it to ticket - 1 (the previous present was committed, not run) and a present that was not submitted sets
 // it to its own ticket. Waiting on g_pq_done, a display-link present never waited here: with three presents in flight, or two after a dropped frame, the allocator was reset
-// under a present the GPU had not run, and that present's drawable read back black (t_present_alloc; docs/reference/frame-rate.md)
+// under a present the GPU had not run, and that present's drawable read back black (t_present_alloc; docs/reference/frame-rate.md). With DM_PRESENT_QUEUE the allocator also
+// encodes the present's copy, and the present on g_pq4 is the last reader of the ring slot of the same index (present_copy): its completion frees both
 static uint64_t g_present_alloc_done[3];
 static pthread_mutex_t g_pq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_pq_cv = PTHREAD_COND_INITIALIZER;
@@ -203,6 +211,9 @@ static void ext_retire(NSArray *textures);
 int g_dm_present_link;   // Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency;   // DM_PRESENT_LATENCY: the display link's frame latency in a window and in fullscreen alike (0 = not set: link_latency picks it)
 static int g_present_link_env;   // Whether DM_PRESENT_LINK was set at startup
+// Under g_pq_mu: the newest ticket the present queue has handed on: dropped, committed, or completed on the GPU. From then on the game may write the texture that present showed.
+// That holds because only g_q4 reads a game texture, ahead of the game's later work: the present itself, or with DM_PRESENT_QUEUE its copy (present_copy), committed before the
+// display-link callback or the present's feedback moves this past it; the present on g_pq4 reads only the copy
 static uint64_t g_pq_done;
 static uint64_t g_pq_read;
 static id<MTLResidencySet> g_res, g_snap_res;   // g_snap_res: the present snapshots' textures (snap_take)
@@ -1188,6 +1199,15 @@ static void rop_f16_probe(void) {
     }
 }
 
+// DM_PRESENT_QUEUE=0 keeps the whole present on g_q4, as before g_pq4 (no copy, no second queue)
+static int g_present_queue_on = -1;
+static int present_queue_on(void) {
+    if (g_present_queue_on < 0) {
+        const char *e = getenv("DM_PRESENT_QUEUE"); g_present_queue_on = !(e && !strcmp(e, "0"));
+        MLOG("present: %s (DM_PRESENT_QUEUE)", g_present_queue_on ? "a copy of the picture made on the game's queue, presented from a queue of its own" : "on the game's queue");
+    }
+    return g_present_queue_on;
+}
 static void mtl_init_once(void) {
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -1221,6 +1241,12 @@ static void mtl_init_once(void) {
         MTL4CommandQueueDescriptor *q4d = [MTL4CommandQueueDescriptor new]; q4d.feedbackQueue = g_feedback_q;
         g_q4 = [g_dev newMTL4CommandQueueWithDescriptor:q4d error:&re];
         if (!g_q4) no4 = "failed to create the MTL4CommandQueue";
+        if (g_q4 && present_queue_on()) {   // its feedback queue of its own: the present's feedback never waits behind the game's
+            static dispatch_queue_t pfq; pfq = dispatch_queue_create("dm.nvn.mtl4-present-feedback", feedback_attr);   // the descriptor does not hold it
+            MTL4CommandQueueDescriptor *pqd = [MTL4CommandQueueDescriptor new]; pqd.feedbackQueue = pfq;
+            g_pq4 = [g_dev newMTL4CommandQueueWithDescriptor:pqd error:&re];
+            if (!g_pq4) { MLOG("[RED] present: no queue of its own (%s); presents stay on the game's queue", re.localizedDescription.UTF8String); g_present_queue_on = 0; re = nil; }
+        }
     }
     if (no4) {
         const char *why = re ? re.localizedDescription.UTF8String : "";
@@ -1250,7 +1276,9 @@ static void mtl_init_once(void) {
         if (!g_present_alloc4[i]) MDIE("failed to create present MTL4CommandAllocator[%d]: %s", i, ae.localizedDescription.UTF8String);
         g_present_cb[i] = [g_dev newCommandBuffer];
         if (!g_present_cb[i]) MDIE("failed to create present MTL4CommandBuffer[%d]", i);
+        if (g_pq4 && !(g_pring[i].cb = [g_dev newCommandBuffer])) MDIE("failed to create the present copy's MTL4CommandBuffer[%d]", i);
     }
+    if (g_pq4 && !(g_pring_ev = [g_dev newSharedEvent])) MDIE("failed to create the present copy event");
     MTL4ArgumentTableDescriptor *atd = [MTL4ArgumentTableDescriptor new];
     atd.maxBufferBindCount = 31; atd.maxTextureBindCount = 1;
     NSError *ate = nil;
@@ -3126,7 +3154,8 @@ static void gpu_capture_frame(uint64_t f) {
         gpu_capture_prune(dir);
         time_t now = time(NULL); struct tm tm; localtime_r(&now, &tm); char ts[32]; strftime(ts, sizeof ts, "%Y%m%d-%H%M%S", &tm);
         NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"dm_%s_f%llu.gputrace", ts, (unsigned long long)f]];
-        MTLCaptureDescriptor *d = [MTLCaptureDescriptor new]; d.captureObject = g_q4 ? (id)g_q4 : (id)g_dev; d.destination = MTLCaptureDestinationGPUTraceDocument; d.outputURL = [NSURL fileURLWithPath:path];
+        // The device when the presents have a queue of their own (g_pq4), so the trace has them too
+        MTLCaptureDescriptor *d = [MTLCaptureDescriptor new]; d.captureObject = g_q4 && !g_pq4 ? (id)g_q4 : (id)g_dev; d.destination = MTLCaptureDestinationGPUTraceDocument; d.outputURL = [NSURL fileURLWithPath:path];
         NSError *err = nil;
         if ([m startCaptureWithDescriptor:d error:&err]) { g_cap_on = 1; g_cap_f0 = (long)f; MLOG("DM_GPU_CAPTURE: capturing frames %llu to %llu into %s", (unsigned long long)f, (unsigned long long)(f + g_cap_n - 1), path.UTF8String); }
         else MLOG("[RED] DM_GPU_CAPTURE: the capture did not start: %s", err.localizedDescription.UTF8String);
@@ -3532,7 +3561,7 @@ static BOOL obj_is_tex(id object) {
     return is_texture;
 }
 
-static int g_red_once[179];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
+static int g_red_once[182];   // one past the highest key: a new key raises this, and the macro refuses to compile otherwise
 #define RED_ONCE(k, ...) do { _Static_assert((k) < sizeof g_red_once / sizeof *g_red_once, "a RED_ONCE key past g_red_once: raise its size"); if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -21052,14 +21081,16 @@ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLT
 // consumer barrier, which is what orders it after the scaler (a pass after a relaxed end skips it, enc_r_begin_pass: the first draw pass after DLSS read its output early in every
 // round with DM_NVN_BARRIER=game, t_dlss_mfx)
 static void mfx_order(id<MTL4CommandBuffer> cb, id<MTLTexture> src, MTLOrigin o, MTLSize z, id<MTLTexture> dst) {
-    static id<MTLBuffer> word; static dispatch_once_t once;
-    dispatch_once(&once, ^{ word = [g_dev newBufferWithLength:16 options:MTLResourceStorageModePrivate]; word.label = @"MetalFX order word"; res_add(word); res_commit(); });
+    static id<MTLBuffer> words; static dispatch_once_t once;
+    dispatch_once(&once, ^{ words = [g_dev newBufferWithLength:32 options:MTLResourceStorageModePrivate]; words.label = @"MetalFX order words"; res_add(words); res_commit(); });
+    // The presents' command buffers (on g_pq4 with DM_PRESENT_QUEUE) use the second half: no two queues write the same bytes
+    NSUInteger at = 0; for (int i = 0; i < 3; i++) if (cb == g_present_cb[i]) at = 16;
     if (cb == g_cb && g_tf_enc) tf_pass_end();   // no other encoder may be open on the replay's command buffer
     id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
     [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];
     if (dst) fbd_written(dst);
     if (dst) [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:o sourceSize:z toTexture:dst destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-    else [ce copyFromBuffer:word sourceOffset:0 toBuffer:word destinationOffset:8 size:4];
+    else [ce copyFromBuffer:words sourceOffset:at toBuffer:words destinationOffset:at + 8 size:4];
     [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];
     [ce endEncoding];
     if (cb == g_cb) g_last_end_relaxed = 0;
@@ -22132,12 +22163,15 @@ static void present_pipeline(MTLPixelFormat format) {
         g_blit_samp = [g_dev newSamplerStateWithDescriptor:sd];
     }
 }
+static MTLPixelFormat present_raw_pf(MTLPixelFormat f) {   // the format a present samples f's storage in (present_raw_src; MTLPixelFormatInvalid: f itself)
+    return f == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : f == MTLPixelFormatBGRA8Unorm_sRGB ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatInvalid;
+}
 // Present samples only the valid source rectangle declared by NVN; kept separate from the raw swapchain readback screenshot. Edges are clamped to the texel centers of the valid area, so bilinear does not read the black texels outside.
 // Present samples the raw bytes stored in the swapchain texture (the Switch's scan-out sends the stored bytes as they are): an sRGB source is replaced by a non-sRGB view of the same storage,
 // otherwise sampling decodes to linear first, the BGRA8Unorm layer does not encode again, and the whole picture comes out dark. Other formats are returned as they are (Mario's swapchain is RGBA8 and does not come here).
 // View cache of 4 entries: swapchain textures live long and are few; a view holds its parent, so an equal parent pointer means the same object. A replaced view is released after the submissions that used it complete (Metal 4 does not retain resources)
 static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
-    MTLPixelFormat pf = src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatInvalid;
+    MTLPixelFormat pf = present_raw_pf(src.pixelFormat);
     if (pf == MTLPixelFormatInvalid) return src;
     static __strong id<MTLTexture> views[4]; static int next; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&mu);
@@ -22704,6 +22738,64 @@ static void present_shot(id<MTLTexture> src, const char *path, const int crop[4]
     }
     if (*ready) shot(src, path, 1, crop);
 }
+// The present's picture copied into ring slot k on g_q4 (DM_PRESENT_QUEUE), behind the frame's work and ahead of the game's next, then g_pring_ev signalled to ticket there.
+// Returns what the present samples, or nil, and that present stays on g_q4, when the slot cannot be made or the source is not a single-sample 2D texture (the present's texture2d
+// binding takes no other kind either).
+// The copy is all of level 0, the only level the present samples (its sampler has no mip filter); the crop applies to it as to the source. Sampling decodes nothing the source
+// would not: a view of the slot takes the source's swizzle and, for sRGB, the non-sRGB format present_raw_src gives. The caller has waited for the slot's last present and copy
+// (its last readers and writer) and reset the slot's allocator, which encodes this copy and then the present: a remade slot's old texture can go at once
+static id<MTLTexture> present_copy(id<MTLTexture> src, int k, uint64_t ticket) {
+    if (src.textureType != MTLTextureType2D || src.sampleCount != 1) {
+        static int once; if (!once++) MLOG("present: a source of texture type %lu with %lu samples is presented on the game's queue", (unsigned long)src.textureType, (unsigned long)src.sampleCount);
+        return nil;
+    }
+    MTLTextureSwizzleChannels sw = src.swizzle;
+    MTLPixelFormat vf = present_raw_pf(src.pixelFormat);
+    int plain = sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
+    int need_view = vf != MTLPixelFormatInvalid || !plain;
+    if (vf == MTLPixelFormatInvalid) vf = src.pixelFormat;
+    id<MTLTexture> t = g_pring[k].tex;
+    if (!t || t.width != src.width || t.height != src.height || t.pixelFormat != src.pixelFormat || need_view != !!(t.usage & MTLTextureUsagePixelFormatView)) {
+        if (t) res_remove(t);
+        g_pring[k].tex = g_pring[k].view = nil;
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat width:src.width height:src.height mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead | (need_view ? MTLTextureUsagePixelFormatView : 0);
+        if (!(t = [g_dev newTextureWithDescriptor:d])) { RED_ONCE(180, "present: no texture for the copy's ring slot %d (%lux%lu format %lu); presented on the game's queue", k, (unsigned long)src.width, (unsigned long)src.height, (unsigned long)src.pixelFormat); return nil; }
+        t.label = @"present copy"; res_add(t); res_commit(); g_pring[k].tex = t;
+        MLOG("present: copy ring slot %d %lux%lu format %lu", k, (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat);
+    }
+    id<MTLTexture> v = g_pring[k].view;
+    MTLTextureSwizzleChannels vs = v.swizzle;
+    if (!need_view) v = t;
+    else if (!v || v == t || v.pixelFormat != vf || memcmp(&vs, &sw, sizeof sw)) {
+        v = [t newTextureViewWithPixelFormat:vf textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
+        if (!v) { RED_ONCE(181, "present: no view of the copy's ring slot %d (format %lu); presented on the game's queue", k, (unsigned long)vf); return nil; }
+    }
+    g_pring[k].view = v;
+    id<MTL4CommandBuffer> cb = g_pring[k].cb;
+    [cb beginCommandBufferWithAllocator:g_present_alloc4[k]];
+    id<MTL4ComputeCommandEncoder> ce = [cb computeCommandEncoder];
+    [ce barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageBlit visibilityOptions:resource_vis()];   // after the frame's work
+    [ce copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(src.width, src.height, 1) toTexture:t destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [ce barrierAfterStages:MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:resource_vis()];   // the game's next writes to its texture come after the copy
+    [ce endEncoding]; cb_end(cb, nil);
+    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        if (!f.error) return;
+        MLOG("[RED] present copy command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "present copy");
+        // The GPU may skip the signal after a failed command buffer (fence_ev_raise): the present waiting for it goes on. Only then: a raise from here ahead of the queue's own
+        // signal of an earlier ticket would let that signal lower the value
+        static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+        os_unfair_lock_lock(&lk); if (g_pring_ev.signaledValue < ticket) g_pring_ev.signaledValue = ticket; os_unfair_lock_unlock(&lk);
+    }];
+    pthread_mutex_lock(&g_res_commit_mu);   // apart from the residency set's commit, as the snapshot copy's (snap_take)
+    uint64_t elapsed = q4_commit_elapsed(&cb, 1, o);
+    [g_q4 signalEvent:g_pring_ev value:ticket];
+    pthread_mutex_unlock(&g_res_commit_mu);
+    q4_commit_slow(elapsed, "present_copy (present copy)");
+    g_pring[k].copied = ticket;
+    return v;
+}
 static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t ticket, const int crop[4], uint64_t ev_val, id<CAMetalDrawable> supplied, double target_ts, double latch_ts) {
     if (g_present_stall_ns) { struct timespec ts = {0, (long)g_present_stall_ns}; nanosleep(&ts, NULL); }
     g_present_n++;
@@ -22781,16 +22873,28 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
         while (g_present_alloc_done[alloc_i] < g_present_alloc_fence[alloc_i]) pthread_cond_wait(&g_pq_cv, &g_pq_mu);
         pthread_mutex_unlock(&g_pq_mu);
     }
+    // A copy whose present was not committed (!kind below) is the slot's last user: its allocator and texture wait for it too
+    if (g_pq4 && g_pring[alloc_i].copied > g_pring_ev.signaledValue && ![g_pring_ev waitUntilSignaledValue:g_pring[alloc_i].copied timeoutMS:10000])
+        RED_ONCE(179, "present: the copy of ticket %llu did not finish on the GPU within %d s", (unsigned long long)g_pring[alloc_i].copied, 10);
     if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
+    // With its own queue, the present reads a copy made on g_q4 and waits on g_pq4 for that copy and for the drawable; the game's later work on g_q4 waits for neither
+    id<MTL4CommandQueue> q = g_q4; id<MTLTexture> show = src;
+    if (g_pq4) {
+        if ((show = present_copy(src, alloc_i, ticket))) { q = g_pq4; [q waitForEvent:g_pring_ev value:ticket]; }
+        else {   // on g_q4 for once: the presents still on g_pq4 run first, as they share the scaler's textures (g_fx_present)
+            show = src;
+            pthread_mutex_lock(&g_pq_mu); while (g_pq_inflight) pthread_cond_wait(&g_pq_cv, &g_pq_mu); pthread_mutex_unlock(&g_pq_mu);
+        }
+    }
     uint64_t hold_v = atomic_load(&g_present_hold_v); id<MTLSharedEvent> hold = hold_v ? g_present_hold : nil;
-    if (hold) [g_q4 waitForEvent:hold value:hold_v];
-    [g_q4 waitForDrawable:dr];
+    if (hold) [q waitForEvent:hold value:hold_v];
+    [q waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
-    int kind = present_encode_m4(cb, src, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
+    int kind = present_encode_m4(cb, show, dr.texture, crop, g_present_uv[alloc_i], &g_fx_present);
     id<MTLResidencySet> drs = ((CAMetalLayer *)dr.layer).residencySet;   // the drawable's
-    if (!kind) { cb_end(cb, drs); [g_q4 signalDrawable:dr]; return 0; }
+    if (!kind) { cb_end(cb, drs); [q signalDrawable:dr]; return 0; }
     int fx_kind = kind == PRESENT_METALFX;
     cb_end(cb, drs);
     MTL4CommitOptions *o = [MTL4CommitOptions new];
@@ -22807,7 +22911,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
     committed = CACurrentMediaTime();
-    [g_q4 commit:buffers count:1 options:o];
+    [q commit:buffers count:1 options:o];
     if (target_ts > 0) {
         static double leads[300], e2e[300];   // e2e: game enqueue -> system-scheduled present (including the time waiting in the queue for the display-link callback), the full span of input latency that our side can read
         static uint64_t lead_n;
@@ -22823,7 +22927,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
                  (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299], (unsigned long long)atomic_load(&g_link_drained), (unsigned long long)g_link_latched, (unsigned long long)g_link_latch_out);
         }
     }
-    [g_q4 signalDrawable:dr];
+    [q signalDrawable:dr];
     g_present_alloc_fence[alloc_i] = ticket;
 #if TARGET_OS_SIMULATOR   // The iOS simulator SDK has no presentation-time callback and no minimum display duration (used only for picture acceptance, display-link ticks are not counted)
     (void)period; [dr present];
@@ -23248,6 +23352,8 @@ static void present_suspend_wait(void) {
     g_pq_done = g_pq_in;
     pthread_cond_broadcast(&g_pq_cv);
     pthread_mutex_unlock(&g_pq_mu);
+    // A present's copy is on g_q4 outside any submission: those of the presents waited for above have run before them, one whose present was not committed may not have
+    for (int k = 0; g_pq4 && k < 3; k++) if (g_pring[k].copied && ![g_pring_ev waitUntilSignaledValue:g_pring[k].copied timeoutMS:2000]) RED_ONCE(179, "present: the copy of ticket %llu did not finish on the GPU within %d s", (unsigned long long)g_pring[k].copied, 2);
 }
 static void *present_main(void *arg) {
     (void)arg;

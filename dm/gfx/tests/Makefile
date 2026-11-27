@@ -363,6 +363,8 @@ t_present_probes: t_present_probes.m $(MTL_T_DEP)
 check_t_present_probes: t_present_probes
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_present_probes
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=0 ./t_present_probes
 t_present_queue: t_present_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_queue.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_queue
@@ -646,7 +648,7 @@ t_res_cb: t_res_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_cb.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_res_cb
 check_t_res_cb: t_res_cb
-	@set -e; for enc in 0 1; do DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
+	@set -e; for enc in 0 1; do for pq in 1 0; do DM_NVN_ENC_THREAD=$$enc DM_PRESENT_QUEUE=$$pq MTL_DEBUG_LAYER=1 ./t_res_cb; done; done
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_src

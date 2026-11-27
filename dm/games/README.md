@@ -119,6 +119,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Factorio](01004200189F4000/README.md) | `01004200189F4000` | 2.0.76 | 21.4.2 | Wube Software's engine, SDL | OpenGL | — |
 | [Farming Simulator 26: Nintendo Switch Edition](0100D440269E8000/README.md) | `0100D440269E8000` | 1.0.1.0 | 20.5.4 | GIANTS Engine | NVN | — |
 | [Fate/hollow ataraxia REMASTERED](010070E022546000/README.md) | `010070E022546000` | 1.0.2 | 16.2.6 | TYPE-MOON's Fuzz engine (`smash::fw`) | OpenGL | — |
+| [Fate/stay night REMASTERED](010023301E41C000/README.md) | `010023301E41C000` | 1.4.1 | 16.2.6 | TYPE-MOON's Fuzz engine (`smash::fw`) | OpenGL | — |
 | [FINAL FANTASY CRYSTAL CHRONICLES Remastered Edition](0100CE4010AAC000/README.md) | `0100CE4010AAC000` | 1.0.3 | 8.2.1 | Unity 2018.4.2f1 IL2CPP, FMOD | NVN | — |
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN | 60 fps target |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN | 60 fps target |

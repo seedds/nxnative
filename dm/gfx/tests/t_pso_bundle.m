@@ -235,14 +235,12 @@ int main(void) { @autoreleasepool {
             EXPECT("steady-state blend-off (FN_OFF_BORDER|FN_OFF_BLEND) is distinct", 0, p1 && [boArchive newRenderPipelineStateWithDescriptor:p1 error:nil] != nil);
         }
     }
-    // KK3 ballot workaround constant (dm_mwa3_fc) in both render and compute shaders: pso_offline.py specializes it per target OS (matching nvn_mtl.m mwa_on),
+    // KK3 ballot workaround constant (dm_mwa3_fc) in both render and compute shaders: pso_offline.py specializes it as nvn_mtl.m mwa_on does (false by default),
     // so both bases and compute pipelines stay in the offline archive and hit on lookup through pre_desc, fn_load and cps_new_b
     NSString *fm = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_mwa3_fc [[function_constant(%d)]];\n"
-        "constant bool dm_mwa3 = is_function_constant_defined(dm_mwa3_fc) ? dm_mwa3_fc : true;\n"
-        "fragment float4 main0() { return float4(dm_mwa3 ? 1 : 0, 0, 0, 1); }\n", DMSH_MWA_FC];
+        "fragment float4 main0() { return float4(is_function_constant_defined(dm_mwa3_fc) && dm_mwa3_fc ? 1 : 0, 0, 0, 1); }\n", DMSH_MWA_FC];
     NSString *cm = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_mwa3_fc [[function_constant(%d)]];\n"
-        "constant bool dm_mwa3 = is_function_constant_defined(dm_mwa3_fc) ? dm_mwa3_fc : true;\n"
-        "kernel void main0(device uint *out [[buffer(0)]]) { out[0] = dm_mwa3 ? 1u : 0u; }\n", DMSH_MWA_FC];
+        "kernel void main0(device uint *out [[buffer(0)]]) { out[0] = is_function_constant_defined(dm_mwa3_fc) && dm_mwa3_fc ? 1u : 0u; }\n", DMSH_MWA_FC];
     if (!lib(msl, @"fm_b", fm) && !lib(msl, @"cm_b", cm)) {
         put([msl stringByAppendingPathComponent:@"fm_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"entry\": \"main0\"}", DMSH_CHAIN]);
         put([msl stringByAppendingPathComponent:@"cm_b.json"], [NSString stringWithFormat:@"{\"chain\": \"%s\", \"stage\": \"cs\", \"entry\": \"main0\"}", DMSH_CHAIN]);

@@ -56,14 +56,11 @@ import vol_space   # the space metal-tt may write, with what APFS frees on deman
 
 # The function constants the host sets on a base or compute pipeline (nvn_mtl.m pre_fn / fn_load), by name: (index, bool value). dm_border_off is true (almost no draw binds a border twin);
 # dm_blend_off is false so one pulling base in the pair archive serves both blend_live = 0 and 1 draws as hybrid stand-ins (hybrid_get), while steady-state pipelines specialize it true
-# when both blend words are 0; dm_mwa3_fc follows the target OS (false on macOS 27+, true on macOS < 27 and iOS, matching nvn_mtl.m mwa_on). A pair whose functions declare another
+# when both blend words are 0; dm_mwa3_fc is false by default (matching nvn_mtl.m mwa_on: opt-in via DM_NVN_METALWA=1 after issue #3405). A pair whose functions declare another
 # constant is left to the device (rest_pairs.tsv)
 def mwa_on(platform, osmin):
-    """Whether the target OS uses KK3's ballot rewrite (nvn_mtl.m mwa_on): off on macOS 27 and later, on for macOS < 27 and iOS."""
-    if platform == 'macos' and osmin:
-        try: return int(str(osmin).split('.')[0]) < 27
-        except ValueError: pass
-    return True
+    """Whether the target OS uses KK3's ballot rewrite by default (nvn_mtl.m mwa_on): off by default until a macOS 26 / iOS-verified lowering is established (issue #3405)."""
+    return False
 
 
 def host_constants(platform='ios', osmin=None):

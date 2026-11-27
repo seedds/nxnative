@@ -8356,18 +8356,16 @@ static id<MTLFunction> fn_spec(id<MTLLibrary> lib, NSString *name, MTLFunctionCo
     os_unfair_lock_unlock(&g_fn_dev_lock);
     return fn4_note(f, lib, name, cv);
 }
-// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): KK_WORKAROUND_3 rewrites spvSubgroupBallot behind the bool function constant dm_mwa3_fc (DMSH_MWA_FC, default true).
-// The GPU compiler of macOS 15.4 to 26 speculates simd_ballot out of divergent branches (Apple FB20113490); macOS 27's compiler is fixed, so the host sets dm_mwa3_fc false on
-// macOS 27 and later and true on macOS < 27 and iOS (matching pso_offline.py's per-target specialization so KK3 shaders stay in offline pipeline archives). DM_NVN_METALWA=0 / 1 overrides.
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): KK_WORKAROUND_3 rewrites spvSubgroupBallot behind the bool function constant dm_mwa3_fc (DMSH_MWA_FC, default false).
+// Apple's macOS 15.4 to 26 GPU compiler can speculate simd_ballot out of divergent branches (FB20113490, fixed in macOS 27), but enabling KK3's simd_or lowering by default on
+// macOS 26.7.3 / M2 Max caused geometry and light corruption in Ocarina of Time (issue #3405) while no shipped game has an established KK3 failure yet. Keep it off by default
+// (matching pso_offline.py's host_constants so KK3 shaders stay in offline pipeline archives); DM_NVN_METALWA=1 opts in for testing or affected titles.
 static int mwa_on(void) {
     static int v; static dispatch_once_t once;
     dispatch_once(&once, ^{
-        const char *e = getenv("DM_NVN_METALWA"); int on = 1;
-#if !TARGET_OS_IPHONE
-        on = ![[NSProcessInfo processInfo] isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){27, 0, 0}];
-#endif
-        if (e && *e) on = strcmp(e, "0") != 0;
-        if (!on || (e && *e)) MLOG("Metal compiler workaround KK3: %s (%s)", on ? "on" : "off", e && *e ? "DM_NVN_METALWA" : "macOS 27 or later");
+        const char *e = getenv("DM_NVN_METALWA");
+        int on = (e && *e) ? strcmp(e, "0") != 0 : 0;
+        if (on || (e && *e)) MLOG("Metal compiler workaround KK3: %s (DM_NVN_METALWA)", on ? "on" : "off");
         v = on;
     });
     return v;

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dmsh_metalwa.py: automatic Metal GPU compiler workarounds after KosmicKrisp.
-KK3 rewrites spvSubgroupBallot as simd_or(uint(value) << lane) behind dm_mwa3_fc (DMSH_MWA_FC, default true; the host and pso_offline set it false on macOS 27+),
+KK3 rewrites spvSubgroupBallot as an always-inline helper using simd_or(uint(value) << lane) behind dm_mwa3_fc (DMSH_MWA_FC, default false; opt-in via DM_NVN_METALWA=1),
 threading the lane ID by value (uint, never thread uint&, avoiding Apple's #2825 out-of-line scalarization bug). KK9 guards loop breaks in subgroup functions unconditionally.
 With DMSH_TEST_METAL=1, compiles and runs t_metalwa.metal's bounded kernels on the GPU."""
 from pathlib import Path
@@ -175,11 +175,13 @@ class MetalWa(unittest.TestCase):
     def test_gate(self):
         out = W.apply(QUEUE, {3, 9})[0]
         self.assertIn(f'constant bool dm_mwa3_fc [[function_constant({W.FC_KK3})]];', out)
-        self.assertIn('constant bool dm_mwa3 = is_function_constant_defined(dm_mwa3_fc) ? dm_mwa3_fc : true;', out)
-        self.assertIn('if (dm_mwa3) return uint4(simd_or(', out)
+        self.assertIn('static inline __attribute__((always_inline)) uint4 dm_mwa_ballot(bool value, uint lane)', out)
+        self.assertIn('if (is_function_constant_defined(dm_mwa3_fc) && dm_mwa3_fc) return uint4(simd_or(', out)
+        self.assertNotIn('constant bool dm_mwa3 =', out)
         self.assertEqual(out.count('function_constant('), 1)
         st = W.apply(QUEUE, {3}, 'static')[0]
-        self.assertIn('constant bool dm_mwa3 = true;', st)
+        self.assertIn('static inline __attribute__((always_inline)) uint4 dm_mwa_ballot(bool value, uint lane)', st)
+        self.assertIn('return uint4(simd_or(uint(value) << lane), 0u, 0u, 0u);', st)
         self.assertNotIn('function_constant', st)
         self.assertNotIn('function_constant', W.apply(QUEUE, {9})[0])
 
@@ -275,8 +277,10 @@ kernel void main0(device uint* o [[buffer(0)]])
         self.assertIn("'tools/dmsh_metalwa.py'", (TOOLS / 'dmsh_chain.py').read_text())
         m = (TOOLS.parent / 'nvn' / 'nvn_mtl.m').read_text()
         self.assertIn('atIndex:DMSH_MWA_FC', m)
-        self.assertIn('isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){27, 0, 0}', m)
         self.assertIn('getenv("DM_NVN_METALWA")', m)
+        mwa_sec = m[m.index('static int mwa_on('):]
+        mwa_sec = mwa_sec[:mwa_sec.index('\n}\n')]
+        self.assertIn('strcmp(e, "0") != 0 : 0', mwa_sec)
         # Every host specialization path wires fc_set_mwa, and compute archive lookup recognizes dm_mwa3_fc
         for fn_head in ('static id<MTLFunction> fn_load(', 'static FnOff *fn_off(', 'static id<MTLFunction> side_spec(', 'static MTL4FunctionDescriptor *pre_fn(', 'static id<MTLFunction> bf_fn(NvShader *fs, const int *fx, uint8_t fbmask, const uint8_t *lmap) {'):
             sec = m[m.index(fn_head):]
@@ -316,6 +320,7 @@ class Repro(unittest.TestCase):
             run = Path(d) / 't_metalwa'
             subprocess.run(['clang', '-O1', '-fobjc-arc', '-o', str(run), str(here / 't_metalwa.m'), '-framework', 'Metal', '-framework', 'Foundation'], check=True)
             cases = [('as built', REPRO, '-O1', 'default'), ('KK3 + KK9', W.apply(REPRO, {3, 9})[0], '-O1', '1'),
+                     ('KK3 + KK9 default-off', W.apply(REPRO, {3, 9})[0], '-O1', 'default'),
                      ('KK3 + KK9 static', W.apply(REPRO, {3, 9}, 'static')[0], '-O1', 'default'),
                      ('KK9 only', W.apply(REPRO, {9})[0], '-O1', 'default')]
             if offline: cases.insert(1, ('-O0', REPRO, '-O0', 'default'))
@@ -328,6 +333,10 @@ class Repro(unittest.TestCase):
                     subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', opt, '-fpreserve-invariance', str(m), '-o', str(air)], check=True)
                     subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(air), '-o', str(lib)], check=True)
                     target = lib
+                    if name == 'KK3 + KK9':   # dm_mwa_ballot must stay inlined in AIR
+                        ll = m.with_suffix('.ll')
+                        subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-S', '-emit-llvm', opt, '-fpreserve-invariance', str(m), '-o', str(ll)], check=True)
+                        self.assertNotRegex(ll.read_text(), r'^define .*dm_mwa_ballot')
                 r = subprocess.run([str(run), str(target), fc], capture_output=True, text=True, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 res[name] = {l.split(': bad ')[0]: int(l.split(': bad ')[1].split()[0]) for l in r.stdout.splitlines()}
@@ -336,6 +345,7 @@ class Repro(unittest.TestCase):
             print(f"\nt_metalwa on this OS ({'offline' if offline else 'online'}): as built failing {bad('as built') or 'none'}", file=sys.stderr)
             self.assertEqual(bad('KK3 + KK9'), [])
             self.assertEqual(bad('KK3 + KK9 static'), [])
+            self.assertNotIn('kk9_break', bad('KK3 + KK9 default-off'))
             self.assertNotIn('kk9_break', bad('KK9 only'))
 
 

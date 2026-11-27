@@ -6,13 +6,14 @@ around them in src/kosmickrisp/compiler/nir_to_msl.c. The numbers below are thei
 
 Where the bugs live: the offline front end (metal -O1) keeps ballots inside their branches in the AIR; the GPU back end of the running OS (the compiler service that turns AIR into
 GPU code when a pipeline is made) miscompiles them. So KK3 depends on the OS the game runs on, not the one that built the library: KK3 sits behind the bool function constant
-dm_mwa3_fc (DMSH_MWA_FC in dm/gfx/nvn/dmsh_abi.h, default true), which the host sets false on macOS 27+ and true on macOS < 27 / iOS (nvn_mtl.m mwa_on; DM_NVN_METALWA=0/1 overrides),
-and pso_offline.py specializes the same way per target OS so KK3 shaders stay in offline pipeline archives. KK9 has no Apple fix (reproduced on macOS 27.2.1, M4 Pro) and is written
-unconditionally with no function constant.
+dm_mwa3_fc (DMSH_MWA_FC in dm/gfx/nvn/dmsh_abi.h, default false), which the host and pso_offline.py leave false by default (issue #3405: enabling KK3 by default on macOS 26.7.3 /
+M2 Max corrupted Ocarina of Time while no shipped game has an established KK3 failure yet; DM_NVN_METALWA=1 opts in at runtime, keeping KK3 shaders in offline pipeline archives).
+KK9 has no Apple fix (reproduced on macOS 27.2.1, M4 Pro) and is written unconditionally with no function constant.
 
   KK3  simd_ballot under divergent control flow returns every active lane of the SIMD group, not the lanes in the branch (KosmicKrisp: macOS 15.4–26, FB20113490, fixed in macOS 27).
-       Rewrites each spvSubgroupBallot call as simd_or(uint(value) << lane) (KosmicKrisp's lower_ballot, avoiding select feeding the reduction), bringing the lane ID by value
-       (uint, never thread uint&, avoiding Apple's #2825 out-of-line scalarization bug) to every function that needs it.
+       Rewrites each spvSubgroupBallot call as an always-inline helper dm_mwa_ballot that uses simd_or(uint(value) << lane) when dm_mwa3_fc is defined and true (KosmicKrisp's
+       lower_ballot, avoiding select feeding the reduction), bringing the lane ID by value (uint, never thread uint&, avoiding Apple's #2825 out-of-line scalarization bug) to every
+       function that needs it.
   KK9  a ballot before the only break of a loop sees all lanes, at -O0 and on macOS 27.2.1 as well (dEQP-VK.reconvergence.maximal.*). Guards every loop break (never a switch break)
        in functions that use subgroup operations (directly or through callees) with `if ((ulong)simd_active_threads_mask()) break;`.
 
@@ -27,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dmsh_abi   # noqa: E402
 
-FC_KK3 = dmsh_abi.MWA_FC   # bool function constant: KK3's rewrite is used (default true); the host and pso_offline set it false on macOS 27+
+FC_KK3 = dmsh_abi.MWA_FC   # bool function constant: opt-in KK3 rewrite (default false; DM_NVN_METALWA=1 enables it)
 FC_NAME = 'dm_mwa3_fc'
 NAMES = {'kk3': 3, 'kk9': 9}
 ALL = frozenset(NAMES.values())
@@ -93,20 +94,18 @@ def functions(msl):
 def _helper(name): return name.startswith(('spv', 'dm_mwa'))   # SPIRV-Cross's helpers and ours are left as they are
 
 
-HELPER3 = """// KK_WORKAROUND_3 (KosmicKrisp lower_ballot): a ballot as simd_or of the lane bit, shifted from the predicate (no select feeding the reduction)
-inline uint4 dm_mwa_ballot(bool value, uint lane)
-{
-    if (dm_mwa3) return uint4(simd_or(uint(value) << lane), 0u, 0u, 0u);
-    simd_vote vote = simd_ballot(value);
-    return uint4(as_type<uint2>((simd_vote::vote_t)vote), 0u, 0u);
-}
-"""
-
-
-def _gate3(gate):
-    if gate == 'static': return 'constant bool dm_mwa3 = true;\n'
-    return (f'constant bool {FC_NAME} [[function_constant({FC_KK3})]];\n'
-            f'constant bool dm_mwa3 = is_function_constant_defined({FC_NAME}) ? {FC_NAME} : true;   // the host and pso_offline set it false on macOS 27+\n')
+def _helper3(gate):
+    """KK_WORKAROUND_3 helper: always_inline so metal -O1 never outlines a subgroup ballot wrapper in large shaders (Ocarina FoliageShader.sharcb had 16 outlined
+    @_Z13dm_mwa_ballotbj compute shaders), and tests dm_mwa3_fc directly (matching dm_blend_off). Undefined dm_mwa3_fc defaults to false."""
+    head = '// KK_WORKAROUND_3 (KosmicKrisp lower_ballot): a ballot as simd_or of the lane bit, shifted from the predicate (no select feeding the reduction)\n'
+    sig = 'static inline __attribute__((always_inline)) uint4 dm_mwa_ballot(bool value, uint lane)\n{\n'
+    if gate == 'static':
+        return head + sig + '    return uint4(simd_or(uint(value) << lane), 0u, 0u, 0u);\n}\n'
+    return (f'constant bool {FC_NAME} [[function_constant({FC_KK3})]];   // opt-in KK3 ballot rewrite (default false; DM_NVN_METALWA=1 enables it)\n'
+            + head + sig
+            + f'    if (is_function_constant_defined({FC_NAME}) && {FC_NAME}) return uint4(simd_or(uint(value) << lane), 0u, 0u, 0u);\n'
+            + '    simd_vote vote = simd_ballot(value);\n'
+            + '    return uint4(as_type<uint2>((simd_vote::vote_t)vote), 0u, 0u);\n}\n')
 
 
 def _rewrite_calls(body, fname, new, lane):
@@ -182,7 +181,7 @@ def _lane_name(f):
 
 
 def apply(msl, enable: 'set[int] | frozenset[int]' = ALL, gate='fc'):
-    """enable: KosmicKrisp numbers (3: spvSubgroupBallot calls; 9: loop breaks in subgroup functions). gate: 'fc' (KK3 behind DMSH_MWA_FC, default on) or 'static' (always on).
+    """enable: KosmicKrisp numbers (3: spvSubgroupBallot calls; 9: loop breaks in subgroup functions). gate: 'fc' (KK3 behind DMSH_MWA_FC, default off) or 'static' (always on).
     Returns (msl, stats {n: rewrites}). Vertex functions are skipped (dmsh_build rewrites their subgroups to one lane via spv_single_lane)."""
     stats = {n: 0 for n in enable}
     if MARK in msl or not enable or _VERTEX_RE.search(msl) or not _SUBGROUP.search(msl): return msl, stats
@@ -246,7 +245,7 @@ def apply(msl, enable: 'set[int] | frozenset[int]' = ALL, gate='fc'):
     msl = '\n'.join(out)
     applied = [n for n in sorted(enable) if stats.get(n)]
     hdr = MARK + ' ' + ' '.join(f'KK{n}' for n in applied) + ' (Metal compiler workarounds after KosmicKrisp, Mesa, MIT: docs/drivers/kosmickrisp/workarounds.rst)\n'
-    if stats.get(3): hdr += _gate3(gate) + HELPER3
+    if stats.get(3): hdr += _helper3(gate)
     m = re.search(r'^using namespace metal;\n', msl, flags=re.M)
     if not m: raise ValueError('dmsh_metalwa: no `using namespace metal;`')
     return msl[:m.end()] + '\n' + hdr + msl[m.end():], stats

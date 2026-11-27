@@ -92,10 +92,10 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
             self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
-            self.assertEqual(po.HOST_CONSTANTS['dm_mwa3_fc'], (220, True))   # dmsh_abi.h DMSH_MWA_FC: per target OS (host_constants)
+            self.assertEqual(po.HOST_CONSTANTS['dm_mwa3_fc'], (220, False))   # dmsh_abi.h DMSH_MWA_FC: off by default (issue #3405; DM_NVN_METALWA=1 opts in)
             self.assertEqual(po.host_constants('macos', '27.0')['dm_mwa3_fc'], (220, False))
-            self.assertEqual(po.host_constants('macos', '26.0')['dm_mwa3_fc'], (220, True))
-            self.assertEqual(po.host_constants('ios', '27.0')['dm_mwa3_fc'], (220, True))
+            self.assertEqual(po.host_constants('macos', '26.0')['dm_mwa3_fc'], (220, False))
+            self.assertEqual(po.host_constants('ios', '27.0')['dm_mwa3_fc'], (220, False))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_a_real_library(self):
@@ -284,7 +284,7 @@ class Compute(unittest.TestCase):
                                                        {'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': False}}])
         j26 = po.script(self.d, [], [('km_b', 'main0')], po.host_constants('macos', '26.0'))
         self.assertEqual(j26['function_descriptors']['specialized_function_descriptors'][0]['constant_values'],
-                         [{'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': True}}])
+                         [{'id_type': 'FunctionConstantIndex', 'id': {'data': 220}, 'value_type': 'ConstantBool', 'value': {'data': False}}])
 
     def test_pipelines_from_a_library_image(self):   # one-file libraries (b-<chain>.img, shader_lib.py), as dmsh_build.py writes them: read in place, as plan reads the bases
         self.shader('c1', {'stage': 'cs'}, {'_b': [('main0', False)]})

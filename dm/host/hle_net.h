@@ -21,3 +21,5 @@ int dm_sk_listen(int fd, int backlog);   // offline: -1, ENETDOWN
 int dm_sk_accept(int fd, void *addr, unsigned *size);   // offline: -1, ENETDOWN
 int dm_sk_errno(void);
 void dm_sk_set_errno(int error);   // the transport in hle_net_backend.c reports through the same per-thread value
+long dm_sk_ret(long result);   // a hook's result; a failure in network mode also sets the game's own errno (hle_net.c). Call on the game's thread only
+int dm_sk_last_errno(void);   // GetLastErrno: the game's errno in network mode, the host's copy otherwise

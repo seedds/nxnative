@@ -21,6 +21,10 @@ void dm_thread_native_wait(int entering) {
 // Records the spans the transport prepares before the kernel writes guest memory
 static _Atomic(void *) g_prep_addr; static _Atomic size_t g_prep_len; static _Atomic int g_prep_count;
 void dm_guest_write_prepare(void *addr, size_t len) { atomic_store(&g_prep_addr, addr); atomic_store(&g_prep_len, len); atomic_fetch_add(&g_prep_count, 1); }
+// The game's own errno (its C library's __errno_location), which a failed hook sets in network mode as Horizon's nn::socket does
+static int g_game_errno;
+static int *game_errno_location(void) { return &g_game_errno; }
+void *guest_sym(const char *name) { return !strcmp(name, "__errno_location") ? (void *)game_errno_location : NULL; }
 
 static int checks, failed;
 #define CHECK(c, what) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, what); } } while (0)
@@ -67,6 +71,10 @@ int main(void) {
     CHECK(h_sk_Recv(v, data, sizeof data, 0x80) == -1 && h_sk_GetLastError() == 11 && dm_sk_errno() == 11, "an empty MSG_DONTWAIT receive is EAGAIN 11 (Horizon's number, not Darwin's 35)");
     uint8_t bad[16]; address(bad, 0x7f000001, 1); bad[1] = 0;
     CHECK(h_nsk_SendTo(u, "x", 1, 0, bad, 16) == -1 && h_sk_GetLastError() == 97, "a family other than AF_INET is EAFNOSUPPORT 97");
+    g_game_errno = 0; CHECK(h_nsk_SendTo(u, "x", 1, 0, bad, 16) == -1 && g_game_errno == 97, "a failed call sets the game's own errno too, as Horizon's errno is the C library's");
+    g_game_errno = 0; CHECK(h_sk_Recv(v, data, sizeof data, 0x80) == -1 && g_game_errno == 11, "an empty MSG_DONTWAIT receive leaves EAGAIN in the game's errno (gRPC reads errno itself)");
+    g_game_errno = 115; CHECK(h_nsk_GetErrno() == 115, "GetLastErrno reads the game's errno, as detail::GetLastErrno does");
+    h_nsk_SetErrno(4); CHECK(g_game_errno == 4 && h_sk_GetLastError() == 4, "SetLastErrno sets both");
     uint8_t zero_len[16]; memcpy(zero_len, b, 16); zero_len[0] = 0;
     CHECK(h_nsk_SendTo(u, "z", 1, 0, zero_len, 16) == 1, "sin_len 0 is accepted, as hand-written game code leaves it");
     CHECK(h_sk_Recv(v, data, sizeof data, 0) == 1, "and arrives");

@@ -1400,6 +1400,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_net` (`make -C dm/host/tests GAME=<id> run`, also under ASan/UBSan and TSan) runs loopback UDP and TCP through the game's entry points: the address layout both ways and a short address buffer, Linux errno numbers, option translation, SO_NOSIGPIPE kept on, timeouts, O_NONBLOCK, a Close that ends a blocked receive on another thread, Poll/Select including a mixed EventFd set and POLLNVAL, a refused connect, EPIPE after the peer closed with the process alive, and nifm. `t_net_loopback` and `t_net_eventfd` check that the offline service is unchanged without `DM_NETWORK`.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md): this is the transport I first wrote in NX Port Studio, where it carried my completed Mac–Switch LAN race on 3.0.5 (2026-10-31); this slice of it is checked by the tests above and not yet in a game on this branch.
 
+### Network mode: the game's errno is the C library's
+
+- **Symptom:** in network mode, a game opens a socket and connects, then closes it without sending anything. Super Mario Bros. Wonder's gRPC logs `tcp_client_posix.cc:299` "Address family not supported by protocol", and its online menu shows 2321-4992.
+- **Cause:** on Horizon, `nn::socket`'s errno is the C library's: `detail::SetLastErrno` and `GetLastErrno` write and read `*__errno_location()`, and code such as gRPC's reads `errno` directly. The host kept only its own per-thread copy. Wonder 1.2.1's gRPC sets errno to 97 (EAFNOSUPPORT) when it falls back from IPv6 (`main+0xb61480`), then reads errno after its non-blocking connect (`main+0xb61e38`). It read the stale 97 instead of the connect's EINPROGRESS 115, and gave up the address.
+- **Fix:** in network mode, every socket hook that fails also writes the host's errno through the game's `__errno_location` (`dm_sk_ret` in `hle_net.c`), on the game's thread, as the hook returns. `GetLastErrno` and `nnsocketGetLastErrno` read the game's errno, and `nnsocketSetLastErrno` sets both. Offline nothing changes, and a game without `__errno_location` keeps only the host's copy.
+- **Check:** `t_net` gives the test its own errno cell: a failed `SendTo` and an empty `MSG_DONTWAIT` receive set it to 97 and 11, `GetLastErrno` reads it back, and `SetLastErrno` sets both.
+- **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) 1.2.1, on an iPhone, with the network transport from our fork. With this fixed, its online sign-in, room creation and room search went through.
+
 ### The local user's profile image
 
 - **Symptom:** `Break#1 reason=0 Result=0` right after the first save is created, then exit 42; the stack has `nn::diag::detail::OnAssertionFailure` under `nn::image::JpegDecoder::Decode` (`sdk+0x394e4`), called from the game (Burnout Paradise Remastered, SDK 9.3).

@@ -72,6 +72,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [The Binding of Isaac: Rebirth](01009BC00C38A000/README.md) | `01009BC00C38A000` | 1.0 (base) | 5.5.0 | its own engine | NVN | — |
 | [Big Brain Academy: Brain vs. Brain](0100620012D6E000/README.md) | `0100620012D6E000` | 1.2.0 | 11.4.3 | NintendoWare Bezel Engine 1.56 | NVN | — |
 | [BioShock Remastered](0100AD10102B2000/README.md) | `0100AD10102B2000` | 1.0.2 (provisional Mac profile) | 9.3.1 | Unreal Engine 3 (Blind Squirrel), Scaleform, Bink | NVN | — |
+| [BioShock 2 Remastered](01002620102C6000/README.md) | `01002620102C6000` | 1.0.2 (provisional Mac profile) | 9.3.1 | Unreal Engine 3 (Blind Squirrel), Scaleform, Bink | NVN | — |
 | [Blasphemous](0100698009C6E000/README.md) | `0100698009C6E000` | 1.0.8 | 8.3.1 | Unity 2017.4.28f1 IL2CPP, FMOD | NVN | — |
 | [Blasphemous 2](010040801A4C8000/README.md) | `010040801A4C8000` | 1.0.8 | 15.3.2 | Unity 2021.3.20f1 IL2CPP, FMOD | NVN | — |
 | [Bloodstained: Curse of the Moon](01004B800AF5A000/README.md) | `01004B800AF5A000` | 1.1.1 | 4.5.0 | Inti Creates' engine | NVN | — |

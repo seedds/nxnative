@@ -51,7 +51,9 @@ class ImportSeeds(unittest.TestCase):
     def upload(self, *rows, title=TITLE, version='1.0.0', corrupt=False):
         data = ('\n'.join(rows) + '\n').encode()
         digest = '0' * 64 if corrupt else hashlib.sha256(data).hexdigest()
-        (self.inbox / f'{title}--{version}--{digest}.tsv').write_bytes(data)
+        path = self.inbox / f'{title}--{version}--{digest}.tsv'
+        path.write_bytes(data)
+        return path
 
     def run_import(self, *flags, check=True):
         return subprocess.run([sys.executable, self.repo / SCRIPT, self.inbox, *flags], env=self.env,
@@ -60,6 +62,16 @@ class ImportSeeds(unittest.TestCase):
     def git(self, *args, cwd=None):
         return subprocess.run(['git', '-c', 'user.name=seedds', '-c', 'user.email=seedds@gmail.com', *args],
                               cwd=cwd or self.repo, env=self.env, text=True, capture_output=True, check=True).stdout.strip()
+
+    def init_origin(self):
+        bare = self.root / 'origin.git'
+        self.git('init', '--bare', '--initial-branch=main', str(bare))
+        self.git('init', '--initial-branch=main')
+        self.git('add', '.')
+        self.git('commit', '-m', 'initial profile')
+        self.git('remote', 'add', 'origin', str(bare))
+        self.git('push', 'origin', 'HEAD:main')
+        return bare
 
     def test_preview_and_apply_deduplicate_and_validate(self):
         shader = f'S\t{COMPUTE}\t5'
@@ -82,22 +94,34 @@ class ImportSeeds(unittest.TestCase):
         self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
         self.assertEqual(len(list(self.inbox.glob('*.tsv'))), 3)
 
+    def test_apply_deletes_fully_imported_captures_including_duplicate_only(self):
+        seed = f'C\t{COMPUTE}'
+        capture = self.upload(seed)
+        self.assertIn('1 imported capture(s) would be deleted', self.run_import().stdout)
+        self.assertTrue(capture.is_file())
+        self.assertIn('Deleted 1 imported capture(s).', self.run_import('--apply').stdout)
+        self.assertFalse(capture.exists())
+        imported = self.manifest.read_text()
+        self.assertIn(seed, imported)
+
+        self.upload(seed)
+        retry = self.run_import('--apply').stdout
+        self.assertIn('No manifest updates.', retry)
+        self.assertIn('Deleted 1 imported capture(s).', retry)
+        self.assertFalse(capture.exists())
+        self.assertEqual(self.manifest.read_text(), imported)
+
     def test_push_updates_main_without_including_local_commits(self):
-        bare = self.root / 'origin.git'
-        self.git('init', '--bare', '--initial-branch=main', str(bare))
-        self.git('init', '--initial-branch=main')
-        self.git('add', '.')
-        self.git('commit', '-m', 'initial profile')
-        self.git('remote', 'add', 'origin', str(bare))
-        self.git('push', 'origin', 'HEAD:main')
+        bare = self.init_origin()
         peer = self.root / 'peer'
         self.git('clone', str(bare), str(peer))
         self.git('commit', '--allow-empty', '-m', 'upstream update', cwd=peer)
         upstream = self.git('rev-parse', 'HEAD', cwd=peer)
         self.git('push', 'origin', 'HEAD:main', cwd=peer)
 
-        self.upload(f'C\t{COMPUTE}')
+        imported = self.upload(f'C\t{COMPUTE}')
         self.run_import('--push')
+        self.assertFalse(imported.exists())
         self.assertEqual(self.git('rev-parse', 'HEAD^'), upstream)
         landed = self.git('rev-parse', 'HEAD')
         self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
@@ -105,9 +129,24 @@ class ImportSeeds(unittest.TestCase):
                          self.manifest.relative_to(self.repo).as_posix())
 
         self.git('commit', '--allow-empty', '-m', 'local change')
-        self.upload(f'S\t{VERTEX}\t0')
+        pending = self.upload(f'S\t{VERTEX}\t0')
         result = self.run_import('--push', check=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn('local commits', result.stderr)
         self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
         self.assertNotIn(f'S\t{VERTEX}', self.manifest.read_text())
+        self.assertTrue(pending.is_file())
+
+    def test_rejected_push_keeps_capture(self):
+        bare = self.init_origin()
+        hook = bare / 'hooks/pre-receive'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        seed = f'C\t{COMPUTE}'
+        capture = self.upload(seed)
+
+        result = self.run_import('--push', check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('pre-receive hook declined', result.stderr)
+        self.assertIn(seed, self.manifest.read_text())
+        self.assertTrue(capture.is_file())

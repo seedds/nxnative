@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Audit a downloaded prewarm inbox, append compatible seeds, and optionally push to main."""
+"""Audit a downloaded prewarm inbox, import seeds, and remove fully imported captures."""
 
 import argparse
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -34,6 +35,7 @@ class Capture:
     title: str
     version: str
     rows: list[str]
+    file_stat: os.stat_result
 
 
 @dataclass
@@ -45,12 +47,19 @@ class Update:
     message: str
 
 
+@dataclass
+class ImportPlan:
+    updates: list[Update] = field(default_factory=list)
+    imported: list[tuple[Path, os.stat_result]] = field(default_factory=list)
+
+
 def load_capture(path: Path) -> Capture:
     match = FILENAME.fullmatch(path.name)
     if not match:
         raise ValueError('expected an inbox filename with title, version and SHA-256')
     title, version, digest = match.groups()
     with path.open('rb') as source:
+        file_stat = os.fstat(source.fileno())
         data = source.read(32 * 1024 * 1024 + 1)
     if len(data) > 32 * 1024 * 1024:
         raise ValueError('exceeds the inbox size limit')
@@ -62,7 +71,7 @@ def load_capture(path: Path) -> Capture:
     for number, row in enumerate(rows, 1):
         if not ROW.fullmatch(row):
             raise ValueError(f'line {number}: invalid inbox row')
-    return Capture(path, title, version, rows)
+    return Capture(path, title, version, rows, file_stat)
 
 
 def parse_pipelines(parser: Path, rows: list[str]) -> dict[str, list[str]]:
@@ -110,12 +119,12 @@ def optional_bytes(path: Path) -> bytes | None:
         return None
 
 
-def plan_profile(parser: Path, profile: Game, captures: list[Capture]) -> Update | None:
+def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: ImportPlan) -> None:
     shader_map = profile.table('shader_map.tsv')
     if not shader_map.is_file():
         for capture in captures:
             print(f'{capture.path.name}: skipped {len(capture.rows):,} rows (profile has no shader map)')
-        return None
+        return
     shaders = {}
     for line in shader_map.read_text(encoding='utf-8').splitlines():
         columns = line.split('\t', 4)
@@ -153,8 +162,10 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture]) -> Update
         note = f' (profile package {package})' if package and package != capture.version else ''
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
+        if counts['added'] + counts['duplicate'] == len(capture.rows):
+            result.imported.append((capture.path, capture.file_stat))
     if not additions:
-        return None
+        return
     # The generated placeholder is obsolete once the manifest contains a recording.
     seed = ''.join(line for line in seed.splitlines(keepends=True)
                    if not line.startswith('# Provisional profile: empty until recorded on the Mac'))
@@ -168,10 +179,10 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture]) -> Update
     if len(subject) > 72:
         subject = f'game/{profile.id}: add prewarm seeds'
     message = f'Import {len(additions):,} rows ({breakdown}) from inbox recordings of {", ".join(versions)}.'
-    return Update(path, original, content.encode('utf-8'), subject, message)
+    result.updates.append(Update(path, original, content.encode('utf-8'), subject, message))
 
 
-def plan(folder: Path) -> list[Update]:
+def plan(folder: Path) -> ImportPlan:
     captures: dict[str, list[Capture]] = defaultdict(list)
     files = sorted((p for p in folder.glob('*.tsv') if p.is_file()), key=lambda p: (p.stat().st_mtime_ns, p.name))
     if not files:
@@ -186,14 +197,15 @@ def plan(folder: Path) -> list[Update]:
             captures[capture.title].append(capture)
         else:
             print(f'{path.name}: skipped {len(capture.rows):,} rows (no repository profile)')
-    if not captures:
-        return []
-    with TemporaryDirectory(prefix='nxnative-prewarm-') as work:
-        parser = Path(work) / 'prewarm_skey'
-        subprocess.run(['clang', '-std=c11', '-I', NVN, '-I', NVN / 'include',
-                        PARSER_SOURCE, '-o', parser], check=True)
-        return [update for title, sources in captures.items()
-                if (update := plan_profile(parser, Game(GAMES / title), sources)) is not None]
+    result = ImportPlan()
+    if captures:
+        with TemporaryDirectory(prefix='nxnative-prewarm-') as work:
+            parser = Path(work) / 'prewarm_skey'
+            subprocess.run(['clang', '-std=c11', '-I', NVN, '-I', NVN / 'include',
+                            PARSER_SOURCE, '-o', parser], check=True)
+            for title, sources in captures.items():
+                plan_profile(parser, Game(GAMES / title), sources, result)
+    return result
 
 
 def apply(updates: list[Update]) -> None:
@@ -210,6 +222,23 @@ def apply(updates: list[Update]) -> None:
                 temporary.replace(update.path)
             finally:
                 temporary.unlink(missing_ok=True)
+
+
+def delete_imported(captures: list[tuple[Path, os.stat_result]]) -> None:
+    deleted = 0
+    for path, original in captures:
+        try:
+            current = path.stat()
+            if (not os.path.samestat(current, original) or current.st_size != original.st_size
+                    or current.st_mtime_ns != original.st_mtime_ns):
+                print(f'{path.name}: kept capture (file changed during the import)')
+                continue
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        deleted += 1
+    if deleted:
+        print(f'Deleted {deleted:,} imported capture(s).')
 
 
 def git(*args: str, capture: bool = False) -> str:
@@ -260,25 +289,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path, help='folder containing downloaded inbox TSVs')
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument('--apply', action='store_true', help='update local manifests without committing')
-    modes.add_argument('--push', action='store_true', help='update, commit and push to GitHub main')
+    modes.add_argument('--apply', action='store_true', help='update local manifests and delete fully imported TSVs')
+    modes.add_argument('--push', action='store_true', help='update, commit and push to GitHub main, then delete fully imported TSVs')
     args = parser.parse_args()
     folder = args.folder.resolve()
     if not folder.is_dir():
         parser.error(f'not a folder: {folder}')
     try:
         base = prepare_main() if args.push else None
-        updates = plan(folder)
-        if not updates:
+        result = plan(folder)
+        write = args.apply or args.push
+        if not result.updates:
             print('No manifest updates.')
-            return 0
-        if args.apply or base is not None:
-            apply(updates)
-            print(f'Updated {len(updates)} manifest(s).', flush=True)
+        elif write:
+            apply(result.updates)
+            print(f'Updated {len(result.updates)} manifest(s).', flush=True)
+            if base is not None:
+                push(result.updates, base)
         else:
-            print(f'Preview: {len(updates)} manifest(s) would change.')
-        if base is not None:
-            push(updates, base)
+            print(f'Preview: {len(result.updates)} manifest(s) would change.')
+        if write:
+            delete_imported(result.imported)
+        elif result.imported:
+            print(f'Preview: {len(result.imported):,} imported capture(s) would be deleted.')
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f'[RED] {parser.prog}: {error}', file=sys.stderr)
         return 1

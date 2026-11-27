@@ -631,12 +631,51 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ### Presents miss their target in fixed-rate external fullscreen
 
-- **Symptom:** at a 60 fps target the game stutters in bursts in fullscreen on a fixed 60 Hz external screen, while the same area is smooth in fullscreen on the Mac's built-in screen. GPU time is about 10–13 ms, within the 16.7 ms frame budget. In `DM_NVN_TSV`, `@pres_at_ms` minus `@link_target_ms` is 12–21 ms for the late presents and within 4 ms for the others.
-- **Cause:** open. The external run at frame latency 2 reported a median link gap of 16.7 ms, about 32 ms of lead and zero acquire and drawable waits. macOS displayed 54% of presents one refresh after the link's target. A frame over 25 ms followed 1,051 of 3,261 late presents (32%) and 132 of 2,731 on-time presents (5%). The timings point to a delay after handoff to macOS. Why those presents missed their target remains unknown.
-- **Workaround:** add `DM_PRESENT_LINK=0` to the [Mac game's `env.txt`](../playing.md#on-the-mac) and restart the game to let the present thread take drawables directly. On the reported external screen this reduced the share of frames over 25 ms from 19.7% to 0.52%. With the link off, 0.68% of frames were under 12 ms. Test this on the affected setup and remove the override to return to the default.
-- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md) v131072, host `e2df31ca` with three RomFS texture substitutions, shader chain `2afd39090b76`, M5 Pro MacBook Pro, macOS 27.3 (26C5035r), external Mi Monitor at 2560×1440 and fixed 60 Hz. [Issue #2362](https://github.com/seedds/nxnative/issues/2362) compares one fullscreen run per setting in the same area, with MetalFX present upscale, dynamic resolution, frame buffering and the Metal HUD on, and frame holds off. External at latency 2: 1,184 of 6,000 frames over 25 ms, frame p99 33.4 ms. Built-in switched to fixed 60 Hz at latency 2: 16 of 7,200 over 25 ms, p99 18.4 ms, zero late presents. External with the link off: 29,200 frames, p99 19.7 ms. An earlier external run at latency 1 dropped about 20–35 frames per 300 in the log, without a per-frame capture.
-- **Related built-in report:** on an M5 MacBook Air at fixed 60 Hz (macOS 27.2, `d2556cff` plus local changes), the same game in Hyrule Castle market dropped 233–279 of 300 frames per log sample once fullscreen slowed at latency 1. At `DM_PRESENT_LATENCY=2` it dropped 102 of 29,100 frames (0.35%). Each setting had one run. The report has no per-present timing capture, and the link-off case was not tried. [Follow-up on #2362](https://github.com/seedds/nxnative/issues/2362#issuecomment-6810253539)
-- **Open on main:** fixed-rate fullscreen still defaults to latency 1 and accepts both overrides. The later [callback latch](#the-callback-took-the-frame-queued-after-the-previous-tick) addresses a frame waiting in the host queue. The reporter's external-display signature has not been retested with it. The measured benefit of disabling the link is specific to the reported display and route.
+- **Symptom:** in fullscreen on a fixed 60 Hz external screen (a TV or monitor shown by direct scanout), a 60 fps game stutters and its frame step falls to 30 fps in stretches, while the same area holds 60 fps on the Mac's built-in screen at a fixed 60 Hz. GPU time is 12–13 ms a frame. In `DM_NVN_TSV`, `@pres_q_ms` reads about 16 ms and `@gpu_q_ms` rises with it.
+- **Cause:** `present_now` (`nvn_mtl.m`) issued `waitForDrawable:` on `g_q4`, the one Metal 4 queue that also carries the game's rendering. On the external screen the drawable is released one refresh later than on the built-in screen. Game command buffers committed after the present waited behind it on the queue, the next frame's GPU work started one refresh late, and the frame step fell to 30 fps.
+  - With `DM_PRESENT_QUEUE=0` on the TV below, 582 frames started their GPU work after an idle gap. 417 of them started 14–21 ms after the previous frame's present was taken.
+  - In those 417, `@gpu_q_ms` is 18.05 ms p50, and the frame's first commit lands at that take (GPU start after the take minus `@gpu_q_ms`: −0.17 ms p50). The queue wait is the whole late start.
+- **Fix:** the present runs on a queue of its own, `g_pq4` (`DM_PRESENT_QUEUE`, on by default on the Mac and iOS):
+  - `present_copy` copies the picture on `g_q4` into ring slot `ticket % 3` of `g_pring` (three private textures of the source's size and format), behind the frame's work and ahead of the game's next, and signals `g_pring_ev` to the present's ticket there.
+  - On `g_pq4` the present waits for that event, then `waitForDrawable:`; MetalFX and the present pass read the ring slot; then `signalDrawable:`.
+  - The game's texture is still read only on `g_q4`, so the release rules for window textures are unchanged.
+  - A source that is not a single-sample 2D texture, or a ring slot that cannot be made, presents on `g_q4` after the presents in flight on `g_pq4`.
+  - `DM_PRESENT_QUEUE=0` keeps the whole present on `g_q4`.
+- **Check:** two rows of the `DM_NVN_TSV` capture. `@gpu_q_ms` is the frame's first game command buffer, GPU start minus CPU commit; `@pres_q_ms` is the same for the present's command buffer.
+  - With the fix on the TV, `@pres_q_ms` reads about 16.5 ms: the drawable wait, now on `g_pq4`. `@gpu_q_ms` no longer follows it (correlation 0.02, against 0.55 with `DM_PRESENT_QUEUE=0`).
+  - The 8–10 ms left in `@gpu_q_ms` on every screen is the frame's first command buffer waiting behind the previous frame's GPU work.
+  - `make -C dm/gfx/tests GAME=<id> check_t_present_queue check_t_present_copy check_t_present_probes`. `t_present_queue`: a game submission completes while a present is held, a held present shows its own picture after the game draws over its texture, and a fourth present waits for its ring slot. `t_present_copy`: sRGB and swizzled sources, slots remade on a new size or format, a crop outside the texture, MetalFX reading the slot, the suspend drain. `t_present_probes`: the two rows on both paths.
+- **Measured:** MacBook Pro M5 Max, macOS 27.2; LG TV at 3840×2160, fixed 60 Hz, fullscreen, not mirrored; Ocarina of Time in the same area, one hand-played run per column, all from one build; display link on, frame latency 1; MetalFX spatial 2560×1440 to 3840×2160 (3456×1944 on the built-in screen). Frames at the 60 fps hold; a late frame has `@frame_ms` of 18.5 or more.
+
+  | | TV, `DM_PRESENT_QUEUE=0` | TV, default | Built-in at fixed 60 Hz, default |
+  |---|---|---|---|
+  | Frames at the 60 fps hold / at 30 fps | 1,549 / 1,199 | 4,571 / 0 | 3,775 / 0 |
+  | Late frames | 393 (25.4%) | 70 (1.5%) | 23 (0.6%) |
+  | Frame step changes | 13 | 0 | 0 |
+  | GPU start after the previous frame's take, p50 (frames that start after an idle gap) | 17.54 ms (582) | 1.08 ms (1,483) | 1.06 ms (1,353) |
+  | `@gpu_q_ms` p50 | 13.9 ms | 8.8 ms | 9.7 ms |
+  | `@pres_q_ms` p50 | 16.18 ms | 16.5 ms | 0.52 ms |
+  | `@pres_at_ms` − `@link_target_ms` p50 | 16.65 ms | 16.65 ms | −0.05 ms |
+  | GPU busy p50, on-time frames | 12.68 ms | 12.78 ms | 13.31 ms |
+  | Game enqueue to screen p50 (log) | 42.7–62.4 ms | 57.7–60.7 ms | 42.0–44.1 ms |
+
+- **Cost:** one copy of the picture per present on `g_q4`.
+  - Copy time alone on the M5 Max: 0.042 / 0.074 / 0.108 ms at 1280×720 / 1920×1080 / 2560×1440 for RGBA8, 0.055 / 0.105 / 0.175 ms for RGBA16F.
+  - The ring of three at those sizes: 10.5 / 23.7 / 42.2 MB for RGBA8, 21.1 / 47.5 / 84.4 MB for RGBA16F.
+- **Open:** on the TV each present reaches the screen one refresh after the link's target on both paths (16.65 ms above), so game enqueue to screen is about 59 ms against 43 ms on the built-in screen. The fix removes the 30 fps drops, not this refresh. Why the direct path to this TV shows the present one refresh after its target is not known.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072.
+  - [Issue #2362](https://github.com/seedds/nxnative/issues/2362), before the fix: M5 Pro MacBook Pro, macOS 27.3, external Mi Monitor at 2560×1440 and fixed 60 Hz, frame latency 2: 1,184 of 6,000 frames over 25 ms, 54% of presents one refresh after the link's target. With `DM_PRESENT_LINK=0`, frames over 25 ms fell from 19.7% to 0.52%. The built-in screen at a fixed 60 Hz: 16 of 7,200.
+  - The M5 Max and LG TV of the table.
+- **Not checked:**
+  - The iPhone.
+  - The Mi Monitor of #2362 with the fix.
+  - `DM_PRESENT_LINK=0` on the TV with the fix.
+  - The [built-in M5 MacBook Air report on #2362](https://github.com/seedds/nxnative/issues/2362#issuecomment-6810253539) (233–279 of 300 frames dropped per log sample at latency 1): not retested.
+  - Metal's ordering of the empty command buffer that follows a queue event wait on `g_pq4`, sent only when the present's encoder fails after the copy.
+- **Limits:**
+  - A cropped present with MetalFX copies the picture twice.
+  - A profile with `present_snap on` copies it twice per present.
+  - A sparse mapping update on `g_q4` can still land between a copy and its signal and delay that one present.
 
 ### The callback took the frame queued after the previous tick
 
@@ -828,7 +867,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   | | merged | 33.3-33.4 / 34.2-35.9 ms | 28.2-29.5 ms | 5 |
 
   In the slow state a profiled frame spans 36-43 ms merged (gaps before a submission 0.1 ms, between encoders 3.4-6.6 ms) against 46-80 ms (6-32 ms and 9.6-13.5 ms).
-- **Open:** the merge removes the gaps, not the low clock: in the slow state a frame now takes its GPU time plus about 4 ms (42-45 ms, 23 fps), and the governor holds the clock there, as the GPU reads about 88 % busy at any clock once the cap no longer bounds the frame. What is left of the host's share is the present. While the frame step shows late frames at the next vsync, the display link runs at frame latency 2 ([Frame latency 2 for the display link in fullscreen](#frame-latency-2-for-the-display-link-in-fullscreen) and `link_latency`), the present's wait for its drawable goes to the game's queue in front of the next frame's command buffer, and that command buffer waited 5 ms for it in the merged frames looked at. Frame latency 1 there is not the way out: with `DM_PRESENT_LATENCY=1` one load of four held its frames at 42-46 ms with 16.6 ms of GPU in them (the hold that rule was made for), and the governor then lowered the clock until the GPU filled them (38-41 ms). A present on a queue of its own, which frame generation's unmerged change already has for its presents, is the candidate; the latency itself was chosen for the M1 iPad's ProMotion screen and is not changed here. The Mac's path without the encode thread commits each submission as before. What decides the governor's clock after a load is not known.
+- **Open:** the merge removes the gaps, not the low clock: in the slow state a frame now takes its GPU time plus about 4 ms (42-45 ms, 23 fps), and the governor holds the clock there, as the GPU reads about 88 % busy at any clock once the cap no longer bounds the frame. What is left of the host's share is the present. While the frame step shows late frames at the next vsync, the display link runs at frame latency 2 ([Frame latency 2 for the display link in fullscreen](#frame-latency-2-for-the-display-link-in-fullscreen) and `link_latency`), the present's wait for its drawable went to the game's queue in front of the next frame's command buffer, and that command buffer waited 5 ms for it in the merged frames looked at. Frame latency 1 there is not the way out: with `DM_PRESENT_LATENCY=1` one load of four held its frames at 42-46 ms with 16.6 ms of GPU in them (the hold that rule was made for), and the governor then lowered the clock until the GPU filled them (38-41 ms). The present now waits for its drawable on a queue of its own, on iOS too ([Presents miss their target in fixed-rate external fullscreen](#presents-miss-their-target-in-fixed-rate-external-fullscreen)); not measured on the iPhone. The latency itself was chosen for the M1 iPad's ProMotion screen and is not changed here. The Mac's path without the encode thread commits each submission as before. What decides the governor's clock after a load is not known.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) on the iPhone 17, at night in Hyrule Field and Kakariko Village and in a fairy fountain (2026-11-14).
 - **Check:** `make -C dm/gfx/tests GAME=<id> check_t_feedback` (`merge_case`, in the run with `DM_NVN_ENC_THREAD=1`: three submissions recorded behind running work go to the queue in one commit, their notes follow it and each one's report reads its own end; a queue operation recorded inside the next submission, after its first pass, finds the held one committed alone, without that pass. The checks on the counts fail with `DM_NVN_SUB_MERGE=0`; a submission that ends after the GPU's work, before the feedback has reported it, is committed at once, which fails with `DM_NVN_SUB_IDLE_FB` on). On a device: `DM_NVN_GPUPROF=every:300`, then the gaps before each submission's first encoder in `dm/tools/gpuprof.py --timeline <frame>`, and play where textures stream in.
 

@@ -45,16 +45,29 @@ import Foundation
         expect(!m.rows(in: "Controls").contains { $0.env == "DM_RUMBLE_GAIN" }, "a sub-setting is hidden while its setting is off")
         expect(m.rows(in: "Controls").contains { $0.env == "DM_RUMBLE" }, "the setting it depends on stays drawn")
         m.values["DM_RUMBLE"] = "1"
-        // DM_LAUNCHER=0 skips the screen, not the saved choices; DM_SAVED_CHOICES=0 ignores them and leaves them stored
+        // DM_LAUNCHER=0 skips the screen, applying saved choices and launcher.json defaults without writing UserDefaults; DM_SAVED_CHOICES=0 ignores saved choices and leaves them stored
         let fps = file.settings.first { $0.env == "DM_FPS_TARGET" }!
-        d.set("30", forKey: "launcher.DM_FPS_TARGET"); unsetenv("DM_FPS_TARGET")
-        LauncherModel(file.settings, defaults: d).applySaved()
+        let snap = file.settings.first { $0.env == "DM_PRESENT_SNAP" }!
+        let mtl4 = file.settings.first { $0.env == "DM_PSO_MTL4" }!
+        d.set("30", forKey: "launcher.DM_FPS_TARGET"); d.removeObject(forKey: "launcher.DM_PSO_MTL4")
+        unsetenv("DM_FPS_TARGET"); unsetenv("DM_PRESENT_SNAP"); unsetenv("DM_PSO_MTL4")
+        LauncherModel(file.settings, defaults: d).apply(persist: false)
         expect(String(cString: getenv("DM_FPS_TARGET")) == "30" && d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "without the screen, a saved choice goes into the environment and stays saved")
-        setenv("DM_SAVED_CHOICES", "0", 1); unsetenv("DM_FPS_TARGET")
+        expect(String(cString: getenv("DM_PRESENT_SNAP")) == snap.def && String(cString: getenv("DM_PSO_MTL4")) == mtl4.def && d.string(forKey: "launcher.DM_PSO_MTL4") == nil, "without the screen, launcher.json defaults go into the environment without writing UserDefaults")
+        expect(String(cString: getenv("DM_METAL_HUD")) == "1", "without the screen, fixed env-file values are kept ahead of defaults")
+        let aspect = try! JSONDecoder().decode(Setting.self, from: Data(#"{"env":"DM_SCREEN_ASPECT","kind":"choice","label":"Picture shape","note":"","default":"auto","options":[["auto","Match screen"],["0","16:9"]]}"#.utf8))
+        unsetenv("DM_SCREEN_ASPECT")
+        LauncherModel([aspect], defaults: d).apply(persist: false)
+        expect(String(cString: getenv("DM_SCREEN_ASPECT")) == "auto" && d.string(forKey: "launcher.DM_SCREEN_ASPECT") == nil, "without the screen, an auto default (DM_SCREEN_ASPECT) is exported so front_ios.m resolves it")
+        setenv("DM_ENV_LAUNCH_KEYS", "DM_SCREEN_ASPECT", 1); setenv("DM_SCREEN_ASPECT", "0", 1)
+        LauncherModel([aspect], defaults: d).apply(persist: false)
+        expect(String(cString: getenv("DM_SCREEN_ASPECT")) == "0", "without the screen, a launch override wins over the launcher.json default")
+        unsetenv("DM_SCREEN_ASPECT"); setenv("DM_ENV_LAUNCH_KEYS", "", 1)
+        setenv("DM_SAVED_CHOICES", "0", 1); unsetenv("DM_FPS_TARGET"); unsetenv("DM_PSO_MTL4")
         let plain = LauncherModel(file.settings, defaults: d)
         expect(plain.values["DM_FPS_TARGET"] == fps.def, "DM_SAVED_CHOICES=0 starts from the defaults")
-        plain.applySaved()
-        expect(getenv("DM_FPS_TARGET") == nil, "DM_SAVED_CHOICES=0: nothing saved goes into the environment")
+        plain.apply(persist: false)
+        expect(String(cString: getenv("DM_FPS_TARGET")) == fps.def && String(cString: getenv("DM_PSO_MTL4")) == mtl4.def && d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "DM_SAVED_CHOICES=0 without the screen applies launcher.json defaults and leaves saved choices stored")
         plain.apply()
         expect(String(cString: getenv("DM_FPS_TARGET")) == fps.def && d.string(forKey: "launcher.DM_FPS_TARGET") == "30", "DM_SAVED_CHOICES=0: Play uses the screen's values and leaves the saved choices")
         plain.reset()

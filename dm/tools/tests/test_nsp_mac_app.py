@@ -794,7 +794,7 @@ class App(unittest.TestCase):
         self.assertEqual((p['CFBundleExecutable'], p['CFBundleName'], p['CFBundleIdentifier'], p['CFBundleShortVersionString']), ('nxnative', 'Game: Test', 'org.nxnative.01008cf01baac000', '1.0.1'))
         self.assertEqual((p['DMTitleID'], p['DMLanguage'], p['DMRomfsMarker'], p['CFBundleIconFile']), (TID, 'fr', 'region_common/audio/edward.bfsar', 'AppIcon'))
         self.assertIs(p['LSSupportsGameMode'], False)   # macOS's Game Mode holds the GPU at its lowest clock (frame-rate.md)
-        self.assertEqual(p['DMSettings'], [])   # launcher.json's settings, as the saved choices they accept: none here
+        self.assertNotIn('DMSettings', p)   # launcher.json is the single source of truth; no duplicate Info.plist rules
         self.assertRegex(p['DMCommit'], r'^[0-9a-f]{12}(\+dirty)?$')   # the packing checkout (scripts/bug_report.py, the host's start line)
         self.assertEqual(p['DMChain'], '0123456789ab')   # the chain of the libraries packed (msl/b-<chain>)
 
@@ -825,13 +825,14 @@ class App(unittest.TestCase):
             self.assertEqual(pack_app.info_plist(a, '14.0', None)['DMLanguage'], 'fr')   # no list: --lang as given
 
     def test_saved_choices(self):
-        """launcher.<VAR> in the app's preferences domain, as a front end or a settings window saves it: used from Finder or the Dock, checked against this build's settings,
-        after the launch environment, the player's env.txt and the bundle's, and ignored with DM_SAVED_CHOICES=0"""
+        """launcher.<VAR> in the app's preferences domain and launcher.json's tested defaults share the same precedence on no-window launches:
+        launch environment > player env.txt > bundle env.txt > saved choices (ignored with DM_SAVED_CHOICES=0) > launcher.json defaults, without writing preferences"""
         domain = f'org.nxnative.test.{uuid.uuid4().hex}'   # never a real game's domain
         listed = {'schema': 1, 'game': TID, 'settings': [
             {'env': 'DM_FPS_TARGET', 'kind': 'choice', 'section': 'Game', 'label': 'Frame rate', 'note': '', 'default': '60', 'options': [['30', '30 fps'], ['60', '60 fps']]},
             {'env': 'DM_RENDER_SCALE', 'kind': 'range', 'section': 'Game', 'label': 'Render scale', 'note': '', 'default': '1.0', 'min': 0.5, 'max': 1.0, 'step': 0.05},
             {'env': 'DM_FPS_HOLD', 'kind': 'toggle', 'section': 'Performance', 'label': 'Hold', 'note': '', 'default': 'on', 'on': 'on', 'off': 'off'},
+            {'env': 'DM_UPSCALER', 'kind': 'choice', 'section': 'Game', 'label': 'Upscaler', 'note': '', 'default': 'metalfx', 'options': [['game', 'Game'], ['metalfx', 'MetalFX']]},
             {'env': 'DM_LANG', 'kind': 'choice', 'section': 'Game', 'label': 'Language', 'note': '', 'default': 'fr', 'options': [['fr', 'French'], ['ja', 'Japanese']]},
             {'env': 'DM_BOTH', 'kind': 'choice', 'section': 'Game', 'label': 'Both', 'note': '', 'default': 'bundle', 'options': [['bundle', 'b'], ['player', 'p'], ['saved', 's']]},
             {'env': 'DM_BAKED', 'kind': 'toggle', 'section': 'Game', 'label': 'Baked', 'note': '', 'default': '1', 'on': '1', 'off': '0'}]}
@@ -851,33 +852,38 @@ class App(unittest.TestCase):
         def save(key, *value): subprocess.run(['defaults', 'write', domain, f'launcher.{key}', *value], check=True)
         try:
             app = pack('Saved', listed)
-            self.assertEqual(plistlib.loads((app / 'Contents/Info.plist').read_bytes())['DMSettings'][:3],
-                             [{'env': 'DM_FPS_TARGET', 'values': ['30', '60']}, {'env': 'DM_RENDER_SCALE', 'min': 0.5, 'max': 1.0}, {'env': 'DM_FPS_HOLD', 'values': ['on', 'off']}])
+            self.assertNotIn('DMSettings', plistlib.loads((app / 'Contents/Info.plist').read_bytes()))
             for key, value in [('DM_FPS_TARGET', '30'), ('DM_RENDER_SCALE', '0.75'), ('DM_FPS_HOLD', 'maybe'), ('DM_LANG', 'ja'), ('DM_BOTH', 'saved'), ('DM_BAKED', '0')]: save(key, '-string', value)
             save('DM_OPMODE', '-string', '0')   # not one of this build's settings
-            r = run(app)   # from Finder or the Dock: no environment of its own
-            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r.get('DM_FPS_HOLD')), ('30', '0.75', None))   # a value the toggle never takes is ignored
+            r = run(app)   # DM_LAUNCHER=0: saved choices and launcher.json defaults apply without writing preferences
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r['DM_FPS_HOLD'], r['DM_UPSCALER']), ('30', '0.75', 'on', 'metalfx'))   # invalid toggle falls back to default; unset setting gets launcher.json default
             self.assertEqual(r['DM_LANG'], 'ja')   # a saved choice before the packed language
             self.assertEqual((r['DM_BOTH'], r['DM_BAKED']), ('player', '1'))   # the player's env.txt and the bundle's win over a saved choice
             self.assertNotIn('DM_OPMODE', r)
             self.assertEqual((r['DM_ENV_FILE_KEYS'], r['DM_ENV_LAUNCH_KEYS']), ('DM_BOTH DM_BAKED', ''))   # what the settings window keeps: the env files' variables
-            r = run(app, DM_FPS_TARGET='60', DM_RENDER_SCALE='0.5')   # a front end's launch overrides: they win, and are not saved
-            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE']), ('60', '0.5'))
-            self.assertEqual(r['DM_ENV_LAUNCH_KEYS'], 'DM_FPS_TARGET DM_RENDER_SCALE')   # the window shows them fixed ("Set at launch")
-            r = run(app, args=['--no-launcher'], DM_LAUNCHER='1')   # open <app> --args --no-launcher: no window, the saved choices
-            self.assertEqual(r['DM_FPS_TARGET'], '30')
+            self.assertNotEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_UPSCALER'], capture_output=True).returncode, 0)   # defaults are not persisted on no-window launch
+            r = run(app, DM_FPS_TARGET='60', DM_RENDER_SCALE='0.5', DM_UPSCALER='game')   # a front end's launch overrides win over saved choices and launcher.json defaults, and are not saved
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r['DM_UPSCALER']), ('60', '0.5', 'game'))
+            self.assertEqual(r['DM_ENV_LAUNCH_KEYS'], 'DM_FPS_TARGET DM_RENDER_SCALE DM_UPSCALER')   # the window shows them fixed ("Set at launch")
+            r = run(app, args=['--no-launcher'], DM_LAUNCHER='1')   # open <app> --args --no-launcher: no window, saved choices + launcher.json defaults
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_UPSCALER']), ('30', 'metalfx'))
             self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
+            subprocess.run(['defaults', 'write', domain, 'window.show', '-bool', 'false'], check=True)
+            r = run(app, DM_LAUNCHER='1')   # "Show this window at launch" off: same resolved saved choices + launcher.json defaults
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_UPSCALER']), ('30', 'metalfx'))
+            subprocess.run(['defaults', 'delete', domain, 'window.show'], check=True)
             r = run(app, DM_SAVED_CHOICES='0')
-            self.assertEqual((r.get('DM_FPS_TARGET'), r.get('DM_RENDER_SCALE'), r['DM_LANG']), (None, None, 'fr'))
-            save('DM_RENDER_SCALE', '-float', '0.75')   # not a string
-            self.assertNotIn('DM_RENDER_SCALE', run(app))
-            save('DM_RENDER_SCALE', '-string', ' 0.75')   # a number the iPhone's settings screen would not take either
-            self.assertNotIn('DM_RENDER_SCALE', run(app))
-            save('DM_RENDER_SCALE', '-string', '0x1p-1')   # hex, which neither side takes (Setting.accepts)
-            self.assertNotIn('DM_RENDER_SCALE', run(app))
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_RENDER_SCALE'], r['DM_LANG'], r['DM_UPSCALER']), ('60', '1.0', 'fr', 'metalfx'))
+            self.assertEqual(subprocess.run(['defaults', 'read', domain, 'launcher.DM_FPS_TARGET'], capture_output=True, text=True).stdout.strip(), '30')
+            save('DM_RENDER_SCALE', '-float', '0.75')   # not a string -> falls back to launcher.json default
+            self.assertEqual(run(app)['DM_RENDER_SCALE'], '1.0')
+            save('DM_RENDER_SCALE', '-string', ' 0.75')   # a padded number Setting.accepts rejects -> falls back to default
+            self.assertEqual(run(app)['DM_RENDER_SCALE'], '1.0')
+            save('DM_RENDER_SCALE', '-string', '0x1p-1')   # hex Setting.accepts rejects -> falls back to default
+            self.assertEqual(run(app)['DM_RENDER_SCALE'], '1.0')
             listed['settings'][0]['options'] = [['60', '60 fps']]; listed['settings'][0]['default'] = '60'   # a rebuild that no longer offers 30 fps
             r = run(pack('Rebuilt', listed))
-            self.assertEqual((r.get('DM_FPS_TARGET'), r['DM_LANG']), (None, 'ja'))   # the host's tested default; the other saved choices still hold
+            self.assertEqual((r['DM_FPS_TARGET'], r['DM_LANG']), ('60', 'ja'))   # falls back to the new build's tested default; the other saved choices still hold
             self.assertIn('saved choice DM_FPS_TARGET=30 ignored', (self.tmp / f'home/Library/Logs/nxnative/{TID}.log').read_text())
         finally:
             subprocess.run(['defaults', 'delete', domain], capture_output=True)

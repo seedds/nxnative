@@ -82,6 +82,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Bloodstained: Curse of the Moon](01004B800AF5A000/README.md) | `01004B800AF5A000` | 1.1.1 | 4.5.0 | Inti Creates' engine | NVN | — |
 | [Bloodstained: Curse of the Moon 2](01004680124E6000/README.md) | `01004680124E6000` | 1.3.2 | 10.6.0 | Inti Creates' engine | NVN | — |
 | [Bloodstained: Ritual of the Night](0100BF500207C000/README.md) | `0100BF500207C000` | 1.60 | 7.6.0 | Unreal Engine 4, CRIWARE | NVN | 60 fps target |
+| [Boomerang Fu](010081A00EE62000/README.md) | `010081A00EE62000` | 1.3.7 | 18.3.5 | Unity 2022.3.54f1 IL2CPP, FMOD | NVN | — |
 | [Borderlands: Game of the Year Edition](010064800F66A000/README.md) | `010064800F66A000` | 1.0.2 | 9.3.0 | Unreal Engine 3 (package version 595), FMOD | NVN | 60 fps target |
 | [Brain Memory Training Academy](0100F5D01DA3A000/README.md) | `0100F5D01DA3A000` | 1.0.0 (base) | 16.2.4 | Unity 2022.3.5f1 IL2CPP | NVN | — |
 | [BRAVELY DEFAULT Ⅱ](01006DC010326000/README.md) | `01006DC010326000` | 1.0.0 (base) | 10.4.0 | Unreal Engine 4.23, CRIWARE | NVN | [60 fps target](01006DC010326000/README.md#frame-rate) |

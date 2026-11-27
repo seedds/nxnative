@@ -634,28 +634,32 @@ static void fam_set_valid(NvImageHeap *o, uint64_t wh) {
     os_unfair_lock_unlock(&o->pool_lk);
     if (!any) return;
     uint64_t stack_s[32], *sers = stack_s; uint32_t ns = 0, cap = 32;
-    os_unfair_lock_lock(&g_rmu);
+    // Which serials a pool ID still registers is g_treg_serial's, under g_rmu. A size switch can come where this thread already holds it: rp_end_at ends a pass that a pool
+    // walk's texture upgrade began (encode_args_full -> pool_gpu -> pool_entry -> tex_upgrade -> blit -> rp_end_at -> fam_mark_valid; Ocarina of Time, #3404), and taking it
+    // again aborted the host (os_unfair_lock is not recursive). So the lock is only tried: held by any thread, the list is noted as it stands, unpruned (a noted serial that
+    // no ID holds patches nothing), and the next miss (fam_track_pool_serial) or switch prunes it
+    int prune = os_unfair_lock_trylock(&g_rmu), lost = 0;
     os_unfair_lock_lock(&o->pool_lk);
     uint32_t keep = 0;
     for (uint32_t i = 0; i < o->npool_sers; i++) {
         uint64_t ser = o->pool_sers[i].serial;
-        if (!treg_serial_held(ser)) continue;
+        if (prune && !treg_serial_held(ser)) continue;
         o->pool_sers[keep++] = o->pool_sers[i];
         uint64_t ewh = o->pool_sers[i].wh;
         if (ewh != prev && ewh != wh) continue;
         if (ns == cap) {
-            cap *= 2;
-            uint64_t *nb = sers == stack_s ? malloc(cap * sizeof *nb) : realloc(sers, cap * sizeof *nb);
-            if (!nb) break;
+            uint64_t *nb = sers == stack_s ? malloc(cap * 2 * sizeof *nb) : realloc(sers, cap * 2 * sizeof *nb);
+            if (!nb) { lost = 1; continue; }   // kept, not noted: the epoch below sends every texture ID down the slow path instead
             if (sers == stack_s) memcpy(nb, stack_s, ns * sizeof *nb);
-            sers = nb;
+            sers = nb; cap *= 2;
         }
         sers[ns++] = ser;
     }
     o->npool_sers = keep;
     os_unfair_lock_unlock(&o->pool_lk);
-    os_unfair_lock_unlock(&g_rmu);
+    if (prune) os_unfair_lock_unlock(&g_rmu);
     for (uint32_t i = 0; i < ns; i++) own_note(sers[i]);
+    if (lost) own_epoch();
     if (sers != stack_s) free(sers);
 }
 static inline void fam_mark_valid(id<MTLTexture> t) {

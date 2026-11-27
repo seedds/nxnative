@@ -346,6 +346,26 @@ static void pool_serials(void) {
         fam_set_valid(o,wh); fam_set_valid(o,0);
         uint64_t notes2=atomic_load(&g_ser_gen)-sg;
         CHECK(notes2==2,"size round trip after post-burst prune emits only 2 notes");
+        // A size switch can come where this thread holds g_rmu: a pass that a pool walk's texture upgrade ends (encode_args_full -> pool_gpu -> pool_entry -> tex_upgrade ->
+        // blit -> rp_end_at -> fam_mark_valid; Ocarina of Time, #3404). Taking the lock again aborted the host (a recursive os_unfair_lock). With it held the switch notes the
+        // list's serials of the two sizes as they stand, and the next switch with the lock free prunes them
+        for (int i=0;i<BURST;i++) {
+            burst[i]=image(&pool,999100+i,1440,810); burst[i].d.format=NVN_FORMAT_RGBA16F; burst[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&burst[i].d,&burst[i].L); mtl_tex_init(&burst[i]);
+            CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"third burst texture joins the compressed family");
+            mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
+            int g=0,l=0,lr=0,tr=0,d=0;
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        }
+        for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
+        sg=atomic_load(&g_ser_gen);
+        os_unfair_lock_lock(&g_rmu); fam_set_valid(o,wh); fam_set_valid(o,0); os_unfair_lock_unlock(&g_rmu);
+        uint64_t notes3=atomic_load(&g_ser_gen)-sg;
+        os_unfair_lock_lock(&o->pool_lk); uint32_t nh=o->npool_sers; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(nh==1+BURST && notes3==2*(1+BURST),"with g_rmu held, a size round trip does not abort: it notes the list as it stands (the live serial and 16 unregistered), unpruned");
+        sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);
+        os_unfair_lock_lock(&o->pool_lk); uint32_t n3=o->npool_sers; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(atomic_load(&g_ser_gen)-sg==2 && n3==1,"with g_rmu free again, the round trip prunes the unregistered serials and notes only the live one");
     }
     mtl_reg_tex_gone(ID); mtl_tex_release(&t[!cur]); mtl_tex_release(&big);
     mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);

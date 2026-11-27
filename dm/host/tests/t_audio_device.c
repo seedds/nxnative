@@ -2,6 +2,7 @@
 // including synchronous format notifications from a buffer write and device removal during disposal. No hardware needed.
 #include <AudioToolbox/AudioToolbox.h>
 #include <assert.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <time.h>
 
@@ -46,8 +47,16 @@ static OSStatus mock_route_remove(AudioObjectID id, const AudioObjectPropertyAdd
 }
 #define AudioObjectAddPropertyListener mock_route_add
 #define AudioObjectRemovePropertyListener mock_route_remove
+static int mock_once(pthread_once_t *, void (*)(void));
+#define pthread_once mock_once
 #include "../hle_audio.c"
+#undef pthread_once
 __thread _Atomic int dm_host_work;   // defined by the graphics host in a full build
+
+// The fixture steps the watchdog itself. Keep the route listener's normal initialization.
+static int mock_once(pthread_once_t *once, void (*init)(void)) {
+    return init == au_watchdog_start ? 0 : pthread_once(once, init);
+}
 
 static struct {
     AudioDeviceID device;
@@ -217,13 +226,34 @@ static void *guest_close(void *out) { h_au_Close(out); dispatch_semaphore_signal
 static int signaled(dispatch_semaphore_t s, int seconds) {
     return dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, seconds * (int64_t)NSEC_PER_SEC)) == 0;
 }
+static void wait_for_phase(aout *a, int phase) {
+    uint64_t until = now_ns() + 3 * NSEC_PER_SEC;
+    for (;;) {
+        pthread_mutex_lock(&g_aos_lock);
+        int ready = a->start_phase == phase;
+        pthread_mutex_unlock(&g_aos_lock);
+        if (ready) return;
+        assert(now_ns() < until);
+        usleep(1000);
+    }
+}
+static void watchdog_retry(aout *a) {
+    wait_for_phase(a, AU_IDLE);
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t t = now_ns();
+    if (t < a->retry_at) t = a->retry_at;
+    au_watchdog_output(a, t, WD_TICK_MS * 1000000ull);
+    pthread_mutex_unlock(&g_aos_lock);
+}
 static void blocked_start(void *out) {
+    const uint64_t tick = WD_TICK_MS * 1000000ull;
+    enum { callback_frames = RATE / 100 };
     start_entered = dispatch_semaphore_create(0);
     start_allowed = dispatch_semaphore_create(0);
     guest_returned = dispatch_semaphore_create(0);
     device_stopped = dispatch_semaphore_create(0);
     guest_closed = dispatch_semaphore_create(0);
-    static int16_t pcm[480 * 2];
+    static int16_t pcm[callback_frames * 2];
     aout_buf b = {.ptr = pcm, .cap = sizeof pcm, .size = sizeof pcm};
     assert(h_au_Append(out, &b));
     pthread_t guest;
@@ -244,16 +274,24 @@ static void blocked_start(void *out) {
     for (unsigned i = 0; i < sizeof music / sizeof *music; i++) music[i] = 1234;
     aout_buf next = {.ptr = music, .cap = sizeof music, .size = sizeof music};
     assert(h_au_Append(out, &next));
-    int16_t samples[2] = {-1, -1};
+    int16_t samples[callback_frames * 2] = {-1, -1};
     AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof samples, samples}}};
     aout *a = ao(out);
-    au_render(a, NULL, NULL, 0, 1, &bl);
+    au_render(a, NULL, NULL, 0, callback_frames, &bl);
     assert(!samples[0] && !samples[1]);
     dispatch_semaphore_signal(start_allowed);
     pthread_join(guest, NULL);
-    until = now_ns() + NSEC_PER_SEC;
-    do { au_render(a, NULL, NULL, 0, 1, &bl); if (samples[0]) break; usleep(1000); } while (now_ns() < until);
+    wait_for_phase(a, AU_WAIT_CALLBACK);
+    au_render(a, NULL, NULL, 0, callback_frames, &bl);
+    assert(!samples[0] && !samples[1]);
+    pthread_mutex_lock(&g_aos_lock);
+    au_watchdog_output(a, a->wd_t + tick, tick);
+    pthread_mutex_unlock(&g_aos_lock);
+    au_render(a, NULL, NULL, 0, callback_frames, &bl);
     assert(samples[0] == 1234 && samples[1] == 1234);
+    for (unsigned frame = callback_frames; frame < RATE; frame += callback_frames)
+        au_render(a, NULL, NULL, 0, callback_frames, &bl);
+    assert(h_au_Released(out) == &next);
 
     dm_audio_suspend(1);
     assert(signaled(device_stopped, 1));
@@ -261,19 +299,31 @@ static void blocked_start(void *out) {
     assert(signaled(start_entered, 2));
     // A successful start with no callbacks keeps releasing buffers and is retried.
     dispatch_semaphore_signal(start_allowed);
-    assert(signaled(device_stopped, 3));
+    wait_for_phase(a, AU_WAIT_CALLBACK);
+    pthread_mutex_lock(&g_aos_lock);
+    uint64_t deadline = a->wd_t + NSEC_PER_SEC;
+    au_watchdog_output(a, deadline - 1, tick);
+    assert(!signaled(device_stopped, 0));
+    au_watchdog_output(a, deadline, 1);
+    assert(signaled(device_stopped, 0));
+    pthread_mutex_unlock(&g_aos_lock);
+    assert(h_au_Append(out, &b));
     until = now_ns() + NSEC_PER_SEC;
     while (!(released = h_au_Released(out)) && now_ns() < until) usleep(1000);
-    assert(released == &next);
+    assert(released == &b);
+    watchdog_retry(a);
     assert(signaled(start_entered, 3));
     start_result = kAudioUnitErr_FailedInitialization;
     dispatch_semaphore_signal(start_allowed);
+    watchdog_retry(a);
     assert(signaled(start_entered, 4));
     // Reset while the retry blocks. The old unit stays alive until Start returns, then its replacement starts.
     start_result = noErr;
     dm_audio_reset(); assert(unit.disposals == 0);
     dispatch_semaphore_signal(start_allowed);
-    assert(signaled(device_stopped, 1) && signaled(start_entered, 2));
+    assert(signaled(device_stopped, 1));
+    watchdog_retry(a);
+    assert(signaled(start_entered, 2));
     assert(unit.disposals == 1);
     // Close returns while the driver still blocks Start: it unregisters the output and leaves the unit to the start's worker,
     // which stops and disposes it when Start returns.
@@ -382,19 +432,7 @@ static void test_route_layouts(void) {
     assert(dm_audio_route() == 2);
     SET_LAYOUT(memset(&route_layout, 0, sizeof route_layout)); unit.route_ch = 2; dm_audio_route_changed();
 }
-static void wait_for_phase(aout *a, int phase) {
-    uint64_t until = now_ns() + 3 * NSEC_PER_SEC;
-    for (;;) {
-        pthread_mutex_lock(&g_aos_lock);
-        int ready = a->start_phase == phase;
-        pthread_mutex_unlock(&g_aos_lock);
-        if (ready) return;
-        assert(now_ns() < until);
-        usleep(1000);
-    }
-}
-// Drive the watchdog's time explicitly before any AudioOut has started the watchdog thread.
-// The only wall-clock limits are for synchronizing with the normal asynchronous start worker.
+// Drive the watchdog's time explicitly. The wall-clock limits synchronize with the asynchronous start worker.
 static void test_same_channel_route(void) {
     aout a = {.au = fake_au(), .ch = 2, .dev_ch = 2, .state = STATE_STARTED, .backend = BK_AU, .vol = 0x3f800000u};
     int16_t pcm[2] = {1234, 1234};

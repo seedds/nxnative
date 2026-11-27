@@ -49,8 +49,9 @@ check_t_rt_unbind: t_rt_unbind
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
 # runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front, t_link_ticks_screen),
 # fixtures test_image_atomic_bounds.py and test_global_memory.py build themselves (t_atomic_return, t_global_memory), t_geometry_primitive_id (the GPU half of test_dmsh_geometry.py, which gives it the directory of
-# its translated fixtures), t_compute_loops (test_dmsh_compute_loops.py supplies its rewritten fixtures), t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml), t_gpu_fault_kinds, whose cases fault the GPU on purpose, and t_metalwa (the GPU half of test_dmsh_metalwa.py)
-NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_link_ticks_screen t_atomic_return t_global_memory t_geometry_primitive_id t_compute_loops t_gpuprof t_gpu_fault_kinds t_metalwa
+# its translated fixtures), t_compute_loops (test_dmsh_compute_loops.py supplies its rewritten fixtures), t_gpuprof, which CI's CPU subset runs (.github/workflows/tests.yml), t_gpu_fault_kinds, whose cases fault the GPU on purpose, t_metalwa (the GPU half of test_dmsh_metalwa.py),
+# and t_present_queue, whose first case fails while a present's drawable wait holds back the game's Metal 4 queue (make check_t_present_queue runs it)
+NOT_RUN = t_host_stubs t_present_rescue_focus t_gpu_lost_front t_link_ticks_screen t_atomic_return t_global_memory t_geometry_primitive_id t_compute_loops t_gpuprof t_gpu_fault_kinds t_metalwa t_present_queue
 RUN_TESTS = $(filter-out $(NOT_RUN),$(basename $(sort $(wildcard t_*.c t_*.m))))
 check_t_%: t_%
 	$(RUN_ENV) ./$<
@@ -362,6 +363,12 @@ t_present_probes: t_present_probes.m $(MTL_T_DEP)
 check_t_present_probes: t_present_probes
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_present_probes
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_present_probes
+t_present_queue: t_present_queue.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_queue.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_queue
+check_t_present_queue: t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_present_queue
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)

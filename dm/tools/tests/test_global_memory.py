@@ -1,4 +1,4 @@
-"""Maxwell global memory through the translator, on synthetic compute shaders only (no game inputs): ATOM.CAS, and the signed displacement of LDG / RED / ATOM
+"""Maxwell global memory through the translator, on synthetic compute shaders only (no game inputs): ATOM.CAS, and the signed displacement of LDG / STG / RED / ATOM
 addresses with the extended (.E) high word.
 
   DMSH_TEST_XLATE=/absolute/path/to/dmsh_xlate python3 -m unittest -v dm/tools/tests/test_global_memory.py
@@ -27,7 +27,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 RYU = ROOT / 'dm/third_party/ryujinx/src/Ryujinx.Graphics.Shader'
 sys.path[:0] = [str(ROOT / 'dm/gfx/tools'), str(ROOT / 'dm/ios/tools')]
-import dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
+import dmsh_abi, dmsh_chain, ios_metal   # noqa: E402  (the builds' Metal compiles)
 SPIRV_CROSS = ROOT / 'dm/gfx/tools/spirv_cross_bin/spirv-cross'
 XC = dmsh_chain.CROSS_MSL
 OP_ATOMIC_COMPARE_EXCHANGE = 230
@@ -45,7 +45,7 @@ def encoder():
 
 
 def shader(op, *, via='c0', disp=0, advance=0, extended=True, pred=7, pred_inv=False, runtime_pred=False, compare=0, value=0, rd=4, rb=6, size64=False, bits50=0):
-    """op: 'cas' (ATOM.CAS Rd, [R2 + disp], Rb, Rb+1), 'ldg' (LDG.32 Rd, [R2 + disp]) or 'red' (RED.ADD.U32 [R2 + disp], R7). R2 / R3: the guest address from c0
+    """op: 'cas' (ATOM.CAS Rd, [R2 + disp], Rb, Rb+1), 'ldg' (LDG.32 Rd, [R2 + disp]), 'stg' (STG.32 [R2 + disp], R7) or 'red' (RED.ADD.U32 [R2 + disp], R7). R2 / R3: the guest address from c0
     plus the advance (via 'c0'), or the pointer in words 2 / 3 (via 'pointer'). The result register goes to word 8 (STG through c0's address)"""
     base = encoder()
     def mov(r, n): return base('Mov32i') | ((n & 0xffffffff) << 20) | (7 << 16) | (15 << 12) | r
@@ -69,6 +69,8 @@ def shader(op, *, via='c0', disp=0, advance=0, extended=True, pred=7, pred_inv=F
         ops.append(base('AtomCas') | (e << 48) | (int(size64) << 49) | (bits50 << 50) | ((disp & 0xfffff) << 28) | (rb << 20) | guard | (2 << 8) | rd)
     elif op == 'ldg':
         ops.append(base('Ldg') | (4 << 48) | (e << 45) | ((disp & 0xffffff) << 20) | guard | (2 << 8) | rd)
+    elif op == 'stg':
+        ops.append(base('Stg') | (4 << 48) | (e << 45) | ((disp & 0xffffff) << 20) | guard | (2 << 8) | (rb + 1))
     else:
         assert op == 'red'
         ops.append(base('Red') | (e << 48) | ((disp & 0xfffff) << 28) | guard | (2 << 8) | (rb + 1))
@@ -95,9 +97,11 @@ def expected(op, *, guest, via='c0', disp=0, advance=0, runs=True, compare=0, va
             if w[at] == compare: w[at] = value
         elif op == 'ldg':
             result = w[at]
+        elif op == 'stg':
+            w[at] = value & 0xffffffff
         else:
             w[at] = (w[at] + value) & 0xffffffff
-    w[8] = PLACEHOLDER if op == 'red' or rd == 255 else result
+    w[8] = PLACEHOLDER if op in ('red', 'stg') or rd == 255 else result
     return w
 
 
@@ -128,6 +132,7 @@ CASES = [
     ('ldg_negative_disp', 'ldg', dict(disp=-4, advance=8), (HI, LO), 1),
     ('ldg_negative_disp_borrow', 'ldg', dict(disp=-8, advance=12), (1, 0xfffffff8), 1),
     ('red_negative_disp', 'red', dict(disp=-4, advance=8, value=5), (HI, LO), 1),
+    ('stg_negative_disp', 'stg', dict(disp=-4, advance=8, value=0x5a5a1234), (HI, LO), 1),
     ('red_negative_disp_32bit_address', 'red', dict(extended=False, disp=-4, advance=8, value=5), (0, LO), 1),
     ('pointer_cas', 'cas', dict(via='pointer', compare=INIT[0], value=99), (HI, LO), 1),
     ('pointer_cas_negative_disp', 'cas', dict(via='pointer', disp=-4, advance=8, compare=INIT[1], value=99), (HI, LO), 1),
@@ -135,6 +140,9 @@ CASES = [
     ('pointer_ldg_negative_disp', 'ldg', dict(via='pointer', disp=-4, advance=8), (HI, LO), 1),
     ('pointer_ldg_negative_disp_borrow', 'ldg', dict(via='pointer', disp=-8, advance=12), (1, 0xfffffff8), 1),
     ('pointer_red_negative_disp', 'red', dict(via='pointer', disp=-4, advance=8, value=5), (HI, LO), 1),
+    ('pointer_stg', 'stg', dict(via='pointer', advance=16, value=0x5a5a1234), (HI, LO), 1),
+    ('pointer_stg_negative_disp', 'stg', dict(via='pointer', disp=-4, advance=8, value=0x5a5a1234), (HI, LO), 1),
+    ('pointer_stg_negative_disp_borrow', 'stg', dict(via='pointer', disp=-8, advance=12, value=0x5a5a1234), (1, 0xfffffff8), 1),
 ]
 SHADER_ARGS = ('via', 'disp', 'advance', 'extended', 'pred_inv', 'runtime_pred', 'compare', 'value', 'rd', 'rb')
 
@@ -186,6 +194,10 @@ class GlobalMemory(unittest.TestCase):
             members = [f'{role[b["cb_slot"], b["cb_offset"]]}={ids["cp_s%d" % b["slot"]]}' for b in sbufs if (b['cb_slot'], b['cb_offset']) in role]
             members.append('s=' + ','.join(ids['cp_s%d' % b['slot']] for b in sbufs if b['cb_slot'] == 0))   # every one of the c0 descriptor's storage buffers
             if 'cp_c0' in ids: members.append('c0=' + ids['cp_c0'])
+            sblen_key = f'cp_c{dmsh_abi.SBLEN_BANK}'
+            if sblen_key in ids:
+                bounded = ','.join(str(b['slot']) for b in sbufs if b['cb_slot'] == 0 and b['flags'] & 2)
+                members.append(f'sblen={ids[sblen_key]}:{bounded}')
             run = subprocess.run([str(exe), str(lib), *members, *(f'{o:#x}={v:#x}' for o, v in c0.items()), *extra],
                                  check=True, capture_output=True, text=True, env=dict(os.environ, MTL_DEBUG_LAYER='1'))
             got = [int(x, 16) for x in run.stdout.split()]

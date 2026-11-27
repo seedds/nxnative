@@ -29,6 +29,7 @@
 #include "pad_apple.h"
 #include "pad_slots.h"
 #include "ctrl_prompt.h"
+#include "pad_switch2_apple.h"
 #include <stdatomic.h>
 #import "DmLayout.h"
 #import "DmGameMenu.h"
@@ -569,6 +570,10 @@ static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 327
 static const char *pad_name(GCController *c);
 static void npad_name(int p, char *out, size_t cap);
 static int cp_poll(void);
+static int s2pad_player(s2_pad *d);
+static void s2pad_read(s2_pad *d);
+static int g_merge_s2_rumble;   // DM_PAD_MERGE: player 1's rumble goes to the Switch 2 pads (merge_rumble_to_s2)
+static void merge_rumble_to_s2(int on);
 static void pad_report(GCController *c, uint64_t m, float lx, float ly, float rx, float ry) {
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); if (p < 0 && !g_press_to_join) return;
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, a press the game also gets
@@ -579,6 +584,7 @@ static void pad_report(GCController *c, uint64_t m, float lx, float ly, float rx
         npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
+    if (g_merge_s2_rumble && m) merge_rumble_to_s2(0);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad
     dm_haptics_apple_controller(p, c);
     dm_pad_set_player(p, m, axis(lx), axis(ly), axis(rx), axis(ry));
 }
@@ -654,24 +660,36 @@ static void pad_unlisten(GCController *c) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+// Switch 2 controllers over Bluetooth LE (pad_switch2_apple.h, shared with the Mac front end): a pad is a player's controller as a GameController one is, in the same slots.
+// iOS cannot give the transport this device's Bluetooth address, so a controller is used without bonding: hold Sync on it after each start of the game
+static const dm_switch2_front g_s2front;
+static int g_s2_off;   // the app is in the background or resigning: no Switch 2 input reaches the game
 static void pads_start(void) {
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
     LOG("front end: %s", g_merge ? "every controller is player 1 (DM_PAD_MERGE)" : "each controller is a player of its own, the touch gamepad plays with player 1");
     if (g_press_to_join) LOG("front end: a controller becomes a player at its first button press, the lowest player free (DM_PAD_PRESS_TO_JOIN)");
+    if (dm_switch2_start(&g_s2front)) LOG("front end: Switch 2 controllers: hold Sync on one to use it (no bonding on iOS: again after each start)");
+}
+static BOOL merge_pads_left(GCController *gone) {
+    if (dm_switch2_pads()) return YES;
+    for (GCController *c in GCController.controllers) if (c != gone && pad_usable(c)) return YES;
+    return NO;
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
     if (gone) dm_motion_detach(gone, 0);
-    BOOL any = NO; int motion = 0;
+    BOOL any_gc = NO; int motion = 0;
     for (GCController *c in GCController.controllers) if (c != gone && pad_usable(c)) {
         if (c.motion.hasRotationRate) motion = 1;
-        any = YES; pad_listen(c);
+        any_gc = YES; pad_listen(c);
         dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
         read_pad(c);
     }
-    if (!any || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
-    if (!any) { dm_haptics_apple_controller(0, nil); dm_pad_set(0, 0, 0, 0, 0); }
+    if (!any_gc || !motion) dm_motion_clear(0);   // the phone's gyro (if on) takes over from its next sample
+    if (!any_gc) dm_haptics_apple_controller(0, nil);
+    BOOL any = any_gc || dm_switch2_pads() != NULL;
+    if (!any) dm_pad_set(0, 0, 0, 0, 0);
     return any;
 }
 static BOOL pads_slotted(GCController *gone) {
@@ -697,9 +715,22 @@ static BOOL pads_slotted(GCController *gone) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         read_pad(c);
     }
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) waiting = YES;
     dm_pad_players(pad_slot_mask(&g_slots));
     dispatch_async(dispatch_get_main_queue(), ^{ cp_poll(); });   // a controller came or went while the controller applet's prompt is up
     return waiting || pad_slot_mask(&g_slots) != 0;   // a controller waiting for its first press hides the touch gamepad too
+}
+// Nothing the controllers pressed stays pressed (resign active, user picker, controller prompt open); main queue
+static void pads_release(void) {
+    if (g_merge) { if (merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0); return; }
+    for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) { int p = s2pad_player(d); if (p >= 0) { dm_pad_set_player(p, 0, 0, 0, 0, 0); dm_joy_set(p, 0, 0, 0, 0); dm_joy_set(p, 1, 0, 0, 0); } }
+}
+// Each controller read as it is now (controller prompt closed); main queue
+static void pads_reread(void) {
+    if (g_merge) { for (GCController *c in GCController.controllers) if (pad_usable(c)) read_pad(c); }
+    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) read_pad(g_held[p]);
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d);
 }
 - (void)padsChanged:(NSNotification *)note {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
@@ -736,10 +767,12 @@ static void cp_buttons(int *a, int *b) {
             *a |= (m & DM_BTN_A) != 0; *b |= (m & DM_BTN_B) != 0;
         }
     }
+    for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2_pad_ab(&d->st, a, b);   // Switch 2 controllers (pad_switch2_apple.h)
 }
 static int cp_waiting(void) {   // connected controllers that are no player yet
     int n = 0;
     if (!g_merge) for (GCController *c in GCController.controllers) if (pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) n++;
+    if (!g_merge) for (s2_pad *d = dm_switch2_pads(); d; d = d->next) if (pad_slot_of(&g_slots, d) < 0) n++;
     return n;
 }
 static UILabel *cp_label(const char *text, CGFloat size, UIFontWeight w, CGFloat alpha) {
@@ -793,7 +826,7 @@ static int cp_poll(void) {
         g_cp_ok = g_cp.ok; dispatch_semaphore_signal(g_cp_done);
         ph = cp_step(&g_cp, joined, 0, a, b, 0, 0);   // nothing held: the game has its input at once
     }
-    if (ph == CP_IDLE) { for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) read_pad(g_held[p]); return 0; }   // each controller read as it is now
+    if (ph == CP_IDLE) { pads_reread(); return 0; }   // each controller read as it is now
     return 1;
 }
 int front_ctrl_support(int min, int max) {
@@ -801,7 +834,7 @@ int front_ctrl_support(int min, int max) {
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
         [g_view reset]; dm_touch_set(NULL, 0);   // nothing the game held stays pressed while the prompt has the input
-        if (g_merge) dm_pad_set(0, 0, 0, 0, 0); else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+        pads_release();
         int a, b; cp_buttons(&a, &b);
         g_cp_done = done; cp_open(&g_cp, min, max, dm_players_reported(), a, b);
         LOG("front end: controller prompt open: %d to %d players wanted, %d in, %d controllers waiting to join", min, max, g_cp.joined, cp_waiting());
@@ -810,6 +843,56 @@ int front_ctrl_support(int min, int max) {
     dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
     return g_cp_ok;
 }
+static int s2pad_player(s2_pad *d) { return g_merge ? 0 : pad_slot_of(&g_slots, d); }
+// DM_PAD_MERGE: player 1's rumble follows the controller last used, as pad_report hands it to a GameController one (as front_mac.m)
+static void merge_rumble_to_s2(int on) {
+    if (!g_merge || g_merge_s2_rumble == on) return;
+    g_merge_s2_rumble = on; dm_haptics_apple_set_sink(0, on ? dm_switch2_rumble : NULL);
+}
+static int s2pad_blocked(void) { return g_s2_off || cp_blocks_input(g_cp.phase); }   // no input to the game (in the background, or the controller prompt up)
+static void s2pad_read(s2_pad *d) {
+    if (g_s2_off) return;
+    int p = s2pad_player(d);
+    uint64_t m; int32_t st[4]; if (!s2_pad_input(&d->st, &m, st)) return;
+    if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button, as a GameController one does (pad_report)
+        char nb[16];
+        if (!g_press_to_join || !m) return;
+        if ((p = pad_slot_take_lowest(&g_slots, d, d->name)) < 0) { LOG("controller '%s' (Bluetooth): a button pressed, but all %d players are taken", d->name, DM_PLAYERS); return; }
+        dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble);   // its rumble goes over Bluetooth, not to a Core Haptics engine
+        npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth): a button pressed: player %d (npad %s)", d->name, p + 1, nb);
+        [g_view padsChanged:nil];   // the touch gamepad hides
+    }
+    if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
+    if (m) merge_rumble_to_s2(1);
+    if (g_merge) dm_pad_set(m, st[0], st[1], st[2], st[3]); else dm_pad_set_player(p, m, st[0], st[1], st[2], st[3]);
+}
+static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its first button press); 0: no free player (pad_switch2_apple.h)
+    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); [g_view padsChanged:nil]; cp_poll(); return 1; }
+    int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
+    if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return 0; }
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);
+    if (!g_merge) { dm_pad_players(pad_slot_mask(&g_slots)); dm_haptics_apple_set_sink(p, dm_switch2_rumble); }   // its rumble goes over Bluetooth, not to a Core Haptics engine
+    [g_view padsChanged:nil];   // the touch gamepad hides
+    cp_poll();   // one controller fewer to wait for
+    return 1;
+}
+static void s2pad_detach(s2_pad *d) {   // d is already off the transport's list
+    if (g_merge) {
+        LOG("controller '%s' (Bluetooth) disconnected", d->name);
+        if (!dm_switch2_pads()) merge_rumble_to_s2(0);
+        if (!merge_pads_left(nil)) dm_pad_set(0, 0, 0, 0, 0);
+        [g_view padsChanged:nil];
+        return;
+    }
+    int p = pad_slot_free(&g_slots, d); char nb[16]; if (p < 0) { [g_view padsChanged:nil]; cp_poll(); return; }   // one that had not joined: one fewer waiting
+    dm_haptics_apple_set_sink(p, NULL);
+    npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) disconnected: player %d (npad %s) is free", d->name, p + 1, nb);
+    dm_pad_set_player(p, 0, 0, 0, 0, 0);
+    dm_pad_players(pad_slot_mask(&g_slots));
+    [g_view padsChanged:nil];
+    cp_poll();   // one player fewer
+}
+static const dm_switch2_front g_s2front = {s2pad_attach, s2pad_detach, s2pad_read, s2pad_player, s2pad_blocked};
 
 UIView *dm_gamepad_view(CGRect frame) { DmGamepad *v = [[DmGamepad alloc] initWithFrame:frame]; g_view = v; return v; }
 void dm_gamepad_arrange(UIView *view, DmLayout layout) { [(DmGamepad *)view arrange:layout]; }
@@ -818,10 +901,18 @@ void dm_gamepad_touch_feedback(bool on) { [g_view setTouchFeedback:on]; }
 int dm_pad_layout(void) { return g_view ? [g_view padLayout] : 0; }
 bool dm_pad_layout_offered(int layout) { return layout == 0 || layout == 1 || (layout == 2 && dm_opmode() == 0); }
 void dm_pad_layout_set(int layout) { [g_view setPadLayout:layout]; }
-void dm_gamepad_active(void) { dispatch_async(dispatch_get_main_queue(), ^{ for (GCController *c in GCController.controllers) dm_motion_rearm(c); }); }   // On become active: motion_apple.h
-void dm_gamepad_reset(void) {   // On resign active: release everything (a key held while switching away and released in background gets no "release")
-    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; });
+void dm_gamepad_active(void) {   // On become active: motion_apple.h, Switch 2 transport
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (GCController *c in GCController.controllers) dm_motion_rearm(c);
+        g_s2_off = 0; dm_switch2_active(1);
+        for (s2_pad *d = dm_switch2_pads(); d; d = d->next) s2pad_read(d);
+    });
+}
+void dm_gamepad_inactive(void) {   // On resign active: pause Switch 2 input until become active, and release everything held
+    dispatch_async(dispatch_get_main_queue(), ^{ g_s2_off = 1; dm_switch2_active(0); [g_view reset]; pads_release(); });
     pthread_mutex_lock(&g_mu); g_shake_btn = 0; pthread_mutex_unlock(&g_mu); publish();
-    if (g_merge) dm_pad_set(0, 0, 0, 0, 0);
-    else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+}
+void dm_gamepad_reset(void) {   // Release everything held (e.g. an in-app alert such as front_user_select, which does not resign active)
+    dispatch_async(dispatch_get_main_queue(), ^{ [g_view reset]; pads_release(); });
+    pthread_mutex_lock(&g_mu); g_shake_btn = 0; pthread_mutex_unlock(&g_mu); publish();
 }

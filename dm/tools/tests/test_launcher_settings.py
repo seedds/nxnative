@@ -77,7 +77,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_ROTATION'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2', 'DM_NVN_ANISO'})   # Mac-only Display mode, Switch 2 controllers, and NVN texture filtering
+        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_NVN_ANISO'})   # Mac-only Display mode and NVN texture filtering
         self.assertNotIn('DM_NVN_ANISO', build('0100535012974000', 'vulkan', 'mac'))
         self.assertNotIn('DM_NVN_ANISO', build('010014E00DB56000', 'gl', 'mac'))
         s = mac['DM_FULLSCREEN']

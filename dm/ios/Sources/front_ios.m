@@ -17,6 +17,7 @@
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_inactive(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 #import "DmRotation.h"
@@ -675,7 +676,7 @@ static void save_sync_background(void) {
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
-        case 0: dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
+        case 0: dm_movie_active(0); dm_gamepad_inactive(); dm_focus_set(2); break;
         case 1:
             UIApplication.sharedApplication.idleTimerDisabled = NO;
             dm_focus_set(3);

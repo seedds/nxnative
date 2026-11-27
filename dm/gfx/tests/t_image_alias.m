@@ -350,6 +350,77 @@ static void pool_serials(void) {
     mtl_reg_tex_gone(ID); mtl_tex_release(&t[!cur]); mtl_tex_release(&big);
     mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
 }
+// Reentrant family size transition during a pool lookup (issue #3404): a compressed resolution family has live and unregistered tracked pool serials,
+// an open render pass stores a new size of that family, and pool_entry (under g_rmu) resolves a format-view texture that triggers
+// tex_upgrade_pfv -> blit() -> rp_end() -> sd_finish() -> fam_set_valid(). Must not recursively lock g_rmu, must prune unregistered serials,
+// and must still invalidate live family serials via own_note.
+static void reentrant_pool_upgrade(void) {
+    if (fam_nocomp()) return;
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
+    pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
+    enum { ID_SMALL=240, ID_BIG=241, ID_DEAD=242, ID_UPG=243 };
+    tex_t fam_s=image(&pool,999100,64,64), fam_b=image(&pool,999101,128,128), fam_d=image(&pool,999102,64,64);
+    fam_s.d.format=fam_b.d.format=fam_d.d.format=NVN_FORMAT_RGBA16F;
+    fam_s.d.flags=fam_b.d.flags=fam_d.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+    nvn_tex_layout(&fam_s.d,&fam_s.L); nvn_tex_layout(&fam_b.d,&fam_b.L); nvn_tex_layout(&fam_d.d,&fam_d.L);
+    mtl_tex_init(&fam_s); mtl_tex_init(&fam_b); mtl_tex_init(&fam_d);
+    id<MTLTexture> ms=tex_mtl(&fam_s), mb=tex_mtl(&fam_b), md=tex_mtl(&fam_d);
+    NvImageHeap *o=fam_owner(ms,NULL);
+    CHECK(o && o->compressed && fam_owner(mb,NULL)==o && fam_owner(md,NULL)==o,"reentrant test family members share one compressed heap");
+    // Establish initial valid size = small, then track all three serials in o->pool_sers and unregister the dead one.
+    state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&fam_s;
+    struct { op_hdr h; p_clear_color clear; op_hdr end; } clr={0};
+    clr.h=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
+    clr.clear=(p_clear_color){.index=0,.mask=15,.rgba={0.25f,0.5f,0.75f,1}}; clr.end=(op_hdr){OP_END,sizeof(op_hdr)};
+    mtl_exec((const uint8_t *)&clr); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+    CHECK(fam_is_valid(ms) && !fam_is_valid(mb),"reentrant test starts with small valid");
+    mtl_reg_tex(ID_SMALL,&fam_s,NULL); mtl_reg_tex(ID_BIG,&fam_b,NULL); mtl_reg_tex(ID_DEAD,&fam_d,NULL);
+    int g=0,l=0,lr=0,tr=0,d=0;
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_s0=pool_entry(0,MTLTextureType2D,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b0=pool_entry(0,MTLTextureType2D,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    (void)pool_entry(0,MTLTextureType2D,ID_DEAD,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_s0!=0 && r_b0==0,"pool_entry tracks family serials before the reentrant transition");
+    mtl_reg_tex(ID_DEAD,NULL,NULL); mtl_tex_release(&fam_d);
+    // Separate texture created without PixelFormatView, registered with a cross-class format view so pool_entry triggers tex_upgrade_pfv -> blit() -> rp_end().
+    tex_t upg=image(&pool,999103,32,32); upg.off=8<<20; upg.mem=pool.mem+upg.off;
+    upg.d.format=NVN_FORMAT_RGBA8; upg.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&upg.d,&upg.L); mtl_tex_init(&upg);
+    id<MTLTexture> mu=tex_mtl(&upg);
+    CHECK(mu && !(mu.usage & MTLTextureUsagePixelFormatView),"upgrade target starts without PixelFormatView");
+    view_t uv={.set_format=1, .format=NVN_FORMAT_R32UI};
+    mtl_reg_tex(ID_UPG,&upg,&uv);
+    // Open a render pass that clears and will store fam_b (size switch small -> big on rp_end), leaving g_enc open.
+    state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&fam_b; R.clear_c[0]=1;
+    id<MTL4RenderCommandEncoder> en=rp_begin();
+    CHECK(en!=nil && g_enc==en,"render pass is open on the new family size before pool_entry");
+    CHECK(fam_is_valid(ms) && !fam_is_valid(mb),"family size has not transitioned while render pass is still open");
+    uint64_t upg_before=g_pfv_upgrades, sg_before=atomic_load(&g_ser_gen);
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_u=pool_entry(0,MTLTextureType2D,ID_UPG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_u!=0 && g_pfv_upgrades==upg_before+1 && g_enc==nil,"pool_entry upgraded the view texture and ended the open render pass under g_rmu");
+    CHECK(fam_is_valid(mb) && !fam_is_valid(ms),"family size transitioned to big during the reentrant pool lookup");
+    os_unfair_lock_lock(&o->pool_lk);
+    uint32_t np=o->npool_sers;
+    int has_s=0, has_b=0;
+    for (uint32_t i=0;i<np;i++) { if (o->pool_sers[i].serial==fam_s.serial) has_s=1; if (o->pool_sers[i].serial==fam_b.serial) has_b=1; }
+    os_unfair_lock_unlock(&o->pool_lk);
+    CHECK(np==2 && has_s && has_b,"reentrant fam_set_valid pruned the unregistered serial and kept only the two live serials");
+    uint64_t s1=0, s2=0; int k1=own_note_at(sg_before+1,&s1), k2=own_note_at(sg_before+2,&s2);
+    CHECK(k1 && k2 && ((s1==fam_s.serial && s2==fam_b.serial) || (s1==fam_b.serial && s2==fam_s.serial)),
+          "reentrant fam_set_valid still emitted exact live-serial own_note invalidations");
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_s1=pool_entry(0,MTLTextureType2D,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b1=pool_entry(0,MTLTextureType2D,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_s1==0 && r_b1!=0,"bindless pool reflects the transitioned size after the reentrant upgrade");
+    mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+    mtl_reg_tex(ID_SMALL,NULL,NULL); mtl_reg_tex(ID_BIG,NULL,NULL); mtl_reg_tex(ID_UPG,NULL,NULL);
+    mtl_tex_release(&fam_s); mtl_tex_release(&fam_b); mtl_tex_release(&upg);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
+}
 int main(void) { @autoreleasepool {
     mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
     posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
@@ -391,6 +462,7 @@ int main(void) { @autoreleasepool {
     depth_planes(&pool);
     cross_size_read();
     pool_serials();
+    reentrant_pool_upgrade();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
     CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.

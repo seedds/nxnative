@@ -92,6 +92,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Persona 5 Strikers](#persona-5-strikers) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pikmin 4](#pikmin-4) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
 | [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Pokémon: Let's Go, Eevee!](#pokémon-lets-go-eevee) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Pokémon: Let's Go, Pikachu!](#pokémon-lets-go-pikachu) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -541,11 +542,19 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
 
+### Pokémon: Let's Go, Eevee!
+
+[Pokémon: Let's Go, Eevee!](../../dm/games/0100187003A36000/README.md), `0100187003A36000`, [patches.py](../../dm/games/0100187003A36000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: Pikachu and Eevee 1.0.0 and 1.0.2 match both functions and the period table offline: one-tick render and simulation periods. The profiles choose a faster default and the game's application override sets the simulation period. Both functions and the relocated period table must match
+
+- **function-matched** (`main` of builds without CUTS): one-tick render and simulation periods: 2 functions, 2 cuts
+
 ### Pokémon: Let's Go, Pikachu!
 
 [Pokémon: Let's Go, Pikachu!](../../dm/games/010003F003A34000/README.md), `010003F003A34000`, [patches.py](../../dm/games/010003F003A34000/patches.py).
 
-- **`game`**, frame rate, at goal, checked: Pikachu 1.0.0 and 1.0.2 and Eevee 1.0.2 match both functions and the period table offline: one-tick render and simulation periods. The profile selects a faster default while the game's application override sets the simulation period; both functions and the relocated period table must match
+- **`game`**, frame rate, at goal, checked: Pikachu and Eevee 1.0.0 and 1.0.2 match both functions and the period table offline: one-tick render and simulation periods. The profiles choose a faster default and the game's application override sets the simulation period. Both functions and the relocated period table must match
 
 - **function-matched** (`main` of builds without CUTS): one-tick render and simulation periods: 2 functions, 2 cuts
 

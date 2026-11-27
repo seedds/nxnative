@@ -1,7 +1,51 @@
 # The rewriter's engine-wide function patches: fixes of middleware code (Unity, Unreal, ...) that hold for every game shipping that engine code, matched by function
 # (dm/tools/nso_match.py) in every game's module of the named kind, whatever the profile and with no build ID. dm/tools/patch_nso.py applies them as it does
 # sdk_patches.py's MATCH_CUTS: to a module whose build has no CUTS, with a plain line (no red) where nothing matches, as most games ship other engines. A game's own
-# patches.py holds what only that game needs; sdk_patches.py holds Nintendo's SDK. Each rule names the engine versions it was checked on.
+# patches.py holds what only that game needs; sdk_patches.py holds Nintendo's SDK. Profiles can also import a shared rule to opt in.
+
+import struct
+
+from loader_census import adrp, got_values, ldr64
+from nso_match import MatchError
+
+
+def check_lets_go_period_table(module, start):
+    # Match the relocated table behind the constructor's ADRP/LDR, whose
+    # address the fingerprint normalizes across builds.
+    page_word, load_word = struct.unpack_from('<II', module.image, start + 0xc0)
+    page = adrp(page_word, start + 0xc0)
+    load = ldr64(load_word)
+    if page is None or load is None or page[0] != load[1]:
+        raise MatchError('the frame-period table load does not match')
+    table = got_values(module.image).get(page[1] + load[2])
+    periods = struct.pack('<QQ', 16_666_667, 33_333_334)
+    if table is None or table < module.text_end or module.image[table:table + len(periods)] != periods:
+        raise MatchError('the first two frame periods are not 16,666,667 and 33,333,334 ns')
+
+
+# Both Let's Go profiles import this rule through their MATCH_CUTS. The framework constructor initializes the
+# periods that drive presentation and simulation. Their application override
+# resets the simulation period every update, so the two cuts apply together.
+lets_go_frame_periods = {
+    'name': 'one-tick render and simulation periods',
+    'functions': [
+        {'size': 0x224,
+         'fingerprints': ['2ceb7798508227178c3b40a4a1cab7d56793ccedf9727f84185b533edc596b94'],
+         'check': check_lets_go_period_table,
+         'cuts': [(0xc8, '080540f9', '080140f9', 'initialize both frame periods from the one-tick entry')]},
+        {'size': 0x18,
+         'fingerprints': ['81673279c08d7094e975f22e4d974b45e6b994714cb3257a3ff11ccb06bba883'],
+         'cuts': [(0x10, 'e2030032', '02008052', 'select the one-tick simulation period on every update')]},
+    ],
+}
+
+lets_go_frame_period_binding = [{
+    'what': 'one-tick render and simulation periods',
+    'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
+    'why': "the profiles choose a faster default and the game's application override sets the simulation period. Both functions and the relocated period table must match",
+    'checked': 'Pikachu and Eevee 1.0.0 and 1.0.2 match both functions and the period table offline',
+}]
+
 
 MATCH_CUTS = {'main': [
     # Unity 2018's ThreadedStreamBuffer, the ring buffer every Unity worker thread is fed through (UnityGfxDeviceWorker, BatchDeleteObjects, ...), wakes a sleeping side with a Dekker

@@ -224,6 +224,7 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+	DM_NVN_SLICE_MRT=0 DM_NVN_LEVEL_GROUP=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FACE_MERGE=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m t_link_ticks_screen.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m t_link_ticks_screen.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

@@ -215,6 +215,7 @@ DM_NVN_INDLOG	diagnostic	`=<n>`: the first n indirect draws (and those of pass-d
 DM_NVN_IXCLOG	diagnostic	`=<n>` logs the first n indirect draw and dispatch conversions (record to arguments) once the GPU has run them
 DM_NVN_KEYDUMP	diagnostic	`=<fs key>[:n[:every]]`: for up to n draws of that fragment shader (default 6), logs the pass dump binding lines plus vertex formats, vertex streams and uniform values; meant for devices
 DM_NVN_LAZY_CLEAR	switch	`0` makes clears with no draw after them open a pass of their own, as before; by default they wait to become the load action of the next pass on that target
+DM_NVN_LEVEL_GROUP	switch	`0` keeps a run of one-draw passes into the levels and faces of one cube or array texture in the game's order (face by face); by default it is replayed level by level so each level's faces become one slice-merged pass (`rg_plan`); `ab` alternates with `DM_AB`
 DM_NVN_LINE_WIDTH	switch	`0` draws every NVN line 1 pixel wide, as before; by default a line draw wider than a pixel is drawn as a quad per segment (`nvn_wline.inc`)
 DM_NVN_LOG	diagnostic	`=1` logs the creation of NVN objects
 DM_NVN_MAGSCAN	diagnostic	`=<fs key>[:every[:phase]]`: device self-check that reads each pass's colour attachments every `every` frames (default 30) and logs `[mag]` lines for solid magenta 16×16 blocks or non-finite pixels
@@ -257,6 +258,7 @@ DM_NVN_SKIP_FS	diagnostic	`=<fragment key>[,…]` (up to 16) drops all draws of 
 DM_NVN_SKIP_MESH	diagnostic	`=1` drops every task and mesh draw, to measure what they cost in all; the picture is wrong
 DM_NVN_SKIP_SMALL	diagnostic	`=<width>` drops all draws whose target width is at most that, to measure the cost of tiny render passes; the picture is wrong
 DM_NVN_SLICE_MERGE	switch	`0` keeps passes into other layers of one array or cube texture level apart (on by default: they run as one layered pass)
+DM_NVN_SLICE_MRT	switch	`0` slice-merges only passes into one colour target of an array or cube texture, as before; by default passes into several colour targets that step through the same layer together, and into the depth planes of 3D textures, are merged too; `ab` alternates with `DM_AB`
 DM_NVN_SNAPRAW	diagnostic	`=1` makes `DM_NVN_TEXDUMP` also save each target's raw bytes, with a text header line, since converting an HDR target to an 8-bit image truncates
 DM_NVN_SPARSE_COPY	switch	`0` disables per-run shadow copies for misaligned physical mappings in virtual NVN memory pools (on by default, `hle_nvn.c` `vshadow_map`)
 DM_NVN_SPARSE_TILES	switch	`0` makes a sparse texture of 64 MB or more whole, as before; by default it is a Metal placement sparse texture with only the mapped tiles backed

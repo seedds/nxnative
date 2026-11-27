@@ -7705,13 +7705,21 @@ static void *rp_begin_ex_(int clear_only) {
             PD("L %llu face-split pass: targets 0-%d are layers %lu-%lu of one attachment", g_stat_pass + 1, n - 1, (unsigned long)lo, (unsigned long)hi);
         }
     }
-    if (g_sm_plan.on && !clear_only && pd.colorAttachments[0].texture && !R.rt.depth) {   // slice-merged pass (see g_sm_plan): the attachment holds every layer the draws reach
-        MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[0];
-        g_sm_cur = (int)c.slice; c.slice = (NSUInteger)g_sm_plan.lo; if (c.loadAction == MTLLoadActionDontCare) c.loadAction = MTLLoadActionLoad;   // the other layers' content stays
-        pd.renderTargetArrayLength = (NSUInteger)(g_sm_plan.hi - g_sm_plan.lo + 1);
-        g_sm_pass = 1; g_sm_lo = g_sm_plan.lo; g_sm_hi = g_sm_plan.hi; g_sm_applied = -1; g_sm_npass++;
-        static int once; if (!once++) MLOG("slice-merged pass: draws into layers %d-%d of one texture level run as one layered pass (first case pass %llu; DM_NVN_SLICE_MERGE)", g_sm_lo, g_sm_hi, g_stat_pass + 1);
-        PD("L %llu slice-merged pass: layers %d-%d, first draw into layer %d", g_stat_pass + 1, g_sm_lo, g_sm_hi, g_sm_cur);
+    if (g_sm_plan.on && !clear_only && pd.colorAttachments[0].texture && !R.rt.depth) {   // slice-merged pass (see g_sm_plan): every attachment holds every layer the draws reach
+        int ok = 1;
+        for (int k = 0; k < R.rt.n && k < 8 && ok; k++) if (R.rt.color[k] && !pd.colorAttachments[k].texture) ok = 0;
+        if (ok) {
+            MTLRenderPassColorAttachmentDescriptor *c0 = pd.colorAttachments[0];
+            g_sm_cur = (int)(c0.texture.textureType == MTLTextureType3D ? c0.depthPlane : c0.slice);
+            for (int k = 0; k < 8 && pd.colorAttachments[k].texture; k++) {   // every attachment from the first layer (sm_rt_slice: all name the same one; a 3D texture's depth plane)
+                MTLRenderPassColorAttachmentDescriptor *c = pd.colorAttachments[k];
+                if (c.texture.textureType == MTLTextureType3D) c.depthPlane = (NSUInteger)g_sm_plan.lo; else c.slice = (NSUInteger)g_sm_plan.lo;
+                if (c.loadAction == MTLLoadActionDontCare) c.loadAction = MTLLoadActionLoad; }   // the other layers' content stays
+            pd.renderTargetArrayLength = (NSUInteger)(g_sm_plan.hi - g_sm_plan.lo + 1);
+            g_sm_pass = 1; g_sm_lo = g_sm_plan.lo; g_sm_hi = g_sm_plan.hi; g_sm_applied = -1; g_sm_npass++;
+            static int once; if (!once++) MLOG("slice-merged pass: draws into layers %d-%d of one texture level run as one layered pass (first case pass %llu; DM_NVN_SLICE_MERGE)", g_sm_lo, g_sm_hi, g_stat_pass + 1);
+            PD("L %llu slice-merged pass: layers %d-%d, first draw into layer %d", g_stat_pass + 1, g_sm_lo, g_sm_hi, g_sm_cur);
+        }
     }
     // clear_only: 0 attach all, 1 only those with clears
     if (R.rt.depth && !(clear_only == 1 && !R.clear_d && !R.clear_s)) {
@@ -16857,15 +16865,27 @@ static int rt_same(const p_set_rt *a, const p_set_rt *b) {   // Same set of targ
     }
     g_rt_diff = NULL; return 1;
 }
-// Slice-merged passes (see g_sm_plan). sm_rt_slice: b names the same single colour target as a (one colour attachment in slot 0, no depth / stencil, the same texture and view)
-// except the view's first layer, which goes to *slice
+// A colour view's format that is the texture's own changes nothing: the view as if it set none (games name it anyway)
+static inline view_t view_own_fmt(view_t v, const tex_t *t) { if (v.set_format && t && v.format == t->d.format) { v.set_format = 0; v.format = 0; } return v; }
+// Slice-merged passes (see g_sm_plan). sm_rt_slice: b names the same colour targets as a (1..8 leading colour attachments, no depth / stencil, distinct textures, same view)
+// except the view's first layer, which goes to *slice. Several colour targets and 3D texture depth planes require DM_NVN_SLICE_MRT (on by default; 0 off, ab alternates with DM_AB)
 static int sm_on(void) { static int m = -1; if (m < 0) { const char *e = getenv("DM_NVN_SLICE_MERGE"); m = !(e && !strcmp(e, "0")); if (!m) MLOG("DM_NVN_SLICE_MERGE=0: passes into other layers of one texture level stay apart"); } return m; }
+static int sm_nc(const p_set_rt *a) { int n = 0; while (n < a->n && n < 8 && a->color[n]) n++; for (int k = n; k < a->n && k < 8; k++) if (a->color[k]) return -1; return n; }
+static int sm_mrt_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_SLICE_MRT", 1); if (!m) MLOG("DM_NVN_SLICE_MRT=0: only passes into one colour target of an array or cube texture are slice-merged"); } return sw_on(m); }
+static int tex_storage_overlap(const tex_t *a, const tex_t *b);
 static int sm_rt_slice(const p_set_rt *a, const p_set_rt *b, int *slice) {
-    if (a->depth || b->depth || a->n < 1 || b->n < 1 || !a->color[0] || !b->color[0] || a->color[0]->serial != b->color[0]->serial || !a->has_cview[0] || !b->has_cview[0]) return 0;
-    for (int k = 1; k < 8; k++) if ((k < a->n && a->color[k]) || (k < b->n && b->color[k])) return 0;
-    view_t x = a->cview[0], y = b->cview[0];
-    if (!x.set_layers || !y.set_layers || x.set_format || y.set_format || (x.set_target && x.target != NVN_TEXTURE_TARGET_2D) || (y.set_target && y.target != NVN_TEXTURE_TARGET_2D)) return 0;
-    x.min_layer = y.min_layer = 0; if (memcmp(&x, &y, sizeof x)) return 0;
+    if (a->depth || b->depth) return 0;
+    int n = sm_nc(a); if (n < 1 || sm_nc(b) != n || (n > 1 && !sm_mrt_on())) return 0;
+    for (int k = 0; k < n; k++) {
+        for (int j = 0; j < k; j++) if (tex_storage_overlap(a->color[j], a->color[k])) return 0;   // distinct, non-aliasing targets
+        if (a->color[k]->serial != b->color[k]->serial || !a->has_cview[k] || !b->has_cview[k] || b->cview[k].min_layer != b->cview[0].min_layer || a->cview[k].min_layer != a->cview[0].min_layer) return 0;
+        view_t x = view_own_fmt(a->cview[k], a->color[k]), y = view_own_fmt(b->cview[k], b->color[k]);
+        int t3 = a->color[k]->d.target == NVN_TEXTURE_TARGET_3D;   // a 3D texture's view names its own target: its layers are depth planes
+        if (!x.set_layers || !y.set_layers || x.set_format || y.set_format
+            || (x.set_target && x.target != NVN_TEXTURE_TARGET_2D && !(t3 && x.target == NVN_TEXTURE_TARGET_3D))
+            || (y.set_target && y.target != NVN_TEXTURE_TARGET_2D && !(t3 && y.target == NVN_TEXTURE_TARGET_3D))) return 0;
+        x.min_layer = y.min_layer = 0; if (!view_same(&x, &y)) return 0;
+    }
     *slice = b->cview[0].min_layer; return 1;
 }
 // From the op after the draw that opens a pass: the layers the following targets switch to while nothing but state, uniform updates (deferred in the pass: ubd_on) and draws comes between.
@@ -16889,22 +16909,190 @@ static int sm_scan(const uint8_t *p, const p_set_rt *rt, int cur, int *lo, int *
     }
     return n;
 }
-// The draw about to open a pass: plan it as slice-merged when its target is one layer of an array or cube texture level and the next targets switch to other layers of that level
+// The draw about to open a pass: plan it as slice-merged when its targets are one layer of array, cube or 3D texture levels and the next targets switch to other layers of those levels
 // (every layer between the lowest and the highest drawn into), and the draw's amplified pipeline is built (else it is queued, and this pass stays as it is)
 static int draw_samples_rt(NvProg *pr); static int fb_mode(void); static int fb_depth_on(void);
+// ---- Level-grouped runs (DM_NVN_LEVEL_GROUP, on by default; 0 off, ab alternates with DM_AB) ----
+// A run of one-draw passes into the levels and layers of one cube or array texture, face by face (level 0..n of layer a, then of layer b), with nothing between them but state and
+// direct draws of one pure-raster VS+FS program (no shader writes, no bindless/dynamic/pool/storage bindings, no draw sampling the texture or any storage alias of it, no occlusion
+// queries or transform feedback), is replayed grouped by level: every pass of one level, then the next level, ending with the last original segment's level so post-run state matches.
+// Every segment must write the exact same state slots/kinds/ranges (rg_op_sig), so reordering segments cannot leak state across slots or leave different state at the end of the run.
+// Each level's passes then become one layered pass (slice merge, sm_scan).
+static int rg_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_LEVEL_GROUP", 1); if (!m) MLOG("DM_NVN_LEVEL_GROUP=0: one-draw passes into the levels of a cube texture keep their order"); } return sw_on(m); }
+// b names the same single non-3D colour target as a, the same texture and view except its first level and layer (*lv, *sl)
+static int rg_rt(const p_set_rt *a, const p_set_rt *b, int *lv, int *sl) {
+    if (a->depth || b->depth || a->n < 1 || b->n < 1 || !a->color[0] || !b->color[0] || a->color[0]->serial != b->color[0]->serial
+        || a->color[0]->d.target == NVN_TEXTURE_TARGET_3D || !a->has_cview[0] || !b->has_cview[0]) return 0;
+    for (int k = 1; k < 8; k++) if ((k < a->n && a->color[k]) || (k < b->n && b->color[k])) return 0;
+    view_t x = view_own_fmt(a->cview[0], a->color[0]), y = view_own_fmt(b->cview[0], b->color[0]);
+    if (!x.set_layers || !y.set_layers || x.set_format || y.set_format || (x.set_target && x.target != NVN_TEXTURE_TARGET_2D) || (y.set_target && y.target != NVN_TEXTURE_TARGET_2D)) return 0;
+    int lb = y.set_levels ? y.base_level : 0;   // a render target view without levels draws into level 0: the same as naming level 0 alone
+    if (!x.set_levels) { x.set_levels = 1; x.nlevels = 1; } if (!y.set_levels) { y.set_levels = 1; y.nlevels = 1; }
+    x.min_layer = y.min_layer = 0; x.base_level = y.base_level = 0; if (!view_same(&x, &y)) return 0;
+    *lv = lb; *sl = b->cview[0].min_layer; return 1;
+}
+static int rg_prog_ok(NvProg *pr) {
+    if (!pr || !pr->sh[0] || pr->sh[0]->layer_out || pr->sh[2] || pr->sh[3] || pr->sh[4] || prog_swrites(pr)) return 0;
+    for (int st = 0; st < 2; st++) { __unsafe_unretained NvShader *sh = pr->sh[st]; if (!sh) continue;
+        if (sh->rf.bindless || sh->rf.dyn || sh->rf.pool) return 0;
+        for (int i = 0; i < sh->rf.nb; i++) { const nvn_rbind *b = &sh->rf.b[i];
+            if (b->rw) return 0;
+            if (b->kind == NVN_RB_TEXD || b->kind == NVN_RB_TEXA || b->kind == NVN_RB_TEXH || b->kind == NVN_RB_TEXP
+                || b->kind == NVN_RB_TEXU || b->kind == NVN_RB_IMGU || b->kind == NVN_RB_IMGP || b->kind == NVN_RB_TBUFU
+                || b->kind == NVN_RB_GMEM || b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_SBUFQ) return 0;
+        }
+    }
+    return 1;
+}
+// Exact state-target signature of an op inside a regrouped segment: two ops match iff they overwrite the exact same state slots/kinds/ranges.
+static uint64_t rg_op_sig(uint32_t op, const void *a) {
+    switch (op) {
+        case OP_VIEWPORTS: { const p_viewports *b = a; return ((uint64_t)op << 32) | ((uint64_t)(uint16_t)b->first << 16) | (uint16_t)b->n; }
+        case OP_VP_SWIZZLE: { const p_vp_swizzle *b = a; return ((uint64_t)op << 32) | ((uint64_t)(uint16_t)b->first << 16) | (uint16_t)b->n; }
+        case OP_BIND_STATE: { const p_bind_state *b = a; uint32_t sub = 0; if (b->kind == 0) { blend_st bs; memcpy(&bs, b->bytes, sizeof bs); sub = (uint32_t)bs.target; }
+            return ((uint64_t)op << 32) | ((uint64_t)(uint16_t)b->kind << 16) | (uint16_t)sub; }
+        case OP_STENCIL: { const p_stencil *b = a; return ((uint64_t)op << 32) | ((uint64_t)(uint16_t)b->which << 16) | (uint16_t)b->face; }
+        case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp);
+            return ((uint64_t)OP_BIND_VBUF << 32) | ((uint64_t)(uint16_t)b->first << 16) | (uint16_t)b->n; }
+        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp);
+            return ((uint64_t)OP_BIND_UBO << 32) | ((uint64_t)(uint16_t)b->stage << 16) | (uint16_t)b->index; }
+        case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles tmp; const p_bind_handles *b = bind_rec(op, a, &tmp);
+            return ((uint64_t)OP_BIND_TEX << 32) | ((uint64_t)(uint8_t)b->stage << 24) | ((uint64_t)(uint16_t)b->first << 8) | (uint8_t)b->n; }
+        case OP_BIND_SAMP: { const p_bind_handles *b = a;
+            return ((uint64_t)op << 32) | ((uint64_t)(uint8_t)b->stage << 24) | ((uint64_t)(uint16_t)b->first << 8) | (uint8_t)b->n; }
+        case OP_PUSH_CONST: { const p_push_const *b = a;
+            return ((uint64_t)op << 32) | ((uint64_t)(b->compute != 0) << 31) | ((uint64_t)(uint16_t)b->offset << 15) | (uint16_t)b->size; }
+        default: return (uint64_t)op << 32;
+    }
+}
+enum { RG_SEGS = 192, RG_BUFS = 32, RG_OPS = 64 };
+static uint8_t *g_rg_buf[RG_BUFS]; static size_t g_rg_cap[RG_BUFS]; static int g_rg_next;
+static const uint8_t *g_rg_redirect;   // mtl_exec continues here after the draw that planned it
+static uint64_t g_rg_runs, g_rg_segs;
+static int rg_in_buf(const uint8_t *p) {
+    for (int i = 0; i < RG_BUFS; i++) if (g_rg_buf[i] && p >= g_rg_buf[i] && p < g_rg_buf[i] + g_rg_cap[i]) return 1;
+    return 0;
+}
+// From the op after the opening draw (p): the run's segments, each from the op after the previous draw through its own draw. Returns the regrouped copy, or NULL
+static const uint8_t *rg_plan(const uint8_t *p, NvProg *pr) {
+    if (!rg_on() || !p || rg_in_buf(p) || g_vis_counting || S.tf_on || S.rast_discard || !rg_prog_ok(pr)) return NULL;
+    int lv0, sl0; if (!rg_rt(&R.rt, &R.rt, &lv0, &sl0)) return NULL;
+    const tex_t *t0 = R.rt.color[0]; uint64_t tser = t0->serial;
+    struct { const uint8_t *op[RG_OPS]; uint64_t sig[RG_OPS]; int nop, lv; } *seg = calloc(RG_SEGS, sizeof *seg); if (!seg) return NULL;
+    int nseg = 0; const uint8_t *end = NULL;
+    // Segments end at their draw: the ops after a draw (viewport, scissor, target, bindings) set up the next one. The ops after the last draw are the tail
+    const uint8_t *cur_op[RG_OPS]; uint64_t cur_sig[RG_OPS]; int ncur = 0, cur_lv = -1, cur_rt = 0, bad = 0;
+    for (int guard = 0; guard < 8192 && p; guard++) {
+        op_hdr h; memcpy(&h, p, sizeof h); const void *a = p + 8;
+        if (h.op == OP_JUMP) { const uint8_t *t; memcpy(&t, a, 8); p = t; continue; }
+        int ok = 1, lv = -1, sl;
+        switch (h.op) {
+            case OP_SET_RT: if (!rg_rt(&R.rt, a, &lv, &sl)) ok = 0; break;
+            case OP_BARRIER: { int32_t bits; memcpy(&bits, a, 4); if (bits) ok = 0; break; }
+            case OP_BIND_PROGRAM: { const p_bind_program *b = a;
+                if (!S.prog || b->prog != S.prog || S.bst[0] != S.prog || S.bst[1] != S.prog || S.bst[2] || S.bst[3] || S.bst[4]
+                    || (b->stages & ~0x1f) || (b->stages & 3) != 3) ok = 0;
+                break; }
+            case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(h.op, a, &t1);
+                if (b->src || b->n < 0 || b->n > 32) { ok = 0; break; }
+                for (int k = 0; k < b->n && ok; k++) {
+                    uint64_t hd = bound_handle(b->h[k]); int tid = bound_tex_id(hd); if (tid < 0) continue;
+                    os_unfair_lock_lock(&g_rmu); tex_t tb = tid < g_ntreg && g_treg[tid].ok ? g_treg[tid].t : (tex_t){0}; os_unfair_lock_unlock(&g_rmu);
+                    if (!tb.serial || tex_storage_overlap(&tb, t0)) ok = 0; } break; }
+            case OP_DRAW: { p_draw tmp; const p_draw *d = draw_rec(a, h.size, &tmp);
+                if (d->ind || d->mdi_cnt || d->prim == DM_PRIM_MESH_TASKS) ok = 0; break; }
+            case OP_DRAW_IDX: { p_draw_idx tmp; const p_draw_idx *d = draw_idx_rec(a, h.size, &tmp);
+                if (d->ind || d->mdi_cnt) ok = 0; break; }
+            case OP_VIEWPORTS: case OP_SCISSOR: case OP_DEPTH_RANGE: case OP_BIND_STATE: case OP_BIND_VATTR: case OP_BIND_VSTREAM:
+            case OP_BIND_VBUF: case OP_BIND_VBUF1: case OP_BIND_UBO: case OP_BIND_UBO_SMALL: case OP_BIND_SAMP: case OP_STENCIL: case OP_POLY_OFFSET:
+            case OP_BLEND_COLOR: case OP_ALPHA_REF: case OP_PUSH_CONST: case OP_DEPTH_CLAMP: case OP_DEPTH_BOUNDS: case OP_LINE_WIDTH: case OP_VP_SWIZZLE: case OP_PRIM_RESTART: break;
+            default: ok = 0;
+        }
+        if (!ok || ncur >= RG_OPS) { end = p; break; }
+        cur_op[ncur] = p; cur_sig[ncur] = rg_op_sig(h.op, a); ncur++;
+        if (h.op == OP_SET_RT) { if (cur_rt) bad = 1; cur_rt = 1; cur_lv = lv; }
+        if (h.op == OP_DRAW || h.op == OP_DRAW_IDX) {
+            if (!cur_rt || nseg >= RG_SEGS) { bad = 1; break; }   // every segment switches the target once, before its draw
+            memcpy(seg[nseg].op, cur_op, (size_t)ncur * sizeof *cur_op);
+            memcpy(seg[nseg].sig, cur_sig, (size_t)ncur * sizeof *cur_sig);
+            seg[nseg].nop = ncur; seg[nseg].lv = cur_lv; nseg++; ncur = 0; cur_rt = 0; }
+        p += h.size;
+    }
+    if (bad || cur_rt) nseg = 0;   // a target switch with no draw after it in the run: leave it as it is
+    const uint8_t *tail[RG_OPS]; int ntail = 0; for (int k = 0; k < ncur; k++) tail[ntail++] = cur_op[k];
+    const uint8_t *r = NULL;
+    // A run worth it: several levels, every segment writes the exact same state targets/slots as the first, levels interleave, and the last original segment is not at lv0
+    // (placing its level last guarantees seg[nseg - 1] runs last before tail, keeping post-run state identical to original order)
+    int nlv = 0, lvs[16], same = nseg >= 4 && seg[nseg - 1].lv != lv0, inter = 0;
+    for (int i = 0; i < nseg && same; i++) {
+        if (seg[i].nop != seg[0].nop) same = 0;
+        for (int k = 0; k < seg[i].nop && same; k++) if (seg[i].sig[k] != seg[0].sig[k]) same = 0;
+        int found = seg[i].lv == lv0; for (int j = 0; j < nlv && !found; j++) found = lvs[j] == seg[i].lv;
+        if (!found) { if (nlv >= 16) same = 0; else lvs[nlv++] = seg[i].lv; }
+        if (i && seg[i].lv != seg[i - 1].lv) inter++;
+    }
+    if (same && end && nlv >= 1 && inter >= 2) {
+        size_t n = 0;
+        for (int i = 0; i < nseg; i++) for (int k = 0; k < seg[i].nop; k++) { op_hdr h; memcpy(&h, seg[i].op[k], 8); n += h.size; }
+        for (int k = 0; k < ntail; k++) { op_hdr h; memcpy(&h, tail[k], 8); n += h.size; }
+        n += 16;
+        int bi = g_rg_next++ % RG_BUFS;
+        if (g_rg_cap[bi] < n) { free(g_rg_buf[bi]); g_rg_buf[bi] = malloc(n); g_rg_cap[bi] = g_rg_buf[bi] ? n : 0; }
+        uint8_t *o = g_rg_buf[bi];
+        if (o) {
+            size_t w = 0;
+            int last_lv = seg[nseg - 1].lv, order[1 + 16], no = 0;
+            order[no++] = lv0;
+            for (int j = 0; j < nlv; j++) if (lvs[j] != last_lv) order[no++] = lvs[j];
+            order[no++] = last_lv;   // seg[nseg - 1] is guaranteed to execute last before tail
+            for (int q = 0; q < no; q++) for (int i = 0; i < nseg; i++) if (seg[i].lv == order[q])
+                for (int k = 0; k < seg[i].nop; k++) { op_hdr h; memcpy(&h, seg[i].op[k], 8); memcpy(o + w, seg[i].op[k], h.size); w += h.size; }
+            for (int k = 0; k < ntail; k++) { op_hdr h; memcpy(&h, tail[k], 8); memcpy(o + w, tail[k], h.size); w += h.size; }
+            op_hdr j = {OP_JUMP, 16}; memcpy(o + w, &j, 8); memcpy(o + w + 8, &end, 8); w += 16;
+            r = o; g_rg_runs++; g_rg_segs += (uint64_t)nseg;
+            if (g_rg_runs == 1) MLOG("level-grouped run: %d one-draw passes into %d levels of texture ser=%llu replayed level by level (first case pass %llu; DM_NVN_LEVEL_GROUP)", nseg + 1, no, (unsigned long long)tser, g_stat_pass + 1);
+            PD("M %llu level-grouped run: %d segments, %d levels", g_stat_pass + 1, nseg, no);
+        }
+    }
+    free(seg);
+    return r;
+}
 static void sm_plan(NvProg *pr) {
     g_sm_plan.on = 0;
-    if (!pr || !pr->sh[0] || pr->sh[0]->layer_out || R.clear_d || R.clear_s || draw_samples_rt(pr)) return;
-    for (int i = 0; i < 8; i++) if (R.clear_c[i]) return;
-    int cur; if (!sm_rt_slice(&R.rt, &R.rt, &cur) || cur >= 64) return;
-    id<MTLTexture> t = tex_mtl_replay(R.rt.color[0]);
-    if (!t || t.sampleCount != 1 || mtl_fmt_block(t.pixelFormat) || mtl_fmt_depth(t.pixelFormat) || (t.textureType != MTLTextureType2DArray && t.textureType != MTLTextureTypeCube && t.textureType != MTLTextureTypeCubeArray)) return;
-    int lo, hi; uint64_t mask; if (!sm_scan(g_exec_next, &R.rt, cur, &lo, &hi, &mask)) return;
-    if (__builtin_popcountll(mask) != hi - lo + 1 || (NSUInteger)hi >= t.arrayLength * (t.textureType == MTLTextureType2DArray ? 1 : 6)) return;
-    __typeof__(g_pass) keep = g_pass; memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); g_pass.cfmt[0] = (uint32_t)t.pixelFormat; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;   // the key pso_get makes in the pass
+#define SMNO(w) do { PD("M %llu no slice merge: %s", g_stat_pass + 1, w); return; } while (0)
+    if (!pr || !pr->sh[0] || pr->sh[0]->layer_out) return;
+    if (R.clear_d || R.clear_s) SMNO("clear");
+    if (draw_samples_rt(pr)) SMNO("samples its target");
+    for (int i = 0; i < 8; i++) if (R.clear_c[i]) SMNO("clear");
+    int cur; if (!sm_rt_slice(&R.rt, &R.rt, &cur) || cur >= 64) { if (R.rt.color[0] && R.rt.has_cview[0]) { const view_t *v = &R.rt.cview[0];
+            PD("M %llu no slice merge: targets (n %d, view levels %d layers %d fmt %d target %d=%d, min_layer %d)", g_stat_pass + 1, sm_nc(&R.rt), v->set_levels, v->set_layers, v->set_format, v->set_target, v->target, v->min_layer); } return; }
+    int nc = sm_nc(&R.rt); uint32_t cf[8] = {0}; NSUInteger nlay = NSUIntegerMax, w0 = 0, h0 = 0;
+    id<MTLTexture> t = nil;
+    for (int k = 0; k < nc; k++) {
+        id<MTLTexture> tk = tex_mtl_replay(R.rt.color[k]);
+        if (!tk || tk.sampleCount != 1 || mtl_fmt_block(tk.pixelFormat) || mtl_fmt_depth(tk.pixelFormat)
+            || (tk.textureType != MTLTextureType2DArray && tk.textureType != MTLTextureTypeCube && tk.textureType != MTLTextureTypeCubeArray && (tk.textureType != MTLTextureType3D || !sm_mrt_on()))) SMNO("texture");
+        NSUInteger lv = R.rt.cview[k].set_levels ? R.rt.cview[k].base_level : 0;
+        NSUInteger wk = mip_extent(tk.width, lv), hk = mip_extent(tk.height, lv);
+        if (!k) { t = tk; w0 = wk; h0 = hk; }
+        else if (wk != w0 || hk != h0 || (tk.textureType == MTLTextureType3D) != (t.textureType == MTLTextureType3D)) SMNO("sizes");
+        // a 3D texture's layers are the depth planes of the attached level (layered rendering selects the plane); the level is the view's first, as attach sets it
+        NSUInteger nl = tk.textureType == MTLTextureType3D ? mip_extent(tk.depth, lv)
+                      : tk.arrayLength * (tk.textureType == MTLTextureType2DArray ? 1 : 6); if (nl < nlay) nlay = nl;
+        cf[k] = (uint32_t)tk.pixelFormat;
+    }
+    int lo, hi; uint64_t mask; const uint8_t *from = g_exec_next, *rg = NULL;
+    if (!sm_scan(from, &R.rt, cur, &lo, &hi, &mask)) {   // the next target is another level: the run, regrouped by level (rg_plan)
+        rg = rg_plan(g_exec_next, pr); if (!rg) SMNO("scan");
+        from = rg;
+        if (!sm_scan(from, &R.rt, cur, &lo, &hi, &mask)) SMNO("scan after regroup"); }
+    if (__builtin_popcountll(mask) != hi - lo + 1 || (NSUInteger)hi >= nlay) SMNO("layers");
+    __typeof__(g_pass) keep = g_pass; memset(g_pass.cfmt, 0, sizeof g_pass.cfmt); for (int k = 0; k < nc; k++) g_pass.cfmt[k] = cf[k]; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;   // the key pso_get makes in the pass
     g_pso_amp = 1; id ps = pso_get(pr, nil); g_pso_amp = 0; g_pass = keep;
-    if (!ps) { g_sm_nwait++; return; }
+    if (!ps) { g_sm_nwait++; SMNO("pipeline building"); }
+    if (rg) g_rg_redirect = rg;   // redirect replay only once the slice-merged pass is committed
     g_sm_plan.on = 1; g_sm_plan.lo = lo; g_sm_plan.hi = hi;
+#undef SMNO
 }
 // Face-split draws (DM_NVN_FACE_SPLIT, on by default; 0 off, ab alternates with DM_AB). A full-screen draw whose colour targets are several layers of one texture level, a target per
 // layer, computes all of them in each fragment thread: Mario Kart World filters its reflection cube maps so (GearPassShader 4744589bb8f9f7dd, DrivePassShaderDefault 765844f5609bb11b), each
@@ -21649,7 +21837,10 @@ void mtl_exec(const uint8_t *p) {
                 }
                 if (g_enc && g_sm_pass && !pend && !g_game_barrier) { int sl;   // another layer of the slice-merged pass's level (sm_scan planned it)
                     if (sm_rt_slice(&R.rt, r, &sl) && sl >= g_sm_lo && sl <= g_sm_hi) { R.rt = *r; g_sm_cur = sl; g_sm_ncont++;
-                        { void td_note_layer(id<MTLTexture>, uint64_t, NSUInteger, NSUInteger); td_note_layer(tex_mtl_replay(r->color[0]), r->color[0]->serial, r->cview[0].set_levels ? r->cview[0].base_level : 0, (NSUInteger)sl); } PD("M %llu slice-merged pass goes on in layer %d", g_stat_pass, sl); break; } }
+                        { void td_note_layer(id<MTLTexture>, uint64_t, NSUInteger, NSUInteger);
+                          for (int k = 0; k < r->n && k < 8 && r->color[k]; k++)
+                              td_note_layer(tex_mtl_replay(r->color[k]), r->color[k]->serial, r->cview[k].set_levels ? r->cview[k].base_level : 0, (NSUInteger)sl); }
+                        PD("M %llu slice-merged pass goes on in layer %d", g_stat_pass, sl); break; } }
                 if (pend && !g_enc && g_cb && lc_on()) lc_push(); else rp_flush();   // clears with no draw wait for the next pass that attaches their targets (lc_push)
                 sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
@@ -21763,6 +21954,7 @@ void mtl_exec(const uint8_t *p) {
             default: break;
         }
         p += h.size;
+        if (g_rg_redirect) { p = g_rg_redirect; g_rg_redirect = NULL; }   // a level-grouped run (rg_plan) replays from its copy
     }
 }
 
@@ -22031,7 +22223,7 @@ static void td_dump(void) {
         id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
         if (!t) { MLOG("[texraw] ser=%llu not in the serial table", ser); continue; }
         int bw, bh; NSUInteger w = t.width, h = t.height, dz = t.depth;
-        size_t bpp = t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : t.pixelFormat == MTLPixelFormatRGBA32Float ? 16 : 4; (void)bw; (void)bh;
+        size_t bpp = mtl_pf_bytes(t.pixelFormat); if (!bpp) bpp = 4; (void)bw; (void)bh;   // the texel size of the format (RG32 is 8 bytes; Depth32F_S8 depth plane is 4)
         size_t row = w * bpp, img = row * h;
         id<MTLBuffer> buf = [g_dev newBufferWithLength:img * dz options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];

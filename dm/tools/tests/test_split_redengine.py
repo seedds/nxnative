@@ -1,6 +1,4 @@
-"""shader_split: REDengine 3's shader caches (The Witcher 3: Wild Hunt — Complete Edition). shadernx.cache (rdhs_shaders) is a run of records {u64 hash, u8 1, u32 raw length,
-u32 stored length, one zstd frame}, each a whole GLSLC output, ended by an index and the footer {u64 index offset, 'RDHS', u32 3}; staticshadernx.cache (fzlc_shaders) is a
-'FZLC' header and a table of chunks whose joined zstd frames hold the GLSLC outputs, which run across chunk boundaries. Synthetic bytes only."""
+"""Synthetic checks for REDengine 3's GLSLC caches and REDengine 4's RDHS caches with NVN2 stages."""
 import contextlib
 import io
 import struct
@@ -35,6 +33,19 @@ def fzlc(data, chunk, compress=True):
     at = 12 + 12 * len(parts); head = bytearray(ss.FZLC + struct.pack('<II', len(parts), at)); pos = at
     for p, s in zip(parts, stored): pos += len(s); head += struct.pack('<3I', len(s), len(p), pos)
     return bytes(head) + b''.join(stored)
+
+
+def nvn2_record(key_size, stage, metadata=b'', attribute=None):
+    code = bytearray(0x100)
+    struct.pack_into('<I', code, 0, {'vs': 0x400, 'ps': 0x1400, 'cs': 0}[stage])
+    if attribute is not None: code[0x18 + attribute] = 0x02
+    ctl = bytearray(0xd8)
+    struct.pack_into('<4sI', ctl, 0, ss.CTL_MAGIC, 0xc9)
+    struct.pack_into('<I16xI', ctl, 0x30, len(ctl), len(code))
+    if stage == 'cs': ctl[0x56] = 5
+    header = struct.pack('<8xII28xI', len(code), len(ctl), len(metadata) // 3)
+    payload = header + code + ctl + metadata
+    return bytes(key_size) + struct.pack('<I', len(payload)) + payload
 
 
 class RedEngineCaches(unittest.TestCase):
@@ -94,6 +105,42 @@ class RedEngineCaches(unittest.TestCase):
         data = bytes(8) + b'\x01' + bytes(7) + program(1)
         (rel, keys, pairs, extra), log = self.scan(data, 'other.bin')
         self.assertEqual(log, ''); self.assertEqual(len(keys), 2)
+
+    def test_nvn2_material_stages_with_variable_metadata(self):
+        records = nvn2_record(16, 'vs', b'123456') + nvn2_record(16, 'ps')
+        footer = struct.pack('<8xQ24x', len(records)) + ss.RDHS_MATERIAL
+        (_, keys, pairs, extra), log = self.scan(records + b'index' + footer, 'materials.cache')
+        self.assertEqual({v[1] for v in keys.values()}, {'vs', 'ps'})
+        self.assertEqual((pairs, extra, log), (set(), {}, ''))
+
+    def test_nvn2_static_record_count_and_start(self):
+        records = b'metadata' + ss.CTL_MAGIC + b'\xc9\0\0\0' + bytes(64)
+        records += nvn2_record(8, 'cs') + nvn2_record(8, 'ps', b'123')
+        for count in (2, 1):
+            with self.subTest(count=count):
+                footer = struct.pack('<4xI8x', count) + ss.RDHS_STATIC + bytes(8)
+                (_, keys, pairs, extra), log = self.scan(records + footer, 'static.cache')
+                if count == 2:
+                    self.assertEqual({v[1] for v in keys.values()}, {'cs', 'ps'})
+                    self.assertEqual((pairs, extra, log), (set(), {}, ''))
+                else:
+                    self.assertEqual((keys, pairs, extra[0]), ({}, set(), 'unreadable'))
+                    self.assertIn('read 2 static shaders, expected 1', log)
+
+    def test_nvn2_material_record_stops_at_index(self):
+        record = nvn2_record(16, 'vs')
+        footer = struct.pack('<8xQ24x', len(record) - 1) + ss.RDHS_MATERIAL
+        (_, keys, pairs, extra), log = self.scan(record + footer, 'materials.cache')
+        self.assertEqual((keys, pairs, extra[0]), ({}, set(), 'unreadable'))
+        self.assertIn('RDHS record at 0x0: inconsistent payload', log)
+
+    def test_nvn2_cover_reads_the_sph_at_the_start_of_code(self):
+        records = nvn2_record(16, 'vs') + nvn2_record(16, 'ps', attribute=3) + nvn2_record(16, 'ps', attribute=12)
+        footer = struct.pack('<8xQ24x', len(records)) + ss.RDHS_MATERIAL
+        (_, keys, _, _), log = self.scan(records + footer, 'materials.cache')
+        cover, pixels = ss.separable_pairs(keys)
+        self.assertEqual(cover, {(v, p) for v in keys if keys[v][1] == 'vs' for p in keys if keys[p][1] == 'ps'})
+        self.assertEqual((len(pixels), log), (2, ''))
 
 
 if __name__ == '__main__':

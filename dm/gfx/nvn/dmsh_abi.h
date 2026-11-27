@@ -58,11 +58,6 @@
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table
-// NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own: stage i's (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) is
-// c[25 + i], which holds graphics push block 1 + i (DMSH_PUSH_BLOCKS): {address, size} entries of 16 bytes, or 8-byte handles. PRAGMATA's shaders read c[25] in 9,944
-// vertex shaders, c[26] in 538 mesh and 3 hull shaders, c[27] in 37 domain shaders, c[28] in 1 geometry shader and c[29] in 12,195 pixel shaders, and the game binds no
-// storage buffer at all. The translator maps the bank onto that block of c[24] (the build's job key stage_bank, InstEmitAmpere.cs AStageBlock)
-#define DMSH_NVN2_STAGE_BANK 25
 
 // NVN2 push constants (nvnCommandBufferPushGraphicsConstants / PushComputeConstants): the bytes the game pushes, read by its shaders as c[24] (the translator maps NVN2
 // compute's c0 push region there); one block for the graphics stages, one for compute
@@ -88,10 +83,10 @@
 // before the address B, then B plus the words from it on, at u32 2s and 2s + 1 for the binding's storage slot s (its "sbx"); only a shader with such a buffer has the table (GitHub issue #2618)
 #define DMSH_SBLEN_BANK 27
 #define DMSH_SBLEN_SLOTS 32              // storage slots of a table, two u32 each, as uint4s: 256 bytes
-// The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
-// stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
-// to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
-// entries (a 64-bit GPU address, then a size) or 8-byte handles there before its dispatches and draws, and its shaders load and store through those addresses
+// The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Every stage of the
+// group reads block b as bank c[DMSH_PUSH_BANK + b], which the translator maps to c[24] + b * DMSH_PUSH_SIZE (InstEmitAmpere.cs APushBlock); compute also reads block 1 where its
+// c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9). The game chooses the blocks: PRAGMATA pushes 16-byte buffer entries (a 64-bit GPU address, then a
+// size) or 8-byte handles into blocks 1, 2 and 5 before its dispatches and draws, Cyberpunk 2077 an 8-byte address into block 7, and their shaders load and store through them
 #define DMSH_PUSH_BLOCKS 8              // native groups each contain eight 256-byte banks; RT consumes the compute group's full 0x800 bytes
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
@@ -126,6 +121,9 @@
 #define DMSH_KIND_TEX_C2A "tex_c2a"      // an array of c2 handles the shader indexes at run time: element k = the texture whose c2 word lies at off + 8 k
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
+#define DMSH_KIND_TEX_QUERY "tex_query"  // registered texture view metadata, indexed by the 20-bit texture ID of a dynamic TXQ
+#define DMSH_TEX_QUERY_MEMBER "nvn_texture_query"
+#define DMSH_TEX_QUERY_WORDS 6           // u32 bound, then per ID: width, height, depth/layers, mip levels, sample count, mipmapped coordinate mask. Last row is all zero.
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
 #define DMSH_KIND_IMG_POOL "img_pool"    // the image pool, indexed by the handle's image ID (an image handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
 #define DMSH_KIND_TEX_HTAB "tex_htab"    // a table the host builds of the handles in uniform slot reg from byte off, element k = the handle at off + 8k (nvn_mtl.m htab_gpu), laid out as a pool: elem = the element type
@@ -171,6 +169,8 @@
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_reflect.py pool_arrays, nvn_mtl.m pool_seen_scan); 0 in a table of a uniform buffer's handles (htab_gpu), whose reads are not marked
 #define DMSH_POOL_BIAS 4                 // BUFFER tables: header word containing the byte offset of n+1 u32 element leads after the n+1 resource IDs; 0 for other tables
+#define DMSH_POOL_ROW_WORDS 3            // a wrapped 1D fetch binding: bound (low 32 bits), GPU addresses of the 2D and sampled BUFFER tables
+#define DMSH_POOL_BUFFER_ABSENT 0xffffffff  // sampled BUFFER table: this ID does not name a compatible buffer texture
 #define DMSH_KIND_UNKNOWN "?"            // a binding the build could not place: the host refuses the shader
 
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)

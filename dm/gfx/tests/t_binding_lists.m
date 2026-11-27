@@ -14,7 +14,8 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s (line %d)\n", label, __LINE__); } } while (0)
 enum { KINDS = NVN_RB_END - 1 };   // the last kind of nvn_refl.h's enum
-_Static_assert(NVN_RB_END == 43, "a binding kind was added to nvn_refl.h: decide below whether the per-draw walks act on it, then raise this");
+// NVN_RB_TEXQUERY reads descriptor metadata only, so neither resource walk includes it.
+_Static_assert(NVN_RB_END == 44, "a binding kind was added to nvn_refl.h: decide below whether the per-draw walks act on it, then raise this");
 // The kinds the walks act on, written out from their code: ubd_conflict_textures' switch (fb_depth_rule and fb_prepare take TEX, IMG and TEXU of them)
 static int is_tex(int k) {
     return k == NVN_RB_TEX || k == NVN_RB_TBUF || k == NVN_RB_TEXU || k == NVN_RB_TBUFU || k == NVN_RB_IMG || k == NVN_RB_IMGU || k == NVN_RB_TEXD || k == NVN_RB_TEXA

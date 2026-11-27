@@ -43,7 +43,7 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze, Metroid Prime Remastered): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its
 #       .pak archives and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
-#   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches, see rdhs_shaders and fzlc_shaders
+#   · REDengine 3 (The Witcher 3): GLSLC outputs in RDHS material caches and FZLC static caches; REDengine 4: NVN2 stages in version 8 and 10 RDHS caches
 #   · shadercache.nx (Blind Squirrel's Unreal Engine 3 ports: BioShock Remastered v13, BioShock 2 Remastered v28): header {u32 version, u32 block count}, then per block
 #       {u32 stored length, [u32 raw length in v28,] one zlib stream}; the blocks are joined before scanning because records straddle block boundaries. A record = 16-byte header
 #       {u32 control length, u32 code length, ?, ?}, code area, control section; see shadercache_nx
@@ -4432,7 +4432,7 @@ def unity_pass_pairs(o, programs):
                         program = programs.get((plat, sp.get('m_BlobIndex')))
                         if program and program[0] == stage:
                             _, ctl, code = program
-                            stages[stage][skey(ctl, code)] = code
+                            stages[stage][skey(ctl, code)] = (ctl, code)
                 cover = pixel_input_cover(stages['ps'])
                 pairs.update((v, f) for v in stages['vs'] for f in cover)
     return pairs
@@ -4734,19 +4734,16 @@ def group(label):
         if k in label: return g
     return 'other'
 
-def ps_inputs(code):
-    """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
-    return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
-
 def pixel_input_cover(shaders):
-    """{pixel key: code} → a deterministic greedy cover of their generic inputs; ties take the smaller key."""
-    ins = {k: ps_inputs(code) for k, code in shaders.items()}
+    """{pixel key: (control section, code area)} → a deterministic greedy cover of their generic inputs; ties take the smaller key."""
+    from dmsh_meshstage import pixel_reads
+    ins = {k: set(pixel_reads(code if nvn2_ctl(ctl) else code[0x30:])) for k, (ctl, code) in shaders.items()}
     left, cover = set().union(*ins.values()) if ins else set(), []
     while left:
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@', '#NXSH@', '#SHDR#', '#SCIMITAR:')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#CIVBSF@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#D3@', '#SHAD@', '#NXSHADER@', '#NXSD@', '#NXSH@', '#SHDR#', '#SCIMITAR:', '#RDHS4@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -4760,7 +4757,7 @@ def separable_pairs(keys):
     All pairs would be 376 × 375 rows; the cover needs a few rows × 376. No single-stage vertex shader, no cover"""
     single = [v for v in keys if keys[v][1] == 'vs' and any(s in keys[v][0] for s in SINGLE_STAGE) and '#var' not in keys[v][0]]   # '#var': a GLSLC output of several stages (glslc_program)
     if not single: return set(), []
-    cover = pixel_input_cover({k: v[3] for k, v in keys.items() if v[1] == 'ps'})
+    cover = pixel_input_cover({k: (v[2], v[3]) for k, v in keys.items() if v[1] == 'ps'})
     return {(v, p) for v in single for p in cover}, cover
 
 SMASH_ARC = struct.pack('<Q', 0xABCDEF9876543210)   # smash_arc.MAGIC (scan_file reads only the first bytes, without importing the reader)
@@ -4979,6 +4976,61 @@ def scan_file(args):
         return args[1], {}, set(), ('unreadable', why, 1)
 
 RDHS, FZLC = b'RDHS', b'FZLC'
+RDHS_MATERIAL = RDHS + struct.pack('<I', 10)
+RDHS_STATIC = RDHS + struct.pack('<I', 8)
+
+def rdhs_nvn2_shaders(d, label, static):
+    """REDengine 4's Switch 2 shader caches. Each record has a key (8 bytes for static, 16 for material), a u32 payload length, then a 0x30-byte descriptor,
+    the NVN2 code and control bytes, and three-byte metadata entries. The descriptor has the two GPU lengths at +8 and the entry count at +0x2c.
+    The version 10 material footer points at the index after the shaders. Version 8 static caches put metadata before the shaders and give their count in the footer."""
+    if static:
+        end = len(d) - 32
+        count, = field(d, '<I', end + 4, label)
+        if not 0 < count <= end // (0x3c + NVN2_KEY_CTL + 4): red(f'{label}: invalid static shader count {count}')
+        # The static footer gives no shader start. Find the first control section with a matching record header, then walk every record to the footer.
+        at = 0
+        magic = CTL_MAGIC + b'\xc9\0\0\0'
+        while (c := d.find(magic, at, end - NVN2_KEY_CTL + len(magic))) >= 0:
+            at = c + len(magic)
+            nc, nk = struct.unpack('<I16xI', d[c + 0x30:c + 0x48])
+            start = c - nk - 0x3c
+            if start < 0 or nc < NVN2_KEY_CTL or nk < 4: continue
+            size, _, code_len, ctl_size = struct.unpack('<IQII', d[start + 8:start + 28])
+            if (nk, nc) == (code_len, ctl_size) and c + nc <= start + 12 + size <= end:
+                at = start
+                break
+        else:
+            red(f'{label}: cannot find the first static shader record')
+        key_size = 8
+    else:
+        footer = len(d) - 48
+        end, = field(d, '<Q', footer + 8, label)
+        if not 0 < end <= footer: red(f'{label}: invalid material index offset {end:#x}')
+        at, key_size = 0, 16
+    out = []
+    while at < end:
+        where = f'{label} RDHS record at {at:#x}'
+        payload = at + key_size + 4
+        code_at = payload + 0x30
+        if code_at > end: red(f'{where}: truncated shader descriptor')
+        size, = struct.unpack('<I', d[payload - 4:payload])
+        nk, nc = struct.unpack('<II', d[payload + 8:payload + 16])
+        entries, = struct.unpack('<I', d[payload + 0x2c:code_at])
+        nxt = payload + size
+        if nc < NVN2_KEY_CTL or nk < 4 or nxt > end or size != 0x30 + nk + nc + 3 * entries:
+            red(f'{where}: inconsistent payload, code, control or metadata lengths')
+        c = code_at + nk
+        code, ctl = d[code_at:c], d[c:c + nc]
+        if not nvn2_ctl(ctl) or struct.unpack_from('<I', ctl, 0x30)[0] != nc:
+            red(f'{where}: invalid NVN2 control section')
+        st = nvn2_stage(ctl, code)
+        if not st: red(f'{where}: unrecognized NVN2 shader stage')
+        if st in ('vs', 'hs', 'ds', 'gs', 'ps') and nk < 0x80: red(f'{where}: truncated NVN2 graphics header')
+        if why := check(where, st, ctl, code): red(f'{where}: {why}')
+        out.append((f'{label}#RDHS4@{c:#x}', st, ctl, code))
+        at = nxt
+    if static and len(out) != count: red(f'{label}: read {len(out)} static shaders, expected {count}')
+    return out
 
 def rdhs_shaders(path, label):
     """REDengine 3's shader caches (The Witcher 3: Wild Hunt — Complete Edition, shadernx.cache in content/content0, content/patch0 and each DLC's content/: 28,491 material shaders).
@@ -5115,6 +5167,8 @@ def scan_file_in(args):
             f.seek(0)
             found = nxsd_shaders(f.read(), '/' + rel)
             return rel, uniq_keys(found), var_pairs(found), {}
+    if ext == '.archive' and head[:8] == b'RDAR\x0c\0\0\0':   # REDengine 4 cooked assets; its Switch 2 GPU programs are kept in the separate RDHS caches.
+        return rel, {}, set(), {}
     if ext in ('.data', '.patch', '.debug', '.nxpc') and os.path.exists(stem + '.dict'): return rel, {}, set(), {}   # read through its Next Level Games index (nlg_shaders)
     found = []; trees = {}
     if len(args) > 2 and args[2][0] == EA_ARCHIVE:
@@ -5280,12 +5334,20 @@ def scan_file_in(args):
     if head[:4] == FZLC:   # REDengine 3's static shader cache (fzlc_shaders)
         found += fzlc_shaders(path, '/' + rel)
         return rel, uniq_keys(found), var_pairs(found), trees
-    if head[8:9] == b'\x01' or os.path.basename(rel) == 'shadernx.cache':   # require the footer even under the engine's filename, which also lets us diagnose a damaged first flag
+    if head[8:9] == b'\x01' or rel.lower().endswith('.cache'):   # the footer distinguishes the RDHS revisions from each other and from unrelated caches
         with open(path, 'rb') as f:
             size = f.seek(0, 2)
-            if size >= 16: f.seek(size - 8)
-            tail = f.read(4) if size >= 16 else b''
-        if tail == RDHS:
+            f.seek(max(0, size - 48))
+            tail = f.read()
+        material = tail[-8:] == RDHS_MATERIAL
+        static = tail[-16:-8] == RDHS_STATIC
+        if material or static:
+            if len(tail) < (48 if material else 32): red(f'/{rel}: truncated RDHS footer')
+            from romfs import mmap
+            with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+                found = rdhs_nvn2_shaders(d, '/' + rel, static=not material)
+            return rel, uniq_keys(found), set(), trees
+        if tail[-8:-4] == RDHS and (head[8:9] == b'\x01' or os.path.basename(rel) == 'shadernx.cache'):
             found += rdhs_shaders(path, '/' + rel)
             return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == b'NXCX' and head[12:16] == bytes(4) and head[8:12] != GFX_MAGIC and head[4:8] not in (ZSTD_MAGIC, LZ4_FRAME_MAGIC):

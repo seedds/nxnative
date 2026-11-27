@@ -395,5 +395,7 @@ void mtl_prog_forget(const prog_t *p);   // program finalize, submit lock held: 
 uint64_t nvn_new_serial(void);
 typedef void (*nvn_buffer_range_fn)(uint64_t addr, uint64_t size);
 void nvn_buffer_write_ranges(uint64_t addr, uint64_t size, nvn_buffer_range_fn note);   // Snapshot physical destinations while a copy captures its storage
+typedef int (*nvn_buffer_range_test)(uint64_t addr, uint64_t size);
+int nvn_sparse_backing_hits(const void *pool, uint64_t addr, uint64_t size, nvn_buffer_range_test hits);
 // Serials handed out from now on are above s (dm/gfx/tests/nvn_replay.m: the objects of a capture keep the live run's serials)
 void nvn_serial_floor(uint64_t s);

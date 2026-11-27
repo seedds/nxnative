@@ -175,17 +175,19 @@ int main(void) { @autoreleasepool {
         check("B uniform handles: other word at byte 0 of slot 2", 1, r.b[2].soff); check("B uniform handles: its slot", 2, r.b[2].sreg); check("B uniform handles: one word has no other", 0, r.b[3].soff);
         printf("%-60s %s\n", "B images, buffer textures and two-word handles in uniform slots", fail == f1 ? "✓" : "✗");
     }
-    {   int f1 = fail;   // image pools (NVN_RB_IMGP): 3D read_write, 2D read-only, and texture_buffer write-only
+    {   int f1 = fail;   // image pools (NVN_RB_IMGP): 3D read_write, 2D read-only, buffer writes and native atomics
         NSDictionary *j = @{@"route": @"B", @"bindings": @[
             @{@"kind": @"img_pool", @"arg_id": @0, @"msl_name": @"cp_i3d_cb0_40000000_", @"msl_type": @"constant spvPool_cp_i3d_cb0_40000000_*", @"elem": @"texture3d<float, access::read_write>"},
             @{@"kind": @"img_pool", @"arg_id": @1, @"msl_name": @"cp_i2d_cb0_40000000_r32ui", @"msl_type": @"constant spvPool_cp_i2d_cb0_40000000_r32ui*", @"elem": @"texture2d<uint, access::read>"},
-            @{@"kind": @"img_pool", @"arg_id": @2, @"msl_name": @"cp_ib_cb0_40000000_", @"msl_type": @"constant spvPool_cp_ib_cb0_40000000_*", @"elem": @"texture_buffer<int, access::write>"}]};
+            @{@"kind": @"img_pool", @"arg_id": @2, @"msl_name": @"cp_ib_cb0_40000000_", @"msl_type": @"constant spvPool_cp_ib_cb0_40000000_*", @"elem": @"texture_buffer<int, access::write>"},
+            @{@"kind": @"img_pool", @"arg_id": @3, @"msl_name": @"cp_ib_cb0_40000000_r32ui", @"msl_type": @"constant spvPool_cp_ib_cb0_40000000_r32ui*", @"elem": @"texture_buffer<uint, access::read_write>", @"atomic": @YES}]};
         check("B image pool: conversion succeeds", 0, nvn_refl_from_json(j, &r, err, sizeof err));
         check("B image pool: pool flag", 1, r.pool); check("B image pool: bindless flag", 1, r.bindless); check("B image pool: dyn stays 0", 0, r.dyn);
         check("B image pool[0]: kind", NVN_RB_IMGP, r.b[0].kind); check("B image pool[0]: 3D", MTLTextureType3D, r.b[0].dtt); check("B image pool[0]: float", NVN_DPF_FLOAT, r.b[0].dpf); check("B image pool[0]: rw", 1, r.b[0].rw);
         check("B image pool[1]: kind", NVN_RB_IMGP, r.b[1].kind); check("B image pool[1]: 2D", MTLTextureType2D, r.b[1].dtt); check("B image pool[1]: uint", NVN_DPF_UINT, r.b[1].dpf); check("B image pool[1]: read-only", 0, r.b[1].rw);
         check("B image pool[2]: kind", NVN_RB_IMGP, r.b[2].kind); check("B image pool[2]: buffer", MTLTextureTypeTextureBuffer, r.b[2].dtt); check("B image pool[2]: sint", NVN_DPF_SINT, r.b[2].dpf); check("B image pool[2]: rw", 1, r.b[2].rw);
-        printf("%-60s %s\n", "B image pools: 3D rw, 2D read-only, texture_buffer write", fail == f1 ? "✓" : "✗");
+        check("B image pool[2]: plain write", 0, r.b[2].atom); check("B image pool[3]: atomic", 1, r.b[3].atom); check("B image pool[3]: rw", 1, r.b[3].rw);
+        printf("%-60s %s\n", "B image pools: 3D rw, 2D read-only, buffer writes and atomics", fail == f1 ? "✓" : "✗");
     }
     {   int f1 = fail;
         NSDictionary *b1 = @{@"route": @"B", @"bindings": @[@{@"kind": @"foo", @"arg_id": @0, @"msl_name": @"x", @"msl_type": @"constant _16*"}]};

@@ -15,7 +15,7 @@ static void fill(pso_key *k, unsigned seed) {
 
 int main(void) {
     for (unsigned seed = 1; seed <= 3; seed++) {
-        pso_key k; fill(&k, seed); pso_key_norm(&k, seed & 1);   // keys are made normalized (pso_key_fill), and a parse normalizes
+        pso_key k; fill(&k, seed); k.early_read_only = seed == 2; pso_key_norm(&k, seed & 1);   // keys are made normalized (pso_key_fill), and a parse normalizes
         NvShader *vs = [NvShader new], *fs = [NvShader new];
         vs->stage = (int)seed; fs->stage = (int)(seed + 1);
         snprintf(vs->key, sizeof vs->key, "vs-%u", seed); snprintf(fs->key, sizeof fs->key, "fs-%u", seed);
@@ -33,9 +33,9 @@ int main(void) {
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-a");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        size_t old = strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.atest + sizeof k.logic + sizeof k.border + sizeof k.border_spare); hex[old] = 0;
+        size_t old = strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.atest + sizeof k.logic + sizeof k.border + sizeof k.early_read_only); hex[old] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 0 && b.k.logic == 0);
-        a.k.atest = a.k.logic = a.k.border = a.k.border_spare = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
+        a.k.atest = a.k.logic = a.k.border = a.k.early_read_only = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
     }
     // A row written before pso_key.attr_hi (NVN2's vertex attributes 16 to 31): they read as 0, the fields before them stay
     {
@@ -43,9 +43,9 @@ int main(void) {
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-h");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        hex[strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.border + sizeof k.border_spare)] = 0;
+        hex[strlen(hex) - 2 * (sizeof k.attr_hi + sizeof k.border + sizeof k.early_read_only)] = 0;
         assert(pso_skey_parse(hex, &b) == 0); assert(b.k.atest == 1 && b.k.logic == 1);
-        a.k.border = a.k.border_spare = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);   // NOLINT(bugprone-suspicious-memory-comparison): the key is defined byte by byte, padding included: pso_skey_from clears it and its hex form is every byte
+        a.k.border = a.k.early_read_only = 0; memset(a.k.attr_hi, 0, sizeof a.k.attr_hi); assert(memcmp(&a, &b, sizeof a) == 0);   // NOLINT(bugprone-suspicious-memory-comparison): the key is defined byte by byte, padding included: pso_skey_from clears it and its hex form is every byte
     }
     // A row written before the border specialization keeps its high attributes and prewarms the no-correction pipeline. Live draws needing corrections have a different key.
     {
@@ -53,9 +53,9 @@ int main(void) {
         NvShader *vs = [NvShader new]; snprintf(vs->key, sizeof vs->key, "vs-b");
         pso_skey a, b; char hex[sizeof a * 2 + 1];
         pso_skey_from(&k, vs, nil, 0, NULL, &a); pso_skey_hex(&a, hex);
-        hex[strlen(hex) - 2 * (sizeof k.border + sizeof k.border_spare)] = 0;
-        assert(pso_skey_parse(hex, &b) == 0 && b.k.border == 0 && b.k.border_spare == 0);
-        a.k.border = a.k.border_spare = 0; assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
+        hex[strlen(hex) - 2 * (sizeof k.border + sizeof k.early_read_only)] = 0;
+        assert(pso_skey_parse(hex, &b) == 0 && b.k.border == 0 && b.k.early_read_only == 0);
+        a.k.border = a.k.early_read_only = 0; assert(memcmp(&a, &b, sizeof a) == 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
         a.k.border = 1; assert(memcmp(&a, &b, sizeof a) != 0);  // NOLINT(bugprone-suspicious-memory-comparison): a pso_skey is its bytes (pso_skey_from zeroes it, pso_skey_hex writes them, the maps key on them)
     }
     // pso_key_attr: attribute 16 is the first of the high table

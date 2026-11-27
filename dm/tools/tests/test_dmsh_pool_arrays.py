@@ -35,6 +35,28 @@ fragment main0_out main0(constant spvDescriptorSetBuffer0& spvDescriptorSet0 [[b
 
 
 class PoolArrays(unittest.TestCase):
+    def test_device_array_accessor_allows_an_optional_early_entry(self):
+        accessor = '''template<typename T, size_t Num>
+struct spvUnsafeArray
+{
+    T elements[Num];
+    device T& operator [] (size_t pos) device
+    {
+        return elements[pos];
+    }
+};
+'''
+        base = NS['pool_arrays'](accessor + MSL)
+        self.assertNotIn('early_fragment_tests', base)
+        self.assertEqual(NS['pool_early_variant'](base), 'standard')
+        self.assertEqual(NS['pool_early_variant'](base + '\n    const device uint* input [[id(15)]];'), 'standard')
+        self.assertEqual(NS['pool_early_variant'](base + '\n    discard_fragment();'), 'read_only')
+        for effect in ('device uint* output [[id(15)]];', 'img.write(float4(1), at);',
+                       '*reinterpret_cast<device uint*>(address) = 1;', 'float z [[depth(any)]];', 'uint mask [[sample_mask]];'):
+            with self.subTest(effect=effect):
+                self.assertIsNone(NS['pool_early_variant'](base + '\n    ' + effect))
+                self.assertIsNone(NS['pool_early_variant'](base + '\n    discard_fragment();\n    ' + effect))
+
     def test_rewrite(self):
         out = NS['pool_arrays'](MSL)
         self.assertIn('struct spvPool_fp_t2d_cb0_40000000\n{\n    uint n;\n    ulong seen;\n    array<texture2d<float>, 1> e;\n};', out)
@@ -47,6 +69,32 @@ class PoolArrays(unittest.TestCase):
         self.assertIn('(&spvDescriptorSet0.fp_t2d_cb0_40000000->e[0])[dm_pool_mark(spvDescriptorSet0.fp_t2d_cb0_40000000, min(uint(int(_9[2u])), spvDescriptorSet0.fp_t2d_cb0_40000000->n))]', out)
         self.assertLess(out.index('dm_pool_mark(constant P* p'), out.index('struct spvPool_'))
         self.assertIn('.sample((&spvDescriptorSet0.fp_s_cb0_40000000->e[0])[min(uint(int(_7)), spvDescriptorSet0.fp_s_cb0_40000000->n)], uv)', out)
+
+    def test_wrapped_1d_fetch_uses_a_native_buffer_or_the_2d_table(self):
+        src = '''#include <metal_stdlib>
+using namespace metal;
+struct spvDescriptorSetBuffer0
+{
+    array<texture2d<float>, 1048576> cp_t2d_cb0_40000000 [[id(0)]];
+    array<texture2d<float>, 1048576> cp_t2d_cb0_40000001 [[id(1048576)]];
+};
+kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]], device uint* out [[buffer(1)]])
+{
+    out[0] = as_type<uint>(d.cp_t2d_cb0_40000001[12].read(uint2(3, 1), 0).x);
+    out[1] = as_type<uint>(d.cp_t2d_cb0_40000000[15].read(uint2(2, 1), 0).x);
+}
+'''
+        out = dmsh_reflect.pool_arrays(src)
+        self.assertIn('dm_pool_read_1d(d.cp_t2d_cb0_40000001, min(uint(12), d.cp_t2d_cb0_40000001->n), uint2(3, 1), 0)', out)
+        self.assertIn('array<texture_buffer<float>, 1> e;', out)
+        self.assertIn('(&d.cp_t2d_cb0_40000000->e[0])', out)
+        bindings = dmsh_reflect.reflect('k', 'cs', out, {'sbufs': [], 'cbufs': []})
+        self.assertEqual([b.get('fetch1d', False) for b in bindings], [False, True])
+        if os.environ.get('DMSH_TEST_GPU') == '1':
+            with tempfile.TemporaryDirectory() as temp:
+                result = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-x', 'metal', '-c', '-', '-o', str(Path(temp) / 'k.air')],
+                                        input=out, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_image_pool(self):
         # 3D read_write image pool (The Duskbloods' GXFogVolume_*) and read-only 2D image pool: both reflect as img_pool, unmarked
@@ -108,6 +156,38 @@ class PoolArrays(unittest.TestCase):
                         'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]])\n{\n    put(0u, d.cp_ib_cb0_40000000_);\n}\n')
         cout = NS['pool_arrays'](callable_msl)
         self.assertIn('dm_buffer_write(cp_ib_cb0_40000000_, min(uint(idx), cp_ib_cb0_40000000_->n), uint4(1u, 2u, 3u, 4u), idx)', cout)
+
+    def test_buffer_image_pool_atomic(self):
+        # Cyberpunk 2077's engine compute shaders: an atomic add on a buffer image whose handle the shader loads from memory. The coordinate moves by the element's lead,
+        # as a read's does, and the MSL compiles at the chain's MSL version
+        msl = ('#include <metal_stdlib>\nusing namespace metal;\n'
+               'template<typename T, access a> inline void spvImageFence(texture_buffer<T, a> img) { img.fence(); }\n'
+               'struct spvDescriptorSetBuffer0\n{\n'
+               '    array<texture_buffer<uint, access::read_write>, 1048576> cp_ib_cb0_40000000_r32ui [[id(0)]];\n'
+               '    device uint* out [[id(1048576)]];\n'
+               '};\n'
+               'kernel void main0(constant spvDescriptorSetBuffer0& d [[buffer(0)]], uint i [[thread_position_in_grid]])\n{\n'
+               '    uint c = i * 2u;\n'
+               '    uint r = d.cp_ib_cb0_40000000_r32ui[int(i)].atomic_fetch_add(uint(c), uint(1)).x;\n'
+               '    spvImageFence(d.cp_ib_cb0_40000000_r32ui[i]);\n'
+               '    d.out[i] = r;\n'
+               '}\n')
+        out = NS['pool_arrays'](msl)
+        self.assertIn('(&d.cp_ib_cb0_40000000_r32ui->e[0])[min(uint(int(i)), d.cp_ib_cb0_40000000_r32ui->n)].atomic_fetch_add('
+                      'dm_buffer_coord(d.cp_ib_cb0_40000000_r32ui, min(uint(int(i)), d.cp_ib_cb0_40000000_r32ui->n), uint(c)), uint(1)).x', out)
+        self.assertIn('spvImageFence((&d.cp_ib_cb0_40000000_r32ui->e[0])[min(uint(i), d.cp_ib_cb0_40000000_r32ui->n)]);', out)   # a fence keeps the element as it is
+        b = {e['msl_name']: e for e in NS['reflect']('k', 'cs', out, {'sbufs': [], 'cbufs': []})}
+        self.assertEqual(b['cp_ib_cb0_40000000_r32ui']['kind'], abi.KIND_IMG_POOL)
+        self.assertTrue(b['cp_ib_cb0_40000000_r32ui']['atomic'])
+        if platform.system() != 'Darwin' or not shutil.which('xcrun'):
+            return
+        with tempfile.TemporaryDirectory(prefix='dm-pool-atomic-') as temporary:
+            src = Path(temporary) / 'atomic.metal'; src.write_text(out)
+            r = subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal3.2',
+                                f'-fmodules-cache-path={temporary}', '-c', str(src), '-o', str(src.with_suffix('.air'))],
+                               capture_output=True, text=True)
+            if 'unable to find utility' in r.stderr: return
+            self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_mark_tests_with_a_plain_load(self):
         # an atomic load goes to the shared cache every time, and a pass's pixels queue on the few words its IDs share (frame-rate.md); only a clear bit takes the atomic

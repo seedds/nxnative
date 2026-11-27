@@ -207,8 +207,13 @@ def plan(lib_dir, chain, pairs, zero):
         if vf is None or ff is None: left['library'] += 1; continue
         if ventry not in vf or fentry not in ff: left['entry'] += 1; continue
         if any(c not in HOST_CONSTANTS for c in vf[ventry] + ff[fentry]): rest.append((vk, fk)); continue   # script specializes HOST_CONSTANTS as the host does
-        b = (vl, ventry, fl, fentry)
-        if b not in seen: seen.add(b); bases.append(b)
+        entries = [fentry]
+        early = fj.get('entry_early')
+        if early in ff and all(c in HOST_CONSTANTS for c in ff[early]):
+            entries.append(early)
+        for entry in entries:
+            b = (vl, ventry, fl, entry)
+            if b not in seen: seen.add(b); bases.append(b)
     return bases, rest, left
 
 

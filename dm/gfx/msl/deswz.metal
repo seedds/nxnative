@@ -2,13 +2,32 @@
 #include <metal_stdlib>
 using namespace metal;
 struct P { ulong src_off, dst_off, base, pitch; uint row_bytes, rows, slices, th, td, gobs_x, gob2; };   // gob2: the Switch 2's order inside a GOB (the texture's captured GOB order)
-kernel void deswz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {
+template<bool Sparse>
+static inline void deswz_block(device const uchar *src, device const ulong *pt, device uchar *dst, constant P& p, uint3 id) {
  uint bh = 1u << p.th, bd = 1u << p.td, gobs_x = p.gobs_x, blocks_y = (p.rows + (8u * bh) - 1u) >> (3u + p.th);
  uint tid = id.x & 31u, gob_x = id.x >> 5, gob_y = id.y, z = id.z; uint xseg = p.gob2 ? ((tid >> 4) << 1) | ((tid >> 2) & 1u) : ((tid >> 4) << 1) | ((tid >> 1) & 1u), y = (gob_y << 3) | (p.gob2 ? (((tid >> 3) & 1u) << 2) | (tid & 3u) : (((tid >> 2) & 3u) << 1) | (tid & 1u)), x = (gob_x << 6) | (xseg << 4);
  if (x >= p.row_bytes || y >= p.rows || z >= p.slices) return;
  uint n = min(16u, p.row_bytes - x); ulong block = 512ul * bh * bd; ulong gob_in_block = ((ulong)(z & (bd - 1u)) << p.th) + (gob_y & (bh - 1u)); ulong so = p.src_off + p.base + ((ulong)(z >> p.td) * gobs_x * blocks_y + (gob_y >> p.th) * gobs_x + gob_x) * block + gob_in_block * 512ul + (ulong)tid * 16ul; ulong doff = p.dst_off + ((ulong)z * p.rows + y) * p.pitch + x;
+ if (Sparse) {
+  // The host keeps the storage base 16-byte aligned. Each segment is in
+  // one guest page, and unmapped pages read as zero.
+  ulong a = pt[(so >> 12) - (p.src_off >> 12)];
+  if (!a) {
+   if (n == 16u && (doff & 15ul) == 0ul) *(device uint4 *)(dst + doff) = uint4(0);
+   else for (uint i = 0; i < n; i++) dst[doff + i] = 0;
+   return;
+  }
+  src = reinterpret_cast<device const uchar *>(a + (so & 0xFFFul));
+  so = 0;
+ }
  if (n == 16u && ((so | doff) & 15ul) == 0ul) *(device uint4 *)(dst + doff) = *(device const uint4 *)(src + so);
  else for (uint i = 0; i < n; i++) dst[doff + i] = src[so + i];
+}
+kernel void deswz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {
+ deswz_block<false>(src, nullptr, dst, p, id);
+}
+kernel void deswz_sparse(device const ulong *pt [[buffer(0)]], device uchar *dst [[buffer(1)]], constant P& p [[buffer(2)]], uint3 id [[thread_position_in_grid]]) {
+ deswz_block<true>(nullptr, pt, dst, p, id);
 }
 struct D { ulong src_off, base, layer_stride; uint width,height,layers,level,th,gobs_x,gob2; };
 kernel void deswz_direct(device const uchar *src [[buffer(0)]], constant D& p [[buffer(2)]], texture2d_array<uint, access::write> dst [[texture(0)]], uint3 id [[thread_position_in_grid]]) {
@@ -54,13 +73,4 @@ kernel void swz(device const uchar *src [[buffer(0)]], device uchar *dst [[buffe
   ulong q = o - p.dst_off + i;   // the byte's offset in the texture's storage: its edge pages' bytes go to eb too
   if (q < p.e0n) eb[q] = v; else if (q >= p.e1s && q - p.e1s < p.e1n) eb[p.e0n + q - p.e1s] = v;
  }
-}
-// A texture of a sparse pool gathered for an upload (nvn_mtl.m pkg_upload_), n bytes from address va into dst: 16 bytes a thread, read from the physical memory mapped behind each 4 KB
-// page (pt and pt_pg as in swz_at), 0 where nothing is mapped. The upload batch runs after every command buffer committed before it, so this reads what their GPU writes stored
-// into that memory (swz), which a gather on the CPU when the upload is encoded did not
-struct G { ulong va, pt_pg, n; };
-kernel void gather(device uint4 *dst [[buffer(0)]], device const ulong *pt [[buffer(1)]], constant G& p [[buffer(2)]], uint id [[thread_position_in_grid]]) {
- ulong q = (ulong)id << 4; if (q >= p.n) return;
- ulong va = p.va + q, a = pt[(va >> 12) - p.pt_pg];
- dst[id] = a ? *reinterpret_cast<device const uint4 *>(a + (va & 0xFFFul)) : uint4(0);
 }

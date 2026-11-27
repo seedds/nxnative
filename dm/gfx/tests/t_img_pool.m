@@ -3,11 +3,15 @@
 // 2. Dynamic c2-picked 2D image pool without tex_dyn_slots, including a RegisterTexture-only texture bound via BindImages (img_pool_note_bound + image_prepare_shader upgrade).
 // 3. Unaligned 1D buffer image pool (Persona 3 Reload's cp_ib_cb0_40000000_) using dm_buffer_write / dm_buffer_read / dm_buffer_width with p->bias and the negative-coordinate guard.
 // 4. g_psnap_gen invalidation when img_pool_gpu rebuilds after a new registration.
+// 5. GPU-selected NVN2 texture descriptors without IMAGE, and typed atomic image pool entries and sink.
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
 #define g_ft g_ft_hle
+#define dm_sdk_ounce default_sdk_ounce
+int default_sdk_ounce(void);
 #include "../nvn/hle_nvn.c"
+#undef dm_sdk_ounce
 #undef g_ft
 #include <unistd.h>
 
@@ -17,6 +21,8 @@ module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 void crash_install(void);
+static _Atomic int test_switch2;
+int dm_sdk_ounce(void) { return atomic_load_explicit(&test_switch2, memory_order_relaxed); }
 
 #define P(name) ((NVNT_##name)nvn_lookup(#name))
 static int checks, failed;
@@ -34,6 +40,9 @@ enum {
     TEX2D_B_OFF   = 0xA0000,
     TEX2D_C_OFF   = 0xC0000,
     BUF_IMG_OFF   = 0xE0000,
+    GLYPH_OFF     = 0x100000,
+    BC1_OFF       = 0x120000,
+    CPU_R8_OFF    = 0x140000,
     POOL_IDS      = 384,
 };
 
@@ -131,7 +140,19 @@ int main(void) { @autoreleasepool {
         "    threadgroup_barrier(mem_flags::mem_texture);\n"
         "    d.ssbo[2 + tid] = dm_buffer_read(d.img, i, tid).x;\n"
         "}\n"
+        "kernel void atomic_buf_from_ssbo(constant ArgsBuf& d [[buffer(0)]], uint tid [[thread_position_in_grid]]) {\n"
+        "    uint i = min(d.ssbo[tid] & 0xfffffu, d.img->n);\n"
+        "    uint bias = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(d.img) + d.img->bias)[i];\n"
+        "    d.ssbo[2 + tid] = (&d.img->e[0])[i].atomic_fetch_add(bias, 4u).x;\n"
+        "}\n"
+        "struct PoolR8 { uint n; ulong seen; array<texture2d<float, access::write>, 1> e; };\n"
+        "struct ArgsR8 { constant PoolR8* img [[id(0)]]; const device uint* ids [[id(1)]]; };\n"
+        "kernel void write_implicit_r8(constant ArgsR8& d [[buffer(0)]], uint tid [[thread_position_in_grid]]) {\n"
+        "    uint i = min(d.ids[tid] & 0xfffffu, d.img->n);\n"
+        "    (&d.img->e[0])[i].write(float4(1), uint2(0));\n"
+        "}\n"
         options:nil error:&err];
+    if (!lib) fprintf(stderr, "%s\n", err.localizedDescription.UTF8String);
     require(lib != nil, "test Metal shaders compile");
 
     NVNdeviceBuilder db = {0}; P(nvnDeviceBuilderSetDefaults)(&db); require(P(nvnDeviceInitialize)(&device, &db), "device initializes");
@@ -289,10 +310,124 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_unlock(&g_rmu);
     CHECK(gpu_after != 0 && pb_out != nil && g_psnap_gen > pgen_before, "img_pool_gpu rebuild bumps g_psnap_gen for argument-block invalidation");
 
+    // A submission retires late views, while a neighbouring descriptor's resource stays live.
+    uint64_t retired_serial = ((tex_t *)&tex2d_regimg)->serial;
+    treg_retire_serial(retired_serial);
+    own_note(retired_serial);
+    nvn_rbind refresh_bind = {.kind = NVN_RB_IMGP, .rw = 1, .dtt = MTLTextureType2D, .dpf = NVN_DPF_UINT};
+    mtl_sub_begin();
+    __unsafe_unretained id<MTLBuffer> refresh_out = nil;
+    os_unfair_lock_lock(&g_rmu);
+    img_pool_gpu(&refresh_bind, 0, &refresh_out);
+    id<MTLBuffer> earlier = refresh_out;
+    require(earlier && g_treg[311].transient_sub == g_sub_serial, "the retired image has a view scoped to this submission");
+    const uint64_t *before = (const uint64_t *)((const uint8_t *)earlier.contents + DMSH_POOL_HEAD);
+    const uint64_t stable_rid = before[310], retired_rid = before[311];
+    const uint64_t old_reg = g_reg_gen, old_ser = g_ser_gen;
+    os_unfair_lock_unlock(&g_rmu);
+    require(mtl_wait(mtl_sub_commit(), 5000000000ull), "the image-pool submission completes");
+    require(!g_treg[311].view, "the late image view is dropped at submission end");
+    mtl_sub_begin();
+    os_unfair_lock_lock(&g_rmu);
+    require(g_reg_gen == old_reg && g_ser_gen == old_ser, "only the submission changed before the refresh");
+    img_pool_gpu(&refresh_bind, 0, &refresh_out);
+    require(refresh_out && refresh_out != earlier, "refresh writes a separate argument buffer");
+    const uint64_t *after = (const uint64_t *)((const uint8_t *)refresh_out.contents + DMSH_POOL_HEAD);
+    CHECK(after[310] == stable_rid, "refresh keeps the stable image's resource ID");
+    CHECK(g_treg[311].view && after[311] == g_treg[311].view_rid, "refresh resolves the retired image again");
+    CHECK(before[310] == stable_rid && before[311] == retired_rid, "refresh preserves the original table's contents");
+    os_unfair_lock_unlock(&g_rmu);
+    require(mtl_wait(mtl_sub_commit(), 5000000000ull), "the refreshed image-pool submission completes");
+
+    // 5. Neither descriptor has IMAGE or appears in a BindImages call. R8 can be written through a float image, and BC1 uses the sink.
+    atomic_store_explicit(&test_switch2, 1, memory_order_relaxed);
+    NVNtexture glyph, compressed, cpu_r8;
+    {
+        NVNtextureBuilder tb = {0};
+        P(nvnTextureBuilderSetDefaults)(&tb); P(nvnTextureBuilderSetDevice)(&tb, &device);
+        P(nvnTextureBuilderSetTarget)(&tb, NVN_TEXTURE_TARGET_2D);
+        P(nvnTextureBuilderSetSize2D)(&tb, 4, 4);
+        P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R8);
+        P(nvnTextureBuilderSetStorage)(&tb, &pool, GLYPH_OFF);
+        require(P(nvnTextureInitialize)(&glyph, &tb), "flagless R8 image initializes");
+        P(nvnTexturePoolRegisterTexture)(&textures, 340, &glyph, NULL);
+        P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA_DXT1);
+        P(nvnTextureBuilderSetStorage)(&tb, &pool, BC1_OFF);
+        require(P(nvnTextureInitialize)(&compressed, &tb), "flagless compressed texture initializes");
+        P(nvnTexturePoolRegisterTexture)(&textures, 341, &compressed, NULL);
+        P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R8);
+        P(nvnTextureBuilderSetStorage)(&tb, &pool, CPU_R8_OFF);
+        require(P(nvnTextureInitialize)(&cpu_r8, &tb), "unflushed CPU-fed texture initializes");
+        memory[CPU_R8_OFF] = 0x55;
+        P(nvnTexturePoolRegisterTexture)(&textures, 342, &cpu_r8, NULL);
+    }
+    NVNprogram prog_r8, prog_atomic;
+    {
+        nvn_refl rf = {0}; rf.nb = 2; rf.bindless = 1; rf.pool = 1; rf.tg[0] = 2; rf.tg[1] = rf.tg[2] = 1;
+        rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMGP, .rw = 1, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT, .aid = 0};
+        rf.b[1] = (nvn_rbind){.kind = NVN_RB_SBUFP, .reg = 0, .aid = 1};
+        make_program(&prog_r8, lib, @"write_implicit_r8", "imgp2d0000000005", rf);
+        rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMGP, .rw = 1, .atom = 1, .dtt = MTLTextureTypeTextureBuffer, .dpf = NVN_DPF_UINT, .aid = 0};
+        rf.b[1].rw = 1;
+        make_program(&prog_atomic, lib, @"atomic_buf_from_ssbo", "imgpbf0000000006", rf);
+    }
+    ssbo_words[0] = 340; ssbo_words[1] = 341;
+    P(nvnMemoryPoolFlushMappedRange)(&pool, SSBO_OFF, 64);
+    P(nvnCommandBufferBeginRecording)(&command);
+    P(nvnCommandBufferSetTexturePool)(&command, &textures);
+    P(nvnCommandBufferBindProgram)(&command, &prog_r8, NVN_SHADER_STAGE_COMPUTE_BIT);
+    P(nvnCommandBufferBindStorageBuffer)(&command, NVN_SHADER_STAGE_COMPUTE, 0, base + SSBO_OFF, 64);
+    P(nvnCommandBufferDispatchCompute)(&command, 1, 1, 1);
+    P(nvnCommandBufferCopyTextureToBuffer)(&command, &glyph, NULL, &reg2d, base + READBACK_OFF + 0x4000, 0);
+    P(nvnCommandBufferCopyTextureToBuffer)(&command, &cpu_r8, NULL, &reg2d, base + READBACK_OFF + 0x6000, 0);
+    submit_and_wait(P(nvnCommandBufferEndRecording)(&command));
+    CHECK(memory[READBACK_OFF + 0x4000] == 255, "NVN2 image pool writes a flagless compatible color texture");
+    id<MTLTexture> bc = tex_made((const tex_t *)&compressed);
+    CHECK(bc && !(bc.usage & MTLTextureUsageShaderWrite), "the compressed texture is resolved without shader write usage");
+    CHECK(memory[READBACK_OFF + 0x6000] == 0x55, "a matching CPU-fed texture retains its unflushed contents");
+    os_unfair_lock_lock(&g_rmu);
+    nvn_rbind float_pool = {.kind = NVN_RB_IMGP, .rw = 1, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT};
+    __unsafe_unretained id<MTLBuffer> float_table = nil;
+    img_pool_gpu(&float_pool, 0, &float_table);
+    const uint32_t *float_head = float_table.contents;
+    const uint64_t *float_slots = (const uint64_t *)((const uint8_t *)float_head + DMSH_POOL_HEAD);
+    CHECK(float_slots[341] == float_slots[*float_head], "the compressed descriptor uses the write sink");
+    os_unfair_lock_unlock(&g_rmu);
+    tex_t unsupported = *(const tex_t *)&glyph;
+    unsupported.d.format = NVN_FORMAT_DEPTH16;
+    CHECK(!img_usage(&unsupported, MTLPixelFormatDepth16Unorm), "implicit depth texture retains its original usage");
+    unsupported.d.format = NVN_FORMAT_R8;
+    unsupported.d.samples = 4;
+    CHECK(!img_usage(&unsupported, MTLPixelFormatR8Unorm), "implicit multisampled texture retains its original usage");
+
+    // Select both the unaligned BUFFER descriptor and an invalid ID. The latter must have an atomic-capable sink.
+    ssbo_words[0] = 320; ssbo_words[1] = 0xfffff;
+    P(nvnMemoryPoolFlushMappedRange)(&pool, SSBO_OFF, 64);
+    P(nvnCommandBufferBeginRecording)(&command);
+    P(nvnCommandBufferSetTexturePool)(&command, &textures);
+    P(nvnCommandBufferBindProgram)(&command, &prog_atomic, NVN_SHADER_STAGE_COMPUTE_BIT);
+    P(nvnCommandBufferBindStorageBuffer)(&command, NVN_SHADER_STAGE_COMPUTE, 0, base + SSBO_OFF, 64);
+    P(nvnCommandBufferDispatchCompute)(&command, 1, 1, 1);
+    submit_and_wait(P(nvnCommandBufferEndRecording)(&command));
+    CHECK(buf_words[0] == 0 && buf_words[1] == 0xdead0004u && buf_words[2] == 0xdead0001u, "image pool atomic increments only the addressed texel at offset +4");
+    CHECK(ssbo_words[2] == 0xdead0000u, "image pool atomic returns the old texel");
+    os_unfair_lock_lock(&g_rmu);
+    nvn_rbind atomic_pool = {.kind = NVN_RB_IMGP, .rw = 1, .atom = 1, .dtt = MTLTextureTypeTextureBuffer, .dpf = NVN_DPF_UINT};
+    __unsafe_unretained id<MTLBuffer> atomic_table = nil, write_table = nil;
+    img_pool_gpu(&atomic_pool, 0, &atomic_table);
+    uint32_t *atomic_head = atomic_table.contents;
+    uint64_t *atomic_slots = (uint64_t *)((uint8_t *)atomic_head + DMSH_POOL_HEAD);
+    CHECK(atomic_slots[*atomic_head] == dummy_img_atomic(atomic_pool.dtt, atomic_pool.dpf, 0).gpuResourceID._impl, "out-of-range ID has the atomic sink");
+    atomic_pool.atom = 0;
+    CHECK(img_pool_gpu(&atomic_pool, 0, &write_table) != atomic_table.gpuAddress, "ordinary and atomic pools with matching type and class use different tables");
+    os_unfair_lock_unlock(&g_rmu);
+
     P(nvnQueueFinish)(&queue);
     P(nvnProgramFinalize)(&prog3d); P(nvnProgramFinalize)(&prog2d); P(nvnProgramFinalize)(&progbuf);
+    P(nvnProgramFinalize)(&prog_r8); P(nvnProgramFinalize)(&prog_atomic);
     P(nvnTextureFinalize)(&tex3d); P(nvnTextureFinalize)(&tex2d_unrelated); P(nvnTextureFinalize)(&tex2d_regtex);
     P(nvnTextureFinalize)(&tex2d_regimg); P(nvnTextureFinalize)(&texbuf);
+    P(nvnTextureFinalize)(&glyph); P(nvnTextureFinalize)(&compressed); P(nvnTextureFinalize)(&cpu_r8);
     P(nvnCommandBufferFinalize)(&command); P(nvnTexturePoolFinalize)(&textures);
     P(nvnMemoryPoolFinalize)(&pool); P(nvnQueueFinalize)(&queue); P(nvnDeviceFinalize)(&device);
     free(memory);

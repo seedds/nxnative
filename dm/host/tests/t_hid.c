@@ -1954,6 +1954,13 @@ int main(void) {
     t_six_ic_info();
     t_touch_sampling();
     t_rec();
+    {   // Mouse history by handle, as polled by Cyberpunk 2077.
+        const uint32_t handle = 0;
+        uint64_t state[5] = {1, 2, 3, 4, 5};
+        h_hid_InitMouseHandle(&handle);
+        CHECK(h_hid_MouseStatesHandle(state, 1, &handle) == 0, "a disconnected mouse has no history by handle");
+        CHECK(!memcmp(state, (uint64_t[]){1, 2, 3, 4, 5}, sizeof state), "zero mouse samples leave the caller's history untouched");
+    }
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;
         h_hid_NmouseInitT(NULL, 0, 1920, 1080, 1); h_hid_NmouseGetRange(&w, &h);

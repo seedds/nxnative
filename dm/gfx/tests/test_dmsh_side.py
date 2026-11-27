@@ -20,6 +20,15 @@ class Unit(unittest.TestCase):
         self.assertEqual(u.count('struct dm_alpha_state '), 1); self.assertEqual(u.count('struct dm_logic_state '), 1)   # the helpers once, main0_u's
         self.assertEqual(u.count('out.m_1 = float4(0.5);'), BASE.count('out.m_1 = float4(0.5);'))
 
+    def test_early_depth_entry_keeps_main0_alpha_test_separate(self):
+        shared = dmsh_side.shared_body(ONE)
+        main = dmsh_side.entry(shared, 'main0')
+        early = dmsh_side.calling({**main, 'attr': '[[early_fragment_tests]] '}, 'main0_early', 'main0_out', 'return out;')
+        unit, info = dmsh_side.unit(shared + early)
+        self.assertIn(early, unit)
+        self.assertEqual(info['alpha'], ['main0_a'])
+        self.assertNotIn('main0_early_a', unit)
+
     def test_a_parameter_it_cannot_pass(self):
         self.assertIsNone(dmsh_side.unit(ONE.replace('[[buffer(0)]])', '[[buffer(0), function_constant(c)]])'))[0])
 

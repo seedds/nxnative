@@ -9,7 +9,7 @@
 
 enum { NVN_RB_CBUF = 1, NVN_RB_SAMP, NVN_RB_TEX, NVN_RB_IMG, NVN_RB_TBUF,
        NVN_RB_SBUFP, NVN_RB_SUPPORT, NVN_RB_C1, NVN_RB_DRV0, NVN_RB_DRV2, NVN_RB_SAMPT, NVN_RB_UBOP, NVN_RB_TEXU, NVN_RB_SAMPU, NVN_RB_SAMPI, NVN_RB_SBUFU, NVN_RB_TEXD, NVN_RB_SAMPD, NVN_RB_TEXA, NVN_RB_SAMPA, NVN_RB_GEOMETRY, NVN_RB_TEXP, NVN_RB_SAMPP, NVN_RB_TEXH, NVN_RB_SAMPH, NVN_RB_BORDER, NVN_RB_PUSH, NVN_RB_GMEM, NVN_RB_GMEML, NVN_RB_IMGU, NVN_RB_TBUFU, NVN_RB_CBSIZE, NVN_RB_SBUFQ, NVN_RB_TBIAS, NVN_RB_SBLEN,
-       NVN_RB_RT_SCENE, NVN_RB_RT_PARAMETERS, NVN_RB_RT_ERRORS, NVN_RB_RT_INSTANCE_SBT, NVN_RB_RT_BANK0, NVN_RB_RT_BANK3, NVN_RB_IMGP,
+       NVN_RB_RT_SCENE, NVN_RB_RT_PARAMETERS, NVN_RB_RT_ERRORS, NVN_RB_RT_INSTANCE_SBT, NVN_RB_RT_BANK0, NVN_RB_RT_BANK3, NVN_RB_IMGP, NVN_RB_TEXQUERY,
        NVN_RB_END };   // one past the last kind: dm/gfx/tests/t_binding_lists.m stops building when a kind is added, until the per-draw binding lists (sh_lists_make) decide on it
 // IMGP: the image pool as one array indexed by the handle's image ID, for an image handle traced to no slot (dmsh_reflect.py pool_arrays, nvn_mtl.m img_pool_gpu)
 // IMGU / TBUFU: an image / a buffer texture whose handle the game keeps in uniform slot reg at byte off, as TEXU (Unreal Engine 5.4 on the Switch 2 keeps every image in c[3]). Read at encode time
@@ -41,8 +41,8 @@ typedef struct {
     uint16_t n;              // TEXD / SAMPD, TEXA / SAMPA, and TEXU / SAMPU arrays (element k = the handle at byte 8k of the uniform buffer): array length (argument buffer entries aid .. aid + n - 1)
     uint16_t soff;           // TEXA / SAMPA: c2 byte of a separate sampler word ORed into every element's handle (handle type 1), 0 = none; TEXU / SAMPU / TBUFU: byte of the other word ORed into the handle (handle type 1) + 1, in uniform slot sreg (DMSH_SREG_C2: SAMPU's sampler is the word at that c2 byte), 0 = none
     uint8_t sreg;
-    uint8_t f1d;             // TEX: read by 1D integer fetches as 2D rows of 16384 texels (dmsh_build.py "fetch1d"): a buffer texture here is bound as such rows (nvn_mtl.m tbuf_as_2d)
-    uint8_t atom;            // IMG: the shader runs image atomics on it (dmsh_build.py "atomic"): the texture must allow Metal's texture atomics (nvn_mtl.m dummy_img_atomic); 2: 64-bit ones (texture2d<ulong>, an RG32Uint texture: pf_atomic)
+    uint8_t f1d;             // Wrapped 1D fetches ("fetch1d"): slot binds use 2D rows (tbuf_as_2d), TEXP binds paired tables of 2D and native buffer textures.
+    uint8_t atom;            // IMG, IMGU or IMGP: the shader runs atomics (reflection "atomic"); 2: 64-bit (texture2d<ulong>, an RG32Uint texture: pf_atomic)
     uint16_t fixw;           // CBUF: the slot's words the shader reads at fixed offsets, from its start to the end of the highest (dmsh_reflect.py "fixed"): a binding shorter than that is encoded with zeros up to there (nvn_mtl.m ub_padded)
     uint8_t bw;              // SAMP / SAMPT / SAMPU / SAMPI: a twin sampler for border colours (dmsh_rewrite.py border_emu), its bit in the BORDER block + 1; 0 = an ordinary sampler binding
     uint8_t raw_id;          // SAMPU: the uniform word holds a SeparateSamplerId (the sampler ID itself), not a handle with the sampler ID in its high 12 bits

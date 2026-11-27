@@ -1738,6 +1738,13 @@ HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleE
 // Mouse / keyboard: not connected
 HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "mouse; not provided by the host", void, h_hid_InitMouse, void) {}
 HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 entries", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
+// SDK 20.5.3's MouseHandle overloads dispatch the ordinary mouse (GetMouseHandle returns 0) to the same operations.
+// The debug mouse has no samples on the host either. GetMouseHandle itself makes a value without HID IPC and runs in the SDK.
+HLE_FORCE("_ZN2nn3hid15InitializeMouseERKNS0_11MouseHandleE", "mouse initialization by handle", void, h_hid_InitMouseHandle, const uint32_t *handle) {
+    (void)handle; h_hid_InitMouse();
+}
+HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEiRKNS0_11MouseHandleE", "mouse states by handle", int, h_hid_MouseStatesHandle,
+          void *out, int n, const uint32_t *handle) { (void)handle; return h_hid_MouseStates(out, n); }
 // Single state (13 Sentinels calls it every frame; without the hook the sdk aborts on its uninitialized mouse resource): MouseState is 0x28 bytes {sampling number i64, x, y, dx, dy, wheel dx, dy, buttons, attributes}; attributes 0 = not connected
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "mouse state: not connected (MouseState 0x28 bytes zeroed)", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

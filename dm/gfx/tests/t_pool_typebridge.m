@@ -66,6 +66,58 @@ static int reads(id<MTLBuffer> tab, int want, int i, unsigned layer, uint8_t v) 
 }
 static id<MTLTexture> palt(int i, int tt) { int k = pool_lk(tt); return k < 0 ? nil : (__bridge id<MTLTexture>)g_treg[i].palt[k]; }   // the view a table of type tt holds for ID i
 static uint64_t prid(int i, int tt) { int k = pool_lk(tt); return k < 0 ? 0 : g_treg[i].palt_rid[k]; }
+static void check_query_table(void) {
+    tex_t volume = {.d = {.target = NVN_TEXTURE_TARGET_3D, .width = 80, .height = 80, .depth = 56, .levels = 3}};
+    view_t view = {.set_levels = 1, .base_level = 1, .nlevels = 1};
+    mtl_reg_tex(901, &volume, &view);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLBuffer> before = tex_query_table(900);
+    CHECK(before == tex_query_table(900), "the same registration generation reuses its query table");
+    os_unfair_lock_unlock(&g_rmu);
+    const uint32_t *old = before.contents;
+    const uint32_t dims[] = {40, 40, 28, 1, 1, 7};
+    const uint32_t zero[DMSH_TEX_QUERY_WORDS] = {0};
+    CHECK(!memcmp(old + 1 + DMSH_TEX_QUERY_WORDS, dims, sizeof dims), "a volume view's metadata uses its base mip even without Metal storage");
+    CHECK(!memcmp(old + 1, zero, sizeof zero) && !memcmp(old + 1 + old[0] * DMSH_TEX_QUERY_WORDS, zero, sizeof zero),
+          "an unregistered ID and the out-of-range row are zero");
+    tex_t array = {.d = {.target = NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY, .width = 96, .height = 32, .depth = 6, .levels = 1, .samples = 4}, .L = {.layers = 6}};
+    view = (view_t){.set_layers = 1, .min_layer = 2, .nlayers = 3};
+    mtl_reg_tex(901, &array, &view);
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLBuffer> after = tex_query_table(901);
+    os_unfair_lock_unlock(&g_rmu);
+    const uint32_t revised[] = {96, 32, 3, 1, 4, 3};
+    CHECK(before != after && !memcmp((const uint32_t *)after.contents + 1, revised, sizeof revised),
+          "another pool base reads the replacement's dimensions, selected layers and sample count");
+    CHECK(!memcmp(old + 1 + DMSH_TEX_QUERY_WORDS, dims, sizeof dims), "the old encoded table remains intact");
+    mtl_reg_tex(901, NULL, NULL);
+}
+static void check_sampled_buffer_table(pool_t *pool, size_t offset) {
+    const int tid = 29;
+    const MTLTextureType type = MTLTextureTypeTextureBuffer;
+    tex_t tex = {
+        .magic = MAGIC('T', 'E', 'X', 0), .serial = 990600,
+        .pool = pool, .off = offset, .mem = (uint8_t *)pool->mem + offset,
+        .d = {.target = NVN_TEXTURE_TARGET_BUFFER, .format = NVN_FORMAT_R32UI, .width = 36,
+              .height = 1, .depth = 1, .levels = 1, .samples = 1},
+    };
+    nvn_tex_layout(&tex.d, &tex.L);
+    mtl_tex_init(&tex);
+    mtl_reg_tex(tid, &tex, NULL);
+    id<MTLBuffer> live = table(type);
+    const uint32_t *head = live.contents;
+    const uint32_t *lead = (const uint32_t *)((const uint8_t *)head + head[DMSH_POOL_BIAS / 4]);
+    CHECK(lead[tid] == 1 && lead[10] == DMSH_POOL_BUFFER_ABSENT && lead[head[0]] == DMSH_POOL_BUFFER_ABSENT,
+          "only the buffer descriptor has a coordinate bias in the sampled buffer table");
+    CHECK(entry(live, tid) != dummy(live) && entry(live, 10) == dummy(live), "the native buffer and a 2D texture select different tables");
+    id<MTLTexture> view = (__bridge id<MTLTexture>)g_treg[tid].palt[4];
+    CHECK(view && view.pixelFormat == MTLPixelFormatR32Float && view.textureType == type,
+          "the buffer's integer bits are exposed through an R32Float view of the same storage");
+    mtl_reg_tex(tid, NULL, NULL);
+    id<MTLBuffer> removed = table(type);
+    CHECK(entry(removed, tid) == dummy(removed) && entry(live, tid) != dummy(live), "re-registration leaves snapshots already taken intact");
+    mtl_tex_release(&tex);
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     enum { SLOT = 1 << 17, N = 9, LEN = N * SLOT };
@@ -148,6 +200,8 @@ int main(void) { @autoreleasepool {
     CHECK(!palt(10, A) && !prid(10, A) && !pool_seen_t(10, A) && !pool_seen_t(10, D2), "an emptied ID drops its view and its read marks");
     id<MTLBuffer> a3 = table(A);
     CHECK(entry(a3, 10) == dummy(a3), "and its table entry is the dummy");
+    check_query_table();
+    check_sampled_buffer_table(&p, LEN - 4096 + 4);
     for (int n = 0; n < N; n++) mtl_reg_tex(10 + n, NULL, NULL);
     for (int n = 0; n < N; n++) mtl_tex_release(&t[n]);
     mtl_pool_del(mem); mtl_drain(); munmap(mem, LEN);

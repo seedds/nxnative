@@ -6,6 +6,7 @@
 #include <assert.h>
 
 static uint64_t g_count, g_in, g_done, g_gns = 5000000000ull, g_hns = 9000000000ull;
+static int g_vsync_hz = 60;
 static double g_pt[64];   // presented time per ticket (seconds on the now_ns clock), 0 not yet, -1 dropped
 static int g_gd[64]; static uint64_t g_gde[64];   // mtl_gpu_done per GPU frame: state (-1 no record, 0 running, 1 done) and end time
 uint64_t dm_nvn_frame_count(void) { return g_count; }
@@ -17,6 +18,7 @@ uint64_t guest_ns(void) { return g_gns; }
 uint64_t now_ns(void) { return g_hns; }
 int dm_sdk_ounce(void) { return 0; }
 int dm_opmode(void) { return 0; }
+int nvn_vsync_hz(void) { return g_vsync_hz; }
 
 static void present(void) { g_in++; g_count++; dm_vi_frame_queued(g_count, 0, 0, 0); dm_vi_frame_ticket(g_count, g_in); }   // no pacer grid (DM_DETCLOCK, display-link follow, unpaced): first-seen stays
 static uint64_t g_at, g_grid;   // the present time and the pacer grid a paced present is queued with
@@ -24,6 +26,15 @@ static void ppresent(void) { g_in++; g_count++; g_done = g_in; g_pt[g_count] = 0
 static uint64_t ticks(uint64_t ns) { return ns * 12 / 625; }
 
 int main(void) {
+    void *display;
+    uint32_t rate = 0;
+    assert(h_vi_OpenDisp(&display) == RES_OK);
+    assert(h_vi_RefreshRate(&rate, display) == RES_OK && rate == 60);
+    g_vsync_hz = 120;
+    assert(h_vi_RefreshRate(&rate, display) == RES_OK && rate == 120);
+    assert(h_vi_RefreshRate(NULL, display) == RES_OK);
+    assert(h_vi_RefreshRate(&rate, NULL) == 0x272 && rate == 120);
+
     uint64_t fi[10][5];
     for (int i = 0; i < 64; i++) g_gd[i] = -1;   // no GPU record until a case sets one
     assert(h_vi_FrameHist(NULL, 0, NULL) == 8 && h_vi_FrameHist(fi, 0, NULL) == 8);   // the SDK's count query

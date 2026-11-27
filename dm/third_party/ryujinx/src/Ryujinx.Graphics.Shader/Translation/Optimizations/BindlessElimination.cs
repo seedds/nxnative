@@ -53,7 +53,25 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 bool converted = table == TableHandle.Set && TryConvertBindless(block, resourceManager, gpuAccessor, texOp);
                 if (!converted && texOp.Inst == Instruction.ImageAtomic && texOp.Flags.HasFlag(TextureFlags.AtomicMetal))
                 {
-                    throw new NotSupportedException("Metal image atomics require a statically resolved image handle.");
+                    // Dynamic 32-bit atomics use the same descriptor IDs as the other image operations. Preserve the instruction's signed type, if known.
+                    // With a descriptor-sized operation the format comes from the runtime descriptor. A sign-independent operation can use an unsigned view.
+                    // Cyberpunk 2077 loads the handles of 14 engine compute shaders from a table at an address pushed into block 7.
+                    if (texOp.Format == TextureFormat.Unknown)
+                    {
+                        if ((texOp.Flags & TextureFlags.AtomicMask) is TextureFlags.Minimum or TextureFlags.Maximum)
+                        {
+                            throw new NotSupportedException("Metal image min/max requires known descriptor signedness.");
+                        }
+
+                        texOp.Format = TextureFormat.R32Uint;
+                    }
+
+                    if (!GenerateBindlessAccess(block, resourceManager, gpuAccessor, texOp, node))
+                    {
+                        throw new NotSupportedException("Metal image atomics require a statically resolved image handle.");
+                    }
+
+                    continue;
                 }
 
                 if (!converted &&
@@ -393,6 +411,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return false;
             }
 
+            if (pooled && gpuAccessor.QueryTextureArrayLengthFromPool() > NvnSlotArrayLength &&
+                texOp.Inst is Instruction.TextureQuerySize or Instruction.TextureQuerySamples)
+            {
+                LowerPoolQuery(block, resourceManager, texOp, node, bindlessHandle);
+                return true;
+            }
+
             Operand textureHandle = OperandHelper.Local();
             Operand samplerHandle = OperandHelper.Local();
             Operand textureIndex = OperandHelper.Local();
@@ -408,13 +433,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             bool hasSampler = !texOp.Inst.IsImage();
 
+            // A pooled wrapped 1D fetch can name a native buffer or a 1D texture.
+            // Keep its binding separate so Metal can select by the live descriptor.
+            int poolHandle = TextureHandle.PackOffsets(
+                pooled && texOp.Flags.HasFlag(TextureFlags.RowWrap) ? 1 : 0, 0, TextureHandleType.Direct);
             SetBindingPair textureSetAndBinding = resourceManager.GetTextureOrImageBinding(
                 texOp.Inst,
                 texOp.Type,
                 texOp.Format,
                 texOp.Flags & ~TextureFlags.Bindless,
                 0,
-                TextureHandle.PackOffsets(0, 0, TextureHandleType.Direct),
+                poolHandle,
                 texturePoolLength,
                 hasSampler);
 
@@ -445,6 +474,63 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             return true;
+        }
+
+        // TXQ gets the shape from the descriptor. A handle loaded at run time can name any texture target.
+        // The host's view metadata (DMSH_TEX_QUERY_* in dmsh_abi.h) has one zero row after the last ID.
+        private static void LowerPoolQuery(
+            BasicBlock block,
+            ResourceManager resourceManager,
+            TextureOperation query,
+            LinkedListNode<INode> node,
+            Operand handle)
+        {
+            Operand Const(int value) => OperandHelper.Const(value);
+            Operand binding = Const(resourceManager.GetTextureQueryBinding());
+
+            Operand Emit(Instruction inst, params Operand[] args)
+            {
+                Operand dest = OperandHelper.Local();
+                block.Operations.AddBefore(node, new Operation(inst, dest, args));
+                return dest;
+            }
+
+            Operand Read(Operand word)
+            {
+                Operand dest = OperandHelper.Local();
+                block.Operations.AddBefore(node, new Operation(Instruction.Load, StorageKind.StorageBuffer, dest, binding, Const(0), word));
+                return dest;
+            }
+
+            Operand id = Emit(Instruction.BitwiseAnd, handle, Const(0xfffff));
+            Operand index = Emit(Instruction.MinimumU32, id, Read(Const(0)));
+            Operand row = Emit(Instruction.Multiply, index, Const(6));
+            Operand At(int field) => Read(Emit(Instruction.Add, row, Const(1 + field)));
+
+            Operand result;
+            if (query.Inst == Instruction.TextureQuerySamples)
+            {
+                result = At(4);
+            }
+            else if (query.Index == 3)
+            {
+                result = At(3);
+            }
+            else
+            {
+                Operand lod = query.GetSource(1);
+                Operand dimension = At(query.Index);
+                Operand mipped = Emit(Instruction.BitwiseAnd, At(5), Const(1 << query.Index));
+                Operand shift = Emit(Instruction.ConditionalSelect, Emit(Instruction.CompareNotEqual, mipped, Const(0)),
+                    Emit(Instruction.MinimumU32, lod, Const(31)), Const(0));
+                Operand size = Emit(Instruction.MaximumU32, Emit(Instruction.ShiftRightU32, dimension, shift), Const(1));
+                Operand valid = Emit(Instruction.CompareLessU32, lod, At(3));
+                result = Emit(Instruction.ConditionalSelect, valid, size, Const(0));
+            }
+
+            Operand dest = query.Dest;
+            block.Operations.AddBefore(node, new Operation(Instruction.Copy, dest, result));
+            Utils.DeleteNode(node, query);
         }
 
         private static bool IsBindlessHandleAllowed(Operand bindlessHandle)

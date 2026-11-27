@@ -68,8 +68,8 @@ void dm_set_opmode(int m) {   // called by the front end (overheat downgrade etc
 // FocusState: 1 InFocus, 2 OutOfFocus, 3 Background. The front end calls dm_focus_set (iOS lifecycle / Mac window losing focus)
 static _Atomic int g_focus = 1; static _Atomic uint64_t g_focus_in_ns;   // the front end's state; time of its most recent entry into InFocus
 // Focus handling mode the game set (-1: none). The SDK's oe::SetFocusHandlingMode (SDK 18 sdk+0x3c5770) turns it into am's SetFocusHandlingMode(notify, ?, suspend) and
-// SetOutOfFocusSuspendingEnabled: 0 → (0, 0, 1), 1 → (1, 1, 0), 2 → (1, 0, 1), 3 → (0, 0, 1) + out-of-focus suspending. Only 1 and 2 ask for focus notifications; under 0 and 3
-// the system suspends the game out of focus and it never sees message 15 (the host's suspend is the guest clock freeze and the graphics gate). Super Mario Galaxy 2 sets 3, and
+// SetOutOfFocusSuspendingEnabled: 0 → (0, 0, 1), 1 → (1, 1, 0), 2 → (1, 0, 1), 3 → (0, 0, 1) + out-of-focus suspending. Only 1 and 2 ask for focus notifications.
+// Mode 3 also suspends the application during foreground library applets. Super Mario Galaxy 2 sets 3, and
 // its Wii layer's pause on focus 2 (main+0x663ba0) never finished: the main loop waits for the GX thread to pause (main+0x5ce870), which waits for work the paused CPU never sends
 static _Atomic int g_focus_mode = -1;
 static int focus_notifies(void) { int m = atomic_load(&g_focus_mode); return m != 0 && m != 3; }   // no mode set: notify, as before
@@ -79,11 +79,15 @@ static int focus_notifies(void) { int m = atomic_load(&g_focus_mode); return m !
 // after the InFocus notification (its notification thread main+0x8ea560 sets the flag main+0x87b5d0 takes each frame); with none its 2P character select never took input
 // (GitHub issue #550). The game sees the front end's state, or 2 while an applet is open over an application in focus; a change of what it sees is one notification 15
 static int g_applets; static _Atomic int g_seen = 1; static pthread_mutex_t g_seen_lock = PTHREAD_MUTEX_INITIALIZER;
+static void applet_suspend_sync(void) {   // g_seen_lock held
+    guest_clock_freeze_for(DM_CLOCK_APPLET, g_applets > 0 && atomic_load(&g_focus_mode) == 3);
+}
 static void focus_sync(int applets) {   // applets: +1 an applet opens, -1 one closes, 0 the front end's state changed
     pthread_mutex_lock(&g_seen_lock);
     g_applets += applets;
     if (g_applets < 0) die("dm_applet_leave without dm_applet_enter");
     int w = atomic_load(&g_focus), s = w == 1 && g_applets ? 2 : w, changed = atomic_exchange(&g_seen, s) != s;
+    if (applets) applet_suspend_sync();   // AlwaysSuspend: also park the guest while the native applet owns the foreground
     pthread_mutex_unlock(&g_seen_lock);
     if (!changed) return;   // pushed outside the lock: 15 only says "query the state again", so pushes from two threads need no order
     LOG("oe focus state → %d%s", s, applets > 0 ? " (library applet open)" : applets < 0 ? " (library applet closed)" : "");
@@ -435,7 +439,11 @@ static pthread_once_t g_oe_once = PTHREAD_ONCE_INIT;
 
 HLE_FORCE("_ZN2nn2oe20GetCurrentFocusStateEv", "foreground / background state; the front end's dm_focus_set, out of focus while a library applet is open", int, h_oe_GetFocus, void) { return atomic_load(&g_seen); }
 HLE_FORCE("_ZN2nn2oe20SetFocusHandlingModeENS0_17FocusHandlingModeE", "focus handling mode; 1 and 2 get focus notifications, 0 and 3 none (see g_focus_mode)", void, h_oe_SetFocusMode, int m) {
-    atomic_store(&g_focus_mode, m); LOG("oe::SetFocusHandlingMode %d (%s)", m, focus_notifies() ? "focus notifications" : "suspended out of focus, no focus notifications");
+    pthread_mutex_lock(&g_seen_lock);
+    atomic_store(&g_focus_mode, m);
+    if (g_applets) applet_suspend_sync();
+    pthread_mutex_unlock(&g_seen_lock);
+    LOG("oe::SetFocusHandlingMode %d (%s)", m, focus_notifies() ? "focus notifications" : "no focus notifications");
 }
 
 // Notification: returns bool (w0), the host has no system notifications

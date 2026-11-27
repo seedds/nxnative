@@ -85,6 +85,16 @@ int main(void) { @autoreleasepool {
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&virt, (NVNmemoryPoolBuilder *)&pb), "sparse virtual pool");
     CHECK(map(&virt, &phys, 0, 0, 0x4000), "first mapping");
     CHECK(nvn_sparse_pool(&virt), "the pool reads through its page table");
+    const uint64_t virtual_base = (uint64_t)(uintptr_t)virt.vp->base;
+    CHECK(mtl_addr_known(virtual_base, 0x4000), "the new sparse run is immediately visible to a range lookup");
+    pthread_mutex_lock(&g_mu);
+    int run_index = pool_peek(virtual_base);
+    CHECK(run_index >= 0 && !g_pools[run_index].buf, "mapping and probing the sparse run leave its Metal buffer deferred");
+    pthread_mutex_unlock(&g_mu);
+    void *run_buffer = NULL;
+    uint64_t run_offset = UINT64_MAX, run_gpu = 0;
+    CHECK(mtl_gpu_addr(virtual_base, 0x4000, &run_buffer, &run_offset, &run_gpu) &&
+          run_buffer && !run_offset && run_gpu, "the first GPU lookup makes a buffer for the exact range");
     // A 32x32 RGBA8 texture: one 4 KB page at the pool's start
     NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb);
     h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, 32); h_nvnTextureBuilderSetHeight(&tb, 32);
@@ -96,6 +106,17 @@ int main(void) { @autoreleasepool {
     __unsafe_unretained id<MTLBuffer> table = nil;
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
     CHECK(gpu_read(table, 1) == A, "the pool table reads the first mapping's page");
+
+    // The texture uses physical pages [0, 0x4000), regardless of its guest virtual address.
+    mtl_sub_copy((uintptr_t)mem + 0x20000, (uintptr_t)mem + 0x10000, sizeof A);
+    CHECK(!b2b_texture_dep((const tex_t *)&tx), "a copy to unrelated physical pages leaves a sparse upload independent");
+    mtl_sub_copy((uintptr_t)mem + 0x20000, (uintptr_t)mem, sizeof A);
+    CHECK(b2b_texture_dep((const tex_t *)&tx), "a copy to the backing of a sparse upload is a dependency");
+    next_sub();
+    dm_guest_write_prepare(mem, sizeof A);
+    dm_guest_write_prepare(mem + 0x10000, sizeof B);
+    *(uint32_t *)mem = A;
+    *(uint32_t *)(mem + 0x10000) = B;
 
     // Serial changes while a sparse pool exists keep the table: they note no sparse texture
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table); id<MTLBuffer> before = table; uint64_t builds = g_stat_pool_builds;

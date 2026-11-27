@@ -119,6 +119,42 @@ static void gather_only(int gpu, pool_t *virt, pool_t *gphys, uint8_t *gmem, uin
     snprintf(n, sizeof n, "%s: and leaves it out of the residency set (pools resident %d, before %d)", how, g_pool_res_n, res); CHECK(g_pool_res_n == res, n);
     h_nvnTextureFinalize(&tx);
 }
+// Check the sparse kernel's page lookup and short row segments against the
+// CPU deswizzle with nonuniform bytes and an unmapped page between two mappings.
+static void sparse_pattern(pool_t *virt, pool_t *phys, uint8_t *pmem) {
+    enum { Width = 127, Height = 33, Pitch = 512 };
+    const uint64_t vo = 0x600000, po = 0x120000;
+    for (uint64_t i = 0; i < 0x2000; i++) pmem[po + i] = (uint8_t)(i ^ (i >> 6) ^ (i >> 12));
+    CHECK(map(virt, phys, vo, po, 0x1000) && map(virt, phys, vo + 0x2000, po + 0x1000, 0x1000),
+          "two physical pages mapped on either side of a hole");
+    for (int order = 0; order < 2; order++) {
+        tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = virt,
+                   .mem = virt->mem + vo + 16, .off = vo + 16, .has_layout = 1,
+                   .d = {.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = Width,
+                         .height = Height, .depth = 1, .levels = 1, .samples = 1, .gob_order = order}};
+        nvn_tex_layout(&t.d, &t.L);
+        uint8_t *storage = malloc(t.L.size), want[Pitch * Height];
+        if (!storage) abort();
+        nvn_sparse_copy(virt, storage, (uint64_t)(uintptr_t)t.mem, t.L.size);
+        CHECK(!nvn_deswizzle(&t.d, 0, 0, storage, want, Pitch), "CPU reference deswizzles the sparse bytes");
+        free(storage);
+        uint64_t stamp;
+        id<MTLTexture> mt = pkg_upload(&t, &stamp, nil, 0, nil, NULL, 0, NULL);
+        next_sub();
+        id<MTLBuffer> out = [g_dev newBufferWithLength:sizeof want options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb = q_cb();
+        id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder];
+        [enc copyFromTexture:mt sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(Width, Height, 1) toBuffer:out destinationOffset:0
+        destinationBytesPerRow:Pitch destinationBytesPerImage:sizeof want];
+        [enc endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        int equal = cb.status == MTLCommandBufferStatusCompleted;
+        for (int y = 0; y < Height && equal; y++)
+            equal = !memcmp((uint8_t *)out.contents + y * Pitch, want + y * Pitch, Width * 4);
+        CHECK(equal, order ? "Switch 2 sparse texels equal the CPU reference" : "Switch sparse texels equal the CPU reference");
+        defer_obj_release(mt);
+    }
+}
 // A buffer copy through a sparse virtual address must invalidate uploads from its physical pages, including textures reached through the page table.
 static void buffer_alias(pool_t *virt, pool_t *phys, uint8_t *pmem, uint8_t *cmem) {
     const uint64_t vo = 0x500000, po = 0x100000, n = 0x10000;
@@ -167,6 +203,7 @@ int main(void) { @autoreleasepool {
     mtl_init(); mtl_sub_begin();
     int gpu = g_nvn_deswz_gpu;
     CHECK(gpu, "the GPU deswizzle is available");
+    CHECK(nvn_deswz_gpu_sparse_supported(), "the sparse GPU deswizzle is available");
     uint8_t *pmem = NULL, *cmem = NULL; posix_memalign((void **)&pmem, 16384, 2 << 20); memset(pmem, 0, 2 << 20);
     posix_memalign((void **)&cmem, 16384, 1 << 20); memset(cmem, 0, 1 << 20);
     pool_t phys = {0}, virt = {0}, cpool = {0}; pool_builder_t pb = {.mem = pmem, .size = 2 << 20, .flags = 0x24};
@@ -187,6 +224,7 @@ int main(void) { @autoreleasepool {
     gather_only(0, &virt, &gphys, gmem, 0x400000, 0x10000);
     g_nvn_deswz_gpu = gpu;
     buffer_alias(&virt, &phys, pmem, cmem);
+    sparse_pattern(&virt, &phys, pmem);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&virt); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&cpool); h_nvnMemoryPoolFinalize((NVNmemoryPool *)&phys);
     h_nvnMemoryPoolFinalize((NVNmemoryPool *)&gphys);
     mtl_sub_commit(); mtl_drain(); free(pmem); free(cmem); free(gmem);

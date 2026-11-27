@@ -2,8 +2,8 @@
 // needs one such buffer: a second is made only when taking its staging flushed the batch that held the first. Before, every staged upload made two, and a scene load of Switch
 // Sports Resort (855 textures, 908 MB) added twice its storage to the residency set. Checks the count and every texel, for small textures in one batch and for 64 MB ones whose
 // staging splits the batches (UP_BATCH_BYTES). A buffer copy over a texture's storage: after it completes, only that texture is uploaded again (its pages stamped at completion,
-// post_run); in the same submission, a texture already uploaded and one not yet uploaded, both read after the run of copies has ended, show the copied texels (b2b_flush: the
-// copy is committed before the upload batch that reads it), including a destination accessed before the copy in that submission. A CPU upload waits for the copy before reading
+// post_run); in the same submission, a texture already uploaded and one not yet uploaded both show the copied texels. Only an upload that depends on the copy submits its
+// prefix. A CPU upload waits for the copy before reading
 // its storage; a queue event keeps the copy pending until after the lookup starts. DM_NVN_COPY_CUT=0 fails the same-submission checks
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -89,9 +89,17 @@ int main(void) { @autoreleasepool {
         .bc = {OP_BLEND_COLOR, sizeof(op_hdr) + sizeof(p_blend_color)}, .end = {OP_END, sizeof(op_hdr)}};
     mtl_sub_begin();
     CHECK("the destination is accessed before its copy in the same submission", tex_mtl(&small[1].t) != nil);
+    uint64_t copy_gen = g_cbgen;
     mtl_exec((const uint8_t *)&ops);
+    CHECK("a state command leaves the copies in the main command buffer", g_cbgen == copy_gen);
+    upl unrelated;
+    make(&unrelated, mem, &pool, 10u << 20, 256, 144, 400);   // between the two destinations
+    id<MTLTexture> outside = tex_mtl(&unrelated.t);
+    CHECK("an unrelated texture upload leaves the copies pending", outside && g_cbgen == copy_gen);
     id<MTLTexture> kept = tex_mtl(&small[1].t), fresh = tex_mtl(&late.t);
+    CHECK("dependent GPU uploads submit one copy prefix", g_cbgen == copy_gen + 1);
     CHECK("same-submission copy completes", mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error());
+    CHECK("the unrelated upload keeps its texels", outside && same_texels(outside, &unrelated));
     CHECK("an uploaded texture read after a copy over it in the same submission shows the copy", kept && same_texels(kept, &moved[0]));
     CHECK("a new texture read after a copy over it in the same submission shows the copy", fresh && same_texels(fresh, &moved[1]));
 
@@ -114,6 +122,7 @@ int main(void) { @autoreleasepool {
     mtl_tex_release(&cpu.t); free(cpu.ref);
     for (int i = 0; i < 2; i++) { mtl_tex_release(&moved[i].t); free(moved[i].ref); }
     mtl_tex_release(&late.t); free(late.ref);
+    mtl_tex_release(&unrelated.t); free(unrelated.ref);
 
     upl big[3];   // 64 MB each: the third's staging no longer fits the batch's 128 MB, so taking it flushes the batch
     for (int i = 0; i < 3; i++) make(&big[i], mem, &pool, (size_t)(16 + 72 * i) << 20, 4096, 4096, 100 + i);

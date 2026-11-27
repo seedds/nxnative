@@ -3848,49 +3848,88 @@ static struct vshadow vshadow_slice(const struct vshadow *orig, uint64_t voff, u
     }
     return (struct vshadow){voff, size, src, abase, alias, alen, orig->stamp, snap, np};
 }
-static void vshadow_add(struct vpool *v, struct vshadow entry) {
+// Shadows are disjoint and sorted by virtual offset. Start at the first one
+// ending past lo so a small GPU write need not scan the whole pool.
+static size_t vshadow_first(const struct vpool *v, uint64_t lo) {
+    size_t first = 0, last = v->nsh;
+    while (first < last) {
+        size_t mid = first + (last - first) / 2;
+        const struct vshadow *e = &v->sh[mid];
+        if (e->voff + e->size <= lo) first = mid + 1;
+        else last = mid;
+    }
+    return first;
+}
+static void vshadow_room(struct vpool *v) {
     if (v->nsh == v->csh) v->sh = grow_pool_table(v->sh, &v->csh, sizeof *v->sh, 64, "sparse pool copy");
-    v->sh[v->nsh++] = entry;
+}
+static void vshadow_add(struct vpool *v, struct vshadow entry) {
+    size_t at = vshadow_first(v, entry.voff);
+    vshadow_room(v);
+    memmove(v->sh + at + 1, v->sh + at, (v->nsh - at) * sizeof *v->sh);
+    v->sh[at] = entry;
+    v->nsh++;
 }
 static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop or trim shadow entries overlapping [lo, hi)
-    for (size_t i = 0; i < v->nsh; ) {
-        struct vshadow e = v->sh[i]; uint64_t a = e.voff, b = e.voff + e.size;
-        if (b <= lo || a >= hi) { i++; continue; }
-        v->sh[i] = v->sh[--v->nsh];
-        atomic_fetch_sub(&g_sh_bytes, e.size);
-        struct vshadow piece[2]; int np = 0;
-        if (a < lo) piece[np++] = vshadow_slice(&e, a, lo - a);
-        if (b > hi) piece[np++] = vshadow_slice(&e, hi, b - hi);
-        vshadow_free(&e);
-        for (int k = 0; k < np; k++) {
-            vshadow_add(v, piece[k]);
-            atomic_fetch_add(&g_sh_bytes, piece[k].size);
-        }
+    if (lo >= hi) return;
+    size_t first = vshadow_first(v, lo), end = first;
+    struct vshadow piece[2];
+    size_t np = 0;
+    uint64_t removed = 0;
+    for (; end < v->nsh && v->sh[end].voff < hi; end++) {
+        struct vshadow *e = &v->sh[end];
+        uint64_t a = e->voff, b = a + e->size;
+        if (a < lo) piece[np++] = vshadow_slice(e, a, lo - a);
+        if (b > hi) piece[np++] = vshadow_slice(e, hi, b - hi);
+        removed += e->size;
+        vshadow_free(e);
     }
+    if (first == end) return;
+    if (np > end - first) vshadow_room(v);
+    memmove(v->sh + first + np, v->sh + end, (v->nsh - end) * sizeof *v->sh);
+    memcpy(v->sh + first, piece, np * sizeof *piece);
+    v->nsh = v->nsh - (end - first) + np;
+    for (size_t i = 0; i < np; i++) removed -= piece[i].size;
+    atomic_fetch_sub(&g_sh_bytes, removed);
 }
 static void vshadow_drop_phys(const uint8_t *mem, uint64_t size) {   // physical pool Finalize: release any shadow entries still pointing into [mem, mem + size)
     if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !size) return;
     uintptr_t plo = (uintptr_t)mem, phi = plo + size;
     pthread_mutex_lock(&g_vp_mu);
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
-        for (size_t k = 0; k < v->nsh; ) { struct vshadow e = v->sh[k];
-            if ((uintptr_t)e.src + e.size <= plo || (uintptr_t)e.src >= phi) { k++; continue; }
-            v->sh[k] = v->sh[--v->nsh];
+        size_t kept = 0;
+        for (size_t k = 0; k < v->nsh; k++) { struct vshadow e = v->sh[k];
+            if ((uintptr_t)e.src + e.size <= plo || (uintptr_t)e.src >= phi) { v->sh[kept++] = e; continue; }
             atomic_fetch_sub(&g_sh_bytes, e.size);
             for (uint64_t o = 0; o < e.size; o += 0x1000) { vpte *pt = (vpte *)vpt_get(v, e.voff + o); if (pt) pt->shadow = 0; }
             vshadow_free(&e);
         }
+        v->nsh = kept;
     }
     pthread_mutex_unlock(&g_vp_mu);
 }
 static _Atomic uint64_t g_sh_sync, g_sh_wb;
+static int vshadow_covers(const struct vpool *v, uint64_t lo, uint64_t hi) {
+    for (size_t i = vshadow_first(v, lo); lo < hi && i < v->nsh; i++) {
+        const struct vshadow *e = &v->sh[i];
+        if (e->voff > lo) return 0;
+        lo = e->voff + e->size;
+    }
+    return lo >= hi;
+}
 static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) {   // → 1 when the request is now a per-run shadow copy
     static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_SPARSE_COPY"); off = e && !strcmp(e, "0"); }
     uint64_t pg = (uint64_t)getpagesize(); uint8_t *to = v->base + r->voff;
     if (off || (uint64_t)r->voff + r->size > v->len || (((uintptr_t)to | r->size) & (pg - 1))) return 0;
-    if (mmap(to, r->size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+    // MapVirtual waits for outstanding users before overwriting these pages.
+    // If shadows already cover the span, the host pages and their Metal buffer
+    // still describe the same virtual range. Replace the bytes and source only.
+    const int reuse = vshadow_covers(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
+    if (!reuse && mmap(to, r->size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
         LOG("[RED] virtual pool %p: cannot make %#llx+%#llx a shadow copy (errno %d)", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, errno); return 0;
     }
+    vpt_set(v, (uint64_t)r->voff, r->size, src);
+    if (v->nsh) vshadow_cut(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     uint64_t stamp = nvn_dirty_now(); nvn_dirty_protect(src, r->size);
     memcpy(to, src, r->size);
     uint8_t *abase = NULL; uint64_t alen = 0;
@@ -3898,7 +3937,9 @@ static int vshadow_map(struct vpool *v, const map_req *r, const uint8_t *src) { 
     vshadow_add(v, (struct vshadow){(uint64_t)r->voff, r->size, src, abase, alias, alen, stamp, NULL, vshadow_npages(src, r->size)});
     for (uint64_t o = 0; o < r->size; o += 0x1000) { vpte *e = (vpte *)vpt_get(v, (uint64_t)r->voff + o); if (e) e->shadow = 1; }
     vshadow_written(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
-    vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
+    if (!reuse) vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
+    uint64_t end = (uint64_t)r->voff + r->size;
+    if (end > v->top) v->top = end;
     uint64_t tot = atomic_fetch_add(&g_sh_bytes, r->size) + r->size;
     if ((tot >> 26) != ((tot - r->size) >> 26) || tot == r->size)
         LOG("[nvn] virtual pool %p: misaligned physical mapping (%#llx+%#llx from %p) kept as a per-run shadow copy (%llu MB live, %d runs)",
@@ -3929,25 +3970,22 @@ int nvn_shadow_arm(uint64_t a, uint64_t n) {
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
         if (!v->nsh || end <= b || a >= b + v->size) continue;
         uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
-        for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
-            if (hi <= e->voff || lo >= e->voff + e->size) continue;
+        for (size_t k = vshadow_first(v, lo); k < v->nsh && v->sh[k].voff < hi; k++) {
+            struct vshadow *e = &v->sh[k];
             uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
             vshadow_arm_entry(v, e, s0, s1); hit = 1;
         }
     }
     pthread_mutex_unlock(&g_vp_mu); return hit;
 }
-// Write-backs that find g_vp_mu busy at completion are queued and drained at the next sync (under g_wbq_mu, never held while taking g_vp_mu)
-enum { WBQ_N = 4096 };
-static struct { uint64_t a, n; } g_wbq[WBQ_N]; static int g_nwbq, g_wbq_over; static pthread_mutex_t g_wbq_mu = PTHREAD_MUTEX_INITIALIZER;
 static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
     uint64_t pg = (uint64_t)getpagesize(), end = n > UINT64_MAX - a ? UINT64_MAX : a + n;
     int touched = 0;
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i]; uint64_t b = (uint64_t)(uintptr_t)v->base;
         if (!v->nsh || end <= b || a >= b + v->size) continue;
         uint64_t lo = a > b ? a - b : 0, hi = end - b < v->size ? end - b : v->size;
-        for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
-            if (hi <= e->voff || lo >= e->voff + e->size) continue;
+        for (size_t k = vshadow_first(v, lo); k < v->nsh && v->sh[k].voff < hi; k++) {
+            struct vshadow *e = &v->sh[k];
             uint64_t s0 = lo > e->voff ? lo : e->voff, s1 = hi < e->voff + e->size ? hi : e->voff + e->size;
             vshadow_arm_entry(v, e, s0, s1);
             uintptr_t sbase = (uintptr_t)e->src & ~(uintptr_t)(pg - 1);
@@ -3955,17 +3993,27 @@ static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
                 uint64_t off = c - e->voff; uintptr_t pa = (uintptr_t)e->src + off;
                 uint32_t p = (uint32_t)((pa - sbase) / pg);
                 uint64_t in_pg = (uint64_t)(pa - (sbase + (uintptr_t)p * pg));
-                uint64_t chunk = 64 - (in_pg & 63);
-                if (chunk > pg - in_pg) chunk = pg - in_pg;
-                if (chunk > s1 - c) chunk = s1 - c;
-                uint8_t *sp = e->snap[p] + in_pg;
-                // Only write bytes the GPU actually changed relative to snap: leaves concurrent CPU writes to neighboring bytes in the same page intact
-                if (memcmp(sp, v->base + c, chunk)) {
-                    memcpy(e->alias + off, v->base + c, chunk);
-                    memcpy(sp, v->base + c, chunk);
-                    atomic_fetch_add(&g_sh_wb, chunk); touched = 1;
+                uint64_t span = pg - in_pg < s1 - c ? pg - in_pg : s1 - c;
+                uint8_t *snap = e->snap[p] + in_pg;
+                const uint8_t *shadow = v->base + c;
+                // A shader can bind a whole buffer and write only a few pages.
+                // Compare once per page before checking its written chunks.
+                if (span > 64 - (in_pg & 63) && !memcmp(snap, shadow, span)) {
+                    c += span;
+                    continue;
                 }
-                c += chunk;
+                for (uint64_t pos = 0; pos < span; ) {
+                    uint64_t chunk = 64 - ((in_pg + pos) & 63);
+                    if (chunk > span - pos) chunk = span - pos;
+                    // Leave concurrent CPU writes in unchanged chunks intact.
+                    if (memcmp(snap + pos, shadow + pos, chunk)) {
+                        memcpy(e->alias + off + pos, shadow + pos, chunk);
+                        memcpy(snap + pos, shadow + pos, chunk);
+                        atomic_fetch_add(&g_sh_wb, chunk); touched = 1;
+                    }
+                    pos += chunk;
+                }
+                c += span;
             }
         }
     }
@@ -3976,12 +4024,9 @@ static void wb_locked(uint64_t a, uint64_t n) {   // caller holds g_vp_mu
 }
 void nvn_shadow_writeback(uint64_t a, uint64_t n) {
     if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !n) return;
-    if (pthread_mutex_trylock(&g_vp_mu)) {
-        pthread_mutex_lock(&g_wbq_mu);
-        if (g_nwbq < WBQ_N) { g_wbq[g_nwbq].a = a; g_wbq[g_nwbq++].n = n; } else g_wbq_over = 1;
-        pthread_mutex_unlock(&g_wbq_mu);
-        return;
-    }
+    // Fence completion publishes these writes to the CPU. Mapping and
+    // teardown release g_vp_mu before waiting for that completion.
+    pthread_mutex_lock(&g_vp_mu);
     wb_locked(a, n);
     pthread_mutex_unlock(&g_vp_mu);
 }
@@ -3990,13 +4035,6 @@ void nvn_shadow_sync(void) {
     if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed)) return;
     static uint64_t seen; uint64_t now = nvn_dirty_now(), pg = (uint64_t)getpagesize(), copied = 0;
     pthread_mutex_lock(&g_vp_mu);
-    {   // Drain any writebacks queued while g_vp_mu was held before taking over CPU changes
-        pthread_mutex_lock(&g_wbq_mu); int nq = g_nwbq, over = g_wbq_over; static struct { uint64_t a, n; } q[WBQ_N];
-        if (nq) memcpy(q, g_wbq, (size_t)nq * sizeof *q);
-        g_nwbq = 0; g_wbq_over = 0; pthread_mutex_unlock(&g_wbq_mu);
-        for (int i = 0; i < nq; i++) wb_locked(q[i].a, q[i].n);
-        static int nl; if (over && nl++ < 4) LOG("[RED] sparse pool shadow copies: writeback queue overflowed");
-    }
     if (now == seen) { pthread_mutex_unlock(&g_vp_mu); return; }
     for (int i = 0; i < g_nvp; i++) { struct vpool *v = g_vp[i];
         for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
@@ -4035,21 +4073,45 @@ static int vpool_overwrites(const struct vpool *v, const map_req *r) {   // does
     for (uint64_t o = 0; o < r->size; o += 0x1000) { const vpte *e = vpt_get(v, (uint64_t)r->voff + o); if (e && e->live) return 1; }
     return 0;
 }
+// In one call, keep adjacent shadow requests together when both addresses
+// advance through the same physical pool. Each request must fit on its own.
+static int vshadow_batch(const struct vpool *v, const map_req *r, int n, map_req *span) {
+    if (n < 2 || r->voff < 0 || r->poff < 0 || !r->size) return 1;
+    const pool_t *ph = (const pool_t *)r->phys;
+    if (!ph || !ph->mem || !(ph->flags & NVN_MEMORY_POOL_FLAGS_PHYSICAL)) return 1;
+    uint64_t pg = (uint64_t)getpagesize(), va = r->voff, pa = r->poff;
+    if (((va | r->size) & (pg - 1)) || (pa & 0xFFF) || !(((uintptr_t)ph->mem + pa) & (pg - 1))) return 1;
+    uint64_t limit = v->len < v->size ? v->len : v->size;
+    if (va >= limit || pa >= ph->size) return 1;
+    uint64_t max_size = limit - va < ph->size - pa ? limit - va : ph->size - pa;
+    uint64_t size = r->size;
+    if (size > max_size) return 1;
+    int i = 1;
+    for (; i < n; i++) {
+        const map_req *next = &r[i];
+        if (next->phys != r->phys || next->storage_class != r->storage_class ||
+            (uint64_t)next->voff != va + size || (uint64_t)next->poff != pa + size ||
+            !next->size || (next->size & (pg - 1)) || next->size > max_size - size) break;
+        size += next->size;
+    }
+    *span = *r;
+    span->size = size;
+    return i;
+}
 static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp_mu; → 0 on failure
     uint64_t pg = (uint64_t)getpagesize();
     if (r->voff < 0 || (uint64_t)r->voff + r->size > v->size) { LOG("[RED] virtual pool %p: request at %#llx+%#llx is beyond the pool's %#llx", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)v->size); return 0; }
     if (((uint64_t)r->voff | r->size | (uint64_t)r->poff) & 0xFFF) { LOG("[RED] virtual pool %p: request %#llx+%#llx (physical offset %#llx) is not 4 KB aligned", (const void *)v->pool, (unsigned long long)r->voff, (unsigned long long)r->size, (unsigned long long)r->poff); return 0; }
     const pool_t *ph = (const pool_t *)r->phys;
     if (ph && (!ph->mem || r->poff < 0 || (uint64_t)r->poff + r->size > ph->size)) { LOG("[RED] virtual pool %p: physical pool %p (%#llx bytes, storage %p) cannot supply %#llx+%#llx", (const void *)v->pool, (const void *)ph, (unsigned long long)ph->size, (void *)ph->mem, (unsigned long long)r->poff, (unsigned long long)r->size); return 0; }
-    vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
-    if (v->nsh) vshadow_cut(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
     vm_address_t to = (vm_address_t)(v->base + r->voff);
     // Not directly vm_remap-able (beyond reservation, or misaligned to host page): misaligned physical sources with host-page-aligned virtual ranges become per-run shadow copies; others stay in the page table only
-    if ((uint64_t)r->voff + r->size > v->len || ((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1) || (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)))) {
-        if (ph && vshadow_map(v, r, ph->mem + r->poff)) {
-            uint64_t end = (uint64_t)r->voff + r->size; if (end > v->top) v->top = end;
-            return 1;
-        }
+    int misaligned = (uint64_t)r->voff + r->size > v->len || (((uintptr_t)to | r->size | (uint64_t)r->voff) & (pg - 1)) ||
+                     (ph && (((uintptr_t)ph->mem + (uintptr_t)r->poff) & (pg - 1)));
+    if (misaligned && ph && vshadow_map(v, r, ph->mem + r->poff)) return 1;
+    vpt_set(v, (uint64_t)r->voff, r->size, ph ? ph->mem + r->poff : NULL);
+    if (v->nsh) vshadow_cut(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size);
+    if (misaligned) {
         static _Atomic uint64_t n; if (!atomic_fetch_add(&n, 1)) LOG("[nvn] virtual pool %p: a request %s (%s %#llx+%#llx) is kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
                                                                    (const void *)v->pool, (uint64_t)r->voff + r->size > v->len ? "beyond the reservation" : "not aligned to the host page", r->phys ? "map" : "unmap", (unsigned long long)r->voff, (unsigned long long)r->size);
         return 1;
@@ -4093,7 +4155,19 @@ NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappi
                                              (unsigned long long)w, (unsigned long long)atomic_load(&g_vp_kept), (unsigned long long)atomic_load(&g_vp_released), g_nvun, (unsigned long long)atomic_load(&g_vp_unmap_lost));
         }
     }
-    for (int i = 0; v && i < n && ok; i++) ok = vpool_map(v, &r[i]);
+    for (int i = 0; v && i < n && ok;) {
+        map_req span;
+        int count = vshadow_batch(v, r + i, n - i, &span);
+        if (count > 1) {
+            const pool_t *ph = (const pool_t *)span.phys;
+            if (vshadow_map(v, &span, ph->mem + span.poff)) {
+                i += count;
+                continue;
+            }
+        }
+        int end = i + count;
+        for (; i < end && ok; i++) ok = vpool_map(v, &r[i]);
+    }
     pthread_mutex_unlock(&g_vp_mu);
     if (v) return (NVNboolean)ok;
     for (int i = 0; i < n; i++) {
@@ -4527,11 +4601,11 @@ NVN_NOPROTO(nvnCommandBufferEvaluateDlss, void, NVNcommandBuffer *c, const dlss_
 }
 // NVN2 push constants: (command buffer, block, byte offset, size, data). The bytes form a constant block of the graphics stages or of compute, which their shaders read
 // as c[24] (DMSH_PUSH_BANK; NVN2 compute's own c0 layout starts with them, which the translator maps there). Donkey Kong Bananza's upscaler pushes (1 / w, 1 / h, w, h) of its
-// target for its graphics passes, and two integer rectangles (source, destination) for its compute network. Block 1 + i holds stage i's buffer entries (dmsh_abi.h DMSH_PUSH_BLOCKS):
-// compute's single stage reads block 1 (PRAGMATA: 16-byte {address, size} entries, 1 to 3 at offset 0, before its dispatches), at DMSH_PUSH_SIZE in c[24]; with it taken for
-// block 0, PRAGMATA's persistent compute shaders spun on a work counter in the wrong buffer and the GPU never finished its first 3D frame. Graphics stage i reads block 1 + i
-// through its own bank: PRAGMATA pushes its vertex stage's entries into block 1, its mesh stage's into block 2 and its pixel stage's into block 5. Blocks 2 to 5 were dropped,
-// and the objects of its visibility buffer drew black
+// target for its graphics passes, and two integer rectangles (source, destination) for its compute network. The other blocks hold what the game chooses (dmsh_abi.h DMSH_PUSH_BLOCKS),
+// which every stage of the group reads as bank c[24 + block]: PRAGMATA's compute reads {address, size} entries from block 1 (1 to 3 at offset 0, before its dispatches), at
+// DMSH_PUSH_SIZE in c[24]; with it taken for block 0, its persistent compute shaders spun on a work counter in the wrong buffer and the GPU never finished its first 3D frame.
+// PRAGMATA pushes its vertex stage's entries into block 1, its mesh stage's into block 2 and its pixel stage's into block 5 (blocks 2 to 5 dropped, the objects of its visibility
+// buffer drew black); Cyberpunk 2077 pushes an 8-byte address into block 7 of both groups
 static void push_const(NVNcommandBuffer *c, int compute, uint64_t w, uint64_t off, uint64_t n, const void *data) {
     const uint64_t blocks = DMSH_PUSH_BLOCKS;
     if (w >= blocks) { static int once; if (!once++) LOG("[RED] %s push constants into block %llu (%#llx + %#llx): the host keeps %llu, dropped", compute ? "compute" : "graphics", (unsigned long long)w, (unsigned long long)off, (unsigned long long)n, (unsigned long long)blocks); return; }
@@ -4685,6 +4759,14 @@ static int vpt_walk(const void *pool, uint64_t a, uint64_t n, uint64_t gen, int 
     int r = v ? vpt_walk_locked(v, a, n, gen, fn, arg) : 1;
     pthread_mutex_unlock(&g_vp_mu); return r;
 }
+static int run_backing_hits(const uint8_t *p, uint64_t n, uint64_t arg) {
+    nvn_buffer_range_test hits = *(nvn_buffer_range_test *)(uintptr_t)arg;
+    return hits((uint64_t)(uintptr_t)p, n);
+}
+int nvn_sparse_backing_hits(const void *pool, uint64_t a, uint64_t n, nvn_buffer_range_test hits) {
+    // The guest range covers shadow pages, which vpt_walk skips. The other pages may alias physical writes or writes through another virtual pool.
+    return hits(a, n) || vpt_walk(pool, a, n, ~0ull, run_backing_hits, (uint64_t)(uintptr_t)&hits);
+}
 static int run_buffer_range(const uint8_t *p, uint64_t n, uint64_t arg) {
     nvn_buffer_range_fn note = *(nvn_buffer_range_fn *)(uintptr_t)arg;
     note((uint64_t)(uintptr_t)p, n); return 0;
@@ -4698,8 +4780,8 @@ void nvn_buffer_write_ranges(uint64_t a, uint64_t n, nvn_buffer_range_fn note) {
         struct vpool *v = g_vp[i]; uint64_t base = (uint64_t)(uintptr_t)v->base;
         if (a >= base && a - base < v->size) { sparse = 1;
             uint64_t lo = a - base, hi = n < v->size - lo ? lo + n : v->size;
-            for (size_t k = 0; k < v->nsh; k++) { struct vshadow *e = &v->sh[k];
-                if (hi <= e->voff || lo >= e->voff + e->size) continue;
+            for (size_t k = vshadow_first(v, lo); k < v->nsh && v->sh[k].voff < hi; k++) {
+                struct vshadow *e = &v->sh[k];
                 vshadow_arm_entry(v, e, lo > e->voff ? lo : e->voff, hi < e->voff + e->size ? hi : e->voff + e->size);
                 sh = 1;
             }

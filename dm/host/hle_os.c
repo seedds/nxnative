@@ -90,7 +90,7 @@ static void guest_clock_freeze_apply(int on) {
     if (on && !atomic_load(&g_gfz)) { atomic_store(&g_gfrozen, now_ns() - atomic_load(&g_glag)); atomic_store(&g_gfz, 1); }
     else if (!on && atomic_load(&g_gfz)) { atomic_store(&g_glag, now_ns() - atomic_load(&g_gfrozen)); atomic_store(&g_gfz, 0); }
 }
-// Freezing has several unrelated reasons (0 freeze tick for testing / loading screen, 1 App in background, 2 system keyboard up, 3 NVN prepare step, 4 NVN pipeline archive init):
+// Freezing has several reasons (0 testing, 1 app in background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init, 5 AlwaysSuspend applet):
 // freeze if any holds, release only when all are lifted -- otherwise "switch to background and back while the keyboard is up" or "archive init finishes inside the prepare step"
 // would release the clock early
 static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_gfz_reasons;
@@ -99,25 +99,34 @@ static pthread_mutex_t g_gfz_mu = PTHREAD_MUTEX_INITIALIZER; static unsigned g_g
 // frames as its period, got 0, and the next frame's loop that steps by it (main+0x9abd0) never ended. The same stall on the render thread during the host's first-submission prepare
 // step or pipeline archive open (reasons 3 and 4: seconds on a slow disk or cold prebuild) let Vanillaware's main thread skip hundreds of frames and advance into texture teardown
 // before frame 1 finished (13 Sentinels: Aegis Rim, SIGSEGV at main+0x309128 / +0x309e28). Guest reads of the system counter (the cntpct gate, svc GetSystemTick) wait while any
-// GFZ_WAIT_MASK reason holds; host work (dm_host_work: inside a submit or present, which the graphics suspend waits for) reads the frozen clock, as do the other reasons
-enum { GFZ_WAIT_MASK = (1u << 1) | (1u << 3) | (1u << 4) };
-static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic int g_gfz_wait;
+// GFZ_WAIT_MASK reason holds. Graphics host work can read the frozen clock during lifecycle and prepare waits so the graphics drain can finish.
+enum { GFZ_APPLET = 1u << DM_CLOCK_APPLET, GFZ_WAIT_MASK = (1u << 1) | (1u << 3) | (1u << 4) | GFZ_APPLET };
+static pthread_cond_t g_gfz_cv = PTHREAD_COND_INITIALIZER; static _Atomic unsigned g_gfz_wait;
+static void guest_wait_for(unsigned mask) {
+    pthread_mutex_lock(&g_gfz_mu);
+    while (g_gfz_reasons & mask) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
+    pthread_mutex_unlock(&g_gfz_mu);
+}
 // Each read also counts on the reading thread: a run of yields whose passes read the clock is a wait for a time, which the yield back-off sleeps from its start (hle_thread.c thr_yield)
 __thread uint64_t dm_clock_reads;
 void guest_clock_read_wait(void) {
     dm_clock_reads++;
-    if (!atomic_load(&g_gfz_wait) || atomic_load(&dm_host_work)) return;
-    pthread_mutex_lock(&g_gfz_mu);
-    while (g_gfz_reasons & GFZ_WAIT_MASK) pthread_cond_wait(&g_gfz_cv, &g_gfz_mu);
-    pthread_mutex_unlock(&g_gfz_mu);
+    if (!atomic_load(&g_gfz_wait)) return;
+    guest_wait_for(atomic_load(&dm_host_work) ? GFZ_APPLET : GFZ_WAIT_MASK);
+}
+void guest_applet_wait(void) {
+    if (!(atomic_load_explicit(&g_gfz_wait, memory_order_relaxed) & GFZ_APPLET)) return;
+    dm_thread_native_wait(1);
+    guest_wait_for(GFZ_APPLET);
+    dm_thread_native_wait(0);
 }
 void guest_clock_freeze_for(int reason, int on) {
     pthread_mutex_lock(&g_gfz_mu);
     if (on) g_gfz_reasons |= 1u << reason; else g_gfz_reasons &= ~(1u << reason);
     guest_clock_freeze_apply(g_gfz_reasons != 0);
-    int wait = (g_gfz_reasons & GFZ_WAIT_MASK) != 0;
-    atomic_store(&g_gfz_wait, wait);
-    if (!wait) pthread_cond_broadcast(&g_gfz_cv);   // after the clock is running again: a released read sees it continue
+    unsigned wait = g_gfz_reasons & GFZ_WAIT_MASK;
+    unsigned old = atomic_exchange(&g_gfz_wait, wait);
+    if (old & ~wait) pthread_cond_broadcast(&g_gfz_cv);   // applet waiters can also resume when another clock freeze still holds
     pthread_mutex_unlock(&g_gfz_mu);
 }
 void guest_clock_freeze(int on) { guest_clock_freeze_for(0, on); }

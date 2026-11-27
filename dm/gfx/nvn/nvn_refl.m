@@ -80,11 +80,13 @@ int nvn_refl_from_json(NSDictionary *j, nvn_refl *o, char *err, int errlen) {
                 if (n) { if (n > 32) FAIL("B binding %s: array of %d", nm.UTF8String, n); r->n = (uint8_t)n; } }
             else if ([k isEqualToString:@DMSH_KIND_SAMP_ID]) r->kind = NVN_RB_SAMPI;
             // The pools, indexed by the handle's IDs (nvn_refl.h TEXP / SAMPP): which texture is read is known only when the GPU runs the draw
-            else if ([k isEqualToString:@DMSH_KIND_TEX_POOL]) { r->kind = NVN_RB_TEXP; dummy_kind(b[@"elem"], &r->dtt, &r->dpf); o->bindless = o->pool = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_TEX_POOL]) { r->kind = NVN_RB_TEXP; dummy_kind(b[@"elem"], &r->dtt, &r->dpf); r->f1d = [b[@"fetch1d"] boolValue]; o->bindless = o->pool = 1; }
+            else if ([k isEqualToString:@DMSH_KIND_TEX_QUERY]) r->kind = NVN_RB_TEXQUERY;
             else if ([k isEqualToString:@DMSH_KIND_SAMP_POOL]) { r->kind = NVN_RB_SAMPP; o->bindless = o->pool = 1; }
             else if ([k isEqualToString:@DMSH_KIND_IMG_POOL]) { NSString *el_p = b[@"elem"]; r->kind = NVN_RB_IMGP; dummy_kind(el_p, &r->dtt, &r->dpf);
                 r->img_rd = [el_p isKindOfClass:[NSString class]] && [el_p containsString:@"access::read_write"];
-                r->rw = r->img_rd || ([el_p isKindOfClass:[NSString class]] && [el_p containsString:@"access::write"]);
+                r->atom = [b[@"atomic"] boolValue] ? ([el_p containsString:@"<ulong"] ? 2 : 1) : 0;
+                r->rw = r->atom || r->img_rd || ([el_p isKindOfClass:[NSString class]] && [el_p containsString:@"access::write"]);
                 o->bindless = o->pool = 1; }   // images indexed by the IDs the shader loads (img_pool_gpu)
             // A table of the handles in a uniform buffer (nvn_refl.h TEXH / SAMPH)
             else if ([k isEqualToString:@DMSH_KIND_TEX_HTAB] || [k isEqualToString:@DMSH_KIND_SAMP_HTAB]) { int samp = [k isEqualToString:@DMSH_KIND_SAMP_HTAB];

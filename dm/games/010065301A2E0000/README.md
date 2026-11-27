@@ -27,3 +27,20 @@ Modules: `main`, `subsdk0` and `sdk`. Other versions are not validated.
 - M5 Max, macOS 27.2 (profile with the depth fix): the bundled archive opened from a clean local cache, found 16 of 16 probed pair bases and skipped the full first-launch rebuild. The packed host loaded the copied Sacred Forest save. It still builds individual pipelines for states absent from the offline archive.
 - M5 Max, macOS 27.2 (earlier build, before the archive depth fix): from a fresh save, choose Claude, advance through the Milokeenia briefing, approach the blue panel and proceed into the ruins, activate the device and reach the Sacred Forest. Clear the battle tutorial and first fight, then continue to Claude's post-battle dialogue with Rena. About 30 fps in the last measured frame window (p50 33.38 ms, p95 34.10 ms). A separate run loaded a local copy of Rena's Lv. 3 Sacred Forest autosave, moved and opened the menu; the original save was not connected.
 - iPhone Duo, iOS 27 (profile tested at `d8d68385`): the signed Xcode device build passed the old startup fault and loaded the Sacred Forest autosave, with the local and iCloud copies already in sync. Ran through 3,900 frames, including movement and opening and closing the camp menu; the last 300 frames had p50 33.27 ms and p95 34.68 ms. No save changed. No IPA was exported; game data was already installed separately. A longer playthrough, a fresh iCloud download and iPad were not checked.
+
+## Frame rate
+
+The profile targets 60 fps and presents on every display tick instead of
+honoring the game's interval-2 request. The game renders its own frames;
+there is no frame interpolation. Select **30 fps** in the launcher's
+**Frame rate** setting to return to a 30 fps cap. The opening 30 fps movie
+keeps its own rate and the host returns to the selected cap afterward.
+
+Star Ocean 1.1.0 (v196608) was play-tested by the contributor on an M5 Max
+MacBook Pro (macOS 27.2) and an iPhone Duo, with no gameplay issues reported.
+The test build also contained separate shader-table and picture-shape
+changes that are outside the scope of this patch. Both logs show a 60 Hz
+present tick and a 30-to-60 fps return after the opening movie. In representative
+300-frame windows after the movie, the Mac recorded 16.66 ms p50 / 16.83 ms p95
+(up to frame 1200), and the Duo recorded 16.67 ms p50 / 17.07 ms p95 (up to
+frame 6000). These windows are not full-playthrough or thermal benchmarks.

@@ -295,6 +295,7 @@ void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit):
 // Graphics lifecycle (hle_nvn.c): on=1 closes submission and waits up to three seconds for the drain, on=0 requests reopening once the drain completes.
 void dm_gfx_suspend(int on);
 void dm_fstep_settle(void);   // hle_nvn.c: the window changed size, visibility, screen or fullscreen state, or graphics resumed (nvn_fstep.h settle)
+int mtl_link_vrr_120_hz(int hz);   // nvn_mtl.m: in fullscreen the display link paces 60 fps on its 120 Hz link on a variable-refresh screen at this rate (front_mac.m screen_match_once)
 void dm_gfx_quit(int wait_ms);   // hle_nvn.c: the process is ending (the graceful exit): what the pipeline archive has not written yet, written, waiting up to wait_ms
 void dm_gfx_quit_begin(void);   // hle_nvn.c: the process is about to end (the graceful exit, oe::ExecuteProgram's hand-over): the pipeline prewarm stops and the archive starts writing what it holds, without waiting
 enum { DM_QUIT_ARCH_MS = 10000 };   // what any end of the process the host controls gives the pipeline archive's write (atexit, the graceful exit): a file of 900 bases took 1.8-4 s on Macs

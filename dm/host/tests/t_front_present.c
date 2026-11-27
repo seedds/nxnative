@@ -1,4 +1,4 @@
-// Check the Mac presentation layer opacity policy (../front_mac_present.h, GitHub issue #1821).
+// Check the Mac presentation policies (../front_mac_present.h): the layer's opacity (GitHub issue #1821) and the screen's mode in fullscreen.
 #include "../front_mac_present.h"
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +36,30 @@ int main(void) {
     CHECK(!strcmp(front_mac_layer_opaque_why(FRONT_MAC_COMP_AUTO, 0, 1), "window"), "why window");
     CHECK(!strcmp(front_mac_layer_opaque_why(FRONT_MAC_COMP_AUTO, 1, 0), "fullscreen on an unmirrored display"), "why fullscreen unmirrored");
     CHECK(!strcmp(front_mac_layer_opaque_why(FRONT_MAC_COMP_AUTO, 1, 1), "fullscreen on a mirrored display"), "why fullscreen mirrored");
+
+    // DM_SCREEN_MATCH parsing
+    CHECK(front_mac_screen_match_mode(NULL) == FRONT_MAC_MATCH_AUTO, "unset -> default");
+    CHECK(front_mac_screen_match_mode("0") == FRONT_MAC_MATCH_OFF, "0 -> keeps every mode");
+    CHECK(front_mac_screen_match_mode("1") == FRONT_MAC_MATCH_FIXED, "1 -> fixed-rate mode for variable-refresh screens too");
+    CHECK(front_mac_screen_match_mode("") == FRONT_MAC_MATCH_AUTO, "empty -> default");
+    CHECK(front_mac_screen_match_mode("2") == FRONT_MAC_MATCH_AUTO, "other -> default");
+
+    // A variable-refresh mode is kept only by default, at a 60 fps target, where the 120 Hz link paces it
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, 1, 1) == 1, "default, variable refresh, 60 fps, 120 Hz link -> kept");
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_FIXED, 1, 1, 1) == 0, "DM_SCREEN_MATCH=1 -> fixed-rate mode");
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 0, 1, 1) == 0, "fixed-rate mode -> the rate match decides");
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, 0, 1) == 0, "30 or 40 fps target -> fixed-rate mode");
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, 1, 0) == 0, "no 120 Hz link (144 Hz, DM_PRESENT_LINK set) -> fixed-rate mode");
+
+    // A fixed mode the host picked goes back to the screen's own variable mode where the keep rule holds for that mode
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 0, 1, 2, 1) == 1, "default, fixed pick, own mode variable, 60 fps held, 120 Hz link -> taken back");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 0, 1, 1, 1) == 0, "60 fps not held for the hold-off yet -> stays fixed");
+    CHECK(front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, 2, 1) == 1, "60 fps held -> a variable mode is still kept");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_FIXED, 0, 1, 2, 1) == 0, "DM_SCREEN_MATCH=1 -> stays fixed");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 1, 1, 2, 1) == 0, "already in a variable mode -> nothing to take back");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 0, 0, 2, 1) == 0, "own mode fixed -> stays");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 0, 1, 0, 1) == 0, "30 fps target -> stays fixed");
+    CHECK(front_mac_restore_vrr(FRONT_MAC_MATCH_AUTO, 0, 1, 2, 0) == 0, "own rate not paced by the 120 Hz link -> stays fixed");
 
     printf("front present policy: %d checks, %d failed\n", checks, fails);
     return fails != 0;

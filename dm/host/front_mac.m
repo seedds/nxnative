@@ -73,7 +73,9 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
         CGDisplayModeRef cur = CGDisplayCopyDisplayMode(g_match_id);
         if (cur && CGDisplayModeGetIODisplayModeID(cur) == g_match_pick) {
             g_screen_variable_refresh = g_match_pick_vrr;
-            double hz = CGDisplayModeGetRefreshRate(cur); if (hz > 0) g_screen_fps = (int)round(hz);
+            double hz = CGDisplayModeGetRefreshRate(cur);
+            if (hz > 0) g_screen_fps = (int)round(hz);
+            else if (g_match_pick_vrr && g_screen_native_fps > 0) g_screen_fps = g_screen_native_fps;   // the screen's own variable mode taken back, reporting no rate: its rate before the switch
         }
         if (cur) CGDisplayModeRelease(cur);
     } else {
@@ -127,11 +129,15 @@ int front_screen_settling(void) {
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
 // screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks.
-// A variable-refresh screen (ProMotion) in fullscreen switches to a fixed-rate mode of the same size at a multiple of the game's rate (120 → 60 Hz for 60 and 30 fps), though its own
+// A variable-refresh screen (ProMotion) in fullscreen switches to a fixed-rate mode of the same size at a multiple of the game's rate (120 → 60 Hz at 30 fps), though its own
 // rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
-// 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
-// the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
-static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
+// 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). At a 60 fps target a variable-refresh
+// screen the 120 Hz link paces (nvn_mtl.m link_vrr_120) keeps its mode, with no mode change (front_mac_keep_vrr), and goes back to it after a 30 fps stretch
+// (front_mac_restore_vrr); a screen with no such fixed-rate mode keeps its mode too
+// The request, written by the present thread only: the frame rate to match (0 = not known yet) below MATCH_AT60_SHIFT, front_screen_match's at60 (0, 1, 2) above it. One
+// word, so a pass on the main thread never pairs one request's rate with another's at60
+#define MATCH_AT60_SHIFT 16
+static NSWindow *g_win; static _Atomic int g_match_req;   // g_win: the game's window
 // A switch reconfigures every screen, and with several screens (a DisplayLink one among them) that moved the fullscreen window off the switched screen and back: each move
 // switched the screen back and then again, 18 times in a minute, until two of three screens lost their signal and the Dock and Finder stopped answering (LNPANDY/NX2Apple#1085).
 // A switch is undone when the screens take it back, not the player or the game: the fullscreen window left the switched screen, or the screen is at its own mode again
@@ -163,9 +169,21 @@ static void screen_match_restore(int on_it, int undone) {   // main thread: the 
     if (undone) g_match_undone = CACurrentMediaTime();
 }
 static void screen_match_apply(void);
+static void match_recheck(double after) {   // main thread: one more pass after this many seconds, coalesced with one already due
+    if (g_match_recheck) return;
+    g_match_recheck = 1;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(after * NSEC_PER_SEC) + 10000000LL), dispatch_get_main_queue(), ^{ g_match_recheck = 0; screen_match_apply(); });
+}
 static void screen_match_once(void) {   // screen_match_apply's work, never entered twice at once
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
-    NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    static int match = -1;
+    if (match < 0) {
+        match = front_mac_screen_match_mode(getenv("DM_SCREEN_MATCH"));
+        if (match == FRONT_MAC_MATCH_OFF) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)");
+        if (match == FRONT_MAC_MATCH_FIXED) LOG("front end: a variable-refresh screen goes to a fixed-rate mode in fullscreen at 60 fps too (DM_SCREEN_MATCH=1)");
+    }
+    int off = match == FRONT_MAC_MATCH_OFF;
+    int req = g_match_req, want = req & ((1 << MATCH_AT60_SHIFT) - 1), at60 = req >> MATCH_AT60_SHIFT;
+    NSScreen *scr = g_win.screen; int full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id, full);
     static int last_want;
@@ -180,28 +198,65 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
     // must not be misread from a leftover variable-refresh flag
     if (!g_match_orig) screen_refresh(scr);
     int32_t cur_id = CGDisplayModeGetIODisplayModeID(cur);
-    if (g_match_orig && cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig) && cur_id != g_match_pick) {
+    if (g_match_orig && cur_id != g_match_pick) {   // the screen is not in the mode this host switched it to last (a fixed one, or its own taken back)
         double since = CACurrentMediaTime() - g_match_switched;
         if (since < MATCH_SETTLE_S) {   // this host's switch has not shown yet: look again once it should have, in case no notification comes
             CGDisplayModeRelease(cur);
-            if (!g_match_recheck) {
-                g_match_recheck = 1;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((MATCH_SETTLE_S - since) * NSEC_PER_SEC) + 10000000LL), dispatch_get_main_queue(), ^{ g_match_recheck = 0; screen_match_apply(); });
-            }
+            match_recheck(MATCH_SETTLE_S - since);
             return;
         }
-        // the screen is at its own mode again with no switch back from this host (macOS or the screen took the switch back): its rate as that mode has it, and the switch is undone
-        double own = mode_hz(cur);
-        LOG("front end: screen at its own %.0f Hz again %.1f s after this host switched it", own, since);
-        if (own > 0) g_screen_fps = g_screen_native_fps = (int)round(own);
-        g_screen_variable_refresh = g_match_orig_vrr;
-        CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
+        if (cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig)) {
+            // the screen is at its own mode again with no switch back from this host (macOS or the screen took the switch back): its rate as that mode has it, and the switch is undone
+            double own = mode_hz(cur);
+            LOG("front end: screen at its own %.0f Hz again %.1f s after this host switched it", own, since);
+            if (own > 0) g_screen_fps = g_screen_native_fps = (int)round(own);
+            g_screen_variable_refresh = g_match_orig_vrr;
+            CGDisplayModeRelease(g_match_orig); g_match_orig = NULL; g_match_pick = 0; g_match_pick_vrr = 0;
+        } else {
+            // still in the fixed mode this host left for the screen's own, or in one it did not pick (the player's, from System Settings): that switch is undone too. The mode
+            // is taken as the pick with its own rate and variable refresh, read MATCH_SETTLE_S after the switch, past NSScreen's lag, so the link follows the screen as it is
+            // and the next pass may switch again within the bounce limit
+            double h = mode_hz(cur); int v = scr.minimumRefreshInterval > 0 && scr.maximumRefreshInterval > scr.minimumRefreshInterval;
+            LOG("front end: screen still at %.0f Hz %.1f s after this host switched it", h, since);
+            g_match_pick = cur_id; g_match_pick_vrr = v;
+            g_screen_fps = h > 0 ? (int)round(h) : (int)scr.maximumFramesPerSecond; g_screen_variable_refresh = v;
+        }
         g_match_undone = CACurrentMediaTime();
     }
     double hz = mode_hz(cur);
     // the current mode is variable-refresh: the screen's own mode as screen_refresh saw it; one this host switched to as it chose it (the screen observer may lag), so a
     // fixed mode is never left for the variable one at a rate it already matches
     int vrr = !g_match_orig ? g_screen_variable_refresh : cur_id == g_match_pick ? g_match_pick_vrr : cur_id == CGDisplayModeGetIODisplayModeID(g_match_orig) ? g_match_orig_vrr : 0;
+    // The mode this host picked has shown: the link reads that mode's rate and variable refresh, also when a screen-parameters notification during the wait wrote NSScreen's
+    // values for the mode before it (screen_refresh); a mode that reports no rate and is the screen's own variable one has the rate from before the switch
+    if (g_match_orig && cur_id == g_match_pick) {
+        if (hz > 0) g_screen_fps = (int)round(hz); else if (g_match_pick_vrr) g_screen_fps = g_screen_native_fps;
+        g_screen_variable_refresh = g_match_pick_vrr;
+    }
+    // A variable mode this host left for a fixed one (a 30 fps stretch) is taken back once the keep rule holds for it again, judged on its own rate from before the switch.
+    // It is switched to as a pick, so screen_refresh keeps its rate and variable refresh while NSScreen still shows the fixed mode
+    if (g_match_orig && cur_id == g_match_pick && front_mac_restore_vrr(match, vrr, g_match_orig_vrr, at60, mtl_link_vrr_120_hz(g_screen_native_fps))) {
+        if ((g_match_bounces = g_match_undone > 0 && CACurrentMediaTime() - g_match_undone < MATCH_SETTLE_S ? g_match_bounces + 1 : 0) >= MATCH_BOUNCES) {
+            g_match_bounced = 1;   // a restore that did not show, twice in a row: the screen stays fixed until fullscreen is left or the frame rate changes
+            LOG("front end: screen at %.0f Hz keeps its fixed mode: switching it back to its own did not show %d times in a row", hz, g_match_bounces);
+            CGDisplayModeRelease(cur); return;
+        }
+        double own = mode_hz(g_match_orig); CGError r = screen_set_mode(id, g_match_orig);
+        LOG("front end: screen at %.0f Hz %s its own variable-refresh mode for 60 fps in fullscreen: the 120 Hz display link paces it", hz, r == kCGErrorSuccess ? "back at" : "could not be switched back to");
+        if (r == kCGErrorSuccess) {
+            g_match_switched = CACurrentMediaTime();
+            g_match_pick = CGDisplayModeGetIODisplayModeID(g_match_orig); g_match_pick_vrr = g_match_orig_vrr;
+            g_screen_fps = own > 0 ? (int)round(own) : g_screen_native_fps;   // the screen observer may not show the mode yet; a mode that reports no rate has the one from before the switch
+            g_screen_variable_refresh = g_match_orig_vrr;
+            match_recheck(MATCH_SETTLE_S);   // whether it showed: the pick's state above, or the still-at branch with the mode the screen is in
+        }
+        CGDisplayModeRelease(cur); return;
+    }
+    // the link's own test on the rate it reads (front_screen_max_fps), so the screen keeps its mode exactly where link_vrr_120 then takes the 120 Hz link
+    if (front_mac_keep_vrr(match, vrr, at60, mtl_link_vrr_120_hz(g_screen_fps))) {
+        LOG("front end: variable-refresh screen at %d Hz keeps its mode for 60 fps in fullscreen: the 120 Hz display link paces it (DM_SCREEN_MATCH=1 switches it to a fixed-rate mode)", (int)g_screen_fps);
+        CGDisplayModeRelease(cur); return;
+    }
     if (!vrr && (hz <= 0 || hz_multiple(hz, want))) {   // already a multiple, or not known
         if (g_match_orig) { if (hz > 0) g_screen_fps = (int)round(hz); g_screen_variable_refresh = 0; }   // the screen this host switched: keep its fixed-mode state even if the screen observer lags
         CGDisplayModeRelease(cur); return;
@@ -231,6 +286,7 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
             g_match_pick_vrr = g_match_pick == CGDisplayModeGetIODisplayModeID(g_match_orig) ? g_match_orig_vrr : 0;
             g_screen_fps = (int)round(pick_hz);   // the screen observer may not show the new mode yet: its rate, and whether it is variable (back to the screen's own mode: as that was)
             g_screen_variable_refresh = g_match_pick_vrr;
+            match_recheck(MATCH_SETTLE_S);   // whether it showed (above)
         }
     }
     if (modes) CFRelease(modes);
@@ -248,9 +304,10 @@ static void screen_match_apply(void) {
         dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); g_match_pending--; });
     }
 }
-void front_screen_match(int fps) {
-    if (!g_layer || g_match_want == fps) return;   // no window (a windowless run's main thread runs the guest), or the rate as before
-    g_match_want = fps; g_match_pending++;
+void front_screen_match(int fps, int at60) {
+    int req = (fps & ((1 << MATCH_AT60_SHIFT) - 1)) | ((at60 < 0 ? 0 : at60 > 2 ? 2 : at60) << MATCH_AT60_SHIFT);
+    if (!g_layer || g_match_req == req) return;   // no window (a windowless run's main thread runs the guest), or the request as before
+    g_match_req = req; g_match_pending++;
     dispatch_async(dispatch_get_main_queue(), ^{ screen_match_apply(); g_match_pending--; });
 }
 // The pointer hides on game input while it is over the picture of the active game window (issue #675): AppKit shows it again when the mouse moves, input_release when

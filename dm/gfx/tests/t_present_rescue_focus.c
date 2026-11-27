@@ -12,8 +12,8 @@ extern int test_game_fps;
 int test_game_fps_now(void) { return test_game_fps; }
 extern int test_screen_hz;
 int front_screen_max_fps(void) { return test_screen_hz; }
-extern int test_match_fps;
-void front_screen_match(int fps) { test_match_fps = fps; }   // the rate link_sync asks the screen for
+extern int test_match_fps, test_match_at60;
+void front_screen_match(int fps, int at60) { test_match_fps = fps; test_match_at60 = at60; }   // the rate link_sync asks the screen for, and whether the game targets 60 fps
 extern int test_settling;
 int front_screen_settling(void) { return test_settling; }
 extern int test_covered;

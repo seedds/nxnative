@@ -23,8 +23,10 @@ int front_display_pixels(int *w, int *h);
 // Whether the window's current screen mode supports variable refresh (Mac front_mac.m; none on iOS). Any thread
 int front_screen_variable_refresh(void);
 // The frame rate the display link paces the game at (60, 30, 120; nvn_mtl.m link_sync): in fullscreen, a screen whose refresh rate is not a multiple of it is switched, while the game runs,
-// to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). Called from the present thread
-void front_screen_match(int fps);
+// to a mode of the same size whose rate is, and back when the window leaves fullscreen or that screen (front_mac.m; none on iOS). at60: 1 the game targets 60 fps, so a variable-refresh
+// screen the 120 Hz link paces (mtl_link_vrr_120_hz) keeps its mode; 2 it has for LINK_VRR_BACK_NS without a break, so the screen also gets that mode back after a 30 fps
+// stretch; 0 neither. Called from the present thread
+void front_screen_match(int fps, int at60);
 // Whether startup fullscreen or a screen mode switch is still settling, so the display link waits before starting (front_mac.m; none on iOS). Any thread
 int front_screen_settling(void);
 // Whether no part of the window is on screen (other windows over it, another Space; front_mac.m; none on iOS). Any thread

@@ -24056,6 +24056,11 @@ static uint64_t g_rescue_back_at, g_rescue_back_ns = 3000000000ull, g_rescue_n;
 #define LINK_PROBE_NS 67000000ull
 static int g_link_probe_pending;
 static uint64_t g_link_probe_at, g_link_probe_fail;
+// The Mac front end takes a variable-refresh screen back from its fixed 60 Hz mode (front_screen_match) only once the 60 fps target has held this long without a break.
+// nvn_game_fps reports 60 at once on an odd present interval and 30 again after 1 s at interval 2, so a 30 fps game with odd frames now and then would otherwise switch
+// the screen twice a second; with 3 s the most is a pair of switches every 4 s. A player back from a 30 fps movie gets the 120 Hz link 3 s after it ends
+#define LINK_VRR_BACK_NS 3000000000ull
+static uint64_t g_link_at60_since;   // link_sync: when the current unbroken 60 fps target began (now_ns, 0 = the target is not 60 now)
 // The display link watchdog only recognizes the "active" state: when the App loses active status (pulling down Control Center / notifications, incoming call, system popup) and in the background the system does not call back anyway, and the picture is covered too -- the frame-drop fallback stays as before,
 // but it is not counted as stuck and no failure is reported; the stall is measured from the later of "the most recent callback / the most recent activation" (A16 logs: 8–17 seconds inactive and 17 seconds in the background were both reported as "stuck in foreground")
 __attribute__((weak)) int dm_focus_now(void) { return 1; }   // The host's hle_oe.c provides the strong definition; when graphics unit tests do not link the host it is treated as always active
@@ -24248,7 +24253,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 __attribute__((weak)) int front_screen_settling(void) { return 0; }   // front_mac.m: startup fullscreen not entered yet, fullscreen match pending, or mode switched under 1 s ago
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m, front_ios.m; some graphics unit tests supply their own
 __attribute__((weak)) int front_screen_capable_fps(void) { return front_screen_max_fps(); }   // front_mac.m: native rate before front_screen_match; iOS and unit tests follow front_screen_max_fps
-__attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
+__attribute__((weak)) void front_screen_match(int fps, int at60) { (void)fps; (void)at60; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
@@ -24292,10 +24297,11 @@ static int link_30hz(void) { return front_fullscreen() ? front_screen_variable_r
 // screen), unless DM_PRESENT_LINK chose the mode. There, with the 60 Hz link at frame latency 2, the system showed every present one 120 Hz refresh after the link's
 // target time (@pres_at_ms − @link_target_ms = 8.33 ms) and the link then skipped every other tick (@link_gap_ms 16.7, 33.3, 16.7, …): 40 callbacks a second, so a game
 // paced by the link ran at 40 fps with its GPU at 10 ms of the 16.7 (Ocarina of Time on an M5 Pro, macOS 27.2; at latency 1 the frame step went to 4 vsyncs, 15 fps).
-// The Mac front end first switches such a screen to a fixed-rate mode (front_screen_match: 60 Hz, 60.0 fps at latency 1 there), so this is the fallback for a screen with
-// no such mode or with DM_SCREEN_MATCH=0: the 120 Hz link held 59.2 fps, about 2% of frames up 25 ms. A window keeps the 60 Hz link, where every present lands on its
-// target (docs/reference/frame-rate.md)
-static int link_vrr_120(void) { int hz = front_screen_max_fps(); return !g_present_link_env && front_fullscreen() && front_screen_variable_refresh() && hz >= 120 && hz % 120 == 0; }
+// The 120 Hz link showed the game's frames sooner than the screen's fixed 60 Hz mode with the 60 Hz link at latency 1, so at a 60 fps target the Mac front end keeps such
+// a screen's variable mode for this link (front_screen_match, mtl_link_vrr_120_hz). A window keeps the 60 Hz link, where every present lands on its target
+// (docs/reference/frame-rate.md)
+int mtl_link_vrr_120_hz(int hz) { return !g_present_link_env && hz >= 120 && hz % 120 == 0; }   // whether link_vrr_120 takes a variable-refresh screen at this rate (front_mac.m asks on its main thread)
+static int link_vrr_120(void) { return front_fullscreen() && front_screen_variable_refresh() && mtl_link_vrr_120_hz(front_screen_max_fps()); }
 static _Atomic int g_test_link_hold;   // DM_TEST_LINK_STALL: a link made during the stall (tried again after a rescue) starts paused, silent from its start as one that never calls back
 static int g_link_mode = 1;   // Current mode of the display link object: 1 / 2 same as g_dm_present_link, 3 = power-saving mode 30 Hz
 static uint64_t link_probe_ns(void) { return g_link_mode == 3 ? 2 * LINK_PROBE_NS : LINK_PROBE_NS; }   // 4 refreshes at 60 Hz (~67 ms) or 30 Hz (~134 ms); 67 ms floor at 120 Hz
@@ -24347,9 +24353,16 @@ static void link_sync(void) {   // Called every frame by the game's present thre
     if (g_rescue_mode || cov) want = 0;
     if (!want) { g_link_probe_pending = 0; g_link_probe_at = 0; }
     pthread_mutex_unlock(&g_pq_mu);
-    if (!g_present_link_env && want && mtl_fps_target() == 30 && link_30hz()) want = 3;   // 30 Hz power-saving mode when the link rate is automatic
-    if (!g_present_link_env && want && mtl_fps_target() == 40) want = 2;   // 40 fps needs the 120 Hz link (3 ticks = 25 ms) when the link rate is automatic
-    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60);   // the game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one
+    int tgt = mtl_fps_target();
+    if (!g_present_link_env && want && tgt == 30 && link_30hz()) want = 3;   // 30 Hz power-saving mode when the link rate is automatic
+    if (!g_present_link_env && want && tgt == 40) want = 2;   // 40 fps needs the 120 Hz link (3 ticks = 25 ms) when the link rate is automatic
+    // The game's rate: a variable-refresh screen goes to a fixed-rate mode at a multiple where it has one, except at a 60 fps target on a screen link_vrr_120 paces. The
+    // 60 that a 30 fps cap reports while its late frames are shown at the next vsync (g_fstep_fine, entered after 3 late frames, left after 8 s) is still the cap's 30: as
+    // a 60 target it would switch the screen's mode at each entry and exit. at60 is 2 once the 60 has held for LINK_VRR_BACK_NS, when the screen may also be taken back
+    int at60 = tgt == 60 && !atomic_load(&g_fstep_fine);
+    if (!at60) g_link_at60_since = 0;
+    else { uint64_t t = now_ns(); if (!g_link_at60_since) g_link_at60_since = t ? t : 1; if (t >= g_link_at60_since + LINK_VRR_BACK_NS) at60 = 2; }
+    if (want) front_screen_match(want == 3 ? 30 : want == 2 ? 120 : 60, at60);
     static int vrr_was; int vrr = want == 1 && link_vrr_120();   // variable-refresh fullscreen that kept its mode: the 120 Hz link paces the 60 (link_vrr_120)
     if (vrr != vrr_was) { vrr_was = vrr; MLOG("display link: %s (frame %llu)", vrr ? "120 Hz in fullscreen on a variable-refresh screen, a frame every other tick (DM_PRESENT_LINK=1 keeps 60 Hz)" : "60 Hz again (window, fixed-rate screen or another frame rate)", (unsigned long long)atomic_load(&g_cur_frame)); }
     if (vrr) want = 2;

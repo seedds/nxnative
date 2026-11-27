@@ -32,6 +32,7 @@
 #define CAMetalDisplayLink SilentDisplayLink
 #define nvn_game_fps test_game_fps_now   // hle_nvn.c, linked here, has the strong nvn_game_fps; t_present_rescue_focus.c sets the rate
 #include "../nvn/nvn_mtl.m"
+#include "../../host/front_mac_present.h"   // the Mac front end's screen-mode decision, checked against the link's choice
 #undef nvn_game_fps
 #undef CAMetalDisplayLink
 static uint64_t test_now;
@@ -42,6 +43,7 @@ int test_variable_refresh;
 int test_game_fps = 60;
 int test_screen_hz;   // the screen's maximumFramesPerSecond (front_screen_max_fps); 0 = not known, as the graphics layer's weak default
 int test_match_fps;   // the last rate link_sync asked the screen for (front_screen_match)
+int test_match_at60;   // and whether it said the game targets 60 fps
 int test_settling;
 static void *test_layer;
 uint64_t test_focus_since;
@@ -259,21 +261,28 @@ static void thirty(void) {   // A 30 fps target runs the link at 30 Hz, except i
     g_link = nil; g_link_started = 0;
 }
 static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh screen at a multiple of 120 Hz takes the 120 Hz link (a frame every other tick); everything else keeps the 60 Hz one.
-    reset(); test_fullscreen = 0; test_variable_refresh = 1; test_screen_hz = 120; test_game_fps = 60; g_present_latency = 0; g_present_link_env = 0;
+    reset(); test_fullscreen = 0; test_variable_refresh = 1; test_screen_hz = 120; test_game_fps = 60; g_present_latency = 0; g_present_link_env = 0; g_link_at60_since = 0;
     SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
     link_sync(); CHECK("a window on a 120 Hz variable-refresh screen keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
     test_fullscreen = 1; link_sync();
     CHECK("fullscreen on a 120 Hz variable-refresh screen takes the 120 Hz link", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && mtl_link_rate() == 120);
     CHECK("the 120 Hz link leaves the requested mode as it was", g_dm_present_link == 1);
     CHECK("the 120 Hz link keeps frame latency 2", link.preferredFrameLatency == 2);
-    CHECK("the screen is asked for the game's 60, so it can go to a fixed 60 Hz mode", test_match_fps == 60);
+    CHECK("the screen is asked for the game's 60 with its 60 fps target", test_match_fps == 60 && test_match_at60 == 1);
+    CHECK("by default the front end keeps the 120 Hz variable-refresh mode for that link", front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
+    CHECK("DM_SCREEN_MATCH=1 switches it to a fixed-rate mode", !front_mac_keep_vrr(FRONT_MAC_MATCH_FIXED, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
+    CHECK("a fixed-rate mode is not kept as a variable-refresh one", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 0, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
     test_variable_refresh = 0; link_sync(); CHECK("fullscreen on a fixed-rate screen keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     test_variable_refresh = 1; test_screen_hz = 144; link_sync(); CHECK("a variable-refresh screen at 144 Hz keeps the 60 Hz link", g_link_mode == 1);
+    CHECK("a variable-refresh screen at 144 Hz goes to a fixed-rate mode", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
     test_screen_hz = 0; link_sync(); CHECK("a screen of unknown rate keeps the 60 Hz link", g_link_mode == 1);
     test_screen_hz = 240; link_sync(); CHECK("a variable-refresh screen at 240 Hz takes the 120 Hz link", g_link_mode == 2);
+    CHECK("a variable-refresh screen at 240 Hz keeps its mode", front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
     test_screen_hz = 120; g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link in fullscreen", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    CHECK("with DM_PRESENT_LINK=1 the screen goes to a fixed-rate mode", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
     g_present_link_env = 0; link_sync(); CHECK("without DM_PRESENT_LINK the 120 Hz link again", g_link_mode == 2);
     test_game_fps = 30; link_sync(); CHECK("30 fps in variable-refresh fullscreen defaults to the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
+    CHECK("at 30 fps the screen goes to a fixed-rate mode", test_match_at60 == 0 && !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)));
     g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link at 30 fps", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && test_match_fps == 60);
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link at 30 fps", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 120);
     g_dm_present_link = 1; g_present_link_env = 0; link_sync(); CHECK("unset DM_PRESENT_LINK restores the 30 Hz power-saving link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
@@ -281,6 +290,103 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     test_fullscreen = 0; link_sync(); CHECK("leaving fullscreen: the 60 Hz link again", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);
     g_dm_present_link = 1; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
+}
+// The front end's screen mode (front_mac_keep_vrr) and the link agree for every target, DM_PRESENT_LINK, DM_SCREEN_MATCH and screen rate, from a window into fullscreen on a
+// variable-refresh screen: a screen kept in its variable mode is never paced by the 60 Hz link (the 40 fps misses), and one switched to a fixed-rate mode never by the 120 Hz one.
+// The model of the front end applies each request with front_mac_keep_vrr: a variable mode it does not keep goes to a fixed 60 Hz mode where the rate asked for divides 60.
+// It does not run screen_match_once (mode lists, a screen with no fixed 60 Hz mode, observer lag, bounces) and walks one entry into fullscreen at a fixed target; vrr_walk
+// changes the target in fullscreen
+static void vrr_agree(void) {
+    static const int hzs[] = { 0, 60, 120, 144, 240 }, fpss[] = { 30, 40, 60, 120 };
+    static const char *const link_name[] = { "unset", "0", "1", "2" };
+    int cases = 0, bad = 0;
+    for (int match = FRONT_MAC_MATCH_FIXED; match <= FRONT_MAC_MATCH_AUTO; match++)
+    for (int link_set = 0; link_set < 4; link_set++)   // DM_PRESENT_LINK unset, 0, 1, 2
+    for (size_t h = 0; h < sizeof hzs / sizeof *hzs; h++)
+    for (size_t f = 0; f < sizeof fpss / sizeof *fpss; f++) {
+        reset(); g_present_latency = 0; g_link_drain_on = 1; g_link_at60_since = 0;   // the Mac's drain: a window at 30 fps asks for 60
+        g_present_link_env = link_set != 0; g_dm_present_link = link_set ? link_set - 1 : 1;
+        test_screen_hz = hzs[h]; test_game_fps = fpss[f]; test_fullscreen = 0; test_variable_refresh = 1; test_match_fps = 0; test_match_at60 = -1;
+        SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+        link_sync();   // in the window: the request the front end holds when fullscreen is entered
+        test_fullscreen = 1;
+        int fixed = 0, kept = 0;
+        for (int i = 0; i < 4; i++) {   // the front end applies the request it holds, then the link follows the screen, until both settle
+            int keep = test_match_fps > 0 && front_mac_keep_vrr(match, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz));
+            if (!fixed) kept = keep;
+            if (test_match_fps > 0 && !fixed && !keep && 60 % test_match_fps == 0) { fixed = 1; test_variable_refresh = 0; }
+            link_sync();
+        }
+        int want_kept = match == FRONT_MAC_MATCH_AUTO && !link_set && fpss[f] == 60 && hzs[h] >= 120 && hzs[h] % 120 == 0;
+        int ok = kept == want_kept && (!kept || g_link_mode == 2) && !(test_variable_refresh && g_link_mode == 1) && !(fixed && g_link_mode == 2) && (link_set != 1 || test_match_fps == 0);
+        cases++; bad += !ok;
+        if (!ok) printf("  DM_SCREEN_MATCH=%d DM_PRESENT_LINK=%s %d Hz %d fps: kept %d fixed %d link mode %d asked %d (at60 %d)\n", match, link_name[link_set],
+                        hzs[h], fpss[f], kept, fixed, g_link_mode, test_match_fps, test_match_at60);
+    }
+    CHECK("the front end keeps a variable mode exactly where the 120 Hz link paces 60 fps, and the link follows the mode it leaves", cases == 160 && bad == 0);
+    g_dm_present_link = 1; g_present_link_env = 0; test_game_fps = 60; g_link_drain_on = -1; test_fullscreen = 0; test_screen_hz = 0; test_variable_refresh = 0;
+    link_sync(); g_link = nil; g_link_started = 0;
+}
+// The screen's mode, the rate asked for and the link along a target that changes in fullscreen, on a 120 Hz variable-refresh screen with a fixed 60 Hz mode. The model
+// applies each request as screen_match_once does: nothing with DM_SCREEN_MATCH=0; a fixed mode the host picked goes back to the variable one where front_mac_restore_vrr
+// holds; a variable mode front_mac_keep_vrr does not keep goes to fixed 60 Hz where the rate asked for divides 60. It counts the mode switches
+static int walk_match, walk_fixed, walk_switches;
+static void walk_apply(void) {   // the front end on the request it holds, then the link on the screen it now sees, until both settle
+    for (int i = 0; i < 4; i++) {
+        if (test_match_fps > 0 && walk_match != FRONT_MAC_MATCH_OFF) {
+            if (walk_fixed && front_mac_restore_vrr(walk_match, 0, 1, test_match_at60, mtl_link_vrr_120_hz(120))) { walk_fixed = 0; walk_switches++; test_variable_refresh = 1; test_screen_hz = 120; }
+            else if (!walk_fixed && !front_mac_keep_vrr(walk_match, 1, test_match_at60, mtl_link_vrr_120_hz(test_screen_hz)) && 60 % test_match_fps == 0) { walk_fixed = 1; walk_switches++; test_variable_refresh = 0; test_screen_hz = 60; }
+        }
+        link_sync();
+    }
+}
+static void walk_begin(int match, int fps) {   // a window on the screen at this target, then fullscreen
+    reset(); g_present_latency = 0; g_present_link_env = 0; g_link_drain_on = 1; mtl_set_fstep_fine(0);   // the Mac's drain: a window at 30 fps asks for 60
+    walk_match = match; walk_fixed = 0; walk_switches = 0; g_link_at60_since = 0;
+    test_screen_hz = 120; test_variable_refresh = 1; test_game_fps = fps; test_match_fps = 0; test_match_at60 = -1; test_fullscreen = 0;
+    g_link = [SilentDisplayLink new]; g_link_started = 1; link_sync();
+    test_fullscreen = 1;
+}
+// ms: the time that passes before this step's frames, at the target of the step before
+static void walk_step(const char *name, uint64_t ms, int fps, int vrr, int mode, int asked, int at60, int switches) {
+    test_now += ms * 1000000ull; test_game_fps = fps; walk_apply();
+    int ok = test_variable_refresh == vrr && g_link_mode == mode && test_match_fps == asked && test_match_at60 == at60 && walk_switches == switches;
+    CHECK(name, ok);
+    if (!ok) printf("  variable %d, link mode %d, asked %d (at60 %d), %d switches\n", test_variable_refresh, g_link_mode, test_match_fps, test_match_at60, walk_switches);
+}
+static void vrr_walk(void) {
+    const uint64_t back = LINK_VRR_BACK_NS / 1000000;
+    walk_begin(FRONT_MAC_MATCH_AUTO, 60);
+    walk_step("60 fps in fullscreen: the variable mode kept at once, the 120 Hz link", 0, 60, 1, 2, 60, 1, 0);
+    walk_step("60 -> 30 fps: fixed 60 Hz, the 60 Hz link", 10, 30, 0, 1, 60, 0, 1);
+    walk_step("30 -> 60 fps: still fixed at first", 10, 60, 0, 1, 60, 1, 1);
+    walk_step("60 fps for less than the hold-off: still fixed", back - 100, 60, 0, 1, 60, 1, 1);
+    walk_step("a 30 fps report inside the hold-off: fixed", 50, 30, 0, 1, 60, 0, 1);
+    walk_step("60 fps again: still fixed", 10, 60, 0, 1, 60, 1, 1);
+    walk_step("60 fps for less than the hold-off after the 30 report: still fixed", back - 100, 60, 0, 1, 60, 1, 1);
+    walk_step("60 fps for the full hold-off: the variable mode again, the 120 Hz link", 100, 60, 1, 2, 60, 2, 2);
+    walk_step("60 -> 30 fps again: fixed 60 Hz, the 60 Hz link", 10, 30, 0, 1, 60, 0, 3);
+    mtl_set_fstep_fine(1);   // a 30 fps cap's late frames, which nvn_game_fps reports as 60
+    walk_step("a 30 fps cap's late frames keep the fixed mode", 10, 60, 0, 1, 60, 0, 3);
+    walk_step("and keep it past the hold-off", back + 1000, 60, 0, 1, 60, 0, 3);
+    mtl_set_fstep_fine(0);
+    walk_step("then 60 fps: fixed until the hold-off", 10, 60, 0, 1, 60, 1, 3);
+    walk_step("then the variable mode again", back, 60, 1, 2, 60, 2, 4);
+    walk_begin(FRONT_MAC_MATCH_AUTO, 30);
+    walk_step("fullscreen entered at 30 fps: fixed 60 Hz, the 60 Hz link", 0, 30, 0, 1, 60, 0, 1);
+    walk_step("then 60 fps: fixed until the hold-off", 10, 60, 0, 1, 60, 1, 1);
+    walk_step("then the variable mode, the 120 Hz link", back, 60, 1, 2, 60, 2, 2);
+    walk_begin(FRONT_MAC_MATCH_FIXED, 60);
+    walk_step("DM_SCREEN_MATCH=1 at 60 fps: fixed 60 Hz, the 60 Hz link", 0, 60, 0, 1, 60, 1, 1);
+    walk_step("DM_SCREEN_MATCH=1 at 30 fps: fixed 60 Hz", 10, 30, 0, 1, 60, 0, 1);
+    walk_step("DM_SCREEN_MATCH=1 back at 60 fps: still fixed", 10, 60, 0, 1, 60, 1, 1);
+    walk_step("DM_SCREEN_MATCH=1 past the hold-off: still fixed, nothing taken back", back, 60, 0, 1, 60, 2, 1);
+    walk_begin(FRONT_MAC_MATCH_OFF, 60);
+    walk_step("DM_SCREEN_MATCH=0 at 60 fps: the variable mode, the 120 Hz link", 0, 60, 1, 2, 60, 1, 0);
+    walk_step("DM_SCREEN_MATCH=0 at 30 fps: the variable mode, the 30 Hz link", 10, 30, 1, 3, 30, 0, 0);
+    walk_step("DM_SCREEN_MATCH=0 back at 60 fps: the 120 Hz link at once", 10, 60, 1, 2, 60, 1, 0);
+    g_present_link_env = 0; test_game_fps = 60; g_link_drain_on = -1; test_fullscreen = 0; test_screen_hz = 0; test_variable_refresh = 0;
+    link_sync(); g_link = nil; g_link_started = 0;
 }
 static void forty(void) {   // 40 fps automatically selects the 120 Hz link (3 ticks = 25 ms) and asks front_screen_match(120); movie/thermal drops to 30/60 and back return to 120 Hz
     reset(); test_fullscreen = 0; test_variable_refresh = 0; test_screen_hz = 120; test_game_fps = 40; g_present_link_env = 0; g_link_drain_on = 0;
@@ -442,7 +548,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); covered(); latency(); thirty(); vrr120(); forty(); settling(); probation();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); covered(); latency(); thirty(); vrr120(); vrr_agree(); vrr_walk(); forty(); settling(); probation();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

@@ -42,7 +42,9 @@ screen manager and for both NVN color and depth targets. They preserve
 the horizontal field of view and show more above and below, rather than
 stretching or cropping the whole picture. They extend scene fades,
 matte layers and window backdrops to the edges, and move selected HUD and
-menu controls with their anchors. The prerecorded intro retains its
+menu controls with their anchors. The Guide Map also extends both left-side
+dimming layers to the top and bottom, leaving the map viewport and list size
+unchanged. The prerecorded intro retains its
 authored 16:9 framing. All hooks leave the 16:9 path in place.
 
 The patch works with the original game image and neither requires nor

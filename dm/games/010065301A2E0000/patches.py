@@ -137,11 +137,12 @@ def edge_layout(ctx):
     # Use only inspected scene paths, not every 1920x1080 rect. Where an edge
     # group mixes edge and center-relative children, translate it as a unit.
     transform, find = 0x24fcc50, 0x2509c10
+    child_count, get_child = 0x2509a00, 0x2509f20  # Transform child accessors
     size_get, size_set = 0x25066e0, 0x25067b0
     pos_get, pos_set = 0x2506540, 0x2506610
     string_ctor = 0x1a1ca60  # System.String.Ctor(char*, int startIndex, int length)
 
-    def emit_adjustment(path, mode):
+    def emit_adjustment(path, mode, children=()):
         literal = ctx.here()
         if path:
             raw = path.encode('utf-16le')
@@ -172,6 +173,23 @@ def edge_layout(ctx):
             word(MOVX(0, 19))
             word(MOVX(2, 31))
             call(find)
+            word(MOVX(19, 0))
+            exits.append(len(code))
+            word(0)  # cbz x0, done
+        short_hierarchies = []
+        for index in children:
+            # The map selector has two same-named Background siblings.
+            # Descend by the inspected prefab indices, safely skipping absence.
+            word(MOVX(0, 19))
+            word(MOVX(1, 31))
+            call(child_count)
+            word(0x7100001f | ((index + 1) << 10))  # cmp w0, #index+1
+            short_hierarchies.append(len(code))
+            word(0)  # b.lo done
+            word(MOVX(0, 19))
+            word(0x52800001 | (index << 5))  # mov w1, #index
+            word(MOVX(2, 31))
+            call(get_child)
             word(MOVX(19, 0))
             exits.append(len(code))
             word(0)  # cbz x0, done
@@ -232,6 +250,8 @@ def edge_layout(ctx):
         word(0xd65f03c0)  # ret
         for j in exits:
             code[j] = cbz(0, start + j * 4, start + done * 4, wide=True)
+        for j in short_hierarchies:
+            code[j] = 0x54000003 | ((done - j) << 5)  # b.lo done
         if unchanged is not None:
             code[unchanged] = 0x54000001 | (done - unchanged) << 5  # b.ne done
         for w in code:
@@ -371,12 +391,16 @@ def edge_layout(ctx):
         ), 'title scene backing, submenu decor and New Game portraits'),
         # Current Location shares the world-map overlay chrome, not its map
         # viewport. The full-width Background is the first child named
-        # Background; the later duplicate is the separate narrow list tint.
+        # Background. The separate 1040-wide list tint (child 2) and its
+        # 800-wide gradient (grandchild 0) are both authored at 1080 high.
+        # Extend just their heights so they meet the header and footer.
         (0x22c2a70, None, (
             ('ui_world_map_fast_travel_selector/Background', 'height'),
             ('ui_world_map_fast_travel_selector/ui_camp_header_image_presenter/HeaderImage', 'top'),
             ('ui_world_map_fast_travel_selector/FooterImage', 'bottom'),
             ('ui_world_map_fast_travel_selector/ui_world_map_parent_presenter/ui_world_map_icon_guide_presenter', 'bottom'),
+            ('ui_world_map_fast_travel_selector', 'height', (2,)),
+            ('ui_world_map_fast_travel_selector', 'height', (2, 0)),
         ), 'Current Location map backdrop and edge anchors'),
         (0x2156514, 0x23023b0, (
             ('BackgroundParent/ui_camp_menu_background_01', 'height'),

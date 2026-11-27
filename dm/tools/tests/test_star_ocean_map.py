@@ -72,7 +72,7 @@ class ScreenShape(unittest.TestCase):
 
 
 class CurrentLocationMap(unittest.TestCase):
-    def test_four_decoration_helpers_and_stock_prologue(self):
+    def test_six_decoration_helpers_and_stock_prologue(self):
         ctx = Fixture()
         with patch.object(PATCHES, 'camp_backdrop'), patch.object(PATCHES, 'title_backdrops'):
             PATCHES.edge_layout(ctx)
@@ -81,7 +81,7 @@ class CurrentLocationMap(unittest.TestCase):
         stub = HOOK + (inst & 0x3ffffff) * 4
         self.assertEqual(inst, B(HOOK, stub))
         self.assertEqual(ctx.word(stub + 4), 0xb9404a11)  # render height
-        stock = stub + 16 * 4
+        stock = stub + 20 * 4
         self.assertEqual(ctx.word(stub + 8), PATCHES.cbz(17, stub + 8, stock))
         self.assertEqual(ctx.word(stock), ORIGINAL)
         self.assertEqual(ctx.word(stock + 4), B(stock + 4, HOOK + 4))
@@ -102,6 +102,25 @@ class CurrentLocationMap(unittest.TestCase):
             addresses = range(dest, dest + 34 * 4, 4)
             self.assertTrue(any(ctx.word(a) == adjust for a in addresses))
             self.assertTrue(any(ctx.word(a) == BL(a, method) for a in addresses))
+        # The same-named list tint is child 2, not the full-width
+        # Background found by name. Only its own child 0 is the gradient.
+        for index, children in enumerate(((2,), (2, 0)), 4):
+            call = stub + (7 + 2 * index) * 4
+            branch = ctx.word(call)
+            rel = branch & 0x3ffffff
+            helper = call + (rel - (1 << 26) if rel & (1 << 25) else rel) * 4
+            self.assertEqual(branch, BL(call, helper))
+            code = range(helper, helper + (31 + 11 * len(children)) * 4, 4)
+            count_calls = [a for a in code if ctx.word(a) == BL(a, 0x2509a00)]
+            self.assertEqual(len(count_calls), len(children))
+            for a, child in zip(count_calls, children):
+                self.assertEqual(ctx.word(a + 4), 0x7100001f | ((child + 1) << 10))
+                self.assertEqual(ctx.word(a + 8) & 0xff00001f, 0x54000003)
+                self.assertEqual(ctx.word(a + 16), 0x52800001 | (child << 5))
+                self.assertEqual(ctx.word(a + 24), BL(a + 24, 0x2509f20))
+            self.assertIn(0x52a890e8, [ctx.word(a) for a in code])  # stock-height guard
+            self.assertTrue(any(ctx.word(a) == BL(a, 0x25067b0) for a in code))
+            self.assertFalse(any(ctx.word(a) == BL(a, 0x2506610) for a in code))
         for render_height, shift in ((1080, 0), (1200, 60), (1344, 132)):
             self.assertEqual((render_height - 1080) // 2, shift)
             self.assertEqual(1080 + 2 * shift, render_height)

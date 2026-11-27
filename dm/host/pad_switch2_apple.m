@@ -91,6 +91,9 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     NSTimer *_tick; uint64_t _reports; BOOL _handshaken; s2_rest _rest;
     s2_clock _clk; uint64_t _lost; char _serial[15]; uint64_t _restSaved;   // sample times from the controller's clock; the serial its learned gyro offset is kept under
     CBCharacteristic *_vib; uint8_t _vseq; int _offLeft; s2_rumble_cursor _rcur;   // _rcur: where this controller is in its player's rumble log
+    // The console's own command path (switch2_proto.h): its vibration + command channel and its side report. _viaVc: the first command got no answer on _wr before the
+    // controller was set up, so commands go to _vc from then on, and the side report gives its buttons, stick and motion (_sm: the last orientation of its compact motion)
+    CBCharacteristic *_vc, *_side; BOOL _viaVc; s2_side_motion _sm;
     int _player;   // the player at the last read (playerSync): a pad waiting for its first button press (DM_PAD_PRESS_TO_JOIN) gets one later
     int16_t _mouseX, _mouseY; BOOL _mouseSeen, _mouseOn;   // _mouseOn: its mouse sensor is turned on (features)   // the mouse sensor's counters at the last report
     s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
@@ -140,11 +143,22 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     __weak S2Session *w = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         S2Session *s = w; if (!s || !s->_pending || s->_seq != mine) return;
+        if (!s->_viaVc && s->_vc && !s->_handshaken) {   // no answer on the shared channel: the same command again on the console's channel, and the side report from now on
+            LOG("[sw2] %s: command 0x%02x got no answer on the command channel: commands go to the vibration + command channel, as the console sends them", s2_kind(s->_pid), id);
+            s->_viaVc = YES; s->_pending = NO; s->_cb = nil; [s->_queue insertObject:c atIndex:0];
+            if (s->_side) [s->_peripheral setNotifyValue:YES forCharacteristic:s->_side];
+            [s pump]; return;
+        }
         s->_pending = NO; void (^d)(NSData *) = s->_cb; s->_cb = nil;
         LOG("[sw2] %s: command 0x%02x timed out", s2_kind(s->_pid), id);
         if (d) d(nil);
         [s pump];
     });
+    if (_viaVc) {
+        uint8_t r[S2_VC_PREFIX + sizeof f]; size_t k = s2_command_vc(r, sizeof r, c.cmd, c.sub, c.payload.bytes, c.payload.length);
+        [_peripheral writeValue:[NSData dataWithBytes:r length:k] forCharacteristic:_vc type:CBCharacteristicWriteWithoutResponse];
+        return;
+    }
     [_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:_wr type:CBCharacteristicWriteWithoutResponse];
 }
 - (void)readMemory:(uint8_t)len at:(uint32_t)addr done:(void (^)(NSData *))done {
@@ -286,6 +300,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (!p) { [self fail:@"out of memory"]; return; }
     BOOL fresh = s2_pad_empty(p);
     s2_dev *d = s2_dev_of(p, _pid); memset(d, 0, sizeof *d);
+    if (_viaVc) {   // a controller that needed the console's channel keeps no stick calibration in its memory (its blocks read as filler, and its stick drifted with them)
+        s2_cal_default(&_cal[0]); s2_cal_default(&_cal[1]);
+        LOG("[sw2] %s: its stored stick calibration is not used (the controller keeps none): typical values", s2_kind(_pid));
+    }
     d->have = 1; d->pid = _pid; d->cal[0] = _cal[0]; d->cal[1] = _cal[1];
     _pad = p; _live = YES; _handshaken = YES;
     s2_rumble_timer();
@@ -328,6 +346,12 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (!_peripheral.canSendWriteWithoutResponse) g_rstat.busy++;
     g_rstat.sent++;
     [_peripheral writeValue:[NSData dataWithBytes:pk length:n] forCharacteristic:_vib type:CBCharacteristicWriteWithoutResponse];
+}
+// A Joy-Con's side report as the common report (s2_side_to_common): its buttons, its stick and its motion; the clock is the host's, as the side report has no millisecond clock
+- (void)sideReport:(NSData *)d {
+    uint8_t out[63];
+    if (!s2_side_to_common(d.bytes, d.length, _pid == S2_PID_JOYCON_R, (uint32_t)(now_ns() / 1000000ull), g_gyro, &_sm, out)) return;
+    [self report:[NSData dataWithBytes:out length:sizeof out]];
 }
 - (void)report:(NSData *)d {
     s2_report r; if (!_pad || !s2_report_parse(d.bytes, d.length, &r)) return;
@@ -421,6 +445,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     for (CBCharacteristic *c in s.characteristics) {
         if ([c.UUID isEqual:wr]) _wr = c; else if ([c.UUID isEqual:rs]) _rsp = c; else if ([c.UUID isEqual:in]) _inp = c;
         else if ([c.UUID isEqual:vr] || [c.UUID isEqual:vl] || [c.UUID isEqual:vp]) _vib = c;
+        else if ([c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_VC_JOYCON_R]] || [c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_VC_JOYCON_L]] ||
+                 [c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_VC_PRO]]) _vc = c;
+        else if ([c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_SIDE_JOYCON_R]] || [c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_SIDE_JOYCON_L]] ||
+                 [c.UUID isEqual:[CBUUID UUIDWithString:@S2_UUID_SIDE_PRO]]) _side = c;
     }
     if (_wr && _rsp && _inp && !_handshaken && !_live) [p setNotifyValue:YES forCharacteristic:_rsp];
 }
@@ -431,6 +459,7 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
 - (void)peripheral:(CBPeripheral *)p didUpdateValueForCharacteristic:(CBCharacteristic *)c error:(NSError *)e {
     if (e || !c.value.length) return;
     if (c == _inp) { [self report:c.value]; return; }
+    if (c == _side) { if (_viaVc && _pid != S2_PID_PRO) [self sideReport:c.value]; return; }   // the Pro Controller 2's side report (0x09) is not mapped yet
     if (c == _rsp && _pending && s2_reply_is(c.value.bytes, c.value.length, _pendingCmd)) {
         _pending = NO; void (^d)(NSData *) = _cb; _cb = nil;
         if (d) d(c.value);

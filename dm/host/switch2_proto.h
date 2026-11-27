@@ -251,6 +251,85 @@ static inline void s2_pad_ab(const s2_pad_state *p, int *a, int *b) {
 #define S2_UUID_VIB_JOYCON_R "FA19B0FB-CD1F-46A7-84A1-BBB09E00C149"
 #define S2_UUID_VIB_JOYCON_L "289326CB-A471-485D-A8F4-240C14F18241"
 #define S2_UUID_VIB_PRO      "CC483F51-9258-427D-A939-630C31F72B05"
+
+// The console's own command path, for controllers that take only it. The console sends its commands on the "vibration + command" channel (GATT handle 0x0016, one UUID per
+// controller type) as a report: 0x00, a 16-byte rumble block, then the 8-byte command header and its payload; replies still come on S2_UUID_CMD_RSP. Nintendo's Joy-Con 2s also
+// take bare commands on S2_UUID_CMD_WR, which the host uses first; some third-party ones (a NYXI Hyperion 3, advertising as a Joy-Con 2: 0x0553, 057E:2066 / 2067) answer only
+// here. Such a controller also sends only its side report (handle 0x000E: 0x07 left, 0x08 right, 0x09 Pro), never the common 63-byte report on S2_UUID_INPUT, and it ends the
+// connection about 30 s after it is made unless the host is subscribed to that side report.
+#define S2_UUID_VC_JOYCON_R   "65A724B3-F1E7-4A61-8078-A342376B27FF"
+#define S2_UUID_VC_JOYCON_L   "CE49A830-DCED-48AE-931E-C8CF88AADBEA"
+#define S2_UUID_VC_PRO        "3DACBC7E-6955-40B5-8EAF-6F9809E8B379"
+#define S2_UUID_SIDE_JOYCON_R "D5A9E01E-2FFC-4CCA-B20C-8B67142BF442"
+#define S2_UUID_SIDE_JOYCON_L "CC1BBBB5-7354-4D32-A716-A81CB241A32A"
+#define S2_UUID_SIDE_PRO      "7492866C-EC3E-4619-8258-32755FFCC0F8"
+#define S2_VC_PREFIX 17   // the report ID 0x00 and the idle rumble block before the command
+static inline size_t s2_command_vc(uint8_t *out, size_t cap, uint8_t cmd, uint8_t sub, const uint8_t *payload, size_t n) {
+    if (!out || cap < S2_VC_PREFIX) return 0;
+    size_t k = s2_command(out + S2_VC_PREFIX, cap - S2_VC_PREFIX, cmd, sub, payload, n);
+    if (!k) return 0;
+    memset(out, 0, S2_VC_PREFIX);
+    return S2_VC_PREFIX + k;
+}
+
+// A Joy-Con's side report (63 bytes, report ID omitted) rewritten as the common report s2_report_parse reads. Layout (linux-switch2's PROTOCOL.md, sections 13-27, checked on a
+// Hyperion 3): 0 counter, 1 power, 2 and 3 buttons, 5..7 the Joy-Con's one stick (packed 12-bit, as the common report packs it), then a motion length byte (0x0F on a right
+// Joy-Con, after its NFC state byte; 0x0E on a left one) and that many bytes of motion. Motion comes in two forms, bit fields little-endian across the payload:
+// - compact (30 bytes; the only form seen over BLE on a Mac): a u12 sample time (800 Hz: 24 ticks per 30 ms report), the orientation as a smallest-three quaternion (selector at
+//   bit 32, three u25 components at bits 41, 72 and 103, each (2 raw / (2^25 - 1) - 1) / sqrt 2, the omitted one positive) and the accelerometer as s16 at bits 144, 176 and 208
+//   (~4096 per g). It has no gyro: the angular rate is the change of orientation between two reports, 2 (conj(q_before) q_now).xyz / dt, in the controller's own axes.
+// - ordinary (40 bytes): the newest accelerometer sample (s14 at bits 277, 291, 305) and gyro sample (s15 at bits 230, 246, 262; ~1877.47 per rad/s).
+// The axes are the common report's (X Y Z, + + +), so the values go into its motion block as they are, the gyro in the host's raw unit (gyro_rad: radians per count)
+typedef struct { float q[4]; int st, have; } s2_side_motion;   // the last compact orientation (w x y z) and its sample time
+static inline uint64_t s2_bitfield(const uint8_t *p, int start, int n) { uint64_t v = 0; for (int i = 0; i < n; i++) { int b = start + i; if (p[b >> 3] >> (b & 7) & 1) v |= 1ull << i; } return v; }
+static inline int32_t s2_bitfield_s(const uint8_t *p, int start, int n) { uint64_t v = s2_bitfield(p, start, n); return (int32_t)(v >> (n - 1) & 1 ? (int64_t)v - (int64_t)(1ull << n) : (int64_t)v); }
+static inline int16_t s2_clamp16(float v) { return (int16_t)(v > 32767.f ? 32767 : v < -32767.f ? -32767 : (int)lrintf(v)); }
+static inline void s2_side_quat(const uint8_t *m, float q[4]) {
+    static const int at[3] = {41, 72, 103}, ord[4][4] = {{0, 1, 2, 3}, {1, 2, 3, 0}, {2, 3, 0, 1}, {3, 0, 1, 2}};
+    int sel = (int)s2_bitfield(m, 32, 2); float c[3], k[4] = {0};
+    for (int i = 0; i < 3; i++) c[i] = (2.f * (float)s2_bitfield(m, at[i], 25) / (float)((1u << 25) - 1) - 1.f) / 1.41421356f;
+    for (int i = 0; i < 3; i++) k[ord[sel][i]] = c[i];
+    k[ord[sel][3]] = sqrtf(fmaxf(0.f, 1.f - c[0] * c[0] - c[1] * c[1] - c[2] * c[2]));
+    q[0] = k[3]; q[1] = k[0]; q[2] = k[1]; q[3] = k[2];
+}
+static inline int s2_side_to_common(const uint8_t *d, size_t n, int right, uint32_t clock_ms, float gyro_rad, s2_side_motion *sm, uint8_t out[63]) {
+    if (!d || !out || n < 8) return 0;
+    memset(out, 0, 63);
+    uint32_t btn = 0xE0000000u;
+    static const uint32_t r2[8] = {S2_B, S2_A, S2_Y, S2_X, S2_R, S2_ZR, S2_PLUS, S2_RSTICK}, r3[8] = {S2_HOME, 0, S2_GR, 0, S2_C, 0, S2_SR_R, S2_SL_R};
+    static const uint32_t l2[8] = {S2_DOWN, S2_RIGHT, S2_LEFT, S2_UP, S2_L, S2_ZL, S2_MINUS, S2_LSTICK}, l3[8] = {S2_CAPTURE, 0, S2_GL, 0, 0, 0, S2_SR_L, S2_SL_L};
+    for (int i = 0; i < 8; i++) { if (d[2] >> i & 1) btn |= right ? r2[i] : l2[i]; if (d[3] >> i & 1) btn |= right ? r3[i] : l3[i]; }
+    memcpy(out, &clock_ms, 4); memcpy(out + 4, &btn, 4);
+    memcpy(out + (right ? 13 : 10), d + 5, 3);
+    size_t lo = right ? 0x0F : 0x0E; size_t ml = n > lo ? d[lo] : 0;
+    if ((ml != 30 && ml != 40) || n < lo + 1 + ml) return 1;
+    const uint8_t *m = d + lo + 1; int16_t raw[6] = {0};
+    if (ml == 30) {
+        int st = (int)s2_bitfield(m, 0, 12); float q[4];
+        for (int i = 0; i < 3; i++) raw[i] = (int16_t)s2_bitfield(m, 144 + 32 * i, 16);
+        s2_side_quat(m, q);
+        if (sm && sm->have) {
+            float dt = (float)((st - sm->st) & 0xFFF) * 0.00125f; const float *a = sm->q;
+            if (a[0] * q[0] + a[1] * q[1] + a[2] * q[2] + a[3] * q[3] < 0) for (int i = 0; i < 4; i++) q[i] = -q[i];
+            if (dt > 0.f && dt < 0.25f && gyro_rad > 0.f) {
+                float w = a[0] * q[0] + a[1] * q[1] + a[2] * q[2] + a[3] * q[3];
+                float x = a[0] * q[1] - a[1] * q[0] - a[2] * q[3] + a[3] * q[2];
+                float y = a[0] * q[2] + a[1] * q[3] - a[2] * q[0] - a[3] * q[1];
+                float z = a[0] * q[3] - a[1] * q[2] + a[2] * q[1] - a[3] * q[0];
+                float k = (w < 0 ? -2.f : 2.f) / dt / gyro_rad;
+                raw[3] = s2_clamp16(k * x); raw[4] = s2_clamp16(k * y); raw[5] = s2_clamp16(k * z);
+            }
+        }
+        if (sm) { memcpy(sm->q, q, sizeof sm->q); sm->st = st; sm->have = 1; }
+    } else {
+        static const int g[3] = {230, 246, 262};
+        for (int i = 0; i < 3; i++) raw[i] = (int16_t)s2_bitfield_s(m, 277 + 14 * i, 14);
+        for (int i = 0; i < 3; i++) raw[3 + i] = gyro_rad > 0.f ? s2_clamp16((float)s2_bitfield_s(m, g[i], 15) / 1877.468103f / gyro_rad) : 0;
+        if (sm) sm->have = 0;
+    }
+    memcpy(out + 0x30, raw, sizeof raw);
+    return 1;
+}
 typedef struct { uint16_t lf_hz, lf_amp, hf_hz, hf_amp; } s2_haptic;   // *_hz: the frequency code (s2_freq_code), *_amp: 0..1023
 static inline void s2_haptic_pack(const s2_haptic *v, uint8_t out[5]) {
     uint64_t x = (uint64_t)(v->lf_hz & 0x3FF) | (uint64_t)(v->lf_amp & 0x3FF) << 10 | (uint64_t)(v->hf_hz & 0x3FF) << 20 | (uint64_t)(v->hf_amp & 0x3FF) << 30;

@@ -22,7 +22,12 @@ from dmsh_chain import MAC_METAL   # noqa: E402  (the build's Mac compile)
 from dmsh_rewrite import raw_noinline   # noqa: E402
 
 LDG = (0x000ea200081e890f, 0x0000000405067981)   # LDG.E R6, [R5.64 + UR4]: R5 the thread index, an address the translator traces to no storage buffer
-HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+)\)\n\{\n')
+ATOMG_INC = (0x000fe200019ee100, 0x00000009050673a8)   # ATOMG.E.INC.STRONG.GPU PT, R6, [R5.64], R9: global atomic write through untraced address R5.64
+CACHE5 = r', thread uint& (_\d+), thread uint& (_\d+), thread uint& (_\d+), thread uint& (_\d+), thread uint& (_\d+)'
+CACHE6 = CACHE5 + r', thread uint& (_\d+)'
+HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+' + CACHE5 + r'\)\n\{\n')
+RW_LOAD_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, device (_\d+)& \w+' + CACHE6 + r'\)\n\{\n')
+RW_ATOM_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, thread const int& _\d+, thread const int& _\d+, device (_\d+)& \w+, device (_\d+)& \w+' + CACHE6 + r'\)\n\{\n')
 
 # The pool table as the host writes it (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): 8,192 entries of 8 words {start lo, start hi, end lo, end hi, delta lo, delta hi, hint, span}, sorted by start,
 # entry 0 empty, unused entries starting at ~0. Pools A and B are adjacent, C lies past a gap and above 4 GiB, and its 2 MiB chunk has a hint naming it (the only pool there; the gap after it is in
@@ -71,21 +76,29 @@ class RawLast(Translated):
         code = (s2r_tid(9), s2r_tid(5), LDG, STORE, (LDG[0], LDG[1] | 4 << 40), STORE)   # two loads, the second 4 bytes on, each kept by a store to shared memory
         return self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
 
-    def test_two_loads_share_one_zeroed_word(self):
+    def test_two_loads_share_one_zeroed_register_cache(self):
         msl = self.msl()
         m = HELPER.search(msl)
         self.assertTrue(m, msl[:3000])
-        name, last = m.group(1), m.group(3)
+        name, c0, c1, c2, c3, c4 = m.group(1), m.group(3), m.group(4), m.group(5), m.group(6), m.group(7)
         main = msl[msl.index('kernel void main0'):]
-        word = re.search(r'(?m)^    uint (_\d+) = 0u;$', main)
-        self.assertTrue(word, main[:600])
-        calls = re.findall(name + r'\([^;]*, (_\d+)\);', main)
-        self.assertEqual(calls, [word.group(1)] * 2)
+        words = re.findall(r'(?m)^    uint (_\d+) = 0u;$', main)
+        self.assertEqual(len(words), 5, main[:600])
+        calls = re.findall(name + r'\([^;]*, (_\d+), (_\d+), (_\d+), (_\d+), (_\d+)\);', main)
+        self.assertEqual(calls, [tuple(words)] * 2)
         helper = msl[m.end():msl.index('\n}\n', m.end())]
-        self.assertLess(helper.index(last), helper.index('dmsh_raw_find('))   # the last entry first, then the search, one function for every access
+        # Fast path checks the register cache (c0, c1, c2) with zero table loads before calling pure dmsh_raw_find
+        fast = helper[:helper.index('dmsh_raw_find(')]
+        self.assertIn(c0, fast); self.assertIn(c1, fast); self.assertIn(c2, fast)
+        self.assertNotIn('._m0[', fast)
+        # dmsh_raw_find is pure (no thread uint& cache refs) and tries the 2 MiB chunk hint first
+        find_sig = re.search(r'(?m)^int dmsh_raw_find\(([^)]+)\)', msl)
+        self.assertTrue(find_sig and 'thread uint&' not in find_sig.group(1), msl[:1500])
         find = msl[msl.index('dmsh_raw_find('):msl.index(name + '(')]
-        self.assertIn('>> uint(21)', find)   # which tries the 2 MiB chunk's hint first
-        self.assertRegex(helper, re.escape(last) + r' = uint\(_\d+\);')   # a hint or search records its choice
+        self.assertIn('>> uint(21)', find)
+        # Miss path refreshes all 5 register cache words and hit path uses c3/c4 without table reads
+        for w in (c0, c1, c2, c3, c4):
+            self.assertRegex(helper, re.escape(w) + r' = ')
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_reads_on_gpu(self):
@@ -93,8 +106,8 @@ class RawLast(Translated):
         m = HELPER.search(msl)
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
-                  f'        out[id * 20 + s] = {m.group(1)}(lo, hi, map, last);\n    }}\n}}\n')
+                  '{\n    uint c0 = 0u, c1 = 0u, c2 = 0u, c3 = 0u, c4 = 0u;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
+                  f'        out[id * 20 + s] = {m.group(1)}(lo, hi, map, c0, c1, c2, c3, c4);\n    }}\n}}\n')
         noinline = raw_noinline(kernel)
         self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
         for form, kernel in (('inline', kernel), ('noinline', noinline)):   # as spirv-cross writes it, and with the search built once (dmsh_rewrite.raw_noinline)
@@ -109,10 +122,82 @@ class RawLast(Translated):
                 out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
                 self.assertIn('bad 0 of 1280', out.stdout, form + ': ' + out.stdout + out.stderr)
 
+    @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
+    def test_read_and_write_share_cache_and_log_pool_bits_on_gpu(self):
+        # A shader with both raw load and raw atomic write shares one 6-word cache {lo, hi, span, dlo, dhi, idx}:
+        # a write hitting a pool populated by an earlier load must log that pool's bit in gmem_log, and a write to a
+        # 4 GiB-straddling pool must log its bit via dmsh_raw_find while unmapped writes log nothing.
+        code = (s2r_tid(9), s2r_tid(5), LDG, STORE, ATOMG_INC, STORE)
+        msl = self.translate(b''.join(inst(*waiting(i)) for i in code) + inst(*EXIT), shared=0x1000)
+        ml = RW_LOAD_HELPER.search(msl)
+        ma = RW_ATOM_HELPER.search(msl)
+        self.assertTrue(ml and ma, msl[:4000])
+        main = msl[msl.index('kernel void main0'):]
+        words = re.findall(r'(?m)^    uint (_\d+) = 0u;$', main)
+        self.assertEqual(len(words), 6, main[:600])
+        kernel = (msl[:msl.index('kernel void main0')] +
+                  f'kernel void k(device {ml.group(2)}& map [[buffer(0)]], device {ma.group(3)}& log [[buffer(1)]], const device uint2* addr [[buffer(2)]], device int* out [[buffer(3)]], uint id [[thread_position_in_grid]])\n'
+                  '{\n    uint c0 = 0u, c1 = 0u, c2 = 0u, c3 = 0u, c4 = 0u, c5 = 0u;\n'
+                  '    int lo0 = int(addr[id * 4 + 0].x), hi0 = int(addr[id * 4 + 0].y);\n'
+                  f'    out[id * 4 + 0] = {ml.group(1)}(lo0, hi0, map, c0, c1, c2, c3, c4, c5);\n'
+                  '    int lo1 = int(addr[id * 4 + 1].x), hi1 = int(addr[id * 4 + 1].y);\n'
+                  f'    out[id * 4 + 1] = {ma.group(1)}(lo1, hi1, 10, 11, map, log, c0, c1, c2, c3, c4, c5);\n'
+                  '    int lo2 = int(addr[id * 4 + 2].x), hi2 = int(addr[id * 4 + 2].y);\n'
+                  f'    out[id * 4 + 2] = {ma.group(1)}(lo2, hi2, 11, 12, map, log, c0, c1, c2, c3, c4, c5);\n'
+                  '    int lo3 = int(addr[id * 4 + 3].x), hi3 = int(addr[id * 4 + 3].y);\n'
+                  f'    out[id * 4 + 3] = {ma.group(1)}(lo3, hi3, 0, 99, map, log, c0, c1, c2, c3, c4, c5);\n'
+                  '}\n')
+        rw_runner = '''#import <Metal/Metal.h>
+#include <stdio.h>
+#include <string.h>
+int main(int ac, char **av) { @autoreleasepool {
+    id<MTLDevice> d = MTLCreateSystemDefaultDevice(); NSError *e = nil;
+    id<MTLLibrary> l = [d newLibraryWithURL:[NSURL fileURLWithPath:@(av[1])] error:&e]; if (!l) { puts(e.description.UTF8String); return 2; }
+    id<MTLComputePipelineState> ps = [d newComputePipelineStateWithFunction:[l newFunctionWithName:@"k"] error:&e]; if (!ps) { puts(e.description.UTF8String); return 2; }
+    id<MTLBuffer> pool[2], map = [d newBufferWithLength:8192 * 32 options:MTLResourceStorageModeShared], log = [d newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    uint32_t *t = map.contents; memset(t, 0, 8192 * 32); memset(log.contents, 0, 1024); for (int k = 1; k < 8192; k++) memset(t + k * 8, 0xff, 8);
+    // Entry 1: normal pool A (span != 0). Entry 2: 4 GiB-straddling pool B (span == 0).
+    uint64_t guest[2] = {0x10000000ull, 0x3fffff800ull};
+    for (int p = 0; p < 2; p++) {
+        pool[p] = [d newBufferWithLength:4096 options:MTLResourceStorageModeShared]; uint32_t *w = pool[p].contents; for (int i = 0; i < 1024; i++) w[i] = 10 + p;
+        uint64_t s = guest[p], end = s + 4096, delta = pool[p].gpuAddress - s, *ent = (uint64_t *)(t + (p + 1) * 8); ent[0] = s; ent[1] = end; ent[2] = delta;
+        if ((s >> 32) == ((end - 1) >> 32)) t[(p + 1) * 8 + 7] = 4096;
+    }
+    id<MTLBuffer> addr = [d newBufferWithLength:4 * 8 options:MTLResourceStorageModeShared], out = [d newBufferWithLength:4 * 4 options:MTLResourceStorageModeShared];
+    uint64_t *a = addr.contents;
+    a[0] = guest[0];           // load from pool 1 -> fills cache with entry 1
+    a[1] = guest[0] + 4;       // write to pool 1 (cache hit!) -> must log bit 1 and increment word 1 from 10 to 11
+    a[2] = guest[1] + 0x804;   // write to 4 GiB-straddling pool 2 -> must log bit 2 and increment from 11 to 12
+    a[3] = 0x50000000ull;      // unmapped write -> must return 0 and log no extra bit
+    id<MTLCommandQueue> q = [d newCommandQueue]; id<MTLCommandBuffer> c = [q commandBuffer]; id<MTLComputeCommandEncoder> ce = [c computeCommandEncoder];
+    [ce setComputePipelineState:ps]; [ce setBuffer:map offset:0 atIndex:0]; [ce setBuffer:log offset:0 atIndex:1]; [ce setBuffer:addr offset:0 atIndex:2]; [ce setBuffer:out offset:0 atIndex:3];
+    for (int p = 0; p < 2; p++) [ce useResource:pool[p] usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    [ce dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [ce endEncoding]; [c commit]; [c waitUntilCompleted];
+    uint32_t bits = *(uint32_t *)log.contents;
+    uint32_t *p0 = pool[0].contents, *p1 = pool[1].contents;
+    int *got = out.contents;
+    int ok = (got[0] == 10 && got[1] == 10 && p0[1] == 11 && got[2] == 11 && p1[0x201] == 12 && got[3] == 0 && bits == 0x6u);
+    printf("ok=%d bits=0x%x p0[1]=%u p1[0x201]=%u got=%d,%d,%d,%d\\n", ok, bits, p0[1], p1[0x201], got[0], got[1], got[2], got[3]);
+    return ok ? 0 : 1;
+} }
+'''
+        for form, src in (('inline', kernel), ('noinline', raw_noinline(kernel))):
+            with tempfile.TemporaryDirectory() as w:
+                w = Path(w)
+                (w / 'k.metal').write_text(src)
+                r = subprocess.run(MAC_METAL + [str(w / 'k.metal'), '-o', str(w / 'k.air')], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+                subprocess.run(['xcrun', '-sdk', 'macosx', 'metallib', str(w / 'k.air'), '-o', str(w / 'k.metallib')], check=True)
+                (w / 'r.m').write_text(rw_runner)
+                subprocess.run(['clang', '-fobjc-arc', '-framework', 'Metal', '-framework', 'Foundation', str(w / 'r.m'), '-o', str(w / 'r')], check=True, capture_output=True)
+                out = subprocess.run([str(w / 'r'), str(w / 'k.metallib')], capture_output=True, text=True)
+                self.assertEqual(out.returncode, 0, form + ': ' + out.stdout + out.stderr)
+                self.assertIn('ok=1 bits=0x6', out.stdout, form + ': ' + out.stdout)
+
 
 LDG128 = ((LDG[0] & ~(7 << 9)) | 6 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.128 R12, [R5.64 + UR4]: size bits 73..75 = 6 (B128), R12..R15
 def sts(rb, off): return (STORE[0], (STORE[1] & ~(0xffffffff << 32)) | rb << 32 | off << 40)   # STS.U32 [R9 * 16 + off], Rb
-VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+, thread uint& (_\d+), thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
+VEC_HELPER = re.compile(r'(?m)^int (_\d+)\(thread const int& _\d+, thread const int& _\d+, const device (_\d+)& \w+' + CACHE5 + r', thread spvUnsafeArray<uint, 3>& (_\d+)\)\n\{\n')
 
 
 @unittest.skipUnless(os.environ.get('DMSH_TEST_XLATE'), 'set DMSH_TEST_XLATE to the offline translator')
@@ -134,7 +219,7 @@ class RawVector(Translated):
         self.assertEqual(len(re.findall(m.group(1) + r'\(', main)), 1)
         scalar = HELPER.search(msl)
         self.assertFalse(scalar and re.search(scalar.group(1) + r'\(', main), 'a word of the 128-bit load went through the scalar helper')
-        for k in range(3): self.assertRegex(main, re.escape(m.group(4)) + rf'\[{k}\]')
+        for k in range(3): self.assertRegex(main, re.escape(m.group(8)) + rf'\[{k}\]')
 
     def test_a_miss_zeroes_the_other_words(self):   # gmem_vec has no initial value and the caller reads its words after the call
         msl = self.msl()
@@ -144,7 +229,7 @@ class RawVector(Translated):
         self.assertTrue(miss.startswith('return 0;'), miss)
         before = helper[:helper.rindex('return')]
         before = before[max(before.rindex('}'), before.rindex('{')):]   # the miss path: the straight run of lines that ends in its return
-        for k in range(3): self.assertIn(f'{m.group(4)}[{k}] = 0u;', before, helper[-600:])
+        for k in range(3): self.assertIn(f'{m.group(8)}[{k}] = 0u;', before, helper[-600:])
 
     def test_a_64_bit_miss_zeroes_its_other_word(self):
         ldg64 = ((LDG[0] & ~(7 << 9)) | 5 << 9, (LDG[1] & ~(0xff << 16)) | 12 << 16)   # LDG.E.64 R12, [R5.64 + UR4]: size bits = 5 (B64), R12..R13
@@ -157,8 +242,8 @@ class RawVector(Translated):
         before = helper[:helper.rindex('return')]
         before = before[max(before.rindex('}'), before.rindex('{')):]
         self.assertTrue(helper[helper.rindex('return'):].startswith('return 0;'))
-        self.assertIn(f'{m.group(4)}[0] = 0u;', before, helper[-600:])
-        self.assertNotIn(f'{m.group(4)}[1] = 0u;', before)
+        self.assertIn(f'{m.group(8)}[0] = 0u;', before, helper[-600:])
+        self.assertNotIn(f'{m.group(8)}[1] = 0u;', before)
 
     @unittest.skipUnless(shutil.which('xcrun') and sys.platform == 'darwin', 'needs Metal')
     def test_reads_on_gpu(self):
@@ -167,8 +252,8 @@ class RawVector(Translated):
         # each step's word 0 when words 1..3 are the next three of its pool (value() counts words), 0 where it reads no pool; the runner's addresses keep all four in one pool
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {m.group(2)}& map [[buffer(0)]], const device uint2* addr [[buffer(1)]], device int* out [[buffer(2)]], uint id [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
-                  f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, map, last, vec);\n'   # a miss must not leave them as they were
+                  '{\n    uint c0 = 0u, c1 = 0u, c2 = 0u, c3 = 0u, c4 = 0u;\n    spvUnsafeArray<uint, 3> vec;\n    for (int s = 0; s < 20; s++)\n    {\n        int lo = int(addr[id * 20 + s].x), hi = int(addr[id * 20 + s].y);\n'
+                  f'        vec[0] = vec[1] = vec[2] = 0xdeadu; int w = {m.group(1)}(lo, hi, map, c0, c1, c2, c3, c4, vec);\n'   # a miss must not leave them as they were
                   '        out[id * 20 + s] = (w == 0 && vec[0] == 0u && vec[1] == 0u && vec[2] == 0u) || (vec[0] == uint(w) + 1u && vec[1] == uint(w) + 2u && vec[2] == uint(w) + 3u) ? w : int(0xdead);\n    }\n}\n')
         noinline = raw_noinline(kernel)
         self.assertIn('static __attribute__((noinline))\nint dmsh_raw_find(', noinline)
@@ -203,7 +288,7 @@ class RawVectorPair(Translated):
         self.assertTrue(vec, msl[:3000])
         main = msl[msl.index('kernel void main0'):]
         self.assertEqual(len(re.findall(vec.group(1) + r'\(', main)), 1, main[:3000])
-        self.assertNotRegex(main, re.escape(vec.group(4)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
+        self.assertNotRegex(main, re.escape(vec.group(8)) + r'\[\d\]', 'a word was read from the vector call\'s gmem_vec')
         self.assertTrue(scalar and len(re.findall(scalar.group(1) + r'\(', main)) == 1, 'the second load\'s word 2 has no lookup of its own:\n' + main[:3000])
 
 if __name__ == '__main__':

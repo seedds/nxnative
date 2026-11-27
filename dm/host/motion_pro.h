@@ -8,7 +8,7 @@
 #include <math.h>
 
 enum { PRO_MOTION_PERIOD_NS = 5000000, PRO_MOTION_STALE_NS = 300000000 };
-typedef struct { int live, seen; uint8_t counter; uint64_t received; } pro_motion;
+typedef struct { int seen; uint8_t counter; uint64_t received; } pro_motion;
 typedef struct { float acc[3], rot[3]; uint64_t ns; } pro_motion_sample;
 // Whether a pad's HID entry has a pad behind it: macOS keeps a Pro Controller in full mode, which sends report 0x30 every 15 ms whether or not anything moves
 // (bluetooth_hid_notes.md: 60 Hz; the raw motion above lives on it), and a DualShock 4 over Bluetooth streams its 0x11 the same way, so heard is when its last motion report
@@ -31,8 +31,7 @@ static inline int pro_motion_decode(pro_motion *s, const uint8_t *r, size_t len,
         v[k][i] = (int16_t)((uint16_t)b[0] | (uint16_t)b[1] << 8); data |= v[k][i] != 0;
     }
     s->seen = 1; s->counter = r[1]; s->received = now;
-    if (!s->live && !data) return 0;   // an advertised but empty stream is not a motion source
-    s->live = 1;
+    if (!data) return 0;   // empty or sensor-off IMU block (same rule as pad_jc1.h jc1_input; #3364)
     const float g = 1.f / 4096.f, rad = 0.070f * (float)M_PI / 180.f;
     for (int k = 0; k < 3; k++) {
         // Raw axes: x toward shoulders, y left, z out of face; acceleration is specific force. Switch: x right, y forward, gravity down.
@@ -52,8 +51,7 @@ static inline int ds4_motion_decode(pro_motion *s, const uint8_t *r, size_t len,
     int16_t v[6]; int data = 0;
     for (int i = 0; i < 6; i++) { v[i] = (int16_t)((uint16_t)r[15 + 2 * i] | (uint16_t)r[16 + 2 * i] << 8); data |= v[i] != 0; }
     s->seen = 1; s->received = now;
-    if (!s->live && !data) return 0;   // an advertised but empty stream is not a motion source
-    s->live = 1;
+    if (!data) return 0;   // empty or sensor-off IMU block (#3364)
     const float g = 1.f / 8192.f, rad = 2000.f / 32767.f * (float)M_PI / 180.f;
     out[0] = (pro_motion_sample){{-v[3] * g, v[5] * g, -v[4] * g}, {v[0] * rad, -v[2] * rad, v[1] * rad}, now};
     return 1;
@@ -68,8 +66,7 @@ static inline int abitdo_motion_decode(pro_motion *s, const uint8_t *r, size_t l
     int16_t v[6]; int data = 0;
     for (int i = 0; i < 6; i++) { v[i] = (int16_t)((uint16_t)r[15 + 2 * i] | (uint16_t)r[16 + 2 * i] << 8); data |= v[i] != 0; }
     s->seen = 1; s->received = now;
-    if (!s->live && !data) return 0;   // an advertised but empty stream is not a motion source
-    s->live = 1;
+    if (!data) return 0;   // empty or sensor-off IMU block (#3364)
     const float g = 1.f / 4096.f, rad = 2000.f / 32767.f * (float)M_PI / 180.f;
     out[0] = (pro_motion_sample){{v[1] * g, -v[0] * g, -v[2] * g}, {-v[4] * rad, v[3] * rad, v[5] * rad}, now};
     return 1;

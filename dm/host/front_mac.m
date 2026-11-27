@@ -355,8 +355,9 @@ static void pad_read(GCExtendedGamepad *g) {
     if (m) merge_rumble_to(NULL);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad or Joy-Cons read from HID
     dm_haptics_apple_controller(p, g.controller);
     int32_t st[4] = {pad_axis(g.leftThumbstick.xAxis.value), pad_axis(g.leftThumbstick.yAxis.value), pad_axis(g.rightThumbstick.xAxis.value), pad_axis(g.rightThumbstick.yAxis.value)};
-    if ([g.controller.productCategory isEqualToString:@"Switch Pro Controller"] && !pad_gc_unread(g.controller)) {
-        int nz[2] = {pro_gc_stick_nonzero(g.controller, 0), pro_gc_stick_nonzero(g.controller, 1)};
+    if (g_pro_sticks && [g.controller.productCategory isEqualToString:@"Switch Pro Controller"] && !pad_gc_unread(g.controller)) {
+        int nz[2] = {g.leftThumbstick.xAxis.value != 0.f || g.leftThumbstick.yAxis.value != 0.f,
+                     g.rightThumbstick.xAxis.value != 0.f || g.rightThumbstick.yAxis.value != 0.f};
         dm_pro_sticks(p, nz, st);
     }
     pad_set(p, m, st[0], st[1], st[2], st[3]);

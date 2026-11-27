@@ -50,8 +50,9 @@ static void removed(TestPro *d) { pro_removed(NULL, kIOReturnSuccess, NULL, hid(
 static int gc[PRO_MODELS], slot[PRO_MODELS] = {[0 ... PRO_MODELS - 1] = -1};   // GameController's controllers of each model, as front_mac.m counts them
 static void players(int pros, int pro_slot) { gc[PRO_MODEL_PRO] = pros; slot[PRO_MODEL_PRO] = pro_slot; dm_motion_pro_players(gc, slot); }
 static void changed(void) { dm_motion_pro_players(gc, slot); }
-static int mock_gc_nz[2], stick_notifies, stick_notify_player = -1;
+static int mock_gc_nz[2], stick_notifies, stick_notify_player = -1, gc_stick_polls;
 static int mock_gc_sticks(int p, int nz[2]) {
+    gc_stick_polls++;
     if (gc[PRO_MODEL_PRO] != 1 || slot[PRO_MODEL_PRO] != p) return 0;
     nz[0] = mock_gc_nz[0]; nz[1] = mock_gc_nz[1];
     return 1;
@@ -164,18 +165,21 @@ int main(void) { @autoreleasepool {
     int motion_before = sent;
     players(1, 2); found(a);
     // BETOP T6 pattern: right stick is live in GameController (nz[1]=1), left stick stays exact zero (nz[0]=0)
-    mock_gc_nz[0] = 0; mock_gc_nz[1] = 1; stick_notifies = 0;
-    report(a);
+    mock_gc_nz[0] = 0; mock_gc_nz[1] = 1; stick_notifies = 0; gc_stick_polls = 0;
+    report(a); report(a);
+    assert(gc_stick_polls == 0);   // idle 0x30 reports never poll GameController / unmappedInput (#3364)
     int32_t st[4] = {123, 456, 789, -321};
     assert(dm_pro_sticks(2, mock_gc_nz, st) == 0 && st[0] == 123 && st[1] == 456 && st[2] == 789 && st[3] == -321);
     assert(sent == motion_before);   // gyro stays disabled independently
-    // Brief flick (< PRO_STICK_HOLD_NS) then back to center must not latch
+    // Brief flick (< PRO_STICK_HOLD_NS) then back to center must not latch or poll GameController
     for (int i = 0; i < 5; i++) report_sticks(a, 4091, 2048, 4091, 2048);   // 75 ms < 150 ms
     report(a);
-    assert(dm_pro_sticks(2, mock_gc_nz, st) == 0 && stick_notifies == 0);
-    // Sustained left+right deflection >= PRO_STICK_HOLD_NS: left latches, right stays on GameController because nz[1] was live
-    for (int i = 0; i < 11; i++) report_sticks(a, 4091, 4, 4, 4091);   // 165 ms >= 150 ms
-    assert(stick_notifies == 1 && stick_notify_player == 2);
+    assert(dm_pro_sticks(2, mock_gc_nz, st) == 0 && stick_notifies == 0 && gc_stick_polls == 0);
+    // Sustained left+right deflection >= PRO_STICK_HOLD_NS: polls only at the 150 ms hold; left latches, right stays on GameController because nz[1] was live
+    for (int i = 0; i < 10; i++) report_sticks(a, 4091, 4, 4, 4091);   // 135 ms elapsed (< 150 ms): still no poll
+    assert(gc_stick_polls == 0 && stick_notifies == 0);
+    report_sticks(a, 4091, 4, 4, 4091);   // 150 ms >= PRO_STICK_HOLD_NS: one poll confirms nz[0]==0 and latches left
+    assert(gc_stick_polls == 1 && stick_notifies == 1 && stick_notify_player == 2);
     assert(dm_pro_sticks(2, mock_gc_nz, st) == 1 && st[0] == DM_STICK_MAX && st[1] == -DM_STICK_MAX && st[2] == 789 && st[3] == -321);
     assert(dm_pro_sticks(0, mock_gc_nz, st) == 0);   // never leak another player's input
     // Repeated identical packets do not re-notify (protects DM_PAD_MERGE last-moved-wins)
@@ -221,9 +225,25 @@ int main(void) { @autoreleasepool {
     mock_gc_nz[0] = 0;
     for (int i = 0; i < 12; i++) report_sticks(a, 4091, 4, 4, 4091);
     assert(dm_pro_sticks(2, mock_gc_nz, st) == 2);   // once GC was live, left stick never latches back
+    // Once both sticks are live in GameController (including a system-remapped stick via unmappedInput), pro_report stops polling GameController altogether (#3364)
+    mock_gc_nz[0] = 1; mock_gc_nz[1] = 1;
+    report_sticks(a, 4091, 4, 4, 4091);   // unlatches right stick -> both live
+    assert(dm_pro_sticks(2, mock_gc_nz, st) == 0);
+    int polls_both_live = gc_stick_polls;
+    for (int i = 0; i < 15; i++) report_sticks(a, 4091, 4, 4, 4091);
+    assert(gc_stick_polls == polls_both_live);
     // Opt-out (DM_PRO_STICKS=0): disables stick override while keeping motion independent
     g_pro_sticks = 0; st[2] = 77;
     assert(dm_pro_sticks(2, mock_gc_nz, st) == 0 && st[2] == 77);
+    // All-zero IMU blocks once live are dropped rather than forwarded to dm_motion_set_hid (#3364)
+    g_pro_gyro = 1;
+    int sent_before_zero = sent;
+    report(a); assert(sent == sent_before_zero + 3);
+    memset(a.buffer, 0, 49); a.buffer[0] = 0x30; a.buffer[1] = (uint8_t)(tick / 15000000);
+    a.callback(a.context, kIOReturnSuccess, hid(a), kIOHIDReportTypeInput, 0x30, a.buffer, 49);
+    tick += 15000000;
+    assert(sent == sent_before_zero + 3);
+    report(a); assert(sent == sent_before_zero + 6);
     removed(a); assert(!g_pro_devices);
     puts("t_motion_pro_mac: passed");
 } }

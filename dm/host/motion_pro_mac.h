@@ -59,6 +59,7 @@ static void (*g_pro_stick_changed)(int player);              // front_mac.m: rer
 
 static int pro_sticks_fresh(const pro_device *d, uint64_t now) { return d && d->sticks.seen && now >= d->heard && now - d->heard < PRO_MOTION_STALE_NS; }
 static void pro_stick_reset(pro_device *d) {
+    memset(d->stick, 0, sizeof d->stick);
     memset(d->stick_live, 0, sizeof d->stick_live); memset(d->stick_hid, 0, sizeof d->stick_hid); memset(d->stick_since, 0, sizeof d->stick_since);
     memset(d->stick_sent, 0, sizeof d->stick_sent); d->stick_sent_mask = 0;
 }
@@ -101,24 +102,31 @@ static int dm_pro_sticks(int player, const int gc_nonzero[2], int32_t st[4]) {
     for (int a = 0; a < 4; a++) if (mask & (1 << (a / 2))) st[a] = d->stick[a];
     return mask;
 }
-// Evaluate per-stick fallback on each Pro report 0x30: latch a stick only after continuous deflection >= PRO_STICK_TRIG for PRO_STICK_HOLD_NS while both mapped and
-// unmapped GameController stay exact zero, and notify front_mac.m only when a latched stick's value or mask changes.
+// Evaluate per-stick fallback on each Pro report 0x30: track raw deflection until a stick stays >= PRO_STICK_TRIG for PRO_STICK_HOLD_NS, and query GameController
+// (including unmappedInput) only right before latching or while already latched—never on idle packets or once both sticks are known live (#2655, #3364).
+// Notify front_mac.m only when a latched stick's value or mask changes.
 static void pro_stick_update(pro_device *d, int player, uint64_t now) {
     if (!g_pro_gc_sticks) return;
-    int nz[2] = {0, 0};
-    if (!g_pro_gc_sticks(player, nz)) return;
+    int check_gc = d->stick_hid[0] || d->stick_hid[1];
+    int ready[2] = {0, 0};
     for (int s = 0; s < 2; s++) {
-        if (nz[s]) {
-            d->stick_live[s] = 1; d->stick_since[s] = 0;
-            if (d->stick_hid[s]) {
-                d->stick_hid[s] = 0;
-                LOG("[hid] Pro Controller %s stick: GameController active again; returning to GameController", s ? "right" : "left");
-            }
-        } else if (!d->stick_live[s] && !d->stick_hid[s]) {
-            int moved = abs(d->stick[2 * s]) >= PRO_STICK_TRIG || abs(d->stick[2 * s + 1]) >= PRO_STICK_TRIG;
-            if (!moved) d->stick_since[s] = 0;
-            else if (!d->stick_since[s]) d->stick_since[s] = now;
-            else if (now >= d->stick_since[s] && now - d->stick_since[s] >= PRO_STICK_HOLD_NS) {
+        if (d->stick_live[s] || d->stick_hid[s]) continue;
+        int moved = abs(d->stick[2 * s]) >= PRO_STICK_TRIG || abs(d->stick[2 * s + 1]) >= PRO_STICK_TRIG;
+        if (!moved) d->stick_since[s] = 0;
+        else if (!d->stick_since[s]) d->stick_since[s] = now;
+        else if (now >= d->stick_since[s] && now - d->stick_since[s] >= PRO_STICK_HOLD_NS) { ready[s] = 1; check_gc = 1; }
+    }
+    if (check_gc) {
+        int nz[2] = {0, 0};
+        if (!g_pro_gc_sticks(player, nz)) return;
+        for (int s = 0; s < 2; s++) {
+            if (nz[s]) {
+                d->stick_live[s] = 1; d->stick_since[s] = 0;
+                if (d->stick_hid[s]) {
+                    d->stick_hid[s] = 0;
+                    LOG("[hid] Pro Controller %s stick: GameController active again; returning to GameController", s ? "right" : "left");
+                }
+            } else if (ready[s] && !d->stick_live[s] && !d->stick_hid[s]) {
                 d->stick_hid[s] = 1;
                 LOG("[hid] Pro Controller %s stick: GameController reads zero while HID moves; reading from report 0x30 (DM_PRO_STICKS=0 keeps GameController)", s ? "right" : "left");
             }
@@ -194,7 +202,8 @@ static void pro_report(void *ctx, IOReturn result, void *sender, IOHIDReportType
         return;
     }
     uint64_t now = now_ns(); int was = pro_live(d->heard, now);
-    if (d->model == PRO_MODEL_PRO && g_pro_sticks) {
+    int want_sticks = d->model == PRO_MODEL_PRO && g_pro_sticks && !(d->stick_live[0] && d->stick_live[1]);
+    if (want_sticks) {
         if (!was) d->sticks = (pad_pro){0};
         uint64_t buttons;
         pad_pro_decode(&d->sticks, r, (size_t)len, &buttons, d->stick);
@@ -203,7 +212,7 @@ static void pro_report(void *ctx, IOReturn result, void *sender, IOHIDReportType
     // A continuous stream must also release another device that fell silent, including a preferred model holding the same merged player.
     if (!was && g_pro_changed) g_pro_changed(); else pro_route();
     if (!g_pro_active || d != g->bound) return;
-    if (d->model == PRO_MODEL_PRO && g_pro_sticks) pro_stick_update(d, g->player, now);
+    if (want_sticks && !(d->stick_live[0] && d->stick_live[1])) pro_stick_update(d, g->player, now);
     if (!g_pro_gyro) return;
     pro_motion_sample samples[3];
     int n = m->decode(&d->motion, r, (size_t)len, now, samples);

@@ -21,9 +21,11 @@ int main(void) {
     }
     assert(!pro_motion_decode(&s, r, 49, t + 15000000, out));   // duplicate packet
     memset(r + 13, 0, 36); r[1]++;
-    assert(pro_motion_decode(&s, r, 64, t + 15000000, out) == 3);   // real free fall after live data
-    assert(out[2].acc[2] == 0 && out[2].rot[2] == 0);
-    assert(!pro_motion_decode(&s, r, 49, t + PRO_MOTION_STALE_NS + 15000001, out));   // stale stream must become live again
+    assert(!pro_motion_decode(&s, r, 64, t + 15000000, out));   // all-zero IMU block after live data is dropped (#3364)
+    word(r, 2, 2, 4096); r[1]++;
+    assert(pro_motion_decode(&s, r, 64, t + 30000000, out) == 3 && out[2].acc[2] == -1);   // resumes on next non-zero block
+    memset(r + 13, 0, 36); r[1]++;
+    assert(!pro_motion_decode(&s, r, 49, t + PRO_MOTION_STALE_NS + 30000001, out));   // stale all-zero stream stays rejected
     r[1] = 255; word(r, 2, 2, -32768); word(r, 2, 5, -32768);
     assert(pro_motion_decode(&s, r, 49, t + 400000000, out) == 3 && out[2].acc[2] == 8 && out[2].rot[2] < 0);
     r[1] = 0; assert(pro_motion_decode(&s, r, 49, t + 415000000, out) == 3);   // report counter wrap
@@ -46,8 +48,8 @@ int main(void) {
     memset(q + 15, 0, 12); q[26] = 0x20;   // acceleration z +8192: standing on its shoulder buttons, grips up (Switch +1 G on y, as gravity on the Pro)
     assert(ds4_motion_decode(&d, q, 78, t + 4000000, out) == 1 && out[0].acc[0] == 0 && out[0].acc[1] == 1 && out[0].acc[2] == 0);
     memset(q + 15, 0, 12);
-    assert(ds4_motion_decode(&d, q, 78, t + 8000000, out) == 1);   // real free fall after live data
-    assert(!ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 1, out));   // stale stream must become live again
+    assert(!ds4_motion_decode(&d, q, 78, t + 8000000, out));   // all-zero IMU block after live data is dropped (#3364)
+    assert(!ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 1, out));
     q[17] = 0x01; assert(ds4_motion_decode(&d, q, 78, t + 8000000 + PRO_MOTION_STALE_NS + 4000001, out) == 1);
     // 8BitDo Ultimate 2 Wireless (2DC8:6012, Bluetooth): 34-byte report 0x01 (firmware 1.03+), 12-byte report (firmware 1.02) carries no sensor
     pro_motion eb = {0}; uint8_t e[34] = {0x01};
@@ -65,8 +67,8 @@ int main(void) {
     assert(out[0].acc[0] == .5f && out[0].acc[1] == 1 && out[0].acc[2] == -1);
     assert(fabsf(out[0].rot[0] - 500 * rd) < 1e-6f && fabsf(out[0].rot[1] - 1000 * rd) < 1e-6f && fabsf(out[0].rot[2] - 250 * rd) < 1e-6f);
     memset(e + 15, 0, 12);
-    assert(abitdo_motion_decode(&eb, e, sizeof e, t + 32000000, out) == 1 && out[0].acc[2] == 0 && out[0].rot[2] == 0);   // real free fall after live data
-    assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 1, out));   // stale stream must become live again
+    assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 32000000, out));   // all-zero IMU block after live data is dropped (#3364)
+    assert(!abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 1, out));
     e[19] = 0x00; e[20] = 0x80; e[25] = 0x00; e[26] = 0x80;   // INT16_MIN on accel z and gyro z
     assert(abitdo_motion_decode(&eb, e, sizeof e, t + 32000000 + PRO_MOTION_STALE_NS + 16000001, out) == 1 && out[0].acc[2] == 8 && out[0].rot[2] < 0);
     puts("t_motion_pro: passed");

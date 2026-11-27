@@ -568,6 +568,7 @@ static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept 
 static int g_merge, g_press_to_join;
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static const char *pad_name(GCController *c);
+static void pad_lights(GCController *c, int p);
 static void npad_name(int p, char *out, size_t cap);
 static int cp_poll(void);
 static int s2pad_player(s2_pad *d);
@@ -580,7 +581,7 @@ static void pad_report(GCController *c, uint64_t m, float lx, float ly, float rx
         char nb[16];
         if (!m) return;
         if ((p = pad_slot_take_lowest(&g_slots, (__bridge const void *)c, pad_name(c))) < 0) { LOG("controller '%s': a button pressed, but all %d players are taken", pad_name(c), DM_PLAYERS); return; }
-        g_held[p] = c; dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
+        g_held[p] = c; pad_lights(c, p); dm_motion_attach(c, p); dm_pad_players(pad_slot_mask(&g_slots));
         npad_name(p, nb, sizeof nb); LOG("controller '%s': a button pressed: player %d (npad %s)", pad_name(c), p + 1, nb);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
@@ -659,6 +660,11 @@ static void pad_unlisten(GCController *c) {
     else pad_live_input(c).elementValueDidChangeHandler = nil;
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
+// Player lights of player p (pad_apple.h), and a log line when it has a player
+static void pad_lights(GCController *c, int p) {
+    if (dm_pad_lights(c, p)) LOG("controller '%s': player lights %d", pad_name(c), p + 1);
+    else if (p >= 0) LOG("controller '%s': player lights off (only players 1-4 have them)", pad_name(c));
+}
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 // Switch 2 controllers over Bluetooth LE (pad_switch2_apple.h, shared with the Mac front end): a pad is a player's controller as a GameController one is, in the same slots.
 // iOS cannot give the transport this device's Bluetooth address, so a controller is used without bonding: hold Sync on it after each start of the game
@@ -678,11 +684,11 @@ static BOOL merge_pads_left(GCController *gone) {
 }
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil otherwise); returns whether a controller is in use
 static BOOL pads_merged(GCController *gone) {
-    if (gone) dm_motion_detach(gone, 0);
+    if (gone) { pad_lights(gone, -1); dm_motion_detach(gone, 0); }
     BOOL any_gc = NO; int motion = 0;
     for (GCController *c in GCController.controllers) if (c != gone && pad_usable(c)) {
         if (c.motion.hasRotationRate) motion = 1;
-        any_gc = YES; pad_listen(c);
+        any_gc = YES; if (pad_listen(c)) pad_lights(c, 0);
         dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
         read_pad(c);
     }
@@ -696,7 +702,7 @@ static BOOL pads_slotted(GCController *gone) {
     NSArray<GCController *> *now = GCController.controllers; char nb[16]; BOOL waiting = NO;
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]])) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
-        pad_unlisten(g_held[p]);
+        pad_unlisten(g_held[p]); pad_lights(g_held[p], -1);
         dm_motion_detach(g_held[p], p);   // player 1's: the phone's gyro (if on) takes over from its next sample
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
@@ -705,12 +711,19 @@ static BOOL pads_slotted(GCController *gone) {
     for (GCController *c in now) if (c != gone && pad_usable(c) && pad_slot_of(&g_slots, (__bridge const void *)c) < 0) {
         if (g_press_to_join) {   // a player at its first button (read_pad)
             waiting = YES;
-            if (pad_listen(c)) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
+            if (pad_listen(c)) {
+                if (c.playerIndex != GCControllerPlayerIndexUnset) pad_lights(c, -1);
+                LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
+            }
             continue;
         }
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
-        if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_listen(c);
+        if (p < 0) {
+            if (c.playerIndex != GCControllerPlayerIndexUnset) pad_lights(c, -1);
+            LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS);
+            continue;
+        }
+        g_held[p] = c; pad_listen(c); pad_lights(c, p);
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");
         read_pad(c);

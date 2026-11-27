@@ -98,6 +98,7 @@ typedef void (^DuoLiveHandler)(id<GCDevicePhysicalInput>, id<GCPhysicalInputElem
 @property (nonatomic, readonly) GCExtendedGamepad *extendedGamepad;
 @property (nonatomic, readonly) GCMotion *motion;
 @property (nonatomic, readonly) DuoLiveInput *input;
+@property (nonatomic) GCControllerPlayerIndex playerIndex;
 - (instancetype)initWithCategory:(NSString *)category;
 @end
 @implementation DuoLiveController
@@ -105,6 +106,7 @@ typedef void (^DuoLiveHandler)(id<GCDevicePhysicalInput>, id<GCPhysicalInputElem
     if ((self = [super init])) {
         _productCategory = [category copy];
         _input = [DuoLiveInput new];
+        _playerIndex = GCControllerPlayerIndexUnset;
     }
     return self;
 }
@@ -1430,13 +1432,17 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
     DuoLiveController *left = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (L)"];
     DuoLiveController *right = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    left.playerIndex = GCControllerPlayerIndex3;
     [self setHarnessControllers:@[(GCController *)right, (GCController *)left] notification:GCControllerDidConnectNotification];
     XCTAssertEqual(duo_harness_state().connected_players, 0u);
+    XCTAssertEqual(left.playerIndex, GCControllerPlayerIndexUnset, @"Waiting controllers must clear any stale player index");
+    XCTAssertEqual(right.playerIndex, GCControllerPlayerIndexUnset);
     [left.input moveX:1 y:0];
     [left.input setPressed:YES button:GCInputButtonHome];
     XCTAssertEqual(duo_harness_state().connected_players, 0u, @"Stick and system Home must not join a player");
     [left.input setPressed:YES button:GCInputLeftShoulder];
     XCTAssertEqual(duo_harness_state().connected_players, 1u, @"First press gets player 1 even when listed second");
+    XCTAssertEqual(left.playerIndex, GCControllerPlayerIndex1);
     XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L);
 
     NSUInteger originalSubviews = window.subviews.count;
@@ -1456,12 +1462,15 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self waitForExpectations:@[closed] timeout:5];
     XCTAssertEqual(result, 1);
     XCTAssertEqual(duo_harness_state().connected_players, 3u);
+    XCTAssertEqual(right.playerIndex, GCControllerPlayerIndex2);
     XCTAssertEqual(duo_harness_state().players[1].buttons, 0u, @"The button that closed the prompt is held back until release");
     [right.input setPressed:NO button:GCInputButtonA];
     XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L, @"Both players' current input is restored on release");
     [right.input setPressed:YES button:GCInputButtonA];
     XCTAssertEqual(duo_harness_state().players[1].buttons, DM_BTN_B);
     [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    XCTAssertEqual(left.playerIndex, GCControllerPlayerIndexUnset);
+    XCTAssertEqual(right.playerIndex, GCControllerPlayerIndexUnset);
 }
 
 - (void)testControllersKeepIndependentPlayersAndLayoutKeepsMotionState {
@@ -1471,6 +1480,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
         XCTAssertTrue(first.isSnapshot);
         XCTAssertTrue(second.isSnapshot);
         [self setHarnessControllers:@[first, second] notification:GCControllerDidConnectNotification];
+        XCTAssertEqual(first.playerIndex, GCControllerPlayerIndex1);
+        XCTAssertEqual(second.playerIndex, GCControllerPlayerIndex2);
 
         CGRect bounds = CGRectMake(0, 0, 844, 390);
         UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
@@ -1504,6 +1515,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
         // Reordering the connected-controller snapshot must not move either player's slot.
         [self setHarnessControllers:@[second, first] notification:GCControllerDidConnectNotification];
         [self setHarnessControllers:@[second] notification:GCControllerDidDisconnectNotification];
+        XCTAssertEqual(first.playerIndex, GCControllerPlayerIndexUnset);
+        XCTAssertEqual(second.playerIndex, GCControllerPlayerIndex2);
         state = duo_harness_state();
         XCTAssertEqual(state.connected_players, 0x2);
         XCTAssertEqual(state.players[0].buttons, 0);
@@ -1517,6 +1530,7 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
         XCTAssertEqual(state.players[1].buttons, DM_BTN_B);
 
         [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+        XCTAssertEqual(second.playerIndex, GCControllerPlayerIndexUnset);
         state = duo_harness_state();
         XCTAssertEqual(state.connected_players, 0);
         XCTAssertEqual(state.players[1].buttons, 0);

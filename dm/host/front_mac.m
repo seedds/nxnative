@@ -321,6 +321,7 @@ static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h)
 static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
 static int pad_join(const void *owner, const char *name);
 static const char *pad_name(GCController *c);
+static void pad_lights(GCController *c, int p);
 static void pads_motion_changed(GCController *gone);
 // GameController's controllers that the host reads from their HID reports instead, so they stay unread here: identical pads (pad_hid_mac.h) and original Joy-Cons (pad_jc1_mac.h)
 static int pad_gc_unread(GCController *c) { return hidpad_gc_unread(c) || jc1_gc_unread(c); }
@@ -349,7 +350,7 @@ static void pad_read(GCExtendedGamepad *g) {
     #undef K
     if (p < 0) {   // DM_PAD_PRESS_TO_JOIN=1: it joins at its first button
         GCController *c = g.controller; if (!m || (p = pad_join((__bridge const void *)c, pad_name(c))) < 0) return;
-        g_held[p] = c; dm_motion_attach(c, p); pads_motion_changed(nil);
+        g_held[p] = c; pad_lights(c, p); dm_motion_attach(c, p); pads_motion_changed(nil);
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     if (m) merge_rumble_to(NULL);   // DM_PAD_MERGE: a button on this controller takes player 1's rumble back from a Switch 2 pad or Joy-Cons read from HID
@@ -369,6 +370,11 @@ static void pad_keep_system_buttons(GCController *c) {
     c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
+// Player lights of player p (pad_apple.h), and a log line when it has a player
+static void pad_lights(GCController *c, int p) {
+    if (dm_pad_lights(c, p)) LOG("controller '%s': player lights %d", pad_name(c), p + 1);
+    else if (p >= 0) LOG("controller '%s': player lights off (only players 1-4 have them)", pad_name(c));
+}
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
 // The players' raw HID motion and Pro stick fallback follow the controllers (gone: one just removed, still listed): each model in motion_pro_mac.h counted on its own
 static int pro_gc_player(GCController *c) { return g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)c); }
@@ -421,11 +427,14 @@ static void pads_changed(GCController *gone) {
         for (GCController *c in GCController.controllers) if (jc1_gc_unread(c)) pad_keep_system_buttons(c);   // read from HID (pad_jc1_mac.h), a lone Joy-Con's too (no extended gamepad profile)
         for (GCController *c in GCController.controllers) if (c.extendedGamepad && c != gone) {
             if (jc1_gc_unread(c)) { c.extendedGamepad.valueChangedHandler = nil; continue; }
-            any = 1; pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
+            int fresh = !c.extendedGamepad.valueChangedHandler;
+            any = 1; pad_keep_system_buttons(c);
+            if (fresh) pad_lights(c, 0);
+            c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
             dm_motion_attach(c, 0);   // every controller is player 1: the last one moved drives its six-axis sensor
             pad_read(c.extendedGamepad);
         }
-        if (gone) dm_motion_detach(gone, 0);
+        if (gone) { if (!jc1_gc_unread(gone)) pad_lights(gone, -1); dm_motion_detach(gone, 0); }
         if (!any) { if (!g_hidpads && !g_gippads && !g_jc1_pads && !dm_switch2_pads()) dm_pad_set(0, 0, 0, 0, 0); dm_haptics_apple_controller(0, nil); }   // a raw HID pad still plays player 1 (pad_hid_mac.h)
         pads_motion_changed(gone);
         return;
@@ -436,6 +445,7 @@ static void pads_changed(GCController *gone) {
     for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p] && (g_held[p] == gone || ![now containsObject:g_held[p]] || pad_gc_unread(g_held[p]))) {
         npad_name(p, nb, sizeof nb); LOG("controller '%s' disconnected: player %d (npad %s) is free", pad_name(g_held[p]), p + 1, nb);
         g_held[p].extendedGamepad.valueChangedHandler = nil;
+        if (!jc1_gc_unread(g_held[p])) pad_lights(g_held[p], -1);   // pad_jc1_mac.h drives an original Joy-Con's own lights over HID
         dm_motion_detach(g_held[p], p);
         dm_haptics_apple_controller(p, nil);
         pad_slot_free(&g_slots, (__bridge const void *)g_held[p]); g_held[p] = nil;
@@ -445,13 +455,20 @@ static void pads_changed(GCController *gone) {
         if (pad_gc_unread(c)) { pad_keep_system_buttons(c); c.extendedGamepad.valueChangedHandler = nil; continue; }   // read from IOKit; Home and Capture stay out of macOS's hands
         if (g_press_to_join) {   // a player at its first button (pad_read)
             pad_keep_system_buttons(c);
-            if (!c.extendedGamepad.valueChangedHandler) LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
+            if (!c.extendedGamepad.valueChangedHandler) {
+                if (c.playerIndex != GCControllerPlayerIndexUnset) pad_lights(c, -1);
+                LOG("controller '%s' connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", pad_name(c));
+            }
             c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
             continue;
         }
         int p = pad_slot_take(&g_slots, (__bridge const void *)c, pad_name(c));
-        if (p < 0) { LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS); continue; }
-        g_held[p] = c; pad_keep_system_buttons(c);
+        if (p < 0) {
+            if (c.playerIndex != GCControllerPlayerIndexUnset) pad_lights(c, -1);
+            LOG("controller '%s' connected: all %d players are taken, not used", pad_name(c), DM_PLAYERS);
+            continue;
+        }
+        g_held[p] = c; pad_keep_system_buttons(c); pad_lights(c, p);
         c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad *g, GCControllerElement *el) { (void)el; pad_read(g); };
         dm_motion_attach(c, p);
         npad_name(p, nb, sizeof nb); LOG("controller '%s' connected: player %d (npad %s)%s", pad_name(c), p + 1, nb, c.motion.hasRotationRate ? ", with motion (gyro)" : "");

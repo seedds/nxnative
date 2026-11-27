@@ -65,6 +65,12 @@ int main(void) {
     CHECK(nvn_link_history_get(&history, newer, &out) && out.target == 3.5 && out.ticks == 4,
           "link timing fields retain their generation too");
     CHECK(!nvn_link_history_get(&history, 1, &out), "overwritten link history stays unknown");
+    double ms = 99;
+    CHECK(!nvn_queue_history_get(&history, 1, &ms) && ms == 99, "an unpublished queue wait does not write its output");
+    nvn_queue_history_put(&history, newer, 17.5);
+    nvn_queue_history_put(&history, 1, 0.5);
+    CHECK(nvn_queue_history_get(&history, newer, &ms) && ms == 17.5, "a queue wait keeps its generation");
+    CHECK(!nvn_queue_history_get(&history, 1, &ms), "a delayed old queue wait cannot displace a newer wrap");
     pthread_t threads[WRITERS + READERS];
     for (uintptr_t i = 0; i < WRITERS; i++) if (pthread_create(&threads[i], NULL, writer, (void *)i)) return 2;
     for (unsigned i = 0; i < READERS; i++) if (pthread_create(&threads[WRITERS + i], NULL, reader, NULL)) return 2;

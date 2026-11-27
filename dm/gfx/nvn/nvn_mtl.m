@@ -378,7 +378,8 @@ static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the enc
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (DM_NVN_SUB_IDLE_FB and test drain)
 static int cut_busy_limit(void);     // maximum in-flight commits for sub_cut (0 = unbounded, 1 = default GPU-idle, N = bounded depth)
 // A main command buffer's commit feedback, kept as blocks: the feedback of several submissions can then ride on one commit (nvn_rec.h, submissions merged into one command buffer)
-@interface DmCommitFB : NSObject { @public NSMutableArray *blocks; }
+// gpu_tag: the frame its GPU time counts for (frame + 1, 0 = none; gpu_tag_commit)
+@interface DmCommitFB : NSObject { @public NSMutableArray *blocks; uint64_t gpu_tag; }
 - (void)addFeedbackHandler:(void (^)(id<MTL4CommitFeedback>))b;
 @end
 @implementation DmCommitFB
@@ -423,6 +424,7 @@ static inline uint64_t q4_commit_elapsed(const id<MTL4CommandBuffer> *buffers, N
     else [g_q4 commit:buffers count:count];
     return commit_now() - start;
 }
+static void gpu_tag_commit(DmCommitFB *fb, uint64_t t);
 // Call after releasing g_res_commit_mu and publishing progress for that commit.
 static void q4_commit_slow(uint64_t dt, const char *site) {
     if (dt < g_slow_commit_ns) return;
@@ -3027,7 +3029,8 @@ static uint64_t g_bp_lib_n, g_bp_lib_ns, g_bp_pso_n, g_bp_pso_ns, g_bp_up_bytes,
 static uint64_t g_up_total_ns;   // Cumulative upload time (same source as the per-frame @upload_ms)
 // ---------- Per-frame GPU time aggregation ----------
 #define GRING 1024
-static struct { _Atomic uint64_t frame, ns, t0, t1; _Atomic int pending; } g_gpu[GRING];   // t0 / t1: the frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns)
+// t0 / t1: the frame's earliest GPUStart / latest GPUEnd; c0: its earliest commit to g_q4 (gpu_tag_commit); all mach absolute time, ns
+static struct { _Atomic uint64_t frame, ns, t0, t1, c0; _Atomic int pending; } g_gpu[GRING];
 static _Atomic uint64_t g_cur_frame;
 // ---------- Same-process alternating measurement (DM_NVN_UB, off by default: without the environment variable the code below only adds one 'is it enabled' check) ----------
 // On a hot real device the system keeps adjusting power / frequency, and segment comparison (segments A and B each run for a minute) cannot resolve differences of <10%; within the same run, toggle by phase in turn and take differences of adjacent phase pairs, so the drift cancels.
@@ -3141,6 +3144,7 @@ static void gpu_tag_begin(uint64_t f) {
         atomic_store_explicit(&g_gpu[k].ns, 0, memory_order_relaxed);
         atomic_store_explicit(&g_gpu[k].t0, UINT64_MAX, memory_order_relaxed);
         atomic_store_explicit(&g_gpu[k].t1, 0, memory_order_relaxed);
+        atomic_store_explicit(&g_gpu[k].c0, UINT64_MAX, memory_order_relaxed);
         atomic_store_explicit(&g_gpu[k].pending, 1, memory_order_relaxed);
         atomic_store_explicit(&g_gpu[k].frame, tag, memory_order_release);
         return;
@@ -3165,6 +3169,13 @@ static void gpu_tag_done(uint64_t f, double g0, double g1) {
     }
     atomic_fetch_sub_explicit(&g_gpu[k].pending, 1, memory_order_release);
 }
+// The commit of a frame's command buffer to g_q4 at t (mach absolute time, ns), right before the commit call: the frame's earliest one stays (mtl_gpu_queue_ms)
+static void gpu_tag_commit(DmCommitFB *fb, uint64_t t) {
+    if (!fb || !fb->gpu_tag) return;
+    unsigned k = (fb->gpu_tag - 1) % GRING;
+    if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != fb->gpu_tag) return;
+    for (uint64_t v = atomic_load_explicit(&g_gpu[k].c0, memory_order_relaxed); t < v && !atomic_compare_exchange_weak_explicit(&g_gpu[k].c0, &v, t, memory_order_relaxed, memory_order_relaxed);) {}
+}
 static void gpu_tag_f(id<MTLCommandBuffer> cb, uint64_t f) { gpu_tag_begin(f); [cb addCompletedHandler:^(id<MTLCommandBuffer> c) { gpu_tag_done(f, c.GPUStartTime, c.GPUEndTime); }]; }
 void gpu_tag(id<MTLCommandBuffer> cb) { gpu_tag_f(cb, atomic_load(&g_cur_frame)); }
 double mtl_gpu_ms(uint64_t f) {
@@ -3183,6 +3194,15 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != tag) return 0;
     *t0 = s0; *t1 = s1;
     return s1 >= s0 && s1;
+}
+// How long the frame's first command buffer waited on g_q4: its GPU start after the frame's first commit (ms); -1 until all of the frame's command buffers have completed, or with no commit time
+double mtl_gpu_queue_ms(uint64_t f) {
+    unsigned k = f % GRING; uint64_t tag = f + 1;
+    if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != tag) return -1;
+    if (atomic_load_explicit(&g_gpu[k].pending, memory_order_acquire)) return -1;
+    uint64_t s0 = atomic_load_explicit(&g_gpu[k].t0, memory_order_relaxed), c0 = atomic_load_explicit(&g_gpu[k].c0, memory_order_relaxed);
+    if (atomic_load_explicit(&g_gpu[k].frame, memory_order_acquire) != tag) return -1;
+    return s0 != UINT64_MAX && c0 != UINT64_MAX && s0 >= c0 ? (s0 - c0) / 1e6 : -1;
 }
 // For the layer's frame history (hle_vi.c): 1 once all of the frame's command buffers have completed, with their latest GPU end (0 if none had a time), 0 while some are still
 // running, -1 when the ring holds no record of the frame (no GPU work tagged with it, or overwritten)
@@ -3346,7 +3366,7 @@ uint64_t mtl_sub_commit(void) {
     DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
-    uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
+    uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f); o->gpu_tag = gpu_f + 1;
     NSString *cctx = @(cctx_snap());
     cbs_list *cbs = cbs_take(); cbs_fly_put(fence, cbs);
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
@@ -21292,7 +21312,7 @@ static void sub_cut(void) {
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
     if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before, sub_place)
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1; cbs_fly_put(cbs_fence, cbs);
-    DmCommitFB *o = [DmCommitFB new];
+    DmCommitFB *o = [DmCommitFB new]; o->gpu_tag = f + 1;
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         atomic_fetch_sub(&g_seg_inflight, 1);
@@ -22073,6 +22093,8 @@ int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, doubl
     nvn_link_time e; if (!nvn_link_history_get(&g_present_history, n, &e)) return 0;
     *target = e.target; *lead_ms = e.lead_ms; *ticks = e.ticks; *gap_ms = e.gap_ms; return 1;
 }
+// How long the n-th present's command buffer waited on the queue: its GPU start after its commit (ms, from its commit feedback); 0 = not known (not committed, not completed yet, or overwritten)
+int mtl_present_queue_ms(uint64_t n, double *ms) { return nvn_queue_history_get(&g_present_history, n, ms); }
 static _Atomic uint64_t g_drawable_ns;   // Accumulated wall clock waiting for nextDrawable in present (timing instrumentation)
 uint64_t mtl_drawable_ns_take(void) { return atomic_exchange(&g_drawable_ns, 0); }
 // Maximum refresh rate (Hz) of the screen when there is a window; returns 0 without a window. Mac uses CoreGraphics display modes (thread-safe C interface; the present configuration is read on the game thread)
@@ -22088,6 +22110,13 @@ int mtl_display_hz(void) {
 }
 static _Atomic uint64_t g_present_stall_ns;   // For unit tests: an extra pause before each present on the present thread (simulating a drawable that stays unavailable)
 void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
+// For unit tests: each present's drawable wait is preceded by a wait for g_present_hold to reach this value (a drawable the display has not released yet); 0 = none.
+// Set between presents only
+static id<MTLSharedEvent> g_present_hold; static _Atomic uint64_t g_present_hold_v;
+void mtl_present_test_hold(id<MTLSharedEvent> ev, uint64_t v) {
+    if (!ev) { atomic_store(&g_present_hold_v, 0); g_present_hold = nil; return; }
+    g_present_hold = ev; atomic_store(&g_present_hold_v, v);
+}
 static void present_pipeline(MTLPixelFormat format) {
     if (!g_blit_pso || g_blit_fmt != format) {
         NSError *e = nil;
@@ -22754,6 +22783,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }
     if (atomic_load(&g_present_suspended)) return 0;
     [g_present_alloc4[alloc_i] reset];
+    uint64_t hold_v = atomic_load(&g_present_hold_v); id<MTLSharedEvent> hold = hold_v ? g_present_hold : nil;
+    if (hold) [g_q4 waitForEvent:hold value:hold_v];
     [g_q4 waitForDrawable:dr];
     id<MTL4CommandBuffer> cb = g_present_cb[alloc_i];
     [cb beginCommandBufferWithAllocator:g_present_alloc4[alloc_i]];
@@ -22763,8 +22794,10 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     int fx_kind = kind == PRESENT_METALFX;
     cb_end(cb, drs);
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    __block double committed = 0;   // CACurrentMediaTime right before the commit, the GPU times' base
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
         if (f.error) { MLOG("[RED] display command buffer error: %s", f.error.description.UTF8String); gpu_lost_check(f.error, "display"); }
+        else if (gpu_time_valid(f.GPUStartTime, f.GPUEndTime) && f.GPUStartTime >= committed) nvn_queue_history_put(&g_present_history, ticket, (f.GPUStartTime - committed) * 1e3);
         if (latch_ts > 0 && f.GPUEndTime > latch_ts) atomic_fetch_add(&g_link_latch_late_gpu, 1);
         pthread_mutex_lock(&g_pq_mu); if (ticket > g_pq_done) g_pq_done = ticket; if (ticket > g_present_alloc_done[alloc_i]) g_present_alloc_done[alloc_i] = ticket; g_pq_inflight--; pthread_cond_broadcast(&g_pq_cv);
         NSArray *retire = nil; if (!g_pq_inflight && g_ext_retire.count) { retire = g_ext_retire; g_ext_retire = nil; }   // every present committed before their release has completed
@@ -22773,6 +22806,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }];
     id<MTL4CommandBuffer> buffers[] = {cb};
     pthread_mutex_lock(&g_pq_mu); g_pq_inflight++; pthread_mutex_unlock(&g_pq_mu);
+    committed = CACurrentMediaTime();
     [g_q4 commit:buffers count:1 options:o];
     if (target_ts > 0) {
         static double leads[300], e2e[300];   // e2e: game enqueue -> system-scheduled present (including the time waiting in the queue for the display-link callback), the full span of input latency that our side can read

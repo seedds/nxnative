@@ -72,6 +72,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [DARK SOULS: REMASTERED](#dark-souls-remastered) | 2 | 0 | 4 | 0 | 0 | `build` → `game`, `game` |
 | [Diablo II: Resurrected](#diablo-ii-resurrected) | 2 | 0 | 0 | 1 | 0 | `game` |
 | [Digimon Story Time Stranger](#digimon-story-time-stranger) | 0 | 0 | 0 | 2 | 0 | `game` |
+| [DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH](#dragon-ball-xenoverse-2-for-nintendo-switch) | 0 | 0 | 0 | 3 | 0 | `game` ×2 |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
@@ -320,6 +321,17 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
 - **function-matched** (`main` of builds without CUTS): Time Stranger 60 fps startup: 2 functions, 2 cuts
+
+### DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH
+
+[DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH](../../dm/games/010078D000F88000/README.md), `010078D000F88000`, [patches.py](../../dm/games/010078D000F88000/patches.py).
+
+- **`game`**, frame rate, at goal, checked: half-rate setter and base-rate selection disassembled in 1.25.02 and 1.26.01: Use Xenoverse 2 full-rate timing. The game chooses the half-rate mode for its simulation and rendering together. The host and SDK see the present interval independently of that choice.
+- **`game`**, frame rate, at goal, checked: Conton City entry traced in 1.26.01 and its constructor and rate getters disassembled in 1.25.02 and 1.26.01: Keep the incoming base rate in Conton City. The game owns the city lifecycle and selects the 30 Hz rate in its city constructor.
+
+- **function-matched** (`main` of builds without CUTS): Use Xenoverse 2 full-rate timing: 1 function, 3 cuts
+- **function-matched** (`main` of builds without CUTS): Use Xenoverse 2 full-rate timing: 1 function, 3 cuts
+- **function-matched** (`main` of builds without CUTS): Keep the incoming base rate in Conton City: 1 function, 1 cut
 
 ### FINAL FANTASY TACTICS - The Ivalice Chronicles
 

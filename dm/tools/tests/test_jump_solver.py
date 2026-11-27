@@ -44,6 +44,31 @@ def adr(d, at, to): off = to - at; return 0x10000000 | (off & 3) << 29 | ((off >
 def bl(at, to): return 0x94000000 | (((to - at) >> 2) & 0x3ffffff)
 def ldrb_reg(e, b, i): return 0x38606800 | i << 16 | b << 5 | e           # ldrb wE, [xB, xI]
 def add_w(d, s, n): return 0x11000000 | n << 10 | s << 5 | d              # add wD, wS, #n
+def subs_w(d, s, n): return 0x71000000 | n << 10 | s << 5 | d             # subs wD, wS, #n
+def sub_sp(n): return 0xd10003ff | n << 10                                # sub sp, sp, #n
+def add_sp(n): return 0x910003ff | n << 10                                # add sp, sp, #n
+def add_x_sp(d, n): return 0x910003e0 | n << 10 | d                       # add xD, sp, #n (mov xD, sp when n == 0)
+def add_x_imm(d, s, n): return 0x91000000 | n << 10 | s << 5 | d          # add xD, xS, #n
+def sub_x_imm(d, s, n): return 0xd1000000 | n << 10 | s << 5 | d          # sub xD, xS, #n
+def str_x_sp(r, off): return 0xf90003e0 | (off // 8) << 10 | r            # str xR, [sp, #off]
+def ldr_x_sp(r, off): return 0xf94003e0 | (off // 8) << 10 | r            # ldr xR, [sp, #off]
+def str_w_sp(r, off): return 0xb90003e0 | (off // 4) << 10 | r            # str wR, [sp, #off]
+def ldr_w_sp(r, off): return 0xb94003e0 | (off // 4) << 10 | r            # ldr wR, [sp, #off]
+def strb_sp(r, off): return 0x390003e0 | off << 10 | r                    # strb wR, [sp, #off]
+def strh_sp(r, off): return 0x790003e0 | (off // 2) << 10 | r             # strh wR, [sp, #off]
+def str_q_sp(q, off): return 0x3d8003e0 | (off // 16) << 10 | q           # str qQ, [sp, #off]
+def stp_x_sp(a, b, off): return 0xa90003e0 | ((off // 8) & 0x7f) << 15 | b << 10 | a
+def ldp_x_sp(a, b, off): return 0xa94003e0 | ((off // 8) & 0x7f) << 15 | b << 10 | a
+def stp_x_sp_pre(a, b, off): return 0xa98003e0 | ((off // 8) & 0x7f) << 15 | b << 10 | a
+def stur_x(r, b, off): return 0xf8000000 | (off & 0x1ff) << 12 | b << 5 | r
+def ldur_x(r, b, off): return 0xf8400000 | (off & 0x1ff) << 12 | b << 5 | r
+def str_x_base(r, b, off): return 0xf9000000 | (off // 8) << 10 | b << 5 | r
+def str_x_idx(r, b, i): return 0xf8206800 | i << 16 | b << 5 | r          # str xR, [xB/sp, xI]
+def stxr_x_sp(s, r): return 0xc8007fe0 | s << 16 | r                      # stxr wS, xR, [sp]
+def sub_sp_reg(r): return 0xcb2063ff | r << 16                            # sub sp, sp, xR
+def dup_v_x(v, r): return 0x4e080c00 | r << 5 | v                         # dup vV.2d, xR
+def dc_zva(r): return 0xd50b7420 | r                                      # dc zva, xR
+def csel_x(d, a, b): return 0x9a800000 | b << 16 | a << 5 | d             # csel xD, xA, xB, eq
 def lsr_x(d, s, n): return 0xd340fc00 | n << 16 | s << 5 | d              # lsr xD, xS, #n
 def ubfx_x(d, s, lsb, k): return 0xd3400000 | lsb << 16 | (lsb + k - 1) << 10 | s << 5 | d   # ubfx xD, xS, #lsb, #k
 RETAB = 0xd65f0fff
@@ -186,6 +211,148 @@ class Bounds(Solver):
         self.assertEqual(run(ldr_x(22), cmp_x(22, 4)), t)
         self.assertEqual(run(ldr_w(22), cmp_w(22, 4)), t)
         self.assertIsNone(run(ldr_x(22), cmp_w(22, 4)))   # ldr x22: the upper half is unknown, the index is not bounded
+
+    def test_spilled_32_bit_index_reloaded_as_64_bit(self):
+        # Sonic Racing: CrossWorlds 1.41 main+0x726afc (issue #3383): subs w4, w8, #1 (zero upper half) spilled to [sp, #0x80] across two bl calls,
+        # reloaded as ldr x4, [sp, #0x80], joined with the direct path, then guarded by cmp w4, #5; b.hi; ldrsw x0, [x17, x4, lsl #2]; adr x18; add; br x18.
+        def build(prologue=(), between=(), spill=None, reload_=None):
+            spill = [str_x_sp(4, 0x80)] if spill is None else list(spill)
+            reload_ = [ldr_x_sp(4, 0x80)] if reload_ is None else list(reload_)
+            # Layout: prologue; subs w4, w8, #1; cbz w0, spill_blk; B join; spill_blk: spill; between; reload; join: cmp w4, #5; b.hi exit; base; adr; ldrsw; add; br; targets...
+            head = list(prologue) + [subs_w(4, 8, 1)]
+            cbz_at = 4 * len(head)
+            spill_at = cbz_at + 8
+            mid = spill + list(between) + reload_
+            join_at = spill_at + 4 * len(mid)
+            adr_at = join_at + 16
+            tail_len = 8
+            t0 = join_at + 4 * tail_len
+            t = [t0 + 4 * i for i in range(6)]
+            exit_at = t0 + 4 * 6
+            self.table(t, rel=adr_at)
+            tail = [
+                cmp_w(4, 5), bcond(HI, join_at + 4, exit_at),
+                ADRP(17, join_at + 8, self.TABLE), ADDI(17, 17, self.TABLE & 0xfff),
+                adr(18, adr_at, adr_at), ldrsw(0, 17, 4), ADDR(18, 18, 0), BR(18),
+            ]
+            w = head + [cbz(0, cbz_at, spill_at), B(cbz_at + 4, join_at)] + mid + tail + [RET] * 7
+            return w, t
+        # Basic spill/reload across two calls inside an allocated frame (with standard AAPCS64 frame pointer x29 = sp + 0x90)
+        w, t = build(prologue=[sub_sp(0xa0), add_x_sp(29, 0x90)], between=[bl(0, 0x400), bl(0, 0x400)])
+        self.assertEqual(self.site(w), t)
+        # Two-stage prologue: stp x29, x30, [sp, #-0x20]!; mov x29, sp; sub sp, sp, #0xa0 (shifts x29 to sp + 0xa0)
+        w, t = build(prologue=[stp_x_sp_pre(29, 30, -0x20), add_x_sp(29, 0), sub_sp(0xa0)], between=[bl(0, 0x400)])
+        self.assertEqual(self.site(w), t)
+        # Spill via stp and reload via ldp, and via frame pointer stur/ldur [x29, #-0x10] (x29 = sp + 0x90 -> sp + 0x80)
+        w, t = build(prologue=[sub_sp(0xa0)], spill=[stp_x_sp(4, 5, 0x80)], between=[bl(0, 0x400)], reload_=[ldp_x_sp(4, 5, 0x80)])
+        self.assertEqual(self.site(w), t)
+        w, t = build(prologue=[sub_sp(0xa0), add_x_sp(29, 0x90)], spill=[stur_x(4, 29, -0x10)], between=[bl(0, 0x400)], reload_=[ldur_x(4, 29, -0x10)])
+        self.assertEqual(self.site(w), t)
+        # Non-overlapping write to another slot (str w0, [sp, #0x70]; str q0, [sp, #0x60]) and non-stack store (str x0, [x1]) keep [sp, #0x80] intact
+        w, t = build(prologue=[sub_sp(0xa0)], between=[str_w_sp(0, 0x70), str_q_sp(0, 0x60), str_x_base(0, 1, 0), bl(0, 0x400)])
+        self.assertEqual(self.site(w), t)
+        # Temporary sub sp / add sp around a call shifts and preserves the slot
+        w, t = build(prologue=[sub_sp(0xa0)], between=[sub_sp(0x20), bl(0, 0x400), add_sp(0x20)])
+        self.assertEqual(self.site(w), t)
+        # Reloading the low 32 bits (ldr w4) of an 8-byte spill works too
+        w, t = build(prologue=[sub_sp(0xa0)], between=[bl(0, 0x400)], reload_=[ldr_w_sp(4, 0x80)])
+        self.assertEqual(self.site(w), t)
+        # Spilled table base and pre-guarded index survive a call too
+        t3 = [64, 68, 72]; self.table(t3)
+        w_base = [sub_sp(0x40), ADRP(4, 4, self.TABLE), ADDI(4, 4, 0), str_x_sp(4, 0x10), ldr_w(5), cmp_w(5, 2), bcond(HI, 24, 76),
+                  str_x_sp(5, 0x18), bl(32, 0x400), ldr_x_sp(4, 0x10), ldr_x_sp(5, 0x18), ldrsw(18, 4, 5), ADDR(18, 18, 4), BR(18), NOP, NOP] + [RET] * 5
+        self.assertEqual(self.site(w_base), t3)
+        # Loop that updates and spills a 32-bit index on every iteration widens cleanly while preserving width 32
+        t_loop = [68, 72, 76, 80]; self.table(t_loop)
+        w_loop = [sub_sp(0x40), ADRP(19, 4, self.TABLE), ADDI(19, 19, 0), ldr_w(8),
+                  # loop @ 16: subs w4, w8, #1; str x4, [sp,#0x10]; bl; ldr x4, [sp,#0x10]; cmp w4, #3; b.hi exit; ldrsw; add; br
+                  subs_w(4, 8, 1), str_x_sp(4, 0x10), bl(24, 0x400), ldr_x_sp(4, 0x10), cmp_w(4, 3), bcond(HI, 36, 84),
+                  ldrsw(18, 19, 4), ADDR(18, 18, 19), BR(18), NOP, NOP, NOP, NOP,
+                  add_w(8, 8, 1), B(72, 16), RET, RET, RET]
+        self.table([68, 76, 80, 84])
+        self.assertEqual(self.site(w_loop), [68, 76, 80, 84])
+
+    def test_stack_slot_soundness_refusals(self):
+        # Every aliasing, escape, overlap, frame-bounds, or width violation must refuse the proof (even though all 6 table targets lie in the function).
+        def build(prologue=(), between=(), spill=None, reload_=None, entries=()):
+            spill = [str_x_sp(4, 0x80)] if spill is None else list(spill)
+            reload_ = [ldr_x_sp(4, 0x80)] if reload_ is None else list(reload_)
+            head = list(prologue) + [subs_w(4, 8, 1)]
+            cbz_at = 4 * len(head); spill_at = cbz_at + 8
+            mid = spill + list(between) + reload_
+            join_at = spill_at + 4 * len(mid); adr_at = join_at + 16
+            t0 = join_at + 32; t = [t0 + 4 * i for i in range(6)]; exit_at = t0 + 24
+            self.table(t, rel=adr_at)
+            tail = [cmp_w(4, 5), bcond(HI, join_at + 4, exit_at), ADRP(17, join_at + 8, self.TABLE), ADDI(17, 17, self.TABLE & 0xfff),
+                    adr(18, adr_at, adr_at), ldrsw(0, 17, 4), ADDR(18, 18, 0), BR(18)]
+            return self.site(head + [cbz(0, cbz_at, spill_at), B(cbz_at + 4, join_at)] + mid + tail + [RET] * 7, entries=entries)
+        # 1. No frame allocated / slot outside frame (caller's stack may already be aliased)
+        self.assertIsNone(build(prologue=[]))
+        self.assertIsNone(build(prologue=[sub_sp(0x80)]))   # 0x80..0x88 lies past frame size 0x80
+        self.assertIsNone(build(prologue=[sub_sp(0x84)]))   # partial overlap with caller's frame
+        # 2. 64-bit reload from a 32-bit spill leaves upper 32 bits unknown
+        self.assertIsNone(build(prologue=[sub_sp(0xa0)], spill=[str_w_sp(4, 0x80)], reload_=[ldr_x_sp(4, 0x80)]))
+        # 3. Overlapping writes to the slot (same offset, upper half, byte, halfword, 16-byte vector, stp, fp-relative stur, indexed store, stxr)
+        for killer in (
+            [str_x_sp(9, 0x80)],
+            [str_w_sp(9, 0x84)],
+            [strb_sp(9, 0x83)],
+            [strh_sp(9, 0x86)],
+            [str_q_sp(0, 0x80)],
+            [stp_x_sp(9, 10, 0x78)],
+            [stur_x(9, 29, -0x10)],
+            [str_x_idx(9, 31, 0)],
+            [add_sp(0x80), stxr_x_sp(0, 9), sub_sp(0x80)],
+        ):
+            with self.subTest(killer=killer):
+                self.assertIsNone(build(prologue=[sub_sp(0xa0), add_x_sp(29, 0x90)], between=killer))
+        # 4. Stack pointer escape to a call (via sp, via x29, via x8 sret, or before the spill)
+        for esc in (
+            [add_x_sp(0, 0x20), bl(0, 0x400)],
+            [add_x_sp(8, 0x20), bl(0, 0x400)],
+            [sub_x_imm(0, 29, 0x70), bl(0, 0x400)],
+            [add_x_sp(0, 0), bl(0, 0x400)],
+            [SVC],
+        ):
+            with self.subTest(esc=esc):
+                self.assertIsNone(build(prologue=[sub_sp(0xa0), add_x_sp(29, 0x90)], between=esc))
+        # Escape before the spill still invalidates later spills across calls (callee could have saved the pointer)
+        self.assertIsNone(build(prologue=[sub_sp(0xa0), add_x_sp(0, 0x20), bl(0, 0x400)], between=[bl(0, 0x400)]))
+        # Callee-saved stack pointer survives one call but kills overlapping store via [x19, #0x60] and escapes if passed to a later call
+        self.assertIsNone(build(prologue=[sub_sp(0xa0), add_x_sp(19, 0x20)], between=[bl(0, 0x400), str_x_base(9, 19, 0x60)]))
+        self.assertIsNone(build(prologue=[sub_sp(0xa0), add_x_sp(19, 0x20)], between=[bl(0, 0x400), mov_x(0, 19), bl(0, 0x400)]))
+        # 5. Stack pointer escape to memory or unhandled instruction (dup, dc zva, csel, dynamic sub sp, mov w0 from sp-reg)
+        for esc in (
+            [add_x_sp(9, 0x20), str_x_base(9, 1, 0)],
+            [add_x_sp(9, 0x20), str_x_sp(9, 0x10)],
+            [add_x_sp(9, 0x20), dup_v_x(0, 9)],
+            [add_x_sp(9, 0x20), dc_zva(9)],
+            [add_x_sp(9, 0x20), csel_x(10, 9, 1)],
+            [add_x_sp(9, 0x20), mov_w(10, 9)],
+            [sub_sp_reg(0)],
+        ):
+            with self.subTest(esc=esc):
+                self.assertIsNone(build(prologue=[sub_sp(0xa0)], between=esc))
+        # 6. Mismatched ('sp', off) across a join marks stack escaped
+        # Prologue: sub sp, #0xa0; cbz w1, +8; add x9, sp, #0x20; b +8; add x9, sp, #0x30; (join with x9 mismatched -> escaped)
+        self.assertIsNone(build(prologue=[sub_sp(0xa0), cbz(1, 4, 16), add_x_sp(9, 0x20), B(12, 20), add_x_sp(9, 0x30)], between=[bl(0, 0x400)]))
+        # 7. External entry skipping the prologue (frame == 0 on that path) invalidates stack proof
+        self.assertIsNone(build(prologue=[sub_sp(0xa0)], between=[bl(0, 0x400)], entries=[4]))
+        # 8. Unspilled 64-bit reload is still refused even though all 6 targets lie inside the function
+        self.assertIsNone(build(prologue=[sub_sp(0xa0)], spill=[], reload_=[ldr_x_sp(4, 0x80)]))
+        # 9. Stack-probe loop (sub sp, sp, #0x1000 in a loop) still terminates cleanly
+        t2 = [48, 52, 56]; self.table(t2)
+        probe = [sub_sp(0x100), cbz(0, 4, 16), sub_sp(0x100), B(12, 4), ADRP(4, 16, self.TABLE), ADDI(4, 4, 0),
+                 ldr_w(18), cmp_w(18, 2), bcond(HI, 32, 60), ldrsw(18, 4, 18), ADDR(18, 18, 4), BR(18)] + [RET] * 5
+        self.assertEqual(self.site(probe), t2)
+        # 10. C++ landing pad preserves a non-escaped slot across a throwing call, and drops it if escaped
+        t4 = [56, 60, 64, 68]; self.table(t4)
+        lp = [sub_sp(0x40), ADRP(19, 4, self.TABLE), ADDI(19, 19, 0), subs_w(4, 8, 1), str_x_sp(4, 0x10), bl(20, 0x400), RET,
+              ldr_x_sp(4, 0x10), cmp_w(4, 3), bcond(HI, 36, 72), ldrsw(18, 19, 4), ADDR(18, 18, 19), BR(18), NOP] + [RET] * 6
+        self.assertEqual(self.site(lp, landing={28: [(20, 24)]}), t4)
+        lp_esc = [sub_sp(0x40), ADRP(19, 4, self.TABLE), ADDI(19, 19, 0), subs_w(4, 8, 1), str_x_sp(4, 0x10), add_x_sp(0, 0x20), bl(24, 0x400), RET,
+                  ldr_x_sp(4, 0x10), cmp_w(4, 3), bcond(HI, 40, 76), ldrsw(18, 19, 4), ADDR(18, 18, 19), BR(18)] + [RET] * 6
+        self.assertIsNone(self.site(lp_esc, landing={32: [(24, 28)]}))
 
     def test_shifted_down_then_a_32_bit_compare(self):
         # ASTRAL CHAIN main+0x6db104: lsr x17,x11,#32; cmp w17,#5; b.hi; ldrsw x17,[x13,x17,lsl #2]: the shift leaves the upper half zero

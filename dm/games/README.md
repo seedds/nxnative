@@ -215,7 +215,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Pokémon Pokopia](0400A3A01EE4C000/README.md) | `0400A3A01EE4C000` | v655360 (Switch 2) | 20.5.25 (Ounce) | Koei Tecmo's KTGL | NVN2 | — |
 | [Pokémon Scarlet](0100A3D008C5C000/README.md) | `0100A3D008C5C000` | 1.0.0 | 13.3.5 | Game Freak's Trinity engine | NVN | — |
 | [Pokémon Shield](01008DB008C2C000/README.md) | `01008DB008C2C000` | 1.3.2 | 7.3.2 | Game Freak's engine (before Trinity) | NVN | — |
-| [Pokémon Shining Pearl](010018E011D92000/README.md) | `010018E011D92000` | 1.3.0 | 11.4.3 | Unity 2019.4.27f1 IL2CPP | NVN | — |
+| [Pokémon Shining Pearl](010018E011D92000/README.md) | `010018E011D92000` | 1.3.0 | 11.4.3 | Unity 2019.4.27f1 IL2CPP | NVN | [60 fps target](010018E011D92000/README.md#frame-rate) |
 | [Pokémon Sword](0100ABF008968000/README.md) | `0100ABF008968000` | 1.3.2 | 7.3.2 | Game Freak's engine (before Trinity) | NVN | — |
 | [Pokémon Violet](01008F6008C5E000/README.md) | `01008F6008C5E000` | 1.0.0 | 13.3.5 | Game Freak's Trinity engine | NVN | — |
 | [Portal](01007BB017812000/README.md) | `01007BB017812000` | 1.0.3 | 13.3.0 | Valve's Source engine (28 NROs) | NVN | — |

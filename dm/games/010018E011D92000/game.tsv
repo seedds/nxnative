@@ -32,6 +32,10 @@ sys_resource	0x1000000
 # Unity sets the NVN near plane to zero at device initialization.
 depth_mode	zero
 
+# ---- Frame rate ----
+# Unity's frame limiter is discovered from its internal calls in each main.
+fps_target	60
+
 # ---- Shader split ----
 shader_groups	/Data/=data
 shader_note	Pokémon Shining Pearl shaders

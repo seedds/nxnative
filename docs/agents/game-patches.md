@@ -594,7 +594,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **`build` → `game`**, rendering, blocked: not function-matched; a new game version must be checked independently, judgement: native tall-screen Unity render targets and world camera. The exact Switch resolution, allocation, and Cinemachine call sites are specific to this game build
 
-- **1.1.0 `main`** `d214ba64…` ([patches.py:1009](../../dm/games/010065301A2E0000/patches.py#L1009))
+- **1.1.0 `main`** `d214ba64…` ([patches.py:1012](../../dm/games/010065301A2E0000/patches.py#L1012))
   <details><summary>74 frame-step sites</summary>
 
   - frame step `+0x6e00ec`: Unity initial handheld screen size height follows the display shape

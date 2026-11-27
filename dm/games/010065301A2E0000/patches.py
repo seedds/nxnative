@@ -819,7 +819,7 @@ def camp_backdrop(ctx, resize_background, restore_background):
          (0x2328ce0, bunny_slot, 'Bunny Race betting'),
          (0x233b020, cooking_slot, 'Cooking Master ingredients'))
 
-    for at, texture_slot, owner in open_owners:
+    def emit_open(at, texture_slot, owner):
         ctx.site(at, pack('<I', BL(at, set_task)).hex())
         start = ctx.here()
         code, labels, jumps = [], {}, []
@@ -887,6 +887,9 @@ def camp_backdrop(ctx, resize_background, restore_background):
             ctx.emit(w)
         ctx.put(at, [BL(at, start)], f'{owner}: capture into a private tall RenderTexture')
 
+
+    for at, texture_slot, owner in open_owners:
+        emit_open(at, texture_slot, owner)
 
     # The task samples the full camera only for an owned tall clone.
     at, original = 0x22c48b8, 0x1e2202a0  # scvtf s0,w21

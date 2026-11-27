@@ -12,6 +12,7 @@ from nso_asm import B, BL  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location(
     'star_ocean_patches', TOOLS.parent / 'games/010065301A2E0000/patches.py')
+assert SPEC is not None and SPEC.loader is not None
 PATCHES = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PATCHES)
 

@@ -1,8 +1,10 @@
 // A present whose drawable the display has not released must not hold back the game's queue. A present is held on the GPU through mtl_present_test_hold, which stands in
 // for that drawable. Real Metal 4 queue and offscreen drawables; the display link's callback is called by hand, as in t_present_alloc.m. Cases:
 // 1. While a present is held, a game submission completes on the GPU (within 500 ms).
-// 2. While a present is held, the game draws something else into the texture it showed once the next present is taken: the held present still shows the old picture.
-// 3. With three presents held, a fourth does not start in the ring slot of the first until that one has run.
+// 2. While a present is held, the game draws something else into the texture it showed once the next present is taken, and that drawing runs: the held present still shows
+//    the old picture (it reads the copy, nvn_mtl.m present_copy).
+// 3. With three presents held, a fourth does not start in the ring slot of the first until that one has run: the first still shows its own picture.
+// Cases 1 and 2 hold for presents on a queue of their own (the default; DM_PRESENT_QUEUE=0 fails them).
 // Every wait here is bounded, so a present that holds the queue fails a check instead of hanging the test.
 #include "../nvn/nvn_mtl.m"
 @interface FakeLinkUpdate : NSObject
@@ -115,30 +117,34 @@ int main(void) { @autoreleasepool {
     present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();   // the next present is taken: the texture is the game's again
     id<MTLTexture> am = serial_get(a.serial);
     fence = submit(am, 220);
+    CHECK("the drawing runs while the present is held", mtl_wait(fence, 500000000ull));
     release_presents(ev);
     CHECK("after the hold, the drawing and the presents complete", mtl_wait(fence, 2000000000ull) && presents_done());
     int bad = bad_pixels(shown.texture, 50, 150); printf("held drawable: %d of 64 pixels wrong\n", bad);
     CHECK("the held present shows the picture it was given", bad == 0);
     CHECK("the game's drawing landed in its texture", bad_pixels(am, 220, 220) == 0);
 
-    // 3. Three presents held: the fourth uses the ring slot of the first, and waits for that one to run (on the Metal 4 queue: g_present_alloc_done)
+    // 3. Three presents held: the fourth uses the ring slot of the first, and waits for that one to run (g_present_alloc_done), so it cannot copy its picture over the first's
     ev = hold_presents();
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick();
-    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, NULL); id<CAMetalDrawable> first_dr = tick();
     present_enqueue(&c, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick();
     pthread_mutex_lock(&g_pq_mu); int inflight = g_pq_inflight; uint64_t first = g_pq_read - 2; pthread_mutex_unlock(&g_pq_mu);
     snprintf(name, sizeof name, "three presents held (%d in flight)", inflight); CHECK(name, inflight == 3);
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL);
+    present_enqueue(&c, 1. / 60, NULL, 0, NULL);
     g_held = drawable(); g_held_done = dispatch_semaphore_create(0); pthread_t th; pthread_create(&th, NULL, held_tick, NULL);
     int returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC)) == 0;
     snprintf(name, sizeof name, "the fourth present waits for ring slot %llu while ticket %llu is held", (unsigned long long)((first + 3) % 3), (unsigned long long)first);
     CHECK(name, !returned);
+    mtl_wait(submit(nil, 0), 2000000000ull);   // the game's queue has run what was committed to it: a copy the fourth present made would have landed
     release_presents(ev);
     if (!returned) returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
     CHECK("the fourth present goes once the held ones have run", returned);
     if (returned) pthread_join(th, NULL);
     CHECK("every present completed", presents_done());
+    bad = bad_pixels(first_dr.texture, 100, 100); printf("first held drawable: %d of 64 pixels wrong\n", bad);
+    CHECK("the first held present shows its own picture, not the fourth's", bad == 0);
 
-    printf("t_present_queue (encode thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
+    printf("t_present_queue (encode thread %s, DM_PRESENT_QUEUE %s): %d checks, %d failed\n", rec_on() ? "on" : "off", g_pq4 ? "on" : "off", checks, failed);
     return failed != 0;
 } }

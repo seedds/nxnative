@@ -92,8 +92,6 @@ def row_key(row: str, parsed: dict[str, list[str]]) -> tuple[str, ...]:
     fields = row.split('\t')
     if row in parsed:
         return (*fields[:-1], parsed[row][-1]) if parsed[row] != ['-'] else ()
-    if fields[0] == 'S':
-        return tuple(fields[:2])  # The host loads an S row by key and gets its stage from the map.
     return tuple(fields)
 
 
@@ -109,7 +107,7 @@ def check_stages(row: str, parsed: dict[str, list[str]], shaders: dict[str, str]
     elif kind == 'G':
         refs = [(key + '_b', 'vertex', ''), (rest[0] + '_b', 'geometry', '')]
     else:
-        refs = [(key, 'compute' if kind == 'C' else '', rest[0] if kind == 'S' else '')]
+        refs = [(key, 'compute', '')]
     if any(key not in shaders for key, _, _ in refs):
         return 'missing shader'
     if any((stage and shaders[key] != stage) or (number and number not in STAGES.get(shaders[key], ''))
@@ -193,6 +191,9 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
         parsed = parse_pipelines(parser, capture.rows)
         counts: Counter[str] = Counter()
         for row in capture.rows:
+            if row.startswith('S\t'):
+                counts['ignored S'] += 1
+                continue
             key = row_key(row, parsed)
             if not key:
                 counts['invalid pipeline'] += 1
@@ -211,7 +212,7 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
             note = ' (no matching version map, using repository shader map)' if repository_shaders else ' (no shader map available)'
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
-        if counts['added'] + counts['duplicate'] == len(capture.rows):
+        if counts['added'] + counts['duplicate'] + counts['ignored S'] == len(capture.rows):
             result.captures_to_delete.append((capture.path, capture.file_stat))
     if not additions:
         return

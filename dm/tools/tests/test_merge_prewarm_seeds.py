@@ -98,21 +98,35 @@ class ImportSeeds(unittest.TestCase):
         mesh = f'M\t{TASK}\t{key(MESH, 7)}'
         compute = f'C\t{COMPUTE}'
         self.upload(f'R\t{key(VERTEX)[:-16]}', shader, mesh, f'M\t{TASK}\t{key(MESH, 4)}', compute,
-                    f'C\t{"0" * 16}_b', f'S\t{VERTEX}\t1', f'G\t{VERTEX[:-2]}\t{"0" * 16}', 'R\t00',
+                    f'C\t{"0" * 16}_b', f'S\t{VERTEX}\t1', f'G\t{VERTEX[:-2]}\t{COMPUTE[:-2]}',
+                    f'G\t{VERTEX[:-2]}\t{"0" * 16}', 'R\t00',
                     version='1.0.1')
         self.upload(f'S\t{VERTEX}\t0', corrupt=True)
-        self.upload(shader, title='0100000000000001')
+        self.upload(compute, title='0100000000000001')
         preview = self.run_import().stdout
-        for expected in ('3 added', '2 duplicate', 'invalid pipeline', '2 missing shader',
+        for expected in ('2 added', '2 duplicate', '2 ignored S', 'invalid pipeline', '2 missing shader',
                          'stage mismatch', 'no matching version map', 'SHA-256 mismatch',
                          'no repository profile', 'Preview'):
             self.assertIn(expected, preview)
         self.assertEqual(self.manifest.read_text(), self.original)
         self.run_import('--apply')
         self.assertEqual(self.manifest.read_text(), self.original + '# Inbox captures from 1.0.1.\n'
-                         + '\n'.join([shader, mesh, compute]) + '\n')
+                         + '\n'.join([mesh, compute]) + '\n')
         self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
         self.assertEqual(len(list(self.inbox.glob('*.tsv'))), 3)
+
+    def test_legacy_s_rows_are_ignored_and_captures_clean_up(self):
+        s_only = self.upload(f'S\t{VERTEX}\t0', f'S\t{COMPUTE}\t5')
+        mixed = self.upload(f'S\t{VERTEX}\t0', f'C\t{COMPUTE}')
+        applied = self.run_import('--apply').stdout
+        self.assertIn('2 ignored S', applied)
+        self.assertIn('1 added, 1 ignored S', applied)
+        self.assertIn('Deleted 2 inbox capture(s).', applied)
+        self.assertFalse(s_only.exists())
+        self.assertFalse(mixed.exists())
+        text = self.manifest.read_text()
+        self.assertNotIn('S\t', text)
+        self.assertIn(f'C\t{COMPUTE}\n', text)
 
     def test_geometry_adds_valid_new_pairs_once_and_keeps_stage_mismatches(self):
         vertex, geometry = VERTEX[:-2], GEOMETRY[:-2]
@@ -229,7 +243,7 @@ class ImportSeeds(unittest.TestCase):
         self.add_local_profile()
         base = self.upload(f'C\t{COMPUTE}', f'C\t{UPDATE_COMPUTE}')
         update = self.upload(f'C\t{UPDATE_COMPUTE}', version='1.0.1')
-        covered = self.upload(f'S\t{SECOND_VERTEX}\t0', version='1.0.2')
+        covered = self.upload(f'R\t{key(SECOND_VERTEX)}', version='1.0.2')
 
         applied = self.run_import('--apply').stdout
         self.assertIn(f'{base.name}: 1 added, 1 missing shader', applied)
@@ -272,12 +286,12 @@ class ImportSeeds(unittest.TestCase):
                          self.manifest.relative_to(self.repo).as_posix())
 
         self.git('commit', '--allow-empty', '-m', 'local change')
-        pending = self.upload(f'S\t{VERTEX}\t0')
+        pending = self.upload(f'R\t{key(SECOND_VERTEX)}')
         result = self.run_import('--push', check=False)
         self.assertEqual(result.returncode, 1)
         self.assertIn('local commits', result.stderr)
         self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
-        self.assertNotIn(f'S\t{VERTEX}', self.manifest.read_text())
+        self.assertNotIn(f'R\t{key(SECOND_VERTEX)}', self.manifest.read_text())
         self.assertTrue(pending.is_file())
 
     def test_rejected_push_keeps_capture(self):

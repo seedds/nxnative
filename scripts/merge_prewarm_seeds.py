@@ -167,9 +167,7 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
         note = f' (profile package {package})' if package and package != capture.version else ''
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
-        fully_imported = counts['added'] + counts['duplicate'] == len(capture.rows)
-        only_duplicates_or_missing = counts['duplicate'] + counts['missing shader'] == len(capture.rows)
-        if fully_imported or only_duplicates_or_missing:
+        if counts['added'] + counts['duplicate'] == len(capture.rows):
             result.captures_to_delete.append((capture.path, capture.file_stat))
     if not additions:
         return

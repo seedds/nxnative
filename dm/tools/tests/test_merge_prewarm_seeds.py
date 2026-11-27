@@ -151,28 +151,39 @@ class ImportSeeds(unittest.TestCase):
         self.assertFalse(capture.exists())
         self.assertEqual(self.manifest.read_text(), imported)
 
-    def test_apply_deletes_captures_with_only_duplicates_or_missing_shaders(self):
+    def test_apply_keeps_captures_with_missing_shaders_even_without_additions(self):
         missing = f'C\t{"0" * 16}_b'
         captures = (self.upload(missing), self.upload(f'R\t{key(VERTEX)}', missing))
 
-        self.assertIn('2 inbox capture(s) would be deleted', self.run_import().stdout)
-        self.assertTrue(all(capture.is_file() for capture in captures))
+        self.assertNotIn('would be deleted', self.run_import().stdout)
         result = self.run_import('--apply').stdout
+        self.assertIn('1 duplicate, 1 missing shader', result)
         self.assertIn('No manifest updates.', result)
-        self.assertIn('Deleted 2 inbox capture(s).', result)
-        self.assertFalse(any(capture.exists() for capture in captures))
+        self.assertTrue(all(capture.is_file() for capture in captures))
         self.assertEqual(self.manifest.read_text(), self.original)
 
-    def test_apply_keeps_capture_with_additions_and_missing_shaders_until_retry(self):
+    def test_apply_retries_missing_rows_after_the_shader_map_gains_the_key(self):
         seed = f'C\t{COMPUTE}'
-        capture = self.upload(seed, f'C\t{"0" * 16}_b')
+        shader = '0' * 16
+        missing = f'C\t{shader}_b'
+        capture = self.upload(seed, missing, version='1.0.1')
+        original_capture = capture.read_bytes()
 
         self.run_import('--apply')
-        self.assertTrue(capture.is_file())
-        self.assertIn(seed, self.manifest.read_text())
+        partial = self.original + f'# Inbox captures from 1.0.1.\n{seed}\n'
+        self.assertEqual(self.manifest.read_text(), partial)
 
         self.assertIn('No manifest updates.', self.run_import('--apply').stdout)
+        self.assertEqual(capture.read_bytes(), original_capture)
+        self.assertEqual(self.manifest.read_text(), partial)
+
+        with self.manifest.with_name('shader_map.tsv').open('a') as shader_map:
+            shader_map.write(f'shaders\t6\tcompute\t{shader}\n')
+        result = self.run_import('--apply').stdout
+        self.assertIn('1 added, 1 duplicate', result)
+        self.assertIn('Deleted 1 inbox capture(s).', result)
         self.assertFalse(capture.exists())
+        self.assertEqual(self.manifest.read_text(), partial + f'# Inbox captures from 1.0.1.\n{missing}\n')
 
     def test_push_updates_main_without_including_local_commits(self):
         bare = self.init_origin()

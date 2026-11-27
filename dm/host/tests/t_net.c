@@ -71,6 +71,23 @@ int main(void) {
     CHECK(h_nsk_SendTo(u, "z", 1, 0, zero_len, 16) == 1, "sin_len 0 is accepted, as hand-written game code leaves it");
     CHECK(h_sk_Recv(v, data, sizeof data, 0) == 1, "and arrives");
 
+    // RecvMsg / SendMsg (gRPC's reads and writes): Horizon's 0x30-byte msghdr, gathered and scattered through one host buffer
+    sk_iovec out_iov[2] = {{(void *)"abc", 3}, {(void *)"defg", 4}}; sk_msghdr out = {b, 16, 0, out_iov, 2, 0, NULL, 0, 0};
+    CHECK(h_nsk_SendMsg(u, &out, 0) == 7, "SendMsg gathers two iovecs into one datagram");
+    char head[3] = {0}, tail[10] = {0}; sk_iovec in_iov[2] = {{head, 3}, {tail, 10}}; uint8_t src[16] = {0}, control[8];
+    sk_msghdr in = {src, sizeof src, 0, in_iov, 2, 0, control, sizeof control, 0x55};
+    CHECK(h_nsk_RecvMsg(v, &in, 0) == 7 && !memcmp(head, "abc", 3) && !memcmp(tail, "defg", 4) && in.namelen == 16 && port_of(src) == port_of(a) && !in.controllen && !in.flags,
+          "RecvMsg scatters it, reports the sender and no ancillary data");
+    h_nsk_SendTo(u, "truncated", 9, 0, b, 16);
+    char small[4] = {0}; sk_iovec small_iov = {small, 4}; sk_msghdr cut = {NULL, 0, 0, &small_iov, 1, 0, NULL, 0, 0};
+    CHECK(h_nsk_RecvMsg(v, &cut, 0) == 4 && !memcmp(small, "trun", 4) && cut.flags == 0x10, "a datagram longer than the iovecs is cut to them, with MSG_TRUNC");
+    out.control = control; out.controllen = sizeof control;
+    CHECK(h_nsk_SendMsg(u, &out, 0) == -1 && h_sk_GetLastError() == 95, "SendMsg refuses ancillary data rather than drop it");
+    out.control = NULL; out.controllen = 0; out.iovlen = -1;
+    CHECK(h_nsk_SendMsg(u, &out, 0) == -1 && h_sk_GetLastError() == 22, "a negative iovec count is EINVAL");
+    out.iovlen = 2; out_iov[1].len = 1ull << 40;
+    CHECK(h_nsk_SendMsg(u, &out, 0) == -1 && h_sk_GetLastError() == 90, "a datagram over the host buffer is EMSGSIZE, before its iovecs are read");
+
     // Socket options: Horizon's numbers translated, SO_NOSIGPIPE kept on, SO_TYPE / SO_ERROR in Horizon's values, getsockopt output prepared
     int one = 1, zero = 0, value = -1; unsigned len = sizeof value;
     CHECK(h_sk_SetSockOpt(u, 0xffff, 0x20, &one, sizeof one) == 0, "SO_BROADCAST (0x20)");
@@ -135,6 +152,9 @@ int main(void) {
     CHECK(h_sk_SetSockOpt(c, 6, 1, &one, sizeof one) == 0, "TCP_NODELAY at IPPROTO_TCP (6)");
     CHECK(h_sk_Send(c, "hello", 5, 0) == 5, "TCP send");
     CHECK(h_sk_Recv(s, data, 5, 0x40) == 5 && !memcmp(data, "hello", 5), "MSG_WAITALL gets the whole message");
+    sk_iovec tcp_iov[2] = {{(void *)"ab", 2}, {(void *)"cd", 2}}; sk_msghdr tcp_out = {NULL, 0, 0, tcp_iov, 2, 0, NULL, 0, 0};
+    char tcp_in[4] = {0}; sk_iovec tcp_in_iov = {tcp_in, 4}; sk_msghdr tcp_msg = {NULL, 0, 0, &tcp_in_iov, 1, 0, NULL, 0, 0};
+    CHECK(h_nsk_SendMsg(c, &tcp_out, 0) == 4 && h_nsk_RecvMsg(s, &tcp_msg, 0x40) == 4 && !memcmp(tcp_in, "abcd", 4) && !tcp_msg.flags, "SendMsg and RecvMsg over TCP");
     n = sizeof from; CHECK(h_sk_GetPeerName(c, from, &n) == 0 && port_of(from) == port_of(la), "GetPeerName");
     CHECK(h_sk_Close(s) == 0, "the server closes");
     dm_guest_sleep_ns(20000000);

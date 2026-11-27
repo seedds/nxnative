@@ -437,6 +437,53 @@ HLE_FORCE("nnsocketRecv", "local UDP (offline BSD service)", long, h_nsk_Recv, i
 HLE_FORCE("nnsocketSend", "local UDP (offline BSD service)", long, h_nsk_Send, int s, const void *b, unsigned long n, int f) { return dm_sk_sendto(s, b, n, f, NULL, 0); }
 HLE_FORCE("nnsocketSendTo", "local UDP (offline BSD service)", long, h_nsk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_sk_sendto(s, b, n, f, a, al); }
 HLE_FORCE("nnsocketRecvFrom", "local UDP (offline BSD service)", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_sk_recvfrom(s, b, n, f, a, al); }
+// RecvMsg / SendMsg, network mode only (offline they stay cut). gRPC's TCP endpoint does all its reads and writes with them (nn::npln: Super Mario Bros. Wonder). Horizon's
+// msghdr is FreeBSD's, 0x30 bytes: name +0x00, namelen +0x08, iov +0x10, iovlen (int) +0x18, control +0x20, controllen +0x28, flags +0x2c; SDK 16's detail::RecvMsg (Wonder 1.2.1
+// sdk+0x14cf70) copies those 0x30 bytes into an mmsghdr and calls RecvMMsg with one message. The data goes through one host buffer, gathered before a send and scattered after a
+// receive. No ancillary data is carried: a receive reports none (controllen 0), and a send that has some fails with EOPNOTSUPP rather than drop it. The buffer holds at most
+// SK_MSG_MAX bytes: on a stream a longer message moves in part, as a real socket may move less than asked, and a datagram that long fails with EMSGSIZE. A datagram longer than
+// the iovecs is cut to them and reported with MSG_TRUNC (FreeBSD's 0x10): the receive asks for one byte more to see it
+typedef struct { void *base; uint64_t len; } sk_iovec;
+typedef struct { void *name; uint32_t namelen, pad0; sk_iovec *iov; int32_t iovlen, pad1; void *control; uint32_t controllen; int32_t flags; } sk_msghdr;
+_Static_assert(sizeof(sk_msghdr) == 0x30 && offsetof(sk_msghdr, iov) == 0x10 && offsetof(sk_msghdr, controllen) == 0x28 && offsetof(sk_msghdr, flags) == 0x2c, "Horizon msghdr");
+enum { SK_MSG_IOV_MAX = 1024, SK_MSG_MAX = 16 << 20, SK_MSG_TRUNC = 0x10 };
+static int sk_datagram(int fd) { int type = 0; unsigned n = sizeof type; return !dm_sk_getopt(fd, 0xffff, 0x1008, &type, &n) && type == SK_UDP; }   // SO_TYPE
+static long sk_msg_size(const sk_msghdr *m, int datagram) {
+    if (!m) return sk_error(14);
+    if (m->iovlen < 0 || m->iovlen > SK_MSG_IOV_MAX || (m->iovlen && !m->iov)) return sk_error(SK_EINVAL);
+    uint64_t total = 0;   // stops at SK_MSG_MAX + 1, whatever the lengths add up to
+    for (int i = 0; i < m->iovlen; i++) {
+        if (m->iov[i].len && !m->iov[i].base) return sk_error(14);
+        if (total <= SK_MSG_MAX) total = m->iov[i].len > SK_MSG_MAX - total ? SK_MSG_MAX + 1ull : total + m->iov[i].len;
+    }
+    if (total > SK_MSG_MAX) { if (datagram) return sk_error(90); total = SK_MSG_MAX; }   // EMSGSIZE, Linux's number as network mode uses
+    return (long)total;
+}
+static long sk_recvmsg(int s, sk_msghdr *m, int f) {
+    int datagram = sk_datagram(s); long total = sk_msg_size(m, datagram); if (total < 0) return -1;
+    uint8_t *buffer = malloc((size_t)total + 1); if (!buffer) return sk_error(12);
+    unsigned namelen = m->name ? m->namelen : 0;
+    long got = dm_sk_recvfrom(s, buffer, (unsigned long)total + (unsigned long)datagram, f, m->name, m->name ? &namelen : NULL);
+    if (got >= 0) {
+        int cut = got > total; if (cut) got = total;
+        long left = got;
+        for (int i = 0; i < m->iovlen && left > 0; i++) { uint64_t n = m->iov[i].len < (uint64_t)left ? m->iov[i].len : (uint64_t)left; memcpy(m->iov[i].base, buffer + (got - left), n); left -= (long)n; }
+        if (m->name) m->namelen = namelen;
+        m->controllen = 0; m->flags = cut ? SK_MSG_TRUNC : 0;
+    }
+    free(buffer); return got;
+}
+static long sk_sendmsg(int s, const sk_msghdr *m, int f) {
+    long total = sk_msg_size(m, sk_datagram(s)); if (total < 0) return -1;
+    if (m->control && m->controllen) return sk_error(95);   // EOPNOTSUPP
+    uint8_t *buffer = malloc(total ? (size_t)total : 1); if (!buffer) return sk_error(12);
+    long at = 0;
+    for (int i = 0; i < m->iovlen && at < total; i++) { long n = m->iov[i].len < (uint64_t)(total - at) ? (long)m->iov[i].len : total - at; memcpy(buffer + at, m->iov[i].base, (size_t)n); at += n; }
+    long sent = dm_sk_sendto(s, buffer, (unsigned long)total, f, m->name, m->name ? m->namelen : 0);
+    free(buffer); return sent;
+}
+HLE_FORCE("nnsocketRecvMsg", "network mode: scatter receive through one host buffer, no ancillary data; offline (cut)", long, h_nsk_RecvMsg, int s, sk_msghdr *m, int f) { return dm_net_enabled() ? sk_recvmsg(s, m, f) : -1; }
+HLE_FORCE("nnsocketSendMsg", "network mode: gather send through one host buffer, ancillary data refused; offline (cut)", long, h_nsk_SendMsg, int s, const sk_msghdr *m, int f) { return dm_net_enabled() ? sk_sendmsg(s, m, f) : -1; }
 HLE_FORCE("nnsocketRead", "local UDP/EventFd (offline BSD service)", long, h_nsk_Read, int s, void *b, unsigned long n) { return dm_sk_read(s, b, n); }
 HLE_FORCE("nnsocketWrite", "local UDP/EventFd (offline BSD service)", long, h_nsk_Write, int s, const void *b, unsigned long n) { return dm_sk_write(s, b, n); }
 HLE_FORCE("nnsocketGetHostByNameWithOptions", "name resolution (cut): NULL", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }

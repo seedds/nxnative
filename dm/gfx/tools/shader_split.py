@@ -1291,8 +1291,11 @@ def rgxd_shaders(d, label):
 def d11_pack_shaders(path, label, out):
     """Double Eleven's resource pack (Red Dead Redemption's d11extra/langselect.pkdswitch, the language selection shown before the game): the data file holds the members one after another, its
     index beside it (.pkiswitch) is u32 version 3, u32 0, u32 member count (22), then per member {u32 length, u32 stored length, u32 offset in the data file, u32 name hash}; a member whose stored
-    length differs from its length is one zlib stream. Members 4 and 5 are whole GLSLC outputs, the screen's pixel and vertex shader (98664fb56b9c9fdf, 70d4dd8068044bb5): without them the host
-    found no vertex shader for the first program the game draws with. The others are textures ('DFvN') and fonts ('BMF')"""
+    length differs from its length is one zlib stream, except one whose stored length is 0: the index gives it no bytes in the data file (what the game's loader makes of such a member is not
+    known), so it is passed over, with a red line when it is long enough to hold a shader (the shortest control section, 0x760 bytes). LEGO Harry Potter Collection's launcher.pkdswitch has one,
+    member 90 of 158, 8 bytes long: read as a zlib stream, its red line made the whole pack unreadable, and none of its shaders reached the map. Members 4 and 5 of langselect are whole GLSLC
+    outputs, the screen's pixel and vertex shader (98664fb56b9c9fdf, 70d4dd8068044bb5): without them the host found no vertex shader for the first program the game draws with. The others are
+    textures ('DFvN') and fonts ('BMF')"""
     with open(path[:-len('.pkdswitch')] + '.pkiswitch', 'rb') as f: idx = f.read()
     with open(path, 'rb') as f: d = f.read()
     if len(idx) < 12: red(f'{label}: the pack index is cut short ({len(idx)} bytes)')
@@ -1302,6 +1305,9 @@ def d11_pack_shaders(path, label, out):
     for k in range(n):
         size, stored, off, h = struct.unpack_from('<4I', idx, 12 + 16 * k)
         if off + stored > len(d): red(f'{label}: member {k} runs past the end of the data file')
+        if not stored:   # nothing stored: no bytes to inflate or scan
+            if size >= 0x760: print(f'[RED] {label}: member {k} ({h:08x}) is {size} bytes long and stores none; it is passed over, and any shader in it is left out', flush=True)
+            continue
         m = d[off:off + stored]
         if stored != size:
             try: m = zlib.decompress(m)

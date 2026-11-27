@@ -915,9 +915,16 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 ### Double Eleven `.pkdswitch` packs
 
 - **Symptom:** after the RPF6 archives are read, the first screen's two shaders are still `[RED] shader … is not in the shader map`.
-- **How it is stored:** Double Eleven's resource pack: the members one after another in `.pkdswitch`, and an index `.pkiswitch` beside it: u32 version 3, u32 0, u32 member count, then 16-byte entries {length, stored length, offset in the data file, name hash}; a member whose stored length differs from its length is one zlib stream. The shaders are whole GLSLC outputs (`langselect`: members 4 and 5, the screen's pixel and vertex shader); the other members are textures (`DFvN`) and fonts (`BMF`).
+- **How it is stored:** Double Eleven's resource pack: the members one after another in `.pkdswitch`, and an index `.pkiswitch` beside it: u32 version 3, u32 0, u32 member count, then 16-byte entries {length, stored length, offset in the data file, name hash}; a member whose stored length differs from its length is one zlib stream, unless its stored length is 0 ([A `.pkdswitch` member with nothing stored](#a-pkdswitch-member-with-nothing-stored)). The shaders are whole GLSLC outputs (`langselect`: members 4 and 5, the screen's pixel and vertex shader); the other members are textures (`DFvN`) and fonts (`BMF`).
 - **Fix:** `d11_pack_shaders` in `shader_split.py` reads a `.pkdswitch` through its index and scans each member for shaders.
 - **Found on:** [Red Dead Redemption](../../dm/games/01007820196A6000/README.md): `d11extra/langselect.pkdswitch`, the language selection shown before the game.
+
+### A `.pkdswitch` member with nothing stored
+
+- **Symptom:** the shader extraction prints `[RED] /…/launcher.pkdswitch: member 90 (bd7144e6) is no zlib stream: Error -5 while decompressing data: incomplete or truncated stream (its shaders are left out)`, and none of the pack's shaders reach the map.
+- **Cause:** the index lists a member whose stored length is 0 (here 8 bytes long). `d11_pack_shaders` took every member whose stored length differs from its length as a zlib stream, so it tried to inflate zero bytes. Its red line made the whole file unreadable, and `scan_file` leaves out such a file, so the shaders of all 158 members were left out, not only those after member 90.
+- **Fix:** a member with nothing stored is passed over, and the pack goes on. The index gives it no bytes in the data file; what the game's loader makes of such a member is not known. 8 bytes cannot hold a shader. A member with nothing stored that is at least as long as the shortest control section (0x760 bytes) could, so it gets a red line naming it. Damaged members (a stream that does not inflate, or that inflates to another length) still stop the pack. `dm/gfx/tests/test_d11_pack.py` covers these cases, also through `scan_file`.
+- **Found on:** LEGO Harry Potter Collection (`010052A00B5D2000`, no profile; [issue #3382](https://github.com/seedds/nxnative/issues/3382), diagnosed by the reporter from the pack's index: 158 members, member 90 the only one with nothing stored). Its build had only the 372 shaders from the NROs. Not run on the game's files here. Open: whether the four shaders the game asked for and the map lacks are in this pack at all.
 
 ### REDengine 3 shader caches
 

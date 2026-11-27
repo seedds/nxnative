@@ -120,7 +120,9 @@ def sources(roots):
 #     as GL's fixed pipeline does, so both become one varying, dm_Color, which the host matches by name;
 #   · `sampler` as a name (DOOM 3's helpers take `sampler2D sampler`): a reserved word in Vulkan GLSL, an ordinary name in OpenGL's;
 #   · a function body closed with `};` (Mega Man Legacy Collection's shaders/nx/*.glsl end main that way): GLSL ES has no empty declaration at file scope, so the `;` goes.
-#     A struct's or a block's `};` ends its declaration and stays: only a `{` opened right after a `)` at file scope is a function body
+#     A struct's or a block's `};` ends its declaration and stays: only a `{` opened right after a `)` at file scope is a function body;
+#   · a doubled `;` at file scope (Mark of the Ninja: Remastered's macros end with `;` and are called with one: `DECL_TEXTURE_REGISTER(FOWTexture, 6);`): glslang allows the empty
+#     declaration only from GLSL 4.60 on, NVIDIA in any version, so the second `;` goes. In a function body `;;` is an empty statement and stays
 OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture3DLod\s*\(', 'textureLod('),
            (r'\btexture2DProj\s*\(', 'textureProj('), (r'\btexture3DProj\s*\(', 'textureProj('),
            (r'\btexture2D\s*\(', 'texture('), (r'\btexture3D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
@@ -146,10 +148,13 @@ def own_name(t, decl, name, new, out=None):
     return re.sub(rf'\b{name}\b', new, t)
 
 def function_semicolons(t):
-    """t without the `;` right after the `}` that closes a function body at file scope"""
+    """t without the empty declarations at file scope: the `;` right after the `}` that closes a function body, and a `;` right after another `;`"""
     out, depth, body, i, k = [], 0, False, 0, 0
     while k < len(t):
         c = t[k]
+        if c == ';' and depth == 0:
+            m = re.match(r'\s*;', t[k + 1:])
+            if m: out.append(t[i:k + 1]); i = k + 1 + m.end(); k = i; continue
         if c == '{':
             if depth == 0: body = t[:k].rstrip().endswith(')')
             depth += 1

@@ -58,6 +58,15 @@ class Fixups(unittest.TestCase):
         self.assertNotIn('} ;', g); self.assertTrue(g.rstrip().endswith('}'))
         self.assertEqual(gl_shaders.function_semicolons(g), g)
 
+    def test_doubled_semicolon_at_file_scope(self):   # Mark of the Ninja: Remastered's DECL_*_REGISTER macros end with `;` and are called with one; `;;` in a body stays
+        t = ('layout(binding = 6) uniform sampler2D FOWTexture;;\nfloat FOWSampler; ;\n'
+             'void main()\n{\n\tif (gl_FragCoord.x < 0.0) discard;;\n}\n')
+        g = gl_shaders.function_semicolons(t)
+        self.assertIn('uniform sampler2D FOWTexture;\n', g); self.assertIn('float FOWSampler;\n', g)
+        self.assertIn('discard;;', g)
+        self.assertEqual(gl_shaders.function_semicolons(g), g)
+
+
 
 # GLSL ES 1.00 as Fate/hollow ataraxia REMASTERED's built shaders write it: a sampler named `texture` (a built-in function from ES 3.00 on) and, as GameMaker's, a variable `sample`
 ES100_FRAG = (b'precision mediump float;\nvarying vec2 v_uv;\nuniform sampler2D texture;\nuniform float sample;\n'

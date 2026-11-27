@@ -2631,6 +2631,14 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Found on:** [Mega Man Legacy Collection](../../dm/games/01002D4007AE0000/README.md): three of its six `.glsl` files end `main` with `};`. Reported in [PR #2726](https://github.com/seedds/nxnative/pull/2726).
 - **Check:** `test_gl_shaders.py`.
 
+### A doubled `;` at file scope
+
+- **Symptom:** `gl_shaders.py` reports `does not translate: frag: glslang: ERROR: …: 'extraneous semicolon' : not supported for this version or the enabled extensions` for most captured shaders of a `#version 450` game. Every program that uses one skips its draws, and the window stays black while the sound plays.
+- **Cause:** the game's macros end with `;` and are called with one (`DECL_TEXTURE_REGISTER( FOWTexture, 6 );`), so the preprocessed text has `;;` at file scope. glslang allows an empty declaration only from GLSL 4.60 on. NVIDIA's compiler accepts it in any version.
+- **Fix:** `fixups()` drops a `;` that follows another `;` at file scope. Inside a function body `;;` is an empty statement and stays.
+- **Found on:** Mark of the Ninja: Remastered (`01009A700A538000`, no profile): 44 of the 74 shaders its title screen compiles.
+- **Check:** `test_gl_shaders.py`.
+
 ### A sampler the shader never reads
 
 - **Symptom:** every sprite of a program samples black, while the textures are there; the shader's table row lists two samplers at one slot, such as `t:T0=0:sampler2D t:T1=0:sampler2D`.

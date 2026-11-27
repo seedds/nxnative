@@ -147,6 +147,128 @@ class PaneGuard(Arm64ScreenShape):
 
 
 @unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
+class ShortcutCapture(Arm64ScreenShape):
+    def run_capture(self, index, name, *, oh=1200, live=5, authored=5, width=3840.0, height=2160.0, count=7, layout_name=b'ShortCutBG_00'):
+        layout, res, nodes = self.frame, self.frame + 0x180, self.frame + 0x400
+        records, names, record = self.frame + 0x200, self.frame + 0x240, self.frame + 0x980
+        pane, title, node_name = nodes + index * 0xb0, self.frame + 0x900, self.frame + 0x930
+        for addr, fmt, value in (
+            (self.state + 0x48, 'I', oh), (self.state + 0x5c, 'f', oh / 1080.0),
+            (pane + 0x18, 'Q', layout), (pane + 0xa8, 'I', live << 22),
+            (layout + 0x10, 'Q', res), (layout + 0x100, 'Q', nodes), (layout + 0x13c, 'H', count),
+            (res, 'I', 0x004c4955), (res + 0x18, 'Q', title), (res + 0x20, 'Q', names), (res + 0x28, 'Q', records),
+            (res + 0x38, 'I', 14 if layout_name == b'ShortCut_01' else 7),
+            (records + index * 8, 'Q', record), (names + index * 8, 'Q', node_name),
+            (record + 0x38, 'I', authored << 7), (record + 0x2c, 'f', width), (record + 0x30, 'f', height),
+        ):
+            self.u.mem_write(addr, struct.pack('<' + fmt, value))
+        self.u.mem_write(title, layout_name + b'\0')
+        self.u.mem_write(node_name, name + b'\0')
+        self.u.reg_write(self.arm.UC_ARM64_REG_X19, pane)
+        self.u.reg_write(self.arm.UC_ARM64_REG_SP, self.frame + 0xf00 if oh else 0)
+        identity = ((1., 0., 0., 0.), (0., 1., 0., 0.), (0., 0., 1., 0.), (0., 0., 0., 1.))
+        for i, column in enumerate(identity):
+            self.u.reg_write(getattr(self.arm, f'UC_ARM64_REG_Q{i}'), int.from_bytes(struct.pack('<4f', *column), 'little'))
+        site = self.base + FUNCTIONS['pane global matrix'] + 0x3b0
+        self.u.emu_start(site, site + 4, count=2000)
+        self.assertEqual(self.u.reg_read(self.arm.UC_ARM64_REG_PC), site + 4)
+        return [struct.unpack('<4f', self.u.reg_read(getattr(self.arm, f'UC_ARM64_REG_Q{i}')).to_bytes(16, 'little')) for i in range(4)]
+
+    def test_both_shortcut_captures_extend_without_shifting(self):
+        for index, name in ((2, b'C_CaptureClearBG_00'), (3, b'C_CaptureBG_00')):
+            for oh in (0, 1200, 1344):
+                with self.subTest(index=index, output_height=oh):
+                    x, y, z, translation = self.run_capture(index, name, oh=oh)
+                    self.assertEqual((x, z, translation), ((1., 0., 0., 0.), (0., 0., 1., 0.), (0., 0., 0., 1.)))
+                    self.assertAlmostEqual(y[1], oh / 1080 if oh else 1.0, places=5)
+
+    def test_shortcut_capture_checks_identity(self):
+        for override in ({'live': 1}, {'authored': 1}, {'width': 1920.}, {'height': 1080.}, {'count': 6}):
+            with self.subTest(override=override):
+                self.assertEqual(self.run_capture(2, b'C_CaptureClearBG_00', **override)[1][1], 1.)
+        self.assertEqual(self.run_capture(2, b'C_Other_00')[1][1], 1.)
+        self.assertEqual(self.run_capture(4, b'P_CaptureClearBG_00', live=1, authored=1)[1][1], 1.)
+
+    def test_only_the_bottom_gradient_follows_the_new_bottom_edge(self):
+        opts = dict(live=1, authored=1, height=1362., count=14, layout_name=b'ShortCut_01')
+        for oh in (0, 1200, 1344):
+            with self.subTest(output_height=oh):
+                _, y, _, t = self.run_capture(1, b'P_Bg_00', oh=oh, **opts)
+                self.assertEqual(y, (0., 1., 0., 0.))
+                self.assertAlmostEqual(t[1], 1080 - oh if oh else 0.0, places=3)
+        self.assertEqual(self.run_capture(5, b'Pa_Guide_02', **opts)[3][1], 0.)
+
+
+@unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
+class OptionsBackdrop(Arm64ScreenShape):
+    def run_backdrop(self, oh, *, clip_name=b'S_Scissor_00', live_width=2200.0):
+        layout, res, nodes = self.frame, self.frame + 0x180, self.frame + 0x400
+        records, names = self.frame + 0x200, self.frame + 0x300
+        title = self.frame + 0x900
+        self.u.mem_write(title, b'SystemOption_00\0')
+
+        def write(addr, fmt, value):
+            self.u.mem_write(addr, struct.pack('<' + fmt, value))
+
+        for addr, fmt, value in (
+            (self.state + 0x48, 'I', oh), (self.state + 0x5c, 'f', oh / 1080 if oh else 1.0),
+            (layout + 0x10, 'Q', res), (layout + 0x100, 'Q', nodes), (layout + 0x13c, 'H', 17),
+            (res, 'I', 0x004c4955), (res + 0x18, 'Q', title), (res + 0x20, 'Q', names),
+            (res + 0x28, 'Q', records), (res + 0x38, 'I', 17),
+        ):
+            write(addr, fmt, value)
+        for i, (name, kind, width, height) in (
+            (4, (clip_name, 4, 2200., 2160.)),
+            (5, (b'P_OptionBg_00', 1, 2240., 5000.)),
+            (6, (b'N_Unrelated_00', 0, 1920., 1524.)),
+        ):
+            pane, record, name_addr = nodes + i * 0xb0, self.frame + 0xa00 + (i - 4) * 0x40, title + (i - 3) * 0x30
+            self.u.mem_write(name_addr, name + b'\0')
+            for addr, fmt, value in (
+                (names + i * 8, 'Q', name_addr), (records + i * 8, 'Q', record),
+                (record + 0x2c, 'f', width), (record + 0x30, 'f', height), (record + 0x38, 'I', kind << 7),
+                (pane + 0x18, 'Q', layout), (pane + 0xa8, 'I', kind << 22),
+                (pane + 0x58, 'f', live_width if i == 4 else width), (pane + 0x5c, 'f', height),
+            ):
+                write(addr, fmt, value)
+
+        def calc(i, y, z=0.0):
+            pane = nodes + i * 0xb0
+            self.u.reg_write(self.arm.UC_ARM64_REG_X19, pane)
+            self.u.reg_write(self.arm.UC_ARM64_REG_SP, self.frame + 0xf00 if oh else 0)
+            matrix = ((1., 0., 0., 0.), (0., 1., 0., 0.), (0., 0., 1., 0.), (0., y, z, 1.))
+            for j, col in enumerate(matrix):
+                self.u.reg_write(getattr(self.arm, f'UC_ARM64_REG_Q{j}'), int.from_bytes(struct.pack('<4f', *col), 'little'))
+            pc = self.base + FUNCTIONS['pane global matrix'] + 0x3b0
+            self.u.emu_start(pc, pc + 4, count=2000)
+            self.assertEqual(self.u.reg_read(self.arm.UC_ARM64_REG_PC), pc + 4)
+            for j in range(3):
+                self.assertEqual(self.u.reg_read(getattr(self.arm, f'UC_ARM64_REG_Q{j}')), int.from_bytes(struct.pack('<4f', *matrix[j]), 'little'))
+            _, y, z, _ = struct.unpack('<4f', self.u.reg_read(self.arm.UC_ARM64_REG_Q3).to_bytes(16, 'little'))
+            return y, z, struct.unpack('<f', self.u.mem_read(pane + 0x5c, 4))[0]
+
+        clip_y, mark, h = calc(4, 0.)
+        self.assertEqual(calc(4, 0.), (clip_y, mark, h))  # repeated frames start with the authored matrix
+        picture_y, _, picture_height = calc(5, 1240. + clip_y, mark)
+        self.assertEqual(picture_height, 5000.)
+        self.assertEqual(calc(6, -12.)[::2], (-12., 1524.))
+        return clip_y, h, picture_y
+
+    def test_options_clip_extends_without_scaling_the_picture(self):
+        for oh in (0, 1200, 1344):
+            with self.subTest(output_height=oh):
+                extra = oh - 1080 if oh else 0
+                y, h, picture_y = self.run_backdrop(oh)
+                self.assertAlmostEqual(y + h / 2, 1080., places=3)
+                self.assertAlmostEqual(y - h / 2, -1080. - extra, places=3)
+                self.assertAlmostEqual(picture_y, 1240. - max(0, extra - 180), places=3)
+
+    def test_options_rejects_wrong_name_or_live_width(self):
+        self.assertEqual(self.run_backdrop(1344, clip_name=b'Other_00'), (0., 2160., 1240.))
+        self.assertEqual(self.run_backdrop(1344, live_width=2199.), (0., 2160., 1240.))
+
+
+@unittest.skipIf(uc is None, 'optional ARM64 execution dependency: unicorn')
 class ProjectionFields(Arm64ScreenShape):
     def set_fovy(self, proj, fovy, aspect):
         # sead's setFovy and its inlined copies write the angle, sin, cos and tan of its half together

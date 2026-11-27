@@ -18,7 +18,8 @@
 //    so carries the menu mark. On the field (x 1490) both move down with the minimap, whatever their mark; on the Minus map page the game puts node 82 at the
 //    centre (x 0) and it stays with the page (measured with DM_PROBE in the stub, 2026-11-18).
 // The state of a chain rides in the translation's z as a mark (UI panes have z 0, z passes to children unchanged, and the UI projection keeps a small negative z):
-// -4/1024 inside a HUD layout, -5/1024 moved, -3/1024 inside a menu (left alone), -6/1024 the Load list window, -7/1024 a Load row put back.
+// -4/1024 inside a HUD layout, -5/1024 moved, -3/1024 inside a menu (left alone), -6/1024 the Load list window,
+// -7/1024 a Load row put back, -8/1024 the Options backdrop scissor.
 // Nothing changes at 16:9.
 // Build: clang -target arm64-apple-macos -O2 -ffreestanding -fno-builtin -fno-stack-protector -fno-jump-tables -fno-asynchronous-unwind-tables -mno-outline-atomics
 //        -c shape_anchor.c, then the __text words (no relocations, no data, shape_calc at +0) as _shape_anchor in patches.py.
@@ -79,12 +80,19 @@ static inline __attribute__((always_inline)) int layout_kind(u32 h) {
 // panes' names at +0x20 and records at +0x28. Verify the pane's name, live class
 // (bits 22..25 of pane+0xa8, copied from bits 7..10 of the authored flags at main+0x1529d9c), and the
 // authored dimensions used by the edit before changing an indexed pane. An updated asset can move panes.
-enum { PANE = 0, PICTURE = 1, CAPTURE = 5, LIST_WINDOW = 7 };
-enum { LEAVE, UP, DOWN, SCREEN_HEIGHT, EXTEND_Y, LOAD_WINDOW, PAUSE_GRADIENT, MAP_PAGE, MAP_BACKDROP, MINIMAP };
+enum { PANE = 0, PICTURE = 1, SCISSOR = 4, CAPTURE = 5, LIST_WINDOW = 7 };
+enum { LEAVE, UP, DOWN, SCREEN_HEIGHT, EXTEND_Y, LOAD_WINDOW, PAUSE_GRADIENT, MAP_PAGE, MAP_BACKDROP, MINIMAP, OPTIONS_CLIP, OPTIONS_PICTURE };
 struct pane_edit { u32 name, kind, action; float height, width; };
 
 static inline __attribute__((always_inline)) struct pane_edit pane_edit(u32 hash, u32 i) {
     switch (hash) {
+    case 0xdce7ed91u:   // ShortCutBG_00: capture the whole gameplay picture behind the quick-item selector.
+        if (i == 2) return (struct pane_edit){0xa3c8ec34u, CAPTURE, SCREEN_HEIGHT, 2160, 3840};   // C_CaptureClearBG_00
+        if (i == 3) return (struct pane_edit){0xa8b18635u, CAPTURE, SCREEN_HEIGHT, 2160, 3840};   // C_CaptureBG_00
+        break;
+    case 0xab1b94d7u:   // ShortCut_01: the bottom gradient is separate from the capture and the item row.
+        if (i == 1) return (struct pane_edit){0x0e802b54u, PICTURE, DOWN, 1362, 3840};   // P_Bg_00
+        break;
     case 0x7f3777e7u:   // PlusMenu_00
         switch (i) {
         case 2: return (struct pane_edit){0xdc1b1dfbu, CAPTURE, SCREEN_HEIGHT, 2000, 0};   // C_3DFade_00
@@ -100,6 +108,10 @@ static inline __attribute__((always_inline)) struct pane_edit pane_edit(u32 hash
         break;
     case 0xdcdc36ddu:   // SystemLoadList_00
         if (i == 5) return (struct pane_edit){0x14520d78u, LIST_WINDOW, LOAD_WINDOW, 1984, 0};   // N_SlideList_00
+        break;
+    case 0xd5063d1eu:   // SystemOption_00: the scissor contains only the backdrop, not the list or buttons.
+        if (i == 4) return (struct pane_edit){0xfeba2fa8u, SCISSOR, OPTIONS_CLIP, 2160, 2200};       // S_Scissor_00
+        if (i == 5) return (struct pane_edit){0x19e60a7fu, PICTURE, OPTIONS_PICTURE, 5000, 2240};    // P_OptionBg_00
         break;
     case 0xb363e973u:   // MapMenu_00
         switch (i) {
@@ -152,7 +164,7 @@ void shape_calc(const u8 *pane, float *m, const u8 *st) {
     if (!(d > 0.0f)) return;
     float *t = m + 12;
     float k = t[2] * -1024.0f, z = t[2]; int mark = 0;
-    if (k >= 2.5f && k <= 7.5f) { mark = (int)(k + 0.5f); if ((float)mark != k) mark = 0; else z = 0; }   // only an exact mark counts
+    if (k >= 2.5f && k <= 8.5f) { mark = (int)(k + 0.5f); if ((float)mark != k) mark = 0; else z = 0; }   // only an exact mark counts
     if (mark == 5 || mark == 7) return;   // already moved, or a Load row already put back: the parent's move carries
     if (mark == 6) { t[1] -= 0.5f * d; t[2] = z + 7.0f * UNIT; return; }   // a direct child of the Load list window: back to its 16:9 place (the game
                                                                              // lays the rows from the window's top edge, so they come out d/2 high)
@@ -176,6 +188,21 @@ void shape_calc(const u8 *pane, float *m, const u8 *st) {
         float f = 3840.0f / edit.width;
         t[0] += c * m[0]; t[1] += c * m[1] - d;
         m[0] *= f; m[1] *= f; m[2] *= f;
+    }
+    else if (action == OPTIONS_CLIP) {
+        float *size = (float *)(pane + 0x58);
+        if (size[0] != edit.width || (size[1] != edit.height && size[1] != edit.height + d)) return;
+        size[1] = edit.height + d;
+        t[1] -= 0.5f * d;   // keep the top edge where it was
+        t[2] = z + 8.0f * UNIT;
+        return;
+    }
+    else if (action == OPTIONS_PICTURE && mark == 8) {
+        // Cancel the inherited scissor shift. The unscaled picture already has 180 units below
+        // the old bottom; move it down only if the new edge would reveal more than that.
+        t[1] += 0.5f * d - (d > 180.0f ? d - 180.0f : 0.0f);
+        t[2] = z + 3.0f * UNIT;
+        return;
     }
     else if (action == LOAD_WINDOW) {
         // Keep the window's top edge. Mark its direct children so their rows start where they did before.

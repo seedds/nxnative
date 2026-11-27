@@ -834,6 +834,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_hid` (`t_imu_noise`: spread, whiteness and the stillness criterion; `t_live_rest`, `t_live_still_dither`, `t_six_ic_info`, the calibration load and store) and `t_motion` (`rest_checks`). With a DualSense, over 1,876 still answers the game got a mean gyro of 0.00, −0.04, −0.00 deg/s after its offset (0.6, 0.1, −0.7 deg/s) was learned.
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536).
 
+### Unaltered six-axis passthrough
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` in `hid::detail::EnableSixAxisSensorPassthrough` (`sdk+0x244fac` in SDK 13.3.4), under `hid::EnableSixAxisSensorPassthrough`.
+- **Cause:** as for [forced vibration sessions](#forced-vibration-sessions), the SDK's call goes to the hid service (IHidServer `EnableSixAxisSensorUnalteredPassthrough`, and `IsSixAxisSensorUnalteredPassthroughEnabled` for the getter), which sm refuses, and reads the null service object.
+- **Fix:** `hle_hid.c` answers `EnableSixAxisSensorPassthrough` and `IsSixAxisSensorPassthroughEnabled`. The setting is kept per sensor, as the game last set it, with device 2's under device 0 as for its calibration, and a handle that is no npad or names a device past 2 is refused with the SDK's codes. The host's values do not change with it: it has no user calibration to leave out, and the rest offset it takes off a GameController's gyro stays.
+- **Open:** what passthrough leaves out on a console is taken from its name (the user calibration); no game is known to read the difference.
+- **Check:** `t_hid`: off before it is set, then as set; per device; on and off through device 2 read through device 0, and the other way, on a sensor nothing else set; the two invalid handles refused.
+- **Found on:** Nintendo Switch Sports 1.5.0 (`0100D2F00D5C0000`, no profile here), [#3378](https://github.com/seedds/nxnative/issues/3378): it crashed about 2.8 s after boot, before the title screen; the reporter's run with the same two hooks gets past it.
+
 ### `nfp`'s extended application area
 
 - **Symptom:** `[RED] sf: the game connects to service nfp:user itself`, then `game called nn::diag abort: Result 0xe15` under the game's own initialization (`main+0x115deb0`).

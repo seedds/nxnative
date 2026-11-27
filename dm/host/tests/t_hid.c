@@ -1758,6 +1758,18 @@ static void t_six_ic_info(void) {
     uint32_t bad = 9u << 8, dev3 = 3u << 16;   // as the SDK's VerifyValidSixAxisSensorHandle (sdk+0x6d8440)
     CHECK(h_hid_SixCalStore(&bad, cal) == 0x58aca && h_hid_SixCalLoad(back, &bad) == 0x58aca, "calibration: an id that is no npad is refused");
     CHECK(h_hid_SixCalStore(&dev3, cal) == 0xd6ca && back[0] == 0xAB, "calibration: a device index past 2 is refused");
+    // Unaltered passthrough (Nintendo Switch Sports 1.5.0 turns it on at boot, #3378): off until set, then as set, per sensor, device 2 the same sensor as device 0
+    CHECK(!h_hid_SixPassQ(&h), "passthrough: off before the game sets it");
+    CHECK(h_hid_SixPassOn(&h, 1) == 0 && h_hid_SixPassQ(&h), "passthrough: on as set");
+    CHECK(!h_hid_SixPassQ(&other), "passthrough: another device keeps its own");
+    CHECK(h_hid_SixPassOn(&h, 0) == 0 && !h_hid_SixPassQ(&h), "passthrough: off again");
+    {   uint32_t host0 = 0x103, sdk2 = 0x20103;   // No2's sensor, which nothing above set: device 2 is the same sensor as device 0
+        CHECK(h_hid_SixPassOn(&sdk2, 1) == 0 && h_hid_SixPassQ(&host0), "passthrough: on through device 2 reads on through device 0");
+        CHECK(h_hid_SixPassOn(&sdk2, 0) == 0 && !h_hid_SixPassQ(&host0), "passthrough: and off");
+        CHECK(h_hid_SixPassOn(&host0, 1) == 0 && h_hid_SixPassQ(&sdk2), "passthrough: on through device 0 reads on through device 2");
+        CHECK(h_hid_SixPassOn(&host0, 0) == 0 && !h_hid_SixPassQ(&sdk2), "passthrough: and off the other way"); }
+    CHECK(h_hid_SixPassOn(&bad, 1) == 0x58aca && !h_hid_SixPassQ(&bad), "passthrough: an id that is no npad is refused");
+    CHECK(h_hid_SixPassOn(&dev3, 1) == 0xd6ca && !h_hid_SixPassQ(&dev3), "passthrough: a device index past 2 is refused");
 }
 
 // Joy-Con icon decoration colour (Switch 2): no controller of the host is a decorated Joy-Con, so each npad answers 0x4b6ca, which the SDK's own wrapper returns to the game, and the

@@ -30,6 +30,10 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x800000
 
+# ---- Frame rate ----
+# The rewriter finds Unity's limiter through internal-call registration.
+fps_target	60
+
 # ---- Shader split ----
 depth_mode	zero
 shader_groups	/Data/=data

@@ -103,9 +103,36 @@ static void save_poison(int e) { // Test helper: poison the first mounted transa
 }
 // The default weak implementation only logs (Mac); the iOS front end provides a strong implementation of the same name that shows a native alert. Called on the game thread, the front end switches to the main thread itself
 __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(errno=%d): no front end attached (default weak implementation)", err); }
-// DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest)
-static FILE *g_fslog; static char *g_fdpath[4096]; static pthread_mutex_t g_fslog_lock = PTHREAD_MUTEX_INITIALIZER;
-static void fslog_init(void) { static int done; if (done) return; done = 1; const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("cannot open DM_FSLOG %s", e); if (g_fslog) setvbuf(g_fslog, NULL, _IOLBF, 0); }   // line-buffered: runs end at the time-limit alarm or a crash, which never flush stdio
+// DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest).
+// The path is the one the file was opened by: a host file's per descriptor (g_fdpath), a packed RomFS image entry's per mount and entry (g_imgpath, one array per mount at its first
+// logged open), as an image handle is no descriptor. Every open of an image entry is the same handle, so an entry open twice at once under two spellings logs the latest one.
+// The first open of either kind opens the log, as a game may read its RomFS before it opens any host file
+static FILE *g_fslog; static char *g_fdpath[4096]; static char **g_imgpath[MAX_MOUNT]; static _Atomic int g_fslog_ready; static pthread_mutex_t g_fslog_lock = PTHREAD_MUTEX_INITIALIZER;
+static void fslog_init(void) {   // under the lock: another thread's first open waits until the log is open, and its path is noted in it
+    if (atomic_load_explicit(&g_fslog_ready, memory_order_acquire)) return;
+    pthread_mutex_lock(&g_fslog_lock);
+    if (!atomic_load_explicit(&g_fslog_ready, memory_order_relaxed)) {
+        const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("cannot open DM_FSLOG %s", e);
+        if (g_fslog) setvbuf(g_fslog, NULL, _IOLBF, 0);   // line-buffered: runs end at the time-limit alarm or a crash, which never flush stdio
+        atomic_store_explicit(&g_fslog_ready, 1, memory_order_release);
+    }
+    pthread_mutex_unlock(&g_fslog_lock);
+}
+static void fslog_open(uint64_t h, const char *path) {   // h: the host handle (FH_IN form), a descriptor or an image entry
+    fslog_init(); if (!g_fslog) return;
+    pthread_mutex_lock(&g_fslog_lock);
+    char **slot = NULL;
+    if (IMG_H(h)) { int mi = IMG_M(h);
+        if (!g_imgpath[mi]) g_imgpath[mi] = calloc(g_mnt[mi].img->n, sizeof *g_imgpath[mi]);
+        if (g_imgpath[mi]) slot = &g_imgpath[mi][IMG_K(h)];
+    } else if (h < 4096) slot = &g_fdpath[h];
+    if (slot && (!*slot || strcmp(*slot, path))) { free(*slot); *slot = strdup(path); }
+    pthread_mutex_unlock(&g_fslog_lock);
+}
+static const char *fslog_path(uint64_t h) {   // under g_fslog_lock
+    const char *p = IMG_H(h) ? (g_imgpath[IMG_M(h)] ? g_imgpath[IMG_M(h)][IMG_K(h)] : NULL) : h < 4096 ? g_fdpath[h] : NULL;
+    return p ? p : "?";
+}
 
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
@@ -1252,6 +1279,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
         if ((ent->flags & IMG_ENT_DAMAGED) && !(__atomic_fetch_or(&ent->flags, IMG_ENT_REPORTED, __ATOMIC_RELAXED) & IMG_ENT_REPORTED))
             LOG("[RED] fs %s failed the NCA's hash check when it was extracted (a damaged NSP, --allow-damaged); its bytes may be wrong", path);
         *out = FH_OUT(IMG_HANDLE(mi, k));
+        fslog_open(IMG_HANDLE(mi, k), path);
         if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → image entry %lld", (now_ns() - g_t0_ns) / 1e9, path, mode, (long long)k);
         return RES_OK;
     }
@@ -1268,8 +1296,7 @@ HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Re
           int txn = g_mnt[i].txn_root; token = (uint16_t)(txn + 1); gen = atomic_load(&g_mnt[txn].work_gen); break;
       }
       atomic_store(&g_fgen[fd], gen); atomic_store(&g_ftxn[fd], token); }
-    fslog_init();
-    if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
+    fslog_open((uint64_t)fd, path);
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }
@@ -1306,8 +1333,8 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;
-        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf, (unsigned long long)fh);
-        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, !IMG_H(h) && (int)h < 4096 && g_fdpath[(int)h] ? g_fdpath[(int)h] : "?", (long long)off, got, buf);
+        if (hash_on) fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\t%016llx\n", (now_ns() - g_t0_ns) / 1e9, fslog_path(h), (long long)off, got, buf, (unsigned long long)fh);
+        else fprintf(g_fslog, "%.4f\t%s\t%lld\t%zu\t%p\n", (now_ns() - g_t0_ns) / 1e9, fslog_path(h), (long long)off, got, buf);
         pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) {   // Read metering: print a line every 64 MiB accumulated or every 1000 reads
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;

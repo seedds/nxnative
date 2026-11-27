@@ -363,6 +363,21 @@ int main(void) {
         memcpy(img, "DMROMFS1", 8); memcpy(img + 8, hd, sizeof hd); memcpy(img + 32, "helloxy", 7); memcpy(img + 39, e, sizeof e); memcpy(img + 39 + sizeof e, "dataabc", 7);
         char ip[1100]; snprintf(ip, sizeof ip, "%s/rom.img", root); FILE *f = fopen(ip, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
         setenv("DM_ROMFS", ip, 1); unsetenv("DM_ROMFS_OVERLAY"); CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the image");
+        {   // DM_FSLOG names a file read from the image by the path it was opened with (it printed "?"), and starts at the first open even when that is an image entry
+            char lp[1100], line[256]; snprintf(lp, sizeof lp, "%s/fslog.tsv", root);
+            if (g_fslog) fclose(g_fslog);
+            g_fslog = NULL; g_fslog_ready = 0; setenv("DM_FSLOG", lp, 1);
+            CHECK(read_fs("rom:/data/c", got, sizeof got) && read_fs("rom:/data/a", got, sizeof got) && read_fs("rom:\\data\\c", got, sizeof got), "three image reads with DM_FSLOG");
+            if (g_fslog) fclose(g_fslog);
+            g_fslog = NULL; unsetenv("DM_FSLOG");
+            const char *want[] = {"\trom:/data/c\t0\t2\t", "\trom:/data/a\t0\t5\t", "\trom:\\data\\c\t0\t2\t"}; int lines = 0, ok = 1;
+            FILE *lf = fopen(lp, "r");
+            while (lf && fgets(line, sizeof line, lf)) { ok &= lines < 3 && strstr(line, want[lines]) != NULL; lines++; }
+            if (lf) fclose(lf);
+            CHECK(lf && lines == 3 && ok, "the log has the three reads, each under the path it was opened by (%d lines)", lines);
+            for (uint64_t k = 0; g_imgpath[0] && k < g_mnt[0].img->n; k++) free(g_imgpath[0][k]);
+            free(g_imgpath[0]); g_imgpath[0] = NULL;   // the tests reuse mount slot 0 for other images
+        }
         CHECK(read_fs("rom:/data/a", got, sizeof got) && !strcmp(got, "hello"), "reads a file"); CHECK(read_fs("rom:/data/../data/c", got, sizeof got) && !strcmp(got, "xy"), "reads the next file, through ..");
         uint64_t h; size_t n = 0; int64_t sz = 0; char b[16] = {0};
         CHECK(h_fs_OpenFile(&h, "rom:/data/a", MODE_READ) == RES_OK && h_fs_ReadFile(&n, h, 3, b, 10) == RES_OK && n == 2 && !memcmp(b, "lo", 2), "a read stops at the end of the file (got %zu)", n);

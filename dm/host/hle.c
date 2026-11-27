@@ -139,10 +139,10 @@ uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs) {
             case G_OBS: if (g_obs_fn[g->arg & 0xff]) g_obs_fn[g->arg & 0xff](regs, g->arg >> 8); return 0;   // dm_gate writes x0–x29 back: the original values, unless the callback changed one (OBS_STDALLOC_INIT)
             case G_SPIN: {   // a pass of a spin wait loop (patch_nso.py "Spin waits"), where the thread may sleep (hle_thread.c dm_spin_wait): inside an SVC frame, so that a thread paused there has its context
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void), dm_spin_wait(uint64_t, uint64_t);
-                thr_svc_enter(regs, g->orig); dm_spin_wait(ret_addr, g->orig); thr_svc_leave(); return 0; }
+                thr_svc_enter(regs, g->orig); dm_spin_wait(ret_addr, g->orig); guest_applet_wait(); thr_svc_leave(); return 0; }
             default: {   // register the gate frame on SVC entry / exit: it is the context of a paused thread (hle_thread.c)
                 void thr_svc_enter(uint64_t *, uint64_t), thr_svc_leave(void);
-                thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); thr_svc_leave(); return r; }
+                thr_svc_enter(regs, g->orig); uint64_t r = svc_dispatch(g->arg, regs, g->orig); guest_applet_wait(); thr_svc_leave(); return r; }
         }
         if (!g->ret) die("unknown gate at %#llx", ret_addr);
     }

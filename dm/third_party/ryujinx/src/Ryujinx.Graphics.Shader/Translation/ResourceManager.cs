@@ -24,6 +24,7 @@ namespace Ryujinx.Graphics.Shader.Translation
         private readonly SetBindingPair[] _sbSlotToBindingMap;
         private uint _sbSlotWritten;
         private uint _sbSlotBounded;   // nxnative: TranslationFlags.MetalStorageBounds
+        private int _textureQueryBinding = -1;
 
         private readonly Dictionary<int, int> _sbSlots;
         private readonly Dictionary<int, int> _sbSlotsReverse;
@@ -397,6 +398,18 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         // nxnative: the shader's raw pointer sources (GlobalToStorage.FindPointerSite), by (storage buffer cb slot, cb word, byte offset of the pointer word); the value is the site number
         public readonly Dictionary<(int, int, int), int> PointerSites = new();
+
+        public int GetTextureQueryBinding()
+        {
+            if (_textureQueryBinding < 0)
+            {
+                SetBindingPair binding = _gpuAccessor.CreateStorageBufferBinding(0);
+                AddNewStorageBuffer(binding.SetIndex, binding.Binding, "nvn_texture_query");
+                _textureQueryBinding = binding.Binding;
+            }
+
+            return _textureQueryBinding;
+        }
 
         public bool TryGetStorageBufferBinding(int sbCbSlot, int sbCbOffset, bool write, out int binding)
         {

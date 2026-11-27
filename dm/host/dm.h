@@ -185,8 +185,10 @@ uint64_t guest_ticks(void);           // The guest's system counter on that cloc
 int dm_detclock_enabled(void);
 void guest_clock_freeze(int on);
 void dm_movie_active(int active);   // iOS movie decoder recovery waits for activation; Stop / Flush / Finalize cancel the wait
-void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (0 tick hold, 1 background, 2 system keyboard, 3 NVN prepare, 4 NVN archive init); see hle_os.c
-void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits while backgrounded or preparing (hle_os.c)
+enum { DM_CLOCK_APPLET = 5 };          // AlwaysSuspend while a foreground library applet is open
+void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (hle_os.c)
+void guest_clock_read_wait(void);     // A guest read of the system counter: counts it in dm_clock_reads and waits during suspension or preparation
+void guest_applet_wait(void);         // Before returning from a guest SVC or spin-wait gate
 extern __thread uint64_t dm_clock_reads;   // the calling thread's guest reads of the system counter (hle_os.c; thr_yield tells clock waits by them)
 void dm_guest_frame_tick(void);        // Called on every present (NVN, Vulkan, OpenGL): runs dm_cheats_present and, when DM_DETCLOCK is on, advances the guest clock
 uint64_t dm_nvn_frame_count(void);

@@ -834,6 +834,15 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_hid` (`t_imu_noise`: spread, whiteness and the stillness criterion; `t_live_rest`, `t_live_still_dither`, `t_six_ic_info`, the calibration load and store) and `t_motion` (`rest_checks`). With a DualSense, over 1,876 still answers the game got a mean gyro of 0.00, −0.04, −0.00 deg/s after its offset (0.6, 0.1, −0.7 deg/s) was learned.
 - **Found on:** [Nintendo Switch Sports Resort](../../dm/games/04008E001F098000/README.md) (`04008E001F098000`, v65536).
 
+### Unaltered six-axis passthrough
+
+- **Symptom:** at boot, `[RED] sf: the game connects to service hid itself, which the host does not serve`, then `CRASH sig=11 addr=0` in `hid::detail::EnableSixAxisSensorPassthrough` (`sdk+0x244fac` in SDK 13.3.4), under `hid::EnableSixAxisSensorPassthrough`.
+- **Cause:** as for [forced vibration sessions](#forced-vibration-sessions), the SDK's call goes to the hid service (IHidServer `EnableSixAxisSensorUnalteredPassthrough`, and `IsSixAxisSensorUnalteredPassthroughEnabled` for the getter), which sm refuses, and reads the null service object.
+- **Fix:** `hle_hid.c` answers `EnableSixAxisSensorPassthrough` and `IsSixAxisSensorPassthroughEnabled`. The setting is kept per sensor, as the game last set it, with device 2's under device 0 as for its calibration, and a handle that is no npad or names a device past 2 is refused with the SDK's codes. The host's values do not change with it: it has no user calibration to leave out, and the rest offset it takes off a GameController's gyro stays.
+- **Open:** what passthrough leaves out on a console is taken from its name (the user calibration); no game is known to read the difference.
+- **Check:** `t_hid`: off before it is set, then as set; per device; on and off through device 2 read through device 0, and the other way, on a sensor nothing else set; the two invalid handles refused.
+- **Found on:** Nintendo Switch Sports 1.5.0 (`0100D2F00D5C0000`, no profile here), [#3378](https://github.com/seedds/nxnative/issues/3378): it crashed about 2.8 s after boot, before the title screen; the reporter's run with the same two hooks gets past it.
+
 ### `nfp`'s extended application area
 
 - **Symptom:** `[RED] sf: the game connects to service nfp:user itself`, then `game called nn::diag abort: Result 0xe15` under the game's own initialization (`main+0x115deb0`).
@@ -1025,9 +1034,11 @@ Most service calls can be found before they crash, before the first boot or the 
 
 ### Mouse, keyboard and key code maps
 
-- **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized).
+- **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized). With SDK 20.5.3, `InitializeMouse(const MouseHandle&)` aborts at boot with `Result 0xe15` and `[RED] sf: the game connects to service hid itself`.
+- **Cause:** the handle overloads reach the same SDK mouse resource for the ordinary mouse. `GetMouseHandle()` creates the value 0 without HID IPC. The SDK initializer then tries to activate that resource through the absent HID service.
 - **Fix:** hooked: `hid::GetMouseState`, `hid::GetKeyboardStates`, and `kpr::GetKeyCodeMap`, which asks the settings service (`settings::detail::GetKeyCodeMap`) for the keyboard layout's map; the host leaves the map zero.
-- **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`).
+- `InitializeMouse(handle)` and `GetMouseStates(states, count, handle)` reuse the existing disconnected mouse handling. A history with no samples returns zero and leaves the buffer untouched. With zero entries available, the SDK history read does the same (`sdk+0x63d934` to `sdk+0x63dab8`). The game's poll branches on the returned count (`main+0x968104`).
+- **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`); Cyberpunk 2077 (v262144, `InitializeMouse(handle)` at `main+0x968060`).
 
 ### Poké Ball Plus (Palma)
 
@@ -1071,6 +1082,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix:** `hle_oe.c` counts open applets apart from the front end's focus. The game sees the front end's state, or 2 while an applet is open over a game in focus; each change of what it sees is one 15 (under focus modes 1 and 2, [Focus handling mode decides whether focus changes are notified](#focus-handling-mode-decides-whether-focus-changes-are-notified)). `DM_APPLET("name");` (`hle.h`) at the top of a stand-in holds the game out of focus until the stand-in returns: the controller applet (both overloads), strap guide (both overloads: SDK 22 adds one with a `StrapGuideArg`) and firmware update, `swkbd::ShowKeyboard`, the Mii editor, the user selector and creator, the error applets and the shop pages. Stand-ins that report the applet could not start (friends, web, the license notice, the album, amiibo) open none. The inline keyboard is left as it was: its applet draws into the game's own picture and is not believed to take focus (not checked). An instant open and close merges into one pending 15 that reads 1, which is all Mario Kart needs; a game that must see the 2 would need more. `ShowControllerSupport` with fewer players than the minimum (`ControllerSupportArg` +0) returns `ResultControllerSupportCanceled` (2202-3101), what the SDK's `ShowControllerSupportCore` (SDK 4.4.0 `sdk+0x24eeb0`) returns when the player closes the applet; Mario Kart goes back to its engine class menu, as on a Switch. `DM_OE_SCRIPT` now also starts for a game that only uses the blocking `PopNotificationMessage`.
 - **Found on:** [Mario Kart 8 Deluxe](../../dm/games/0100152000022000/README.md) (4.0.0 and 4.0.1; GitHub issue #550).
 - **Check:** `t_oe` and `t_hid` (`dm/host/tests`). On the Mac, from a save past the Mii pick: L+R at the title, Down, A (2P), A (Grand Prix), A (50cc). The log shows `oe library applet: controller support`, then `oe focus state → 2 (library applet open)` and `→ 1 (library applet closed)`, and the character select takes input. With one controller and no window (or under `DM_CTL`) the applet logs `too few, closed as the player would (canceled)` once and the engine class menu comes back; with a window its prompt waits for a second player ([The controller applet waits for players](#the-controller-applet-waits-for-players)).
+
+### A foreground applet leaves an AlwaysSuspend game running
+
+- **Symptom:** the profile selector is still open when the game crashes with a watchdog timeout. Cyberpunk 2077's watchdog reaches an undefined instruction at `main+0xd22624` after counting 120 seconds of `SleepThread` intervals.
+- **Cause:** focus handling mode 3 (AlwaysSuspend) suppresses focus notifications because Horizon suspends application execution while a library applet owns the foreground. The host recorded the focus state and blocked the applet caller. Other guest threads could still leave kernel waits and run.
+- **Fix:** in AlwaysSuspend mode, an open foreground library applet freezes the guest clock and parks guest threads at counter reads and when returning from SVC and spin-wait gates. The native UI remains responsive. The last applet's return releases those gates, even if another reason keeps the guest clock frozen.
+- **Found on:** Cyberpunk 2077, Switch 2 update `v262144`.
+- **Check:** `t_oe` covers nested applets and focus mode changes during an applet. `t_sync_wait` covers overlapping suspension reasons.
 
 ### The controller applet waits for players
 
@@ -1254,6 +1273,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** both reach the applet proxy: `FinishStartupLogo` through `am::GetApplicationFunctions`, the SDK 21 registration through `am::GetCommonStateGetter`.
 - **Fix:** the host has no startup logo (`hle_oe.c`): `FinishStartupLogo` is a no-op, and `EnableStartupLogoDisappearedMessage` queues message 95 (startup logo disappeared) at once through the notification queue and its event, since the logo is already gone. The number comes from the PR's run (the game popped it and went on); it was not found in the SDK's code.
 - **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md); Fit Boxing 3 (`0100AC101BFA2000`, provisional profile, no note; [PR #1973](https://github.com/seedds/nxnative/pull/1973)).
+
+### System gameplay recording with a work buffer
+
+- **Symptom:** a null read in `oe::EnableGamePlayRecording` before the first frame.
+- **Cause:** Splatoon 2 5.5.2 calls this SDK 3.4.1 entry point unconditionally with a 96 MiB work buffer (`main+0x3a3e28`). The SDK creates transfer memory, then dereferences the absent `am::GetApplicationFunctions` proxy at `sdk+0x14f778` to initialize system video recording.
+- **Fix:** `hle_oe.c` handles this overload alongside the other system recording switches. On a host without a system recorder it returns without borrowing the game's buffer.
+- **Found on:** [Splatoon 2](../../dm/games/01003BC0000A0000/README.md) 5.5.2. The Mac startup probe passed the call, opened the audio renderer and reached frame 1,200.
 
 ### Copyright frame buffer overlay
 
@@ -2012,6 +2038,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the game chooses its output from `nn::vi::QueryDisplayBufferMaxResolution` (its tables: 0 is 720p, 1 is 1080p, 2 is 1440p, 3 is 4K), and what the game got before the hook gave it 720p.
 - **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
+
+### The display's refresh rate
+
+- **Symptom:** a Switch 2 game stays on its boot screen with audio and repeatedly logs `[nvn] WindowInitialize`.
+- **Cause:** `nn::vi::QueryDisplayCurrentRefreshRate` only accepts the SDK's own default display (`sdk+0x55dbd0`). It returns `0x272` for the host's display without writing the rate. Cyberpunk 2077 ignores the result and treats a zero rate as VRR. Its frame loop then requests four active swap-chain textures (`main+0x854fe8`), but its window builder initializes two in the observed mode (`main+0x8155d0`), so it rebuilds the swap chain each frame.
+- **Fix:** `hle_vi.c` writes the currently configured guest vsync rate in Hz for the display returned by the host's `OpenDefaultDisplay`. An unrecognized display still gets `0x272` with the output untouched. `t_vi_history` verifies the 60 and 120 Hz replies and the invalid-display case.
+- **Found on:** Cyberpunk 2077 (v262144). Reporting 60 Hz in the original Mac test reduced about 5,600 window initializations in 180 seconds to three and let the game proceed to its loading screen. [PR #3293](https://github.com/seedds/nxnative/pull/3293)
 
 ### A game that decodes its code at run time
 

@@ -12,6 +12,7 @@ uint64_t unimpl_stubs[MAX_STUB];
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; return fn; }
 uint64_t guest_ticks(void) { return 123456789; }
 void guest_clock_read_wait(void) {}
+void guest_applet_wait(void) {}
 static uint64_t entered, spun_ret, spun_orig;
 static unsigned enters, leaves;
 void thr_svc_enter(uint64_t *regs, uint64_t orig) { (void)regs; entered = orig; enters++; }

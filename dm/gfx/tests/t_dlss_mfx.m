@@ -175,6 +175,49 @@ int main(void) { @autoreleasepool {
     mtl_sub_begin(); dlss_eval(&c4);
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the submission with the original builder size completes");
     CHECK(alpha_flat(tex_mtl(&out4), b[3]), "alpha follows the scaler's output extent rather than the original builder size");
+    tex_t col5 = texture(105, 640, 360, NVN_FORMAT_RGBA16F), dep5 = texture(106, 640, 360, NVN_FORMAT_DEPTH32F),
+          mot5 = texture(107, 640, 360, NVN_FORMAT_RG16F);
+    mtl_tex_init(&col5); mtl_tex_init(&dep5); mtl_tex_init(&mot5);
+    fill_alpha_rect(tex_mtl(&col5), a, 11, 7, 512, 288);
+    fill(tex_mtl(&dep5), MTLClearColorMake(0, 0, 0, 0), 1);
+    fill(tex_mtl(&mot5), MTLClearColorMake(0, 0, 0, 0), 0);
+    p_dlss c5 = c4;
+    c5.tex[DLSS_COLOR] = &col5; c5.tex[DLSS_DEPTH] = &dep5; c5.tex[DLSS_MOTION] = &mot5;
+    c5.iw = 512; c5.ih = 288; c5.base[DLSS_COLOR][0] = 11; c5.base[DLSS_COLOR][1] = 7;
+    mtl_sub_begin(); dlss_eval(&c5);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the smaller backing textures scale after their content is copied");
+    dlss_scaler *staged_entry = NULL;
+    for (int i = 0; i < DLSS_KEEP; i++) if (g_dlss[i].net == c5.net && g_dlss[i].cur) staged_entry = &g_dlss[i];
+    id<MTL4FXTemporalScaler> staged = staged_entry ? staged_entry->sc : nil;
+    CHECK(staged && staged_entry->staged && staged.inputWidth == 1536 && staged.inputHeight == 864, "changing backing sizes gives the scaler fixed-size inputs");
+    CHECK(flat(tex_mtl(&out4), a) && alpha_flat(tex_mtl(&out4), a[3]), "the copy preserves the offset content, including alpha at its edges");
+    mtl_sub_begin(); dlss_eval(&c4);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the larger backing textures scale again");
+    CHECK(staged && staged_entry->cur && staged_entry->sc == staged, "a second backing size change keeps the same temporal scaler");
+    CHECK(flat(tex_mtl(&out4), b) && alpha_flat(tex_mtl(&out4), b[3]), "the larger input covers the output after switching back");
+    // The Nomad loading screen uses full-size textures. When the scene uses smaller ones,
+    // staging still presents exactly the same texture descriptors to MetalFX.
+    tex_t full_col = texture(108, 1536, 864, NVN_FORMAT_RGBA16F), full_dep = texture(109, 1536, 864, NVN_FORMAT_DEPTH32F),
+          full_mot = texture(110, 1536, 864, NVN_FORMAT_RG16F);
+    mtl_tex_init(&full_col); mtl_tex_init(&full_dep); mtl_tex_init(&full_mot);
+    fill(tex_mtl(&full_col), MTLClearColorMake(b[0], b[1], b[2], b[3]), 0);
+    fill(tex_mtl(&full_dep), MTLClearColorMake(0, 0, 0, 0), 1);
+    fill(tex_mtl(&full_mot), MTLClearColorMake(0, 0, 0, 0), 0);
+    p_dlss full = {.tex = {&full_col, &full_dep, &full_mot, &out4}, .net = 4, .iw = 1536, .ih = 864,
+                   .ow = 1536, .oh = 864, .mv = {1, 1}, .pre_exposure = 1, .flags = c5.flags, .reset = 1};
+    mtl_sub_begin(); dlss_eval(&full);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the full-size loading screen scales");
+    dlss_scaler *s_full = NULL;
+    for (int i = 0; i < DLSS_KEEP; i++) if (g_dlss[i].net == full.net && g_dlss[i].cur) s_full = &g_dlss[i];
+    id<MTL4FXTemporalScaler> full_scaler = s_full ? s_full->sc : nil;
+    CHECK(full_scaler && !s_full->staged, "full-size inputs initially bind directly");
+    full.tex[DLSS_COLOR] = &col5; full.tex[DLSS_DEPTH] = &dep5; full.tex[DLSS_MOTION] = &mot5;
+    full.iw = c5.iw; full.ih = c5.ih;
+    memcpy(full.base[DLSS_COLOR], c5.base[DLSS_COLOR], sizeof full.base[DLSS_COLOR]);
+    mtl_sub_begin(); dlss_eval(&full);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the smaller inputs scale after the loading screen");
+    CHECK(full_scaler && s_full->sc == full_scaler && s_full->staged, "staging reuses the scaler when its descriptor stays the same");
+    CHECK(flat(tex_mtl(&out4), a) && alpha_flat(tex_mtl(&out4), a[3]), "the smaller input preserves color and cropped alpha with the same scaler");
     // The scaler after the work before it, and the next pass after the scaler (mfx_order). Before: a slow pass writes the colour just before each evaluation and ends with no
     // barrier, as a scaler's own encoders end (the passes the host ends carry barriers of their own); behind an encoder of barriers alone the scaler read the colour before it in
     // most rounds. After: a draw pass copies the output right after the evaluation; with DM_NVN_BARRIER=game (a run of the Makefile's) it skipped its consumer barrier and read the

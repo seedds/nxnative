@@ -1207,6 +1207,118 @@ static void bundle_recovery_compute(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
 }
 
+@interface BatchProbeSerializer : NSObject {
+@public
+    id<MTL4PipelineDataSetSerializer> ser;
+    _Atomic int *active, *peak, *calls, *bad_gate;
+} @end
+@implementation BatchProbeSerializer
+- (id)forwardingTargetForSelector:(SEL)selector { return ser; }
+- (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
+    atomic_fetch_add(calls, 1);
+    pthread_mutex_lock(&g_ser_mu);
+    int bad = g_ser_compiles != 0 || g_ser_want < 1;
+    pthread_mutex_unlock(&g_ser_mu);
+    if (bad) atomic_fetch_add(bad_gate, 1);
+    int cur = atomic_fetch_add(active, 1) + 1;
+    int prev = atomic_load(peak);
+    while (cur > prev && !atomic_compare_exchange_weak(peak, &prev, cur)) {}
+    usleep(40000);
+    BOOL ok = [ser serializeAsArchiveAndFlushToURL:url error:error];
+    atomic_fetch_sub(active, 1);
+    return ok;
+}
+@end
+
+static void batch_wave(void) {
+    char bdir[] = "/tmp/t_pso_wave.XXXXXX"; if (!mkdtemp(bdir)) abort();
+    arch_flush_wait();
+    NSString *saved_dir = g_arch_dir;
+    int saved_max = g_arch_period_max, saved_batch = g_arch_ser_batch;
+    g_arch_dir = @(bdir); g_arch_period_max = 2; g_arch_ser_batch = 3;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    _Atomic int ser_active = 0, ser_peak = 0, ser_calls = 0, bad_gate = 0;
+    NSMutableArray<MTLRenderPipelineDescriptor *> *built = [NSMutableArray array];
+    NSError *err = nil;
+    arch_batch_begin();
+    for (int i = 0; i < 6; i++) {
+        // Wrap each new period's serializer before it rolls over to observe concurrent wave serialization and ser_begin exclusion.
+        if (i % 2 == 0 && ![(id)g_ep->ser isKindOfClass:BatchProbeSerializer.class]) {
+            BatchProbeSerializer *p = [BatchProbeSerializer new];
+            p->ser = g_ep->ser; p->active = &ser_active; p->peak = &ser_peak; p->calls = &ser_calls; p->bad_gate = &bad_gate;
+            g_ep->ser = (id<MTL4PipelineDataSetSerializer>)p;
+        }
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+        if (i == 3) {
+            __block NSUInteger queued = 0; __block int comps_live = 0;
+            dispatch_sync(g_arch_q, ^{
+                queued = g_arch_batch.count;
+                for (ArchEpoch *e in g_arch_batch) if (e->comp != nil) comps_live++;
+            });
+            EXPECT("wave: two full periods parked before reaching batch limit 3", 2, queued);
+            EXPECT("wave: parked periods released their compilers", 0, comps_live);
+            EXPECT("wave: no files written before wave fills", 0, archive_files(@(bdir)).count);
+        }
+    }
+    dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+    EXPECT("wave: third full period flushed all 3 files", 3, archive_files(@(bdir)).count);
+    EXPECT("wave: serializer invoked for all 3 periods", 3, atomic_load(&ser_calls));
+    EXPECT("wave: serializers ran concurrently inside one wave", 1, atomic_load(&ser_peak) >= 2);
+    EXPECT("wave: ser_begin held with zero compiles active", 0, atomic_load(&bad_gate));
+    EXPECT("wave: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Partial wave (1 full parked period + 1 partial period in g_ep) drains cleanly on arch_batch_end + arch_flush_wait.
+    for (int i = 6; i < 9; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave tail: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+    }
+    arch_batch_end();
+    arch_flush_wait();
+    NSArray<NSString *> *names = [archive_files(@(bdir)) sortedArrayUsingSelector:@selector(compare:)];
+    EXPECT("wave tail: all 5 period files written", 5, names.count);
+    EXPECT("wave tail: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Every base from the parallel wave is usable through Metal's archive open.
+    NSMutableArray<id<MTL4Archive>> *opened = [NSMutableArray array];
+    for (NSString *n in names) {
+        id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(bdir) stringByAppendingPathComponent:n]] error:&err];
+        if (a) [opened addObject:a];
+    }
+    EXPECT("wave verify: all 5 archives opened", 5, opened.count);
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = opened;
+    int found = 0;
+    for (MTLRenderPipelineDescriptor *cd in built) if (pso_build_ex(cd, 0, &err, 0) != nil) found++;
+    EXPECT("wave verify: all 9 bases found in archives with compile=0", 9, found);
+
+    // Compiler death discards any already-parked period in the batch instead of publishing it.
+    char ddir[] = "/tmp/t_pso_wdeath.XXXXXX"; if (!mkdtemp(ddir)) abort();
+    g_arch_dir = @(ddir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[];
+    uint64_t disc0 = atomic_load(&g_arch_discarded);
+    arch_batch_begin();
+    for (int i = 0; i < 2; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 340);
+        EXPECT("wave death: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+    }
+    arch_died([NSError errorWithDomain:@"AGX" code:2 userInfo:@{NSLocalizedDescriptionKey: @"XPC_ERROR_CONNECTION_INTERRUPTED"}]);
+    arch_batch_end();
+    arch_flush_wait();
+    EXPECT("wave death: parked period discarded, no archive written", 0, archive_files(@(ddir)).count);
+    EXPECT("wave death: discard counted", 1, atomic_load(&g_arch_discarded) > disc0);
+    EXPECT("wave death: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    g_arch_dir = saved_dir; g_arch_period_max = saved_max; g_arch_ser_batch = saved_batch;
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(ddir) error:nil];
+}
+
 int main(int argc, char **argv) { @autoreleasepool {
     if (!mkdtemp(archive_cache_root)) abort();
     atexit(archive_cache_cleanup);
@@ -1261,6 +1373,11 @@ int main(int argc, char **argv) { @autoreleasepool {
         pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive compiler death: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--batch-wave")) {
+        pso4_init(); batch_wave();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive batch wave: %d checks, %d failed\n", checks, failed); return failed != 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
         pso4_init();
@@ -1825,6 +1942,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     crashed_flush_race(0);
     crashed_flush_race(1);
     compiler_death_notifications();
+    batch_wave();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts

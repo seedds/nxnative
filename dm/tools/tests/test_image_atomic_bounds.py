@@ -306,7 +306,9 @@ class Compiler(unittest.TestCase):
                         self.assertIn('require an R32 integer descriptor format', result.stderr)
                         self.assertFalse(spv.exists())
 
-    def test_unresolved_bindless_atomic_rejected(self):
+    def test_unresolved_bindless_atomic_indexes_the_image_pool(self):
+        # A handle the build cannot trace to c2 or a uniform buffer (Cyberpunk 2077 loads its handles from memory): the atomic indexes the image pool, read as R32Uint,
+        # as other dynamic images do (BindlessElimination.GenerateBindlessAccess). It was refused before
         with tempfile.TemporaryDirectory(prefix='dm-image-atomic-bindless-') as temp:
             work = Path(temp)
             code = work / 'unresolved.bin'
@@ -315,9 +317,10 @@ class Compiler(unittest.TestCase):
             jobs.write_text(json.dumps([dict(key='unresolved', stage='cs', code=str(code),
                 img={'0': dict(type='2darray', fmt='R32Uint')}, local=[1, 1, 1], debug=True)]))
             result = subprocess.run([os.environ['DMSH_TEST_XLATE'], str(jobs), str(work)], capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('require a statically resolved image handle', result.stderr)
-            self.assertFalse((work / 'unresolved.spv').exists())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            subprocess.run(['spirv-val', '--target-env', 'vulkan1.1', str(work / 'unresolved.spv')], check=True)
+            images = json.loads((work / 'unresolved.res.json').read_text())['images']
+            self.assertEqual([(i['format'], i['handle'], i['array'] > 32) for i in images], [('R32Uint', 0x40000000, True)])
 
     def compile_metal(self, msl, work, key, gpu=None):
         if os.environ.get('DMSH_TEST_METAL') != '1':

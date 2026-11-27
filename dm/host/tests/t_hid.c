@@ -1758,6 +1758,18 @@ static void t_six_ic_info(void) {
     uint32_t bad = 9u << 8, dev3 = 3u << 16;   // as the SDK's VerifyValidSixAxisSensorHandle (sdk+0x6d8440)
     CHECK(h_hid_SixCalStore(&bad, cal) == 0x58aca && h_hid_SixCalLoad(back, &bad) == 0x58aca, "calibration: an id that is no npad is refused");
     CHECK(h_hid_SixCalStore(&dev3, cal) == 0xd6ca && back[0] == 0xAB, "calibration: a device index past 2 is refused");
+    // Unaltered passthrough (Nintendo Switch Sports 1.5.0 turns it on at boot, #3378): off until set, then as set, per sensor, device 2 the same sensor as device 0
+    CHECK(!h_hid_SixPassQ(&h), "passthrough: off before the game sets it");
+    CHECK(h_hid_SixPassOn(&h, 1) == 0 && h_hid_SixPassQ(&h), "passthrough: on as set");
+    CHECK(!h_hid_SixPassQ(&other), "passthrough: another device keeps its own");
+    CHECK(h_hid_SixPassOn(&h, 0) == 0 && !h_hid_SixPassQ(&h), "passthrough: off again");
+    {   uint32_t host0 = 0x103, sdk2 = 0x20103;   // No2's sensor, which nothing above set: device 2 is the same sensor as device 0
+        CHECK(h_hid_SixPassOn(&sdk2, 1) == 0 && h_hid_SixPassQ(&host0), "passthrough: on through device 2 reads on through device 0");
+        CHECK(h_hid_SixPassOn(&sdk2, 0) == 0 && !h_hid_SixPassQ(&host0), "passthrough: and off");
+        CHECK(h_hid_SixPassOn(&host0, 1) == 0 && h_hid_SixPassQ(&sdk2), "passthrough: on through device 0 reads on through device 2");
+        CHECK(h_hid_SixPassOn(&host0, 0) == 0 && !h_hid_SixPassQ(&sdk2), "passthrough: and off the other way"); }
+    CHECK(h_hid_SixPassOn(&bad, 1) == 0x58aca && !h_hid_SixPassQ(&bad), "passthrough: an id that is no npad is refused");
+    CHECK(h_hid_SixPassOn(&dev3, 1) == 0xd6ca && !h_hid_SixPassQ(&dev3), "passthrough: a device index past 2 is refused");
 }
 
 // Joy-Con icon decoration colour (Switch 2): no controller of the host is a decorated Joy-Con, so each npad answers 0x4b6ca, which the SDK's own wrapper returns to the game, and the
@@ -1942,6 +1954,13 @@ int main(void) {
     t_six_ic_info();
     t_touch_sampling();
     t_rec();
+    {   // Mouse history by handle, as polled by Cyberpunk 2077.
+        const uint32_t handle = 0;
+        uint64_t state[5] = {1, 2, 3, 4, 5};
+        h_hid_InitMouseHandle(&handle);
+        CHECK(h_hid_MouseStatesHandle(state, 1, &handle) == 0, "a disconnected mouse has no history by handle");
+        CHECK(!memcmp(state, (uint64_t[]){1, 2, 3, 4, 5}, sizeof state), "zero mouse samples leave the caller's history untouched");
+    }
     {   // Nmouse with no device (SDK 21's forms): the pointer range is kept, the merged handle 0 takes settings, the standard mouse and the handle queries report nothing
         int w = 0, h = 0; uint64_t std = 7; uint32_t npad = 9;
         h_hid_NmouseInitT(NULL, 0, 1920, 1080, 1); h_hid_NmouseGetRange(&w, &h);

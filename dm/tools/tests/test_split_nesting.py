@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -76,6 +77,31 @@ class Nesting(unittest.TestCase):
         with mock.patch.object(ss, 'yaz0', wraps=ss.yaz0) as dec, self.assertRaisesRegex(SystemExit, 'Yaz0 archive members expand to more than 16 times the file'):
             ss.scan_blob(d, '/bomb.sarc', [])
         self.assertEqual(dec.call_count, 0)
+
+
+class Emz(unittest.TestCase):
+    def setUp(self):
+        self.payload = b'#EMB' + bytes(60) + fz.bnsh()
+        stream = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        self.packed = (struct.pack('<4sIII', b'#EMZ', 0, len(self.payload), 16)
+                       + stream.compress(self.payload) + stream.flush())
+
+    def test_loose_and_nested_emz_reach_the_shader_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'shaders.bin'
+            path.write_bytes(self.packed)
+            _, loose, _, unreadable = ss.scan_file((str(path), path.name))
+        self.assertFalse(unreadable)
+        self.assertEqual({s[1] for s in loose.values()}, {'vs', 'ps'})
+        found = []
+        ss.scan_blob(fz.sarc([(b'shaders.bin', self.packed), (b'padding', bytes(len(self.payload)))]), '/pack', found)
+        self.assertEqual(set(ss.uniq_keys(found)), set(loose))
+
+    def test_emz_rejects_over_budget_and_incomplete_streams(self):
+        with self.assertRaisesRegex(SystemExit, 'archive byte budget'):
+            ss.emz_decode(self.packed, '/shaders.emz', len(self.payload) - 1)
+        with self.assertRaisesRegex(SystemExit, 'does not end at its declared size'):
+            ss.emz_decode(self.packed[:-1], '/shaders.emz', len(self.payload))
 
 
 class NestedZstd(unittest.TestCase):
@@ -189,6 +215,19 @@ class NestedZstd(unittest.TestCase):
 
 
 class MemberNames(unittest.TestCase):
+    def test_big_endian_archive_scans_named_shaders(self):
+        shader = fz.bnsh()
+        name = b'program.bnsh\0'
+        start = 0x38 + len(name)
+        archive = struct.pack('>4sHHII4x', b'SARC', 0x14, 0xfeff, start + len(shader), start)
+        archive += struct.pack('>4sHHI', b'SFAT', 0xc, 1, 0x65)
+        archive += struct.pack('>IIII', 0, 1 << 24, 0, len(shader))
+        archive += struct.pack('>4sHH', b'SFNT', 8, 0) + name + shader
+        out = []
+        ss.scan_blob(archive, '/program.sarc', out)
+        self.assertEqual({where.split('#')[0] for where, *_ in out}, {'/program.sarc/program.bnsh'})
+        self.assertEqual({stage for _, stage, *_ in out}, {'vs', 'ps'})
+
     def test_names_and_time(self):   # each name ends at its own NUL; splitting the rest of the archive per member made Fire Emblem Fortune's Weave's 9.8 MB layout SARC take 6 minutes
         members = [(b'tex%04d.bntx' % i, bytes(0x4000)) for i in range(800)]
         archive = fz.sarc(members)   # built outside the timing: only the member reading is measured (about 1 ms here, 47 s with the per-member split)

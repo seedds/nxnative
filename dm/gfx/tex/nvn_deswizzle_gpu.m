@@ -1,7 +1,7 @@
 #import "nvn_deswizzle_gpu.h"
 #import "../nvn/host_msl.h"
 
-static id<MTLComputePipelineState> g_nvn_deswz_pipeline, g_nvn_deswz_direct;
+static id<MTLComputePipelineState> g_nvn_deswz_pipeline, g_nvn_deswz_direct, g_nvn_deswz_sparse;
 
 // The kernels deswz and deswz_direct: dm/gfx/msl/deswz.metal
 
@@ -16,8 +16,12 @@ int nvn_deswz_gpu_init(id<MTLDevice> dev) {
     g_nvn_deswz_pipeline = [dev newComputePipelineStateWithFunction:function error:&error];
     id<MTLFunction> direct = [library newFunctionWithName:@"deswz_direct"];
     if (direct) g_nvn_deswz_direct = [dev newComputePipelineStateWithFunction:direct error:&error];
+    id<MTLFunction> sparse = [library newFunctionWithName:@"deswz_sparse"];
+    if (sparse) g_nvn_deswz_sparse = [dev newComputePipelineStateWithFunction:sparse error:&error];
     return g_nvn_deswz_pipeline ? 0 : -1;
 }
+
+int nvn_deswz_gpu_sparse_supported(void) { return g_nvn_deswz_sparse != nil; }
 
 int nvn_deswz_gpu_direct_supported(const nvn_texdesc *d) {
     // Prefer retained compression for large images. This path targets many
@@ -66,20 +70,22 @@ int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, ui
 }
 
 int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
-                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off, int sparse,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
                             id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch) {
-    if (!g_nvn_deswz_pipeline || !enc || !table || !params || !src || !dst || !d) return -1;
+    id<MTLComputePipelineState> pipeline = sparse ? g_nvn_deswz_sparse : g_nvn_deswz_pipeline;
+    if (!pipeline || !enc || !table || !params || !src || !dst || !d) return -1;
     uint32_t row_bytes, rows, slices, bpb;
     uint64_t base;
     unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || dst_pitch < row_bytes) return -1;
+    if (sparse && ((src_off | base) & 15)) return -1;
     struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2; } p = {
         src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_order(d)   // GOB columns as laid out (nvn_tex_level_gobs)
     };
     memcpy((uint8_t *)params.contents + params_off, &p, sizeof p);
     [enc setArgumentTable:table];
-    [enc setComputePipelineState:g_nvn_deswz_pipeline];
+    [enc setComputePipelineState:pipeline];
     [table setAddress:src.gpuAddress atIndex:0];
     [table setAddress:dst.gpuAddress atIndex:1];
     [table setAddress:params.gpuAddress + params_off atIndex:2];

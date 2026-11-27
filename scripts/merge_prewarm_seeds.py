@@ -15,9 +15,12 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 REPO = Path(__file__).resolve().parents[1]
 GAMES = REPO / 'dm/games'
 NVN = REPO / 'dm/gfx/nvn'
+SHADER_TOOLS = NVN.parent / 'tools'
 PARSER_SOURCE = REPO / 'dm/tools/prewarm_skey.c'
-sys.path.insert(0, str(GAMES))
-from game import Game
+sys.path[:0] = [str(GAMES), str(SHADER_TOOLS), str(PARSER_SOURCE.parent)]
+from dmsh_chain import table_pairs
+from game import Game, extra_dirs
+from nacp import bundle_version
 
 FILENAME = re.compile(r'([A-F0-9]{16})--([A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63})--([a-f0-9]{64})\.tsv')
 HASH = r'[a-f0-9]{16}'
@@ -27,6 +30,7 @@ STAGES = {'vertex': '0', 'pixel': '1', 'geometry': '2', 'hull': '3', 'domain': '
           'compute': '5', 'task': '36', 'mesh': '47'}  # NVN2 task and mesh can use guest or host stage numbers.
 HEADER = '# Prewarm seed list (shipped in the app, next to shader_map.tsv). See docs/development.md#prewarm-lists.\n'
 IDENTITY = ('-c', 'user.name=seedds', '-c', 'user.email=seedds@gmail.com')
+GEOMETRY_TABLES = ('geo_pairs.tsv', 'geo_mesh.tsv')
 
 
 @dataclass
@@ -102,6 +106,8 @@ def check_stages(row: str, parsed: dict[str, list[str]], shaders: dict[str, str]
             refs.append((fragment, 'pixel', fs_stage))
         if kind == 'M' and key != '-':
             refs.append((key, 'task', ''))
+    elif kind == 'G':
+        refs = [(key + '_b', 'vertex', ''), (rest[0] + '_b', 'geometry', '')]
     else:
         refs = [(key, 'compute' if kind == 'C' else '', rest[0] if kind == 'S' else '')]
     if any(key not in shaders for key, _, _ in refs):
@@ -119,38 +125,79 @@ def optional_bytes(path: Path) -> bytes | None:
         return None
 
 
-def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: ImportPlan) -> None:
-    shader_map = profile.table('shader_map.tsv')
-    if not shader_map.is_file():
-        for capture in captures:
-            print(f'{capture.path.name}: skipped {len(capture.rows):,} rows (profile has no shader map)')
-        return
+def read_shader_map(profile: Game) -> dict[str, str]:
     shaders = {}
-    for line in shader_map.read_text(encoding='utf-8').splitlines():
+    data = optional_bytes(profile.table('shader_map.tsv')) or b''
+    for line in data.decode('utf-8').splitlines():
         columns = line.split('\t', 4)
         if not line.startswith(('#', 'package')) and len(columns) >= 4:
             shaders[columns[3] + '_b'] = columns[2]
+    return shaders
+
+
+def covered_versions(profile: Game, registered: dict[str, dict[str, str]]) -> set[str]:
+    builds = profile.builds()
+    covered = profile.words('shader_versions', profile.get('package', '')) + profile.words('shader_covers', '')
+    versions = set()
+    for version in covered:
+        if version not in builds:
+            continue
+        build = builds[version]
+        known = registered.get(version)
+        if known is not None:
+            # Older derived profiles may have no display label. Recover it from the same registered modules.
+            if (build | {'display': known['display']}) != known:
+                continue
+            versions.update((known['display'], bundle_version(known['display'])))
+        versions.update((version, build['display'], bundle_version(build['display'])))
+    return versions
+
+
+def validation_tables(profile: Game, versions: set[str]):
+    repository_shaders = read_shader_map(profile)
+    registered = profile.builds()
+    tables: dict[str, tuple[dict[str, str], set[tuple[str, ...]]]] = {}
+    sources = [profile]
+    for root in extra_dirs():
+        folder = root / profile.id
+        if (folder / 'game.tsv').is_file() and folder.resolve() != profile.dir:
+            sources.append(Game(folder))
+    for source in sources:
+        if source.get('title_id', '').upper() != profile.id:
+            continue
+        matches = (covered_versions(source, registered) & versions) - tables.keys()
+        if not matches:
+            continue
+        shaders = repository_shaders if source is profile else read_shader_map(source)
+        if shaders:
+            pairs = {('G', *pair) for pair in table_pairs(source.table('geo_pairs.tsv'))}
+            tables.update(dict.fromkeys(matches, (shaders, pairs)))
+    return repository_shaders, tables
+
+
+def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: ImportPlan) -> None:
+    repository_shaders, tables = validation_tables(profile, {capture.version for capture in captures})
     path = profile.table('pso_manifest.tsv')
     original = optional_bytes(path)
     seed = original.decode('utf-8') if original is not None else HEADER
     existing = [row for row in seed.splitlines() if ROW.fullmatch(row)]
     parsed = parse_pipelines(parser, existing)
     seen = {row_key(row, parsed) for row in existing}
-    package = profile.builds().get(profile.get('package', ''), {}).get('display')
+    seen.update(('G', *pair) for pair in table_pairs(profile.table('geo_mesh.tsv')))
     additions = []
     kinds: Counter[str] = Counter()
     versions: dict[str, None] = {}
     for capture in captures:
+        exact = tables.get(capture.version)
+        shaders, pairs = exact if exact is not None else (repository_shaders, set())
         parsed = parse_pipelines(parser, capture.rows)
         counts: Counter[str] = Counter()
         for row in capture.rows:
             key = row_key(row, parsed)
             if not key:
                 counts['invalid pipeline'] += 1
-            elif key in seen:
+            elif key in seen or key in pairs:
                 counts['duplicate'] += 1
-            elif row.startswith('G\t'):
-                counts['geometry needs shader build'] += 1
             elif reason := check_stages(row, parsed, shaders):
                 counts[reason] += 1
             else:
@@ -159,12 +206,12 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
                 kinds[row[0]] += 1
                 counts['added'] += 1
                 versions[capture.version] = None
-        note = f' (profile package {package})' if package and package != capture.version else ''
+        note = ''
+        if exact is None:
+            note = ' (no matching version map, using repository shader map)' if repository_shaders else ' (no shader map available)'
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
-        fully_imported = counts['added'] + counts['duplicate'] == len(capture.rows)
-        only_duplicates_or_missing = counts['duplicate'] + counts['missing shader'] == len(capture.rows)
-        if fully_imported or only_duplicates_or_missing:
+        if counts['added'] + counts['duplicate'] == len(capture.rows):
             result.captures_to_delete.append((capture.path, capture.file_stat))
     if not additions:
         return
@@ -177,6 +224,10 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
     name = profile.get('name', profile.id)
     breakdown = ', '.join(f'{n:,} {kind}' for kind, n in sorted(kinds.items()))
     print(f'{name} ({profile.id}): {len(additions):,} new rows ({breakdown})')
+    for row in additions:
+        if row.startswith('G\t'):
+            _, vertex, geometry = row.rstrip('\n').split('\t')
+            print(f'  Next shader build: mesh pair {vertex} {geometry}')
     subject = f'game: {name} adds prewarm seeds'
     if len(subject) > 72:
         subject = f'game/{profile.id}: add prewarm seeds'
@@ -258,9 +309,9 @@ def prepare_main() -> str:
     return git('rev-parse', 'HEAD', capture=True).strip()
 
 
-def push(updates: list[Update], base: str) -> None:
+def push(plan: ImportPlan, base: str) -> None:
     paths = []
-    for update in updates:
+    for update in plan.updates:
         path = update.path.relative_to(REPO).as_posix()
         paths.append(path)
         if update.path.read_bytes() != update.content:
@@ -270,18 +321,20 @@ def push(updates: list[Update], base: str) -> None:
         git(*IDENTITY, 'commit', '--only', '-m', update.subject, '-m', update.message, '--', path)
     git('fetch', 'origin', 'main')
     inputs = ['dm/gfx/nvn/nvn_pso_skey.h', 'dm/gfx/nvn/nvn_pso_ds.h', 'dm/gfx/nvn/nvn_obj.h',
-              str(PARSER_SOURCE.relative_to(REPO))]
-    for update in updates:
-        directory = update.path.parent.relative_to(REPO)
-        inputs.extend(str(directory / name) for name in ('game.tsv', 'shader_map.tsv', 'pso_manifest.tsv'))
+              str(PARSER_SOURCE.relative_to(REPO)), str((SHADER_TOOLS / 'dmsh_chain.py').relative_to(REPO))]
+    titles = {update.path.parent.name for update in plan.updates}
+    titles.update(path.name.split('--', 1)[0] for path, _ in plan.captures_to_delete)
+    for title in sorted(titles):
+        directory = GAMES.relative_to(REPO) / title
+        inputs.extend(str(directory / name) for name in ('game.tsv', 'shader_map.tsv', 'pso_manifest.tsv', *GEOMETRY_TABLES))
     if git('diff', '--name-only', base, 'origin/main', '--', *inputs, capture=True):
         raise ValueError('origin/main changed import inputs during the run. The local commits need a fresh audit before pushing')
     git(*IDENTITY, 'rebase', '--no-autostash', 'origin/main')
     change = 'origin/main..HEAD'
     changed = git('diff', '--name-only', change, capture=True).splitlines()
     commits = git('rev-list', '--count', change, capture=True).strip()
-    if (sorted(changed) != sorted(paths) or int(commits) != len(updates)
-            or any(update.path.read_bytes() != update.content for update in updates)):
+    if (sorted(changed) != sorted(paths) or int(commits) != len(plan.updates)
+            or any(update.path.read_bytes() != update.content for update in plan.updates)):
         raise ValueError('the commits to push differ from this import')
     git('diff', '--check', change)
     git('push', 'origin', 'HEAD:main')
@@ -307,7 +360,7 @@ def main() -> int:
             apply(result.updates)
             print(f'Updated {len(result.updates)} manifest(s).', flush=True)
             if base is not None:
-                push(result.updates, base)
+                push(result, base)
         else:
             print(f'Preview: {len(result.updates)} manifest(s) would change.')
         if write:

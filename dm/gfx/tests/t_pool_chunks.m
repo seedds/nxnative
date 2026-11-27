@@ -149,9 +149,9 @@ int main(void) { @autoreleasepool {
         CHECK("the pool has an entry to log", want > 0);
         id<MTLBuffer> w = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
         ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
-        gml_read(w, map, 0, 0);
+        gml_read(w, map, 0, 0, nil);
         CHECK("the bit teaches its range", g_gml_n == n0 + 1 && g_gml_lo[n0] <= base + 900 * MB && base + 900 * MB < g_gml_hi[n0]);
-        gml_read(w, map, 0, 0);
+        gml_read(w, map, 0, 0, nil);
         CHECK("a known range adds nothing", g_gml_n == n0 + 1);
         finish();
     }

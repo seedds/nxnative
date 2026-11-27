@@ -45,6 +45,7 @@ check_t_rt_unbind: t_rt_unbind
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_rt_unbind
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_UNBIND_DEFER=0 ./t_rt_unbind
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_NVN_UNBIND_DEFER=0 ./t_rt_unbind
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_NVN_RT_SUBSET=0 ./t_rt_unbind
 # The run list: every t_*.c and t_*.m but those in NOT_RUN. `make run` builds them all (in parallel with -j), then runs them one after another, each through its check_
 # target: ./t_x by default, with the environment its RUN_ENV gives it (check_t_x: RUN_ENV = MTL_DEBUG_LAYER=1, beside its build rule), or a check_t_x recipe of its own when it
 # runs several ways. A new test needs its source and its build rule; no list to add it to. NOT_RUN: helpers linked into other tests (t_host_stubs, t_present_rescue_focus, t_gpu_lost_front, t_link_ticks_screen),
@@ -223,6 +224,7 @@ check_t_perf_order: t_perf_order
 	MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+	DM_NVN_SLICE_MRT=0 DM_NVN_LEVEL_GROUP=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FACE_MERGE=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 t_link_ticks: t_link_ticks.m t_link_ticks_screen.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m t_link_ticks_screen.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
@@ -456,7 +458,10 @@ t_rt_lifetime: t_rt_lifetime.m $(MTL_T_DEP)
 check_t_rt_lifetime: t_rt_lifetime
 	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
 	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_rt_lifetime
-check_t_rast_discard: RUN_ENV = MTL_DEBUG_LAYER=1
+.PHONY: check_t_rast_discard
+check_t_rast_discard: t_rast_discard
+	MTL_DEBUG_LAYER=1 ./t_rast_discard
+	MTL_DEBUG_LAYER=1 DM_NVN_VBAR_PASS=0 ./t_rast_discard
 t_cpu_storage: t_cpu_storage.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_cpu_storage.m $(MTL_T_SRC) $(FW)
 check_t_cpu_storage: RUN_ENV = MTL_DEBUG_LAYER=1

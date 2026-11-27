@@ -433,7 +433,7 @@ class Writers(Base):
     def test_a_full_drive_fails_the_whole_batch(self):   # SQLite ends the transaction itself on SQLITE_FULL: an earlier write must not be lost while a later one lands outside the batch
         self.store.put('before', b'0'); self.full_after(2)
         with self.store.batch():
-            self.store.put('a', b'small'); self.store.put('b', b'x' * 200000); self.store.put('c', b'small too')
+            self.store.put('a', b'small'); self.store.put('b', os.urandom(200000)); self.store.put('c', b'small too')
         self.assertTrue(self.store.full); self.assertEqual(self.store.names(''), {'before'})
         self.assertEqual(len([m for m in self.said if m.startswith('[RED]')]), 1)
         self.store.put('d', b'1'); self.assertFalse(self.store.has('d'))   # the build goes on without the cache
@@ -528,7 +528,8 @@ class Prune(Base):
         for d in (D1, D2): self.shader(d, now - 100)
         self.shader(D3, now + 100); self.store.put('shader/notadigest/mac/x', b'k', now - 100); self.store.put('metallib/mac/m.metallib', b'L' + D2.encode(), now - 100)
         before = self.blobs()
-        self.assertEqual(self.store.prune_shaders({D1}, now), (1, 640))   # the source's bytes, not the library's
+        stored_src = self.store.db.execute('SELECT length(b.payload) FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', (f'shader/{D2}/mac/k_b.metal',)).fetchone()[0]
+        self.assertEqual(self.store.prune_shaders({D1}, now), (1, stored_src))   # the source's stored bytes, not the library's
         self.assertEqual({n.split('/')[1] for n in self.store.names('shader/')}, {D1, D3, 'notadigest'})
         self.assertEqual(self.blobs(), before - 1)   # D2's source; its library's bytes stay under metallib/
         self.assertEqual(self.store.get('metallib/mac/m.metallib'), b'L' + D2.encode())
@@ -632,6 +633,127 @@ class Adopt(unittest.TestCase):
         Path(f'{self.old}.tar.part').write_bytes(b'1')
         shader_cache.adopt(self.old, self.path, self.said.append)
         self.assertEqual(os.listdir(self.root), [])
+
+
+def _make_v1(path, entries):
+    """Create a legacy v1 raw compile cache (blob(id, hash, data)) as written before inline Zstd compression."""
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        db.execute('CREATE TABLE blob(id INTEGER PRIMARY KEY, hash BLOB UNIQUE NOT NULL, data BLOB NOT NULL)')
+        db.execute('CREATE TABLE entry(name TEXT PRIMARY KEY, blob INTEGER NOT NULL, mtime REAL NOT NULL) WITHOUT ROWID')
+        for name, data in entries.items():
+            h = hashlib.blake2b(data, digest_size=16).digest()
+            row = db.execute('SELECT id FROM blob WHERE hash=?', (h,)).fetchone()
+            bid = row[0] if row else db.execute('INSERT INTO blob(hash, data) VALUES(?, ?)', (h, data)).lastrowid
+            db.execute('INSERT OR REPLACE INTO entry(name, blob, mtime) VALUES(?, ?, ?)', (name, bid, 100.0))
+        db.commit()
+
+
+@unittest.skipIf(shader_cache.zstd is None, 'zstd module unavailable')
+class Compression(Base):
+    def test_inline_compression_and_incompressible_fallback(self):
+        text = b'kernel void main0() { /* shader source */ }\n' * 1000
+        rand = os.urandom(4096)
+        tiny = b'short'
+        self.store.put('text', text); self.store.put('rand', rand); self.store.put('tiny', tiny)
+        self.assertEqual((self.store.get('text'), self.store.get('rand'), self.store.get('tiny')), (text, rand, tiny))
+        rows = {n: (c, l) for n, c, l in self.store.db.execute('SELECT e.name, b.codec, length(b.payload) FROM entry e JOIN blob b ON b.id=e.blob')}
+        self.assertEqual(rows['text'][0], shader_cache.ZSTD)
+        self.assertLess(rows['text'][1], len(text) // 10)
+        self.assertEqual(rows['rand'], (shader_cache.RAW, len(rand)))
+        self.assertEqual(rows['tiny'], (shader_cache.RAW, len(tiny)))
+
+    def test_older_checkout_fails_closed(self):
+        self.store.put('metallib/mac/a.metallib', b'library' * 500)
+        with self.assertRaisesRegex(sqlite3.OperationalError, 'no such column'):
+            self.store.db.execute('SELECT b.data FROM entry e JOIN blob b ON b.id=e.blob WHERE e.name=?', ('metallib/mac/a.metallib',))
+
+    def test_legacy_v1_read_write_generation_copy_and_take(self):
+        payload = b'compiled metal library ' * 400
+        d = self.root / 'mig'; d.mkdir()
+        v1 = d / 'cas.db'
+        _make_v1(v1, {'metallib/mac/m.metallib': payload, 'metallib/ios/i.metallib': payload + b'ios'})
+        # Opening an existing v1 file keeps it readable and writable in place.
+        s1 = shader_cache.Store(v1, self.said.append); self.addCleanup(s1.close)
+        self.assertFalse(s1.v2)
+        self.assertEqual(s1.get('metallib/mac/m.metallib'), payload)
+        s1.put('metallib/mac/n.metallib', payload + b'new'); s1.close()
+        # Migrating from v1 older generation into a new v2 generation compresses on read and on take().
+        a, b = 'aaaaaaaaaaaa', 'bbbbbbbbbbbb'
+        sa = shader_cache.for_chain(d, a, self.said.append); self.addCleanup(sa.close)
+        self.assertTrue(sa.v2)
+        self.assertEqual(sa.get('metallib/mac/m.metallib'), payload)
+        self.assertEqual(sa.db.execute('SELECT codec FROM blob').fetchone()[0], shader_cache.ZSTD)
+        self.assertEqual(sa.take(v1, 'metallib/ios/'), 1)
+        self.assertEqual(sa.get('metallib/ios/i.metallib'), payload + b'ios')
+        self.assertTrue(all(c == shader_cache.ZSTD for c, in sa.db.execute('SELECT codec FROM blob')))
+        sa.close()
+        # Copying from a v2 older generation into a newer v2 generation must not re-encode already-compressed blobs.
+        sb = shader_cache.for_chain(d, b, self.said.append); self.addCleanup(sb.close)
+        with mock.patch.object(shader_cache, '_encode', side_effect=AssertionError('re-encoded v2 blob')):
+            self.assertEqual(sb.get('metallib/mac/m.metallib'), payload)
+            self.assertEqual(sb.take(d / f'cas-{a}.db', 'metallib/ios/'), 1)
+        self.assertEqual(sb.get('metallib/ios/i.metallib'), payload + b'ios')
+        # Taking from v2 into a v1 store decodes back to raw bytes.
+        v1_dst = d / 'v1_dst.db'; _make_v1(v1_dst, {})
+        sd = shader_cache.Store(v1_dst, self.said.append); self.addCleanup(sd.close)
+        self.assertEqual(sd.take(d / f'cas-{b}.db', 'metallib/mac/'), 1)
+        self.assertEqual(sd.get('metallib/mac/m.metallib'), payload)
+
+    def test_corrupt_zstd_frame_recovers_local_and_ignores_readonly(self):
+        payload = b'shader source ' * 500
+        self.store.put('metallib/mac/a.metallib', payload)
+        self.store.db.execute('UPDATE blob SET payload=?', (b'not a valid zstd frame',))
+        self.assertIsNone(self.store.get('metallib/mac/a.metallib'))
+        self.assertTrue(any('[RED]' in m for m in self.said))
+        self.store.put('metallib/mac/a.metallib', payload)
+        self.assertEqual(self.store.get('metallib/mac/a.metallib'), payload)
+        # Corrupt Zstd in a read-only fallback is ignored without altering the fallback file, and falls through to the next file.
+        good = self.root / 'good.db'; sg = shader_cache.Store(good); sg.put('metallib/mac/a.metallib', b'from good'); sg.close()
+        bad = self.root / 'bad.db'; sb = shader_cache.Store(bad); sb.put('metallib/mac/a.metallib', payload); sb.db.execute('UPDATE blob SET payload=?', (b'corrupt',)); sb.close()
+        before = bad.read_bytes()
+        ro = shader_cache._ReadOnly([bad, good], self.said.append); self.addCleanup(ro.close)
+        self.assertEqual(ro.get('metallib/mac/a.metallib'), b'from good')
+        self.assertEqual(bad.read_bytes(), before)
+        # A corrupt older generation never poisons a new generation (either directly or via get_raw).
+        fresh = shader_cache.Store(self.root / 'fresh.db', self.said.append, older=[bad, good]); self.addCleanup(fresh.close)
+        self.assertEqual(fresh.get('metallib/mac/a.metallib'), b'from good')
+        self.assertEqual(fresh.get('metallib/mac/a.metallib'), b'from good')   # copied the valid entry, not the corrupt one
+
+    def test_missing_codec_and_unknown_codec_preserve_cache(self):
+        payload = b'precious shader ' * 500
+        self.store.put('keep', payload); self.store.close()
+        with mock.patch.object(shader_cache, 'zstd', None):
+            s = shader_cache.Store(self.path, self.said.append); self.addCleanup(s.close)
+            with self.assertRaisesRegex(RuntimeError, 'backports.zstd'): s.get('keep')
+            self.assertEqual(s.db.execute('SELECT count(*) FROM blob').fetchone()[0], 1)   # never wiped as damaged
+            s.close()
+            raw_store = shader_cache.Store(self.root / 'no_zstd.db', self.said.append); self.addCleanup(raw_store.close)
+            raw_store.put('raw', payload)
+            self.assertEqual(raw_store.get('raw'), payload)
+            self.assertEqual(raw_store.db.execute('SELECT codec FROM blob').fetchone()[0], shader_cache.RAW)
+        s = shader_cache.Store(self.path, self.said.append); self.addCleanup(s.close)
+        self.assertEqual(s.get('keep'), payload)
+        s.db.execute('UPDATE blob SET codec=99')
+        with self.assertRaisesRegex(RuntimeError, 'codec 99'): s.get('keep')
+        self.assertEqual(s.db.execute('SELECT count(*) FROM blob').fetchone()[0], 1)
+
+    def test_remote_corrupt_zstd_falls_back_to_parent_recovery(self):
+        import multiprocessing
+        global SERVED
+        payload = b'worker shader ' * 500
+        self.store.put('metallib/mac/bad.metallib', payload)
+        self.store.db.execute('UPDATE blob SET payload=?', (b'bad zstd',))
+        SERVED = shader_cache.Served(self.store, 1)
+        def check_worker():
+            remote = SERVED.worker()
+            assert remote.get('metallib/mac/bad.metallib') is None
+            remote.put('metallib/mac/ok.metallib', payload)
+            assert remote.get('metallib/mac/ok.metallib') == payload
+        p = multiprocessing.get_context('fork').Process(target=check_worker)
+        p.start(); SERVED.start(); p.join(20)
+        self.assertEqual(p.exitcode, 0)
+        self.assertEqual(self.store.get('metallib/mac/ok.metallib'), payload)
+        self.assertTrue(any('[RED]' in m for m in self.said))
 
 
 if __name__ == '__main__': unittest.main()

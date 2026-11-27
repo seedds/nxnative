@@ -267,9 +267,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // c[0] + 0x210 + 0x10 r and storage slot s to c[0] + 0x310 + 0x10 s (NVN's compute tables), texture slot t to c[2] + 0x20 + 8 t, separate texture r to
         // c[2] + 0x168 + 8 r, separate sampler r to c[2] + 0x568 + 8 r and image slot i to c[2] + 0x120 + 8 i (NVN's handle tables). Other offsets stay.
         // Push block 1 (control +0xaa words; PRAGMATA's buffer entries and handles) lies between push block 0 and the uniform entries, mapped to c[24] + 0x100.
-        // NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own, c[25 + stage index] (QueryAmpereStageBank): mapped to their push block
-        // in c[24] (AStageBlock). A bank past the push constants' (24) that is not the stage's is refused here: the binding table ends there, and it failed later as an
-        // IndexOutOfRangeException (PRAGMATA: 18,198 shaders before the map)
+        // A bank past the push constants' (24) is another push block of the stage group, c[24 + b] (APushBlock): mapped to block b in c[24]. Left as it was, the binding table
+        // ended there, and it failed later as an IndexOutOfRangeException (PRAGMATA: 18,198 shaders before the map)
         private static (int Bank, int Offset) AMapC0(EmitterContext context, int bank, int offset)
         {
             if (bank > 24)
@@ -279,7 +278,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
                     throw AFail(context, $"stage buffer bank c[{bank}] read at 0x{offset:x}, past its push block");
                 }
 
-                return (24, AStageBlock(context, bank) * 0x100 + offset);
+                return (24, APushBlock(bank) * 0x100 + offset);
             }
 
             int[] layout = bank == 0 ? context.TranslatorContext.GpuAccessor.QueryAmpereComputeC0Layout() : null;
@@ -289,23 +288,26 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 return (bank, offset);
             }
 
-            int ubos = layout[0], ssbos = layout[1], textures = layout[2], size = layout[3], push = (layout[4] + 0xf) & ~0xf;
-            // Push block 1 (control +0xaa: the driver's accessor reads +0xa9 + block, the words of each push block; dmsh_abi.h DMSH_PUSH_BLOCKS) follows push block 0,
-            // before the uniform entries: PRAGMATA's c8f5a992ec204a44 reads {address, size} pairs at 0x20 / 0x28 and 0x30 / 0x38, right after its one push word, and
-            // b12078fe3bce1273, with no push words, the three 8-byte handles it pushes at 0x10, 0x18 and 0x20, then its uniform entries
-            int pushed = layout.Length > 7 ? (layout[7] + 0xf) & ~0xf : 0;
-            int pb = 0x10 + push;
-            int ub = pb + pushed;
+            int ubos = layout[0], ssbos = layout[1], textures = layout[2], size = layout[3];
+            // All push blocks precede the uniform entries, in block order and aligned to 16 bytes.
+            // PRAGMATA uses block 1 for buffer entries and Cyberpunk 2077 uses block 7 for an address.
+            int ub = 0x10;
+            for (int block = 0; block < 8; block++)
+            {
+                int field = block == 0 ? 4 : 6 + block;
+                int bytes = field < layout.Length ? (layout[field] + 0xf) & ~0xf : 0;
+                if (offset >= ub && offset < ub + bytes)
+                {
+                    return (24, block * 0x100 + (offset - ub));
+                }
+
+                ub += bytes;
+            }
             int sb = ub + 0x10 * ubos;
             int hb = sb + 0x10 * ssbos;
             int sepTextures = hb + 8 * textures;
             int sepSamplers = sepTextures + 8 * (layout.Length > 5 ? layout[5] : 0);
             int ib = sepSamplers + 8 * (layout.Length > 6 ? layout[6] : 0);
-
-            if (offset >= 0x10 && offset < pb)
-            {
-                return (24, offset - 0x10);
-            }
 
             if (offset >= ub && offset < sb)
             {
@@ -316,13 +318,6 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 }
 
                 return (0, 0x210 + (offset - ub));
-            }
-
-            // Push block 1, mapped to c[24] + 0x100. PRAGMATA's compute shaders load and store through the buffer addresses it holds (a persistent kernel spins on a work counter
-            // behind one); taken for uniform slots, which the game never bound, or read at the wrong place, the GPU never finished its first 3D frame
-            if (offset >= pb && offset < ub)
-            {
-                return (24, 0x100 + (offset - pb));
             }
 
             if (offset >= sb && offset < hb)
@@ -353,19 +348,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             return (bank, offset);
         }
 
-        // A constant bank past the push constants' (24) is an NVN2 graphics stage's buffer bank: stage i (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) reads c[25 + i]
-        // (QueryAmpereStageBank), which holds what the game pushes into the graphics push block 1 + i with nvnCommandBufferPushGraphicsConstants: {address, size} entries, 16 bytes
-        // each, or 8-byte handles, as compute reads its own from push block 1. PRAGMATA pushes the mesh stage's six entries into block 2 and the pixel stage's five into block 5 before
-        // its visibility and material passes. The bank maps to that block of c[24] (dmsh_abi.h DMSH_PUSH_BLOCKS; an indexed read, LDC Ra / ULDC URa, is moved by the block's base
-        // with it). Taken for the uniform slots the game binds, the mesh shader read three unbound slots and the material pass the wrong tables: every object drawn through the
-        // visibility buffer came out black. Another stage's bank is refused.
-        private static int AStageBlock(EmitterContext context, int bank)
+        // NVN2's push blocks are constant banks: block b of the stage group (nvnCommandBufferPushGraphicsConstants / PushComputeConstants, block b) is c[24 + b], for every stage
+        // of the group. The 5-bit bank field reaches c[31], block 7, the last of the group's eight (dmsh_abi.h DMSH_PUSH_BLOCKS). The game chooses the blocks: PRAGMATA pushes its
+        // vertex stage's {address, size} entries into block 1 (c[25]), its mesh stage's into block 2 (c[26]) and its pixel stage's into block 5 (c[29]); Cyberpunk 2077 pushes one
+        // 8-byte address into block 7 of both groups at boot, which 2,237 of its pixel and 852 of its vertex shaders read as c[31][0], and its pixel shaders also read c[25].
+        // The bank maps to that block of c[24] (an indexed read, LDC Ra / ULDC URa, is moved by the block's base with it). Taken for the uniform slots the game binds, PRAGMATA's
+        // mesh shader read three unbound slots and its material pass the wrong tables: every object drawn through the visibility buffer came out black
+        private static int APushBlock(int bank)
         {
-            if (bank != context.TranslatorContext.GpuAccessor.QueryAmpereStageBank())
-            {
-                throw AFail(context, $"constant bank c[{bank}], which is not this stage's buffer bank");
-            }
-
             return bank - 24;
         }
 

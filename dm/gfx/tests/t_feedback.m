@@ -636,6 +636,81 @@ static void pool_depth_case(void) {
     CHECK(!g_enc, "and the next draw writing depth ends it, as a tile-based store would show it the write");
     rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "that submission completed");
 }
+static void pool_depth_snapshot_case(void) {
+    tex_t colour, depth, unrelated;
+    target(&colour, 99810);
+    depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99811, .mem=(uint8_t *)g_ubo_words,
+        .d={.target=NVN_TEXTURE_TARGET_2D, .format=NVN_FORMAT_DEPTH32F_STENCIL8, .width=4, .height=4, .depth=1, .levels=1, .samples=1}};
+    id<MTLTexture> original = [g_dev newTextureWithDescriptor:tex_desc(&depth, 0)];
+    CHECK(original != nil, "pool feedback depth/stencil attachment allocates");
+    if (!original) return;
+    res_add(original); mtl_tex_init(&depth); serial_put(depth.serial, original);
+    tex_t alias = depth; alias.serial++;
+    serial_put(alias.serial, original);
+    id<MTLTexture> other = target(&unrelated, 99813); unrelated.mem = (uint8_t *)g_ubo_words; unrelated.off = 4096;
+    tex_t old = depth; old.serial = 99814;
+    id<MTLTexture> previous = [g_dev newTextureWithDescriptor:tex_desc(&old, 0)];
+    CHECK(previous != nil, "the previous lifetime of the depth texture allocates separately");
+    res_add(previous); mtl_tex_init(&old); serial_put(old.serial, previous);
+    const view_t stencil = {.set_dsmode=1, .dsmode=NVN_TEXTURE_DEPTH_STENCIL_MODE_STENCIL};
+    mtl_reg_tex(712, &depth, NULL);
+    mtl_reg_tex(713, &alias, &stencil);
+    mtl_reg_tex(714, &unrelated, NULL);
+    mtl_reg_tex(715, &old, NULL);
+    pool_ds_note(712);
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs;
+    fs->rf.pool = fs->rf.bindless = 1; fs->rf.nb = 2;
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureType2D, .dpf=NVN_DPF_FLOAT};
+    fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureTypeCube, .dpf=NVN_DPF_FLOAT};
+    const nvn_rbind *binding = &fs->rf.b[0];
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    g_fb_pass = UINT64_MAX;
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; R.rt.depth = &depth;
+    S.ds.dt = S.ds.dw = 1;
+    R.clear_d = 1; R.cd = 0.375;
+    fb_prepare(pr);
+    id<MTLBuffer> first = fb_pool_table(binding);
+    id<MTLTexture> snap = g_fb_pool_snapshot;
+    CHECK(first && !g_enc && g_fb_pool_copied, "the pending depth clear lands before copying the pool attachment");
+    CHECK(!fb_pool_table(&fs->rf.b[1]) && !g_fb_dread, "a cube table neither needs replacement nor prevents a 2D depth snapshot");
+    if (first) {
+        const uint64_t *rid = (const uint64_t *)((const uint8_t *)first.contents + DMSH_POOL_HEAD);
+        id<MTLTexture> view = g_fb_pool_views[@(g_treg[713].view_rid)];
+        CHECK(rid[712] == snap.gpuResourceID._impl && snap != original, "pool depth uses the copied attachment");
+        CHECK(view.pixelFormat == MTLPixelFormatX32_Stencil8 && view.parentTexture == snap && rid[713] == view.gpuResourceID._impl,
+              "an aliased stencil view uses the stencil plane of the same copy");
+        CHECK(rid[714] == other.gpuResourceID._impl, "other textures still use their original pool entries");
+        CHECK(rid[715] == previous.gpuResourceID._impl, "a separate allocation with the same guest description keeps its pool entry");
+        blit_barrier();
+        enc_b_copy_texture_buffer_opt(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 0, 256, 1024,
+            MTLBlitOptionDepthFromDepthStencil);
+    }
+    clear(MTLClearColorMake(0, 0, 0, 1));
+    fb_prepare(pr); fb_prepare(pr);
+    CHECK(g_enc && first && fb_pool_table(binding) == first && !g_fb_dread, "consecutive depth-writing draws reuse the copied table in one pass");
+    rp_end();
+    R.clear_d = 1; R.cd = 0.75;
+    g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(first && fb_pool_table(binding) == first && g_fb_pool_copied, "the next barrier refreshes the depth snapshot in the same immutable pool table");
+    if (snap) {
+        blit_barrier();
+        enc_b_copy_texture_buffer_opt(blit(), snap, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result, 1024, 256, 1024,
+            MTLBlitOptionDepthFromDepthStencil);
+    }
+    R.rt.depth = NULL;
+    fb_prepare(pr);
+    CHECK(!fb_pool_table(binding), "the pool binding is restored when the attachment changes");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the two pool copies complete under Metal validation");
+    int exact = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) {
+        const float *row = (const float *)((const uint8_t *)result.contents + y * 256);
+        exact &= row[x] == 0.375f && row[256 + x] == 0.75f;
+    }
+    CHECK(exact, "the pool copy holds the depth visible at each barrier");
+    mtl_tex_release(&colour); mtl_tex_release(&depth); mtl_tex_release(&alias); mtl_tex_release(&unrelated); mtl_tex_release(&old);
+}
 // A replaced pool table comes back only once the submission that may read it has completed, and only at its own size; the readback cache makes room with its oldest buffers instead of turning new sizes away
 static void reuse_tables_case(void) {
     uint64_t done0 = g_done, fence0 = g_fence, made0 = g_pool_made, reused0 = g_pool_reused;
@@ -1175,9 +1250,32 @@ static void depth_rect_case(NvProg *pr) {
     mtl_tex_release(&depth); mtl_tex_release(&depth_alias); mtl_tex_release(&src_depth);
     printf("bounded depth rect snapshots: %s\n", before == failed ? "PASS" : "FAIL");
 }
+static void read_only_depth_case(void) {
+    NvShader *fs = [NvShader new];
+    fs->early_read_only = 1;
+    __typeof__(S.ds) saved_depth = S.ds;
+    int saved_counting = g_vis_counting, saved_need = g_vis_need;
+    S.ds.dt = 1; S.ds.dw = 0; S.ds.df = NVN_DEPTH_FUNC_LESS; S.ds.st = 0;
+    g_vis_counting = 0; g_vis_need = 1;
+    CHECK(pso_early_read_only(fs), "discard can test read-only depth early");
+    S.ds.dw = 1;
+    CHECK(!pso_early_read_only(fs), "discard must precede depth writes");
+    S.ds.dw = 0; S.ds.st = 1;
+    CHECK(!pso_early_read_only(fs), "discard must precede stencil tests and writes");
+    S.ds.st = 0; S.ds.df = NVN_DEPTH_FUNC_ALWAYS;
+    CHECK(!pso_early_read_only(fs), "always-pass depth cannot reject fragments");
+    S.ds.df = NVN_DEPTH_FUNC_LESS; g_vis_counting = 1;
+    CHECK(!pso_early_read_only(fs), "occlusion reports must exclude discarded fragments");
+    g_vis_need = 0;
+    CHECK(pso_early_read_only(fs), "an unobserved occlusion query permits early rejection");
+    S.ds = saved_depth;
+    g_vis_counting = saved_counting;
+    g_vis_need = saved_need;
+}
 int main(int argc, char **argv) { @autoreleasepool {
     setenv("DM_NVN_GPU_TS", "segment", 1);
     mtl_init(); NSError *error = nil;
+    read_only_depth_case();
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { return float4(i == 1 ? 3.0 : -1.0, i == 2 ? 3.0 : -1.0, 0, 1); }\n"
         "struct A {texture2d<float, access::read> source[[id(0)]];};\n"
@@ -1235,6 +1333,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (argc == 2) { tile_case(argv[1]); fpos_case(argv[1]); om_case(argv[1]); }
     pool_depth_case();
     reuse_tables_case();
+    pool_depth_snapshot_case();
     cut_boundary_case();
     merge_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);

@@ -188,11 +188,21 @@ def c2_array(name, ty):
 
 def pool_fallback(name):
     """Ryujinx's array for a handle it traced to no slot: <stage>_<t|s|i...>_cb0_40000000, an image's with a trailing format suffix (cp_i3d_cb0_40000000_)"""
-    return re.fullmatch(r'\w+?_cb0_40000000(?:_\w*)?', name) is not None
+    return re.fullmatch(r'\w+?_cb0_4000000[01](?:_\w*)?', name) is not None
+
+def pool_row_fetch(name):
+    return name.endswith('_cb0_40000001')
 
 def pool_image(name):
     """Whether a pool binding name is a storage image (<stage>_i...; matching reflect()'s image prefix rule), read-only or writable"""
     return re.match(r'[a-z]+_i', name) is not None
+
+def pool_index_end(src, start, name):
+    depth = 1
+    for i in range(start, len(src)):
+        depth += (src[i] == '[') - (src[i] == ']')
+        if not depth: return i + 1
+    raise ValueError(f'{name}: unbalanced pool index')
 
 POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx's handle fallback by the pools, the vendored BindlessElimination keeps 32-entry slot arrays (NvnSlotArrayLength)
 
@@ -209,8 +219,8 @@ POOL_MARK = """template<typename P> static inline __attribute__((always_inline))
 
 """
 
-def _buffer_pool_operation(src, start, base, index):
-    call = re.match(r'\.(read|write|get_width)\(', src[start:])
+def _buffer_pool_operation(src, start, base, index, row_fetch=False):
+    call = re.match(r'\.(read|write|get_width|atomic_\w+)\(', src[start:])
     if not call: raise ValueError(f'{base}: unsupported BUFFER table operation')
     first, depth, split = start + call.end(), 1, []
     end = first
@@ -219,10 +229,18 @@ def _buffer_pool_operation(src, start, base, index):
         c = src[end]
         if c == ',' and depth == 1: split.append(end)
         depth += {'(': 1, ')': -1, '[': 1, ']': -1, '{': 1, '}': -1}.get(c, 0); end += 1
-    if call[1] == 'read':
+    if row_fetch:
+        if call[1] != 'read' or len(split) != 1:
+            raise ValueError(f'{base}: expected a wrapped 1D fetch')
+        out = f'dm_pool_read_1d({base}, {index}, {src[first:end - 1]})'
+    elif call[1] == 'read':
         out = f'dm_buffer_read({base}, {index}, {src[first:end - 1]})'
     elif call[1] == 'get_width':
         out = f'dm_buffer_width({base}, {index})'
+    elif call[1].startswith('atomic_'):   # a texture atomic (MSL 3.1): its first argument is the coordinate, moved by the element's lead as a read's or a write's is
+        if not split: raise ValueError(f'{base}: unsupported BUFFER atomic arguments')
+        coord, rest = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
+        out = f'(&{base}->e[0])[{index}].{call[1]}(dm_buffer_coord({base}, {index}, {coord}), {rest})'
     else:
         if len(split) != 1: raise ValueError(f'{base}: unsupported BUFFER write arguments')
         val, coord = src[first:split[0]].strip(), src[split[0] + 1:end - 1].strip()
@@ -347,6 +365,12 @@ template<typename P, typename V> static inline __attribute__((always_inline)) vo
     uint m = c + b;
     (&p->e[0])[i].write(v, m < b ? c : m);
 }
+template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_coord(constant P* p, uint i, uint c)
+{
+    uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
+    uint m = c + b;
+    return m < b ? c : m;
+}
 template<typename P> static inline __attribute__((always_inline)) uint dm_buffer_width(constant P* p, uint i)
 {
     uint b = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(p) + p->bias)[i];
@@ -354,6 +378,42 @@ template<typename P> static inline __attribute__((always_inline)) uint dm_buffer
 }
 
 """
+
+ROW_POOL_READ = """template<typename P> static inline __attribute__((always_inline)) auto dm_pool_read_1d(constant P* p, uint i, uint2 xy, uint lod)
+{
+    constant auto* b = p->buffers;
+    uint lead = reinterpret_cast<constant uint*>(reinterpret_cast<constant uchar*>(b) + b->bias)[i];
+    if (lead != uint(-1)) {
+        uint c = xy.x | (xy.y << 14);
+        return (&b->e[0])[dm_pool_mark(b, i)].read(c <= uint(-1) - lead ? c + lead : uint(-1));
+    }
+    constant auto* r = p->rows;
+    return (&r->e[0])[dm_pool_mark(r, i)].read(xy, lod);
+}
+
+"""
+
+_DISCARD = re.compile(r'\bdiscard_fragment\b')
+_POOL_WRITES = re.compile(r'\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|'
+                          r'\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|\.atomic_\w+\(|^\s*device\s', re.M)
+_ARRAY_DEVICE_ACCESSOR = re.compile(
+    r'^ +device T& operator \[\] \(size_t pos\) device\n *\{\n *return elements\[pos\];\n *\}', re.M)
+
+
+def pool_early_variant(src):
+    """Return the eligible draw state for a fragment with host texture read tracking."""
+    if POOL_MARK not in src or '[[early_fragment_tests]]' in src:
+        return None
+    own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '').replace(ROW_POOL_READ, '')
+    # The template defines this accessor even when no writable device array is instantiated.
+    # Leave the remaining device declarations and stores in the proof.
+    own, removed = _ARRAY_DEVICE_ACCESSOR.subn('', own)
+    if _POOL_WRITES.search(own) or re.search(r'\bdevice\b', re.sub(r'\bconst\s+device\b', '', own)):
+        return None
+    if _DISCARD.search(own):
+        return 'read_only'
+    return 'standard' if removed else None
+
 
 def pool_arrays(src):
     """Ryujinx's arrays for a texture handle it cannot trace to one slot (<stage>_<t|s>_cb0_40000000, indexed by the handle's texture / sampler ID), sized to the whole ID ranges
@@ -375,7 +435,8 @@ def pool_arrays(src):
         if int(m.group(3)) < POOL_MIN or not (pool_fallback(m.group(4)) or decode_ubo_tex(m.group(4).removesuffix('Smplr'))): return m.group(0)
         if pool_image(m.group(4)) and not pool_fallback(m.group(4)): raise ValueError(f'{m.group(4)}: a table of images from a uniform buffer')
         # element, length, marked (a texture pool's reads; an image pool's are not: the host fills it with every image-flagged texture, nvn_mtl.m img_pool_gpu)
-        pools[m.group(4)] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and not pool_image(m.group(4)) and pool_fallback(m.group(4)))
+        name = m.group(4)
+        pools[name] = (m.group(2), int(m.group(3)), m.group(2) != 'sampler' and not pool_image(name) and pool_fallback(name) and not pool_row_fetch(name))
         return f'{m.group(1)}constant spvPool_{m.group(4)}* {m.group(4)} [[id('
     members = re.sub(r'^(\s*)array<(.+), (\d+)> (\w+) \[\[id\(', to_pointer, body.group(1), flags=re.M)
     if not pools: return src
@@ -393,9 +454,22 @@ def pool_arrays(src):
         aid += int(a.group(1)) if a else 1
         return out
     members = re.sub(r'^(\s*)(.+?)\s+(\w+)\s*\[\[id\((\d+)\)((?:\s*,\s*\w+\(\d+\))*)\]\];', renumber, members, flags=re.M)
-    structs = ''.join(f'struct spvPool_{nm}\n{{\n    uint n;\n' + ('    uint bias;\n' if 'texture_buffer<' in el else '') + f'    ulong seen;\n    array<{el}, 1> e;\n}};\n\n' for nm, (el, n, _) in pools.items())
+    structs = ''
+    for nm, (el, _, _) in pools.items():
+        if pool_row_fetch(nm):
+            element = re.fullmatch(r'texture2d<([a-z]+)>', el)
+            if not element:
+                raise ValueError(f'{nm}: unexpected wrapped 1D texture type {el}')
+            structs += f'struct spvPoolRows_{nm}\n{{\n    uint n;\n    ulong seen;\n    array<{el}, 1> e;\n}};\n\n'
+            structs += f'struct spvPoolBuffers_{nm}\n{{\n    uint n;\n    uint bias;\n    ulong seen;\n    array<texture_buffer<{element[1]}>, 1> e;\n}};\n\n'
+            structs += f'struct spvPool_{nm}\n{{\n    uint n;\n    constant spvPoolRows_{nm}* rows;\n    constant spvPoolBuffers_{nm}* buffers;\n}};\n\n'
+        else:
+            bias = '    uint bias;\n' if 'texture_buffer<' in el else ''
+            structs += f'struct spvPool_{nm}\n{{\n    uint n;\n{bias}    ulong seen;\n    array<{el}, 1> e;\n}};\n\n'
     if any('texture_buffer<' in el for el, _, _ in pools.values()): structs = BUFFER_POOL_READ + structs
-    marked = any(mk for _, _, mk in pools.values())
+    row_fetches = any(pool_row_fetch(nm) for nm in pools)
+    if row_fetches: structs = ROW_POOL_READ + structs
+    marked = row_fetches or any(mk for _, _, mk in pools.values())
     if marked: structs = POOL_MARK + structs
     i = body.start()
     src = src[:i] + structs + src[i:body.start(1)] + members + src[body.end(1):]
@@ -403,10 +477,7 @@ def pool_arrays(src):
         out, pos = [], 0
         for m in re.finditer(r'([\w.]+)\.%s\[' % re.escape(nm), src):
             if m.start() < pos: continue
-            depth, j = 1, m.end()
-            while depth:
-                if j >= len(src): raise ValueError(f'{nm}: unbalanced index')
-                depth += {'[': 1, ']': -1}.get(src[j], 0); j += 1
+            j = pool_index_end(src, m.end(), nm)
             base = f'{m.group(1)}.{nm}'
             index = f'min(uint({src[m.end():j - 1]}), {base}->n)'
             selected = f"dm_pool_mark({base}, {index})" if pools[nm][2] else index
@@ -420,19 +491,18 @@ def pool_arrays(src):
     # already inside its caller's argument when the outer operation is wrapped.
     for access in reversed(list(re.finditer(r'\(&([\w.]+)->e\[0\]\)\[', src))):
         base = access[1]; name = base.rsplit('.', 1)[-1]
-        if name not in pools or 'texture_buffer<' not in pools[name][0]: continue
-        first, end, depth = access.end(), access.end(), 1
-        while depth:
-            if end >= len(src): raise ValueError(f'{name}: unbalanced BUFFER index')
-            depth += {'[': 1, ']': -1}.get(src[end], 0); end += 1
+        if name not in pools or ('texture_buffer<' not in pools[name][0] and not pool_row_fetch(name)): continue
+        first = access.end()
+        end = pool_index_end(src, first, name)
         index = src[first:end - 1]
-        end, replacement = _buffer_pool_operation(src, end, base, index)
+        if src.startswith(')', end) and src[:access.start()].endswith('spvImageFence('): continue   # a fence on the element (before a read of what this thread wrote): no coordinate to move
+        end, replacement = _buffer_pool_operation(src, end, base, index, pool_row_fetch(name))
         src = src[:access.start()] + replacement + src[end:]
     # The mark stores to memory, so Metal would test this fragment shader against depth after running it: every covered pixel is shaded (no hidden surface removal) and the depth it tests differs by
     # an ulp from a prepass's, which fails an EQUAL pass along contours. The mark is the host's own, so it must not change when the test runs: early, unless the shader discards or writes depth, which
     # a test before it would get wrong (then it stays late, and only costs the shading)
-    own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '')   # what the shader does itself: a store of its own keeps the test where the game's own shader has it
-    if marked and not re.search(r'\bdiscard_fragment\b|\[\[\s*depth\(|\[\[\s*sample_mask\s*\]\]|\[\[\s*stencil\s*\]\]|\.write\(|\bdm_buffer_write\b|\batomic_\w+_explicit\b|^\s*device\s', own, re.M):
+    own = src.replace(POOL_MARK, '').replace(BUFFER_POOL_READ, '').replace(ROW_POOL_READ, '')
+    if marked and not _DISCARD.search(own) and not _POOL_WRITES.search(own):
         src = re.sub(r'^(?<!\]\] )fragment\s', '[[early_fragment_tests]] fragment ', src, flags=re.M)
     return src
 
@@ -447,7 +517,8 @@ def reflect(key, stage, msl, res):
     for m in members:
         ty, nm, aid = m.group(1).strip(), m.group(2), int(m.group(3))
         e = {'msl_name': nm, 'msl_type': ty, 'arg_id': aid}
-        pool = re.search(r'struct spvPool_%s\s*\{\s*uint n;\s*(?:uint bias;\s*)?ulong seen;\s*array<(.+), \d+> e;' % re.escape(nm), msl) if ty == f'constant spvPool_{nm}*' else None
+        prefix = 'spvPoolRows' if pool_row_fetch(nm) else 'spvPool'
+        pool = re.search(r'struct %s_%s\s*\{\s*uint n;\s*(?:uint bias;\s*)?ulong seen;\s*array<(.+), \d+> e;' % (prefix, re.escape(nm)), msl) if ty == f'constant spvPool_{nm}*' else None
         if ty == 'sampler' and nm.endswith('Smplr' + abi.BORDER_TWIN):   # a sampler's twin (border_emu): the same sampler, its bit in the block in the order of the twins
             nm = nm[:-len(abi.BORDER_TWIN)]; e['border_bit'] = sum(1 for b in binds if 'border_bit' in b)
         if nm == abi.BORDER_MEMBER: e.update(kind=abi.KIND_BORDER)
@@ -455,7 +526,15 @@ def reflect(key, stage, msl, res):
         elif pool and not pool_fallback(nm):   # a table of a uniform buffer's handles (pool_arrays): reg and off as an array of them, below
             ut, us = decode_ubo_tex(nm.removesuffix('Smplr'))   # pyright: ignore[reportGeneralTypeIssues]  (not None: pool_arrays made this pool only for a name it decodes)
             e.update(kind=abi.KIND_SAMP_HTAB if pool.group(1) == 'sampler' else abi.KIND_TEX_HTAB, elem=pool.group(1), reg=ut[0], off=ut[1], **({'soff': us[1], 'sreg': abi.SREG_C2} if us[0] == 'c2' else {}))
-        elif pool: e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_IMG_POOL if pool_image(nm) else abi.KIND_TEX_POOL, elem=pool.group(1))   # see pool_arrays
+        elif pool:
+            e.update(kind=abi.KIND_SAMP_POOL if pool.group(1) == 'sampler' else abi.KIND_IMG_POOL if pool_image(nm) else abi.KIND_TEX_POOL, elem=pool.group(1))
+            if pool_row_fetch(nm): e['fetch1d'] = True
+            if e['kind'] == abi.KIND_IMG_POOL and '.atomic_' in msl:
+                # Each rewritten access is (&pool->e[0])[index]. Check this pool's call so a second, ordinary pool keeps its own usage.
+                accesses = re.finditer(rf'\b{re.escape(nm)}->e\[0\]\)\[', msl)
+                if any(msl.startswith('.atomic_', pool_index_end(msl, a.end(), nm)) for a in accesses):
+                    e.update(atomic=True, rw=True)
+        elif nm == abi.TEX_QUERY_MEMBER: e.update(kind=abi.KIND_TEX_QUERY)
         elif nm == 'support_buffer': e.update(kind=abi.KIND_SUPPORT)
         elif c := re.fullmatch(r'[a-z]+_c(\d+)', nm):
             n = int(c.group(1))

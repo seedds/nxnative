@@ -279,11 +279,11 @@ static void replay_timeout(void) {
     }
     event_close(e);
 }
-typedef struct { _Atomic int entered, done; } cw_arg_t;
+typedef struct { _Atomic int entered, done; int applet; } cw_arg_t;
 static void *cw_reader(void *p) {
     cw_arg_t *a = p;
     atomic_store(&a->entered, 1);
-    guest_clock_read_wait();
+    if (a->applet) guest_applet_wait(); else guest_clock_read_wait();
     atomic_store(&a->done, 1);
     return NULL;
 }
@@ -315,6 +315,18 @@ static void clock_freeze_wait(void) {
     guest_clock_freeze_for(1, 0);   // all wait reasons lifted: reader wakes
     assert(!pthread_join(th, NULL));
     assert(atomic_load(&a.done));
+
+    guest_clock_freeze_for(DM_CLOCK_APPLET, 1);
+    guest_clock_freeze_for(1, 1);
+    cw_arg_t applet = {.applet = 1};
+    assert(!pthread_create(&th, NULL, cw_reader, &applet));
+    while (!atomic_load(&applet.entered)) sched_yield();
+    usleep(15000);
+    assert(!atomic_load(&applet.done));
+    guest_clock_freeze_for(DM_CLOCK_APPLET, 0);
+    assert(!pthread_join(th, NULL));   // the applet gate reopens even while background keeps the clock frozen
+    assert(atomic_load(&applet.done));
+    guest_clock_freeze_for(1, 0);
 }
 int main(int argc, char **argv) {
     alarm(10);

@@ -429,8 +429,9 @@ static void *name_at(void ***tab, uint32_t *n, uint32_t *cap, uint32_t k, size_t
 }
 
 // use: serial of the last command buffer that read it; immutable: made by glBufferStorage (LÖVE's persistently mapped streams), never orphaned, the game keeps a pointer into it.
+// created: made by glCreateBuffers or bound at least once (DSA rejects names that glGenBuffers only reserved);
 // refs: 1 for the name-table slot (g_bufs) plus one per live context binding, VAO binding or buffer-texture attachment (OpenGL §5.1.3).
-typedef struct { __strong id<MTLBuffer> mb; size_t size; uint64_t use; int immutable; unsigned refs; } buf_t;
+typedef struct { __strong id<MTLBuffer> mb; size_t size; uint64_t use; int immutable; uint8_t created; unsigned refs; } buf_t;
 typedef struct { GLuint name; buf_t *obj; } buf_bind_t;
 NAMES(buf_t, g_bufs, g_nbufs, g_capbufs)
 static buf_t *buf_of(GLuint n) { return n && n < g_nbufs ? g_bufs[n] : NULL; }
@@ -2132,11 +2133,17 @@ GL(glGetFloatv, void, GLenum p, GLfloat *v) {
 }
 
 // ---------- Buffers and vertex arrays ----------
-GL(glGenBuffers, void, GLsizei n, GLuint *out) {
+static void buf_gen(GLsizei n, GLuint *out, int created) {
     for (GLsizei i = 0; i < n; i++) {
         out[i] = name_new((void ***)&g_bufs, &g_nbufs, &g_capbufs, sizeof(buf_t));
         g_bufs[out[i]]->refs = 1;
+        g_bufs[out[i]]->created = (uint8_t)created;
     }
+}
+GL(glGenBuffers, void, GLsizei n, GLuint *out) { buf_gen(n, out, 0); }
+GL(glCreateBuffers, void, GLsizei n, GLuint *out) {
+    if (n < 0) { gl_error(GL_INVALID_VALUE); return; }
+    buf_gen(n, out, 1);
 }
 GL(glDeleteBuffers, void, GLsizei n, const GLuint *b) {
     // GL unbinds a deleted buffer from the current context and current vertex array; other vertex arrays, shared contexts and buffer textures retain it until unbound (OpenGL §5.1.2–3)
@@ -2165,13 +2172,15 @@ GL(glBindBuffer, void, GLenum target, GLuint b) {
     else if (target == GL_ELEMENT_ARRAY_BUFFER) buf_bind_set(&cur_vao()->ebo, b, obj);
     else if (target == GL_UNIFORM_BUFFER) buf_bind_set(&S.uniform_buf, b, obj);
     else if (target == GL_TEXTURE_BUFFER) buf_bind_set(&S.texture_buf, b, obj);
-    else RED1("glBindBuffer target %#x not implemented", target);
+    else { RED1("glBindBuffer target %#x not implemented", target); return; }
+    if (obj) obj->created = 1;
 }
 // A uniform buffer binding point: the buffer and the range a named uniform block of a program bound to that point reads (bind_blocks); both calls also bind the generic target
 static void ubo_bind(GLenum target, GLuint index, GLuint b, GLintptr off, GLsizeiptr size, const char *fn) {
     if (target != GL_UNIFORM_BUFFER) { RED1("%s target %#x not implemented", fn, target); return; }
     if (index >= NUBO || off < 0 || size < 0) { gl_error_at(GL_INVALID_VALUE, fn); return; }
     buf_t *obj = buf_of(b);
+    if (obj) obj->created = 1;
     buf_bind_set(&S.uniform_buf, b, obj);
     buf_bind_set(&S.ubo[index].buf, b, obj);
     S.ubo[index].off = b ? off : 0; S.ubo[index].size = b ? size : 0;
@@ -2182,19 +2191,32 @@ static buf_t *bound_buf(GLenum target) {
     return target == GL_ARRAY_BUFFER ? S.array_buf.obj : target == GL_ELEMENT_ARRAY_BUFFER ? cur_vao()->ebo.obj :
            target == GL_UNIFORM_BUFFER ? S.uniform_buf.obj : target == GL_TEXTURE_BUFFER ? S.texture_buf.obj : NULL;
 }
+static int buf_usage_valid(GLenum usage) {
+    return (usage >= 0x88e0 && usage <= 0x88e2) || (usage >= 0x88e4 && usage <= 0x88e6) || (usage >= 0x88e8 && usage <= 0x88ea);   // STREAM/STATIC/DYNAMIC _DRAW/_READ/_COPY
+}
 // Orphaning: data for a buffer a pending command buffer may still read goes into a new MTLBuffer, so draws already encoded keep the old contents
-GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
-    (void)usage;
-    buf_t *b = bound_buf(target);
-    if (!b) { RED1("glBufferData with no buffer bound to %#x", target); return; }
-    if (b->immutable) { RED1("glBufferData on a buffer glBufferStorage made"); return; }
-    if (size <= 0) { b->mb = nil; b->size = 0; return; }
+static void buf_data(buf_t *b, GLsizeiptr size, const void *data, const char *fn) {
+    if (size < 0) { gl_error_at(GL_INVALID_VALUE, fn); return; }
+    if (b->immutable) { gl_error_at(GL_INVALID_OPERATION, fn); return; }
+    if (size == 0) { b->mb = nil; b->size = 0; return; }
     @autoreleasepool {
         if (!b->mb || b->mb.length < (NSUInteger)size || b->use > atomic_load(&g_done) || b->mb.length > (NSUInteger)size * 2 + 4096)
             b->mb = [g_dev newBufferWithLength:(size + 15) & ~(GLsizeiptr)15 options:MTLResourceStorageModeShared];
         b->size = size; b->use = 0;
         if (data) memcpy(b->mb.contents, data, size); else memset(b->mb.contents, 0, size);
     }
+}
+GLB(glBufferData, void, GLenum target, GLsizeiptr size, const void *data, GLenum usage) {
+    (void)usage;
+    buf_t *b = bound_buf(target);
+    if (!b) { RED1("glBufferData with no buffer bound to %#x", target); return; }
+    buf_data(b, size, data, __func__);
+}
+GLB(glNamedBufferData, void, GLuint name, GLsizeiptr size, const void *data, GLenum usage) {
+    buf_t *b = buf_of(name);
+    if (!b || !b->created) { gl_error(GL_INVALID_OPERATION); return; }
+    if (!buf_usage_valid(usage)) { gl_error(GL_INVALID_ENUM); return; }
+    buf_data(b, size, data, __func__);
 }
 // Immutable storage that stays mapped: the game writes into the MTLBuffer's own memory and fences what the GPU still reads (LÖVE's StreamBufferPersistentMapSync)
 GLB(glBufferStorage, void, GLenum target, GLsizeiptr size, const void *data, GLbitfield flags) {
@@ -2384,7 +2406,9 @@ GL(glVertexAttribBinding, void, GLuint i, GLuint bi) {
 }
 GL(glBindVertexBuffer, void, GLuint bi, GLuint buf, GLintptr off, GLsizei stride) {
     if (bi >= 16 || off < 0 || stride < 0) { gl_error(GL_INVALID_VALUE); return; }
-    vbind_t *b = &cur_vao()->b[bi]; buf_bind_set(&b->buf, buf, buf_of(buf)); b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
+    buf_t *obj = buf_of(buf);
+    if (obj) obj->created = 1;
+    vbind_t *b = &cur_vao()->b[bi]; buf_bind_set(&b->buf, buf, obj); b->client = 0; b->off = (uint64_t)off; b->stride = stride;   // stride 0 is literal (vbind_t)
 }
 GL(glVertexBindingDivisor, void, GLuint bi, GLuint d) {
     if (bi >= 16) { gl_error(GL_INVALID_VALUE); return; }
@@ -2490,6 +2514,18 @@ GL(glAlphaFunc, void, GLenum f, GLfloat ref) { if (f >= GL_NEVER && f <= GL_NEVE
 
 // ---------- Textures ----------
 GL(glGenTextures, void, GLsizei n, GLuint *out) { for (GLsizei i = 0; i < n; i++) out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t)); }
+GL(glCreateTextures, void, GLenum target, GLsizei n, GLuint *out) {
+    int supported = target == GL_TEXTURE_2D || target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_BUFFER;
+    int unimpl = target == 0x0de0 /* 1D */ || target == 0x8c18 /* 1D_ARRAY */ || target == 0x84f5 /* RECTANGLE */ ||
+                 target == 0x9009 /* CUBE_MAP_ARRAY */ || target == 0x9100 /* 2D_MULTISAMPLE */ || target == 0x9102 /* 2D_MULTISAMPLE_ARRAY */;
+    if (!supported && !unimpl) { gl_error(GL_INVALID_ENUM); return; }
+    if (n < 0) { gl_error(GL_INVALID_VALUE); return; }
+    if (unimpl) { RED1("glCreateTextures target %#x not implemented", target); return; }
+    for (GLsizei i = 0; i < n; i++) {
+        out[i] = name_new((void ***)&g_texs, &g_ntexs, &g_captexs, sizeof(tex_t));
+        tex_init_params(tex_of(out[i]), target);
+    }
+}
 GL(glDeleteTextures, void, GLsizei n, const GLuint *t) {
     for (GLsizei i = 0; i < n; i++) {
         tex_t *x = tex_of(t[i]); if (!x) continue;
@@ -2545,9 +2581,8 @@ static void tex_set_swz(tex_t *t, int c, GLint s) {   // fixed once the texture 
     if (t->made && t->swz[c] != s) RED1("texture swizzle changed after the texture was made: ignored");
     t->swz[c] = s;
 }
-// glTexParameter*: v as floats, from an integer or a float call alike (GL converts between them the same way)
-static void tex_param(GLenum target, GLenum p, const float *v) {
-    tex_t *t = bound_tex(target);
+// glTexParameter* / glTextureParameter*: v as floats, from an integer or a float call alike (GL converts between them the same way)
+static void tex_param_obj(tex_t *t, GLenum p, const float *v) {
     if (!t) return;
     GLint i = (GLint)v[0];
     if (samp_param(&t->sp, p, v)) { t->smp_dirty = 1; return; }
@@ -2559,17 +2594,29 @@ static void tex_param(GLenum target, GLenum p, const float *v) {
         default: RED1("glTexParameter(%#x) not implemented", p); break;
     }
 }
-GL(glTexParameteri, void, GLenum target, GLenum p, GLint v) { float f[4] = {(float)v}; tex_param(target, p, f); }
-GL(glTexParameterf, void, GLenum target, GLenum p, GLfloat v) { float f[4] = {v}; tex_param(target, p, f); }
-GL(glTexParameterfv, void, GLenum target, GLenum p, const GLfloat *v) {
-    if (p == GL_TEXTURE_SWIZZLE_RGBA) { tex_t *t = bound_tex(target); if (t) for (int c = 0; c < 4; c++) tex_set_swz(t, c, (GLint)v[c]); return; }
-    float f[4] = {v[0]}; if (p == GL_TEXTURE_BORDER_COLOR) memcpy(f, v, sizeof f); tex_param(target, p, f);
+static void tex_param_fv_obj(tex_t *t, GLenum p, const GLfloat *v) {
+    if (!t) return;
+    if (p == GL_TEXTURE_SWIZZLE_RGBA) { for (int c = 0; c < 4; c++) tex_set_swz(t, c, (GLint)v[c]); return; }
+    float f[4] = {v[0]}; if (p == GL_TEXTURE_BORDER_COLOR) memcpy(f, v, sizeof f); tex_param_obj(t, p, f);
 }
+GL(glTexParameteri, void, GLenum target, GLenum p, GLint v) { float f[4] = {(float)v}; tex_param_obj(bound_tex(target), p, f); }
+GL(glTexParameterf, void, GLenum target, GLenum p, GLfloat v) { float f[4] = {v}; tex_param_obj(bound_tex(target), p, f); }
+GL(glTexParameterfv, void, GLenum target, GLenum p, const GLfloat *v) { tex_param_fv_obj(bound_tex(target), p, v); }
 GL(glTexParameteriv, void, GLenum target, GLenum p, const GLint *v) {   // an integer border colour is normalized as GL does: the full int range to −1..1
     if (p == GL_TEXTURE_SWIZZLE_RGBA) { tex_t *t = bound_tex(target); if (t) for (int c = 0; c < 4; c++) tex_set_swz(t, c, v[c]); return; }
     float f[4] = {(float)v[0]};
     if (p == GL_TEXTURE_BORDER_COLOR) for (int c = 0; c < 4; c++) f[c] = (float)((double)v[c] / 2147483647.0);
-    tex_param(target, p, f);
+    tex_param_obj(bound_tex(target), p, f);
+}
+GL(glTextureParameteri, void, GLuint name, GLenum p, GLint v) {
+    tex_t *t = tex_of(name);
+    if (!t || !t->target || t->target == GL_TEXTURE_BUFFER) { gl_error(GL_INVALID_OPERATION); return; }
+    float f[4] = {(float)v}; tex_param_obj(t, p, f);
+}
+GL(glTextureParameterfv, void, GLuint name, GLenum p, const GLfloat *v) {
+    tex_t *t = tex_of(name);
+    if (!t || !t->target || t->target == GL_TEXTURE_BUFFER) { gl_error(GL_INVALID_OPERATION); return; }
+    tex_param_fv_obj(t, p, v);
 }
 
 // ---------- Sampler objects ----------
@@ -2608,16 +2655,25 @@ static int sub_cv(int f, GLenum format, GLenum type) {
     return type == GL_UNSIGNED_SHORT_5_6_5 ? CV_565 : type == GL_UNSIGNED_SHORT_4_4_4_4 ? CV_4444 : type == GL_UNSIGNED_SHORT_5_5_5_1 ? CV_5551 :
            format == GL_RGB ? CV_RGB8 : format == GL_COLOR_INDEX ? CV_INDEX : CV_COPY;
 }
-// glTexImage2D and glTexSubImage2D take nine arguments, the last on the stack, which the big-stack entry does not carry: they pack them here, on the game's stack, and enter there
-typedef struct { GLenum target; GLint level, ifmt, x, y; GLsizei w, h; GLenum format, type; const void *pixels; GLsizei size; int sub, compressed; } teximg_args;
+// glTexImage2D, glTexSubImage2D and glTextureSubImage2D take nine arguments, the last on the stack, which the big-stack entry does not carry: they pack them here, on the game's stack, and enter there
+typedef struct { GLenum target; GLint level, ifmt, x, y; GLsizei w, h; GLenum format, type; const void *pixels; GLsizei size; int sub, compressed, dsa; GLuint tex_name; } teximg_args;
 static void teximg_impl(const teximg_args *a) __attribute__((used));
 BIGSTUB(teximg_impl);
 static void teximg_impl(const teximg_args *a) {
     @autoreleasepool {
         if (a->sub) {
-            tex_t *t = bound_tex(a->target);
-            int face = a->target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && a->target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(a->target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
-            if (!t || t->fmt < 0 || a->w <= 0 || a->h <= 0) return;
+            tex_t *t = a->dsa ? tex_of(a->tex_name) : bound_tex(a->target);
+            int face = !a->dsa && a->target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && a->target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(a->target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
+            if (a->dsa) {
+                if (!t || t->target != GL_TEXTURE_2D) { gl_error(GL_INVALID_OPERATION); return; }
+                if (a->level < 0 || a->level >= MAXLV || a->x < 0 || a->y < 0 || a->w < 0 || a->h < 0) { gl_error(GL_INVALID_VALUE); return; }
+                level_t *l = &t->pend[0][a->level];
+                int have = t->slevels ? a->level < t->slevels : (t->defined >> a->level & 1) || l->w || (t->made && a->level < t->levels);
+                if (t->fmt < 0 || !have || g_fmt[t->fmt].kind == K_BLOCK) { gl_error(GL_INVALID_OPERATION); return; }
+                uint32_t lw = umax(1, t->w >> a->level), lh = umax(1, t->h >> a->level);
+                if ((uint64_t)a->x + (uint64_t)a->w > lw || (uint64_t)a->y + (uint64_t)a->h > lh) { gl_error(GL_INVALID_VALUE); return; }
+                if (!a->w || !a->h) return;
+            } else if (!t || t->fmt < 0 || a->level < 0 || a->w <= 0 || a->h <= 0) return;
             int f = t->fmt, cv = sub_cv(f, a->format, a->type);   // the data is converted to the texture's format
             size_t pitch; void *conv = pixels_convert(a->pixels, a->w, a->h, a->format, a->type, f, cv, &pitch);
             if (!t->made) {   // into a level not made yet: patch the pending copy
@@ -2644,22 +2700,53 @@ static void teximg_impl(const teximg_args *a) {
     }
 }
 GL_SPLIT_STACK(glTexImage2D, void, 8, GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void *pixels) {
-    (void)border; teximg_args a = {target, level, ifmt, 0, 0, w, h, format, type, pixels, 0, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
+    (void)border; teximg_args a = {target, level, ifmt, 0, 0, w, h, format, type, pixels, 0, 0, 0, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
 GL_SPLIT_STACK(glTexSubImage2D, void, 8, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels) {
-    teximg_args a = {target, level, 0, x, y, w, h, format, type, pixels, 0, 1, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
+    teximg_args a = {target, level, 0, x, y, w, h, format, type, pixels, 0, 1, 0, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
+}
+GL_SPLIT_STACK(glTextureSubImage2D, void, 8, GLuint name, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels) {
+    teximg_args a = {.level = level, .x = x, .y = y, .w = w, .h = h, .format = format, .type = type, .pixels = pixels, .sub = 1, .dsa = 1, .tex_name = name};
+    ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
 GL(glCompressedTexImage2D, void, GLenum target, GLint level, GLenum ifmt, GLsizei w, GLsizei h, GLint border, GLsizei size, const void *data) {
-    (void)border; teximg_args a = {target, level, (GLint)ifmt, 0, 0, w, h, 0, 0, data, size, 0, 1}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
+    (void)border; teximg_args a = {target, level, (GLint)ifmt, 0, 0, w, h, 0, 0, data, size, 0, 1, 0, 0}; ((void (*)(const teximg_args *))(const void *)teximg_impl_bs)(&a);
 }
-// glTexStorage2D / 3D: the format, the size and the level count, before any data (LÖVE makes every texture so, the mipmapped ones with all their levels, which glGenerateMipmap
-// fills). The Metal texture is made at its first upload, attachment or sampling, as one glTexImage2D gives (tex_make: shared, or private for a render target)
+// glTexStorage2D / 3D and glTextureStorage2D: the format, the size and the level count, before any data (LÖVE makes every texture so, the mipmapped ones with all their levels,
+// which glGenerateMipmap fills). The Metal texture is made at its first upload, attachment or sampling, as one glTexImage2D gives (tex_make: shared, or private for a render target)
+static uint32_t tex_max_levels(uint32_t w, uint32_t h, uint32_t d) {
+    uint32_t lv = 1;
+    for (uint32_t m = umax(umax(w, h), d); m > 1; m >>= 1) lv++;
+    return lv;
+}
+static int tex_unsized_ifmt(GLenum ifmt) {
+    switch (ifmt) {
+        case 1: case 2: case 3: case 4:
+        case GL_RED: case GL_RG: case GL_RGB: case GL_RGBA: case GL_BGRA:
+        case GL_LUMINANCE: case GL_ALPHA: case GL_LUMINANCE_ALPHA:
+        case GL_DEPTH_COMPONENT: case GL_DEPTH_STENCIL: return 1;
+    }
+    return 0;
+}
+static void tex_storage_set(tex_t *t, GLsizei levels, GLenum ifmt, int f, GLsizei w, GLsizei h, GLsizei d) {
+    if (t->made || t->defined) tex_drop(t);
+    t->fmt = f; t->ifmt = ifmt; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
+}
 static void tex_storage(GLenum target, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h, GLsizei d) {
     tex_t *t = bound_tex(target);
     int cv, f = fmt_pick((GLint)ifmt, 0, 0, &cv);
     if (!t || f < 0 || levels <= 0 || w <= 0 || h <= 0 || d <= 0) { RED1("glTexStorage(%#x, %d levels, %#x, %dx%dx%d) not implemented", target, levels, ifmt, w, h, d); return; }
-    if (t->made || t->defined) tex_drop(t);
-    t->fmt = f; t->ifmt = ifmt; t->w = w; t->h = h; t->d = d; t->slevels = levels; t->smp_dirty = 1;
+    tex_storage_set(t, levels, ifmt, f, w, h, d);
+}
+GLB(glTextureStorage2D, void, GLuint name, GLsizei levels, GLenum ifmt, GLsizei w, GLsizei h) {
+    tex_t *t = tex_of(name);
+    if (!t || (t->target != GL_TEXTURE_2D && t->target != GL_TEXTURE_CUBE_MAP)) { gl_error(GL_INVALID_OPERATION); return; }
+    if (levels < 1 || w < 1 || h < 1 || (t->target == GL_TEXTURE_CUBE_MAP && w != h)) { gl_error(GL_INVALID_VALUE); return; }
+    if (t->slevels || (uint32_t)levels > tex_max_levels((uint32_t)w, (uint32_t)h, 1)) { gl_error(GL_INVALID_OPERATION); return; }
+    if (tex_unsized_ifmt(ifmt)) { gl_error(GL_INVALID_ENUM); return; }
+    int cv, f = fmt_pick((GLint)ifmt, 0, 0, &cv);
+    if (f < 0) { RED1("glTextureStorage2D(%#x, %d levels, %#x, %dx%d) not implemented", t->target, levels, ifmt, w, h); return; }
+    tex_storage_set(t, levels, ifmt, f, w, h, 1);
 }
 // One scalar of pixel-transfer data. Integer colour/depth components are normalized; stencil indices are integers. memcpy permits unaligned guest data.
 static double pixel_scalar(const uint8_t *p, GLenum type, int normalized) {
@@ -2814,16 +2901,23 @@ GL_SPLIT_STACK(glTexImage3D, void, 16, GLenum target, GLint level, GLint ifmt, G
 // glCompressedTexImage3D / glCompressedTexSubImage3D into 2D arrays, and glCompressedTexSubImage2D into a 2D texture or a cube face (its image calls go through teximg_impl):
 // each layer has its own rounded block rows, even when a mip is smaller than one block. Their last argument(s) are on the stack (64-bit here, as glTexSubImage3D's), so they pack
 // them before the big-stack entry. Other 3D targets (3D, cube-map arrays) and compressed formats the layer does not map are the host's gaps: a red line, no GL error (see g_gl_error)
-typedef struct { GLenum target, format; GLint level, x, y, z, border; GLsizei w, h, d, size; const void *data; int sub, dims; } compressed_args;
+typedef struct { GLenum target, format; GLint level, x, y, z, border; GLsizei w, h, d, size; const void *data; int sub, dims, dsa; GLuint tex_name; } compressed_args;
 static void compressed_impl(const compressed_args *a) __attribute__((used));
 BIGSTUB(compressed_impl);
 static void compressed_impl(const compressed_args *a) {
     @autoreleasepool {
         const char *sub = a->sub ? "Sub" : "";
-        int arr = a->target == GL_TEXTURE_2D_ARRAY, cube = a->target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && a->target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
-        if (a->dims == 3 && !arr) { RED1("glCompressedTex%sImage3D target %#x not implemented (2D arrays only)", sub, a->target); return; }
-        if (a->dims == 2 && a->target != GL_TEXTURE_2D && !cube) { gl_error(GL_INVALID_ENUM); return; }
-        int face = cube ? (int)(a->target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;   // the pending level's face (an array keeps all its layers in face 0)
+        tex_t *t = NULL;
+        GLenum target = a->target;
+        if (a->dsa) {
+            t = tex_of(a->tex_name);
+            if (!t || t->target != GL_TEXTURE_2D) { gl_error(GL_INVALID_OPERATION); return; }
+            target = t->target;
+        }
+        int arr = target == GL_TEXTURE_2D_ARRAY, cube = target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z;
+        if (a->dims == 3 && !arr) { RED1("glCompressedTex%sImage3D target %#x not implemented (2D arrays only)", sub, target); return; }
+        if (a->dims == 2 && target != GL_TEXTURE_2D && !cube) { gl_error(GL_INVALID_ENUM); return; }
+        int face = cube ? (int)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;   // the pending level's face (an array keeps all its layers in face 0)
         if (a->level < 0 || a->level >= MAXLV || a->w < 0 || a->h < 0 || a->d < 0 || a->size < 0 || a->border ||
             (uint32_t)a->w > (16384u >> a->level) || (uint32_t)a->h > (16384u >> a->level) || a->d > 2048) { gl_error(GL_INVALID_VALUE); return; }
         int cv, f = fmt_pick(a->format, 0, 0, &cv);
@@ -2835,7 +2929,7 @@ static void compressed_impl(const compressed_args *a) {
         if (a->d && layer > SIZE_MAX / (uint32_t)a->d) { gl_error(GL_INVALID_VALUE); return; }
         // the byte count must match the data given; an allocation with no data has no bytes to count, whatever size it names
         if (a->data && layer * a->d != (size_t)a->size) { gl_error(GL_INVALID_VALUE); return; }
-        tex_t *t = bound_tex(a->target);
+        if (!a->dsa) t = bound_tex(target);
         if (!t) { gl_error(GL_INVALID_OPERATION); return; }
         if (!a->sub) {
             if (t->slevels) { gl_error(GL_INVALID_OPERATION); return; }
@@ -2844,7 +2938,7 @@ static void compressed_impl(const compressed_args *a) {
                 umax(1, t->w >> a->level) != (uint32_t)a->w || umax(1, t->h >> a->level) != (uint32_t)a->h)) { gl_error(GL_INVALID_OPERATION); return; }
             void *copy = NULL;
             if (a->data && a->size) { copy = zalloc((size_t)a->size); memcpy(copy, a->data, (size_t)a->size); }
-            tex_image(a->target, a->level, a->format, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
+            tex_image(target, a->level, a->format, f, CV_COPY, a->w, a->h, a->d, copy, pitch);
             return;
         }
         level_t *l = &t->pend[face][a->level];
@@ -2873,14 +2967,17 @@ static void compressed_impl(const compressed_args *a) {
 }
 static void compressed_call(compressed_args a) { ((void (*)(const compressed_args *))(const void *)compressed_impl_bs)(&a); }
 GL_SPLIT_STACK(glCompressedTexImage3D, void, 8, GLenum target, GLint level, GLenum format, GLsizei w, GLsizei h, GLsizei d, GLint border, GLsizei size, const void *data) {
-    compressed_call((compressed_args){target, format, level, 0, 0, 0, border, w, h, d, size, data, 0, 3});
+    compressed_call((compressed_args){target, format, level, 0, 0, 0, border, w, h, d, size, data, 0, 3, 0, 0});
 }
 GL_SPLIT_STACK(glCompressedTexSubImage3D, void, 24, GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, uint64_t format, uint64_t size, const void *data) {
-    compressed_call((compressed_args){target, (GLenum)format, level, x, y, z, 0, w, h, d, (GLsizei)size, data, 1, 3});
+    compressed_call((compressed_args){target, (GLenum)format, level, x, y, z, 0, w, h, d, (GLsizei)size, data, 1, 3, 0, 0});
 }
 // DOOM 3 streams its DXT images a part at a time (glCompressedTexSubImage2DARB)
 GL_SPLIT_STACK(glCompressedTexSubImage2D, void, 8, GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLsizei size, const void *data) {
-    compressed_call((compressed_args){target, format, level, x, y, 0, 0, w, h, 1, size, data, 1, 2});
+    compressed_call((compressed_args){target, format, level, x, y, 0, 0, w, h, 1, size, data, 1, 2, 0, 0});
+}
+GL_SPLIT_STACK(glCompressedTextureSubImage2D, void, 8, GLuint name, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLsizei size, const void *data) {
+    compressed_call((compressed_args){.format = format, .level = level, .x = x, .y = y, .w = w, .h = h, .d = 1, .size = size, .data = data, .sub = 1, .dims = 2, .dsa = 1, .tex_name = name});
 }
 // Mipmaps from level 0, in command order (after the draws that rendered level 0 this frame): a texture of one level gets its full chain first, level 0 copied over
 static void mip_impl(GLenum target) __attribute__((used));
@@ -2912,6 +3009,14 @@ static void fb_init(GLuint name) { fb_t *f = fb_of(name); f->draw[0] = f->read =
 GL(glGenFramebuffers, void, GLsizei n, GLuint *out) {
     for (GLsizei i = 0; i < n; i++) { out[i] = name_new((void ***)&g_fbs, &g_nfbs, &g_capfbs, sizeof(fb_t)); fb_init(out[i]); }
 }
+GL(glCreateFramebuffers, void, GLsizei n, GLuint *out) {
+    if (n < 0) { gl_error(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; i++) {
+        out[i] = name_new((void ***)&g_fbs, &g_nfbs, &g_capfbs, sizeof(fb_t));
+        fb_init(out[i]);
+        fb_of(out[i])->bound = 1;   // created: glIsFramebuffer and DSA calls accept it immediately
+    }
+}
 GLB(glDeleteFramebuffers, void, GLsizei n, const GLuint *f) {
     for (GLsizei i = 0; i < n; i++) {
         fb_t *x = fb_of(f[i]); if (!x) continue;
@@ -2937,6 +3042,14 @@ GLB(glBindFramebuffer, void, GLenum target, GLuint f) {
 }
 GL(glIsFramebuffer, uint32_t, GLuint f) { fb_t *fb = fb_of(f); return fb && fb->bound; }
 GL(glCheckFramebufferStatus, GLenum, GLenum target) { (void)target; return GL_FRAMEBUFFER_COMPLETE; }
+GL(glCheckNamedFramebufferStatus, GLenum, GLuint fb, GLenum target) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) { gl_error(GL_INVALID_ENUM); return 0; }
+    if (fb) {
+        fb_t *f = fb_of(fb);
+        if (!f || !f->bound) { gl_error(GL_INVALID_OPERATION); return 0; }
+    }
+    return GL_FRAMEBUFFER_COMPLETE;
+}
 static int color_index(GLuint fb, GLenum buffer) {
     if (!buffer) return 0;   // GL_NONE
     if (fb) return buffer >= GL_COLOR_ATTACHMENT0 && buffer < GL_COLOR_ATTACHMENT0 + NGL_COLORS ? (int)(buffer - GL_COLOR_ATTACHMENT0 + 1) : -1;
@@ -3002,15 +3115,22 @@ GLB(glRenderbufferStorage, void, GLenum target, GLenum ifmt, GLsizei w, GLsizei 
     OLOG("renderbuffer %u: %dx%d %s", S.rb, w, h, g_fmt[f].name);
 }
 static int att_same(att_t a, att_t b) { return a.kind == b.kind && a.name == b.name && a.level == b.level && a.face == b.face; }
-static void fb_attach(GLenum target, GLenum attachment, int kind, GLuint name, int level, int face) {
-    GLuint fb = target == GL_READ_FRAMEBUFFER ? S.read_fb : S.fb;
+static void fb_attach_obj(GLuint fb, GLenum attachment, int kind, GLuint name, int level, int face, int dsa) {
     fb_t *f = fb_of(fb);
-    if (!f) { RED1("attachment to framebuffer 0 or to one never generated"); return; }
+    if (!f || (dsa && !f->bound)) {
+        if (dsa) gl_error(GL_INVALID_OPERATION);
+        else RED1("attachment to framebuffer 0 or to one never generated");
+        return;
+    }
     int both = attachment == GL_DEPTH_STENCIL_ATTACHMENT;
     int col = color_index(fb, attachment);
     att_t *slot = col > 0 ? &f->col[col - 1] : attachment == GL_STENCIL_ATTACHMENT ? &f->stencil :
                   attachment == GL_DEPTH_ATTACHMENT || both ? &f->depth : NULL;
-    if (!slot) { RED1("framebuffer attachment %#x not implemented", attachment); return; }
+    if (!slot) {
+        if (dsa) gl_error(GL_INVALID_ENUM);
+        else RED1("framebuffer attachment %#x not implemented", attachment);
+        return;
+    }
     att_t a = name ? (att_t){kind, name, level, face} : (att_t){0};
     if (att_same(*slot, a) && (!both || att_same(f->stencil, a))) return;
     // A pending clear addresses the images that were attached at glClear, even when the framebuffer name stays bound.
@@ -3018,6 +3138,9 @@ static void fb_attach(GLenum target, GLenum attachment, int kind, GLuint name, i
     *slot = a;
     if (both) f->stencil = a;
     f->gen++;
+}
+static void fb_attach(GLenum target, GLenum attachment, int kind, GLuint name, int level, int face) {
+    fb_attach_obj(target == GL_READ_FRAMEBUFFER ? S.read_fb : S.fb, attachment, kind, name, level, face, 0);
 }
 GLB(glFramebufferTexture2D, void, GLenum target, GLenum att, GLenum textarget, GLuint t, GLint level) {
     int face = textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? (int)(textarget - GL_TEXTURE_CUBE_MAP_POSITIVE_X) : 0;
@@ -3028,6 +3151,17 @@ GLB(glFramebufferTexture2D, void, GLenum target, GLenum att, GLenum textarget, G
 GLB(glFramebufferTextureLayer, void, GLenum target, GLenum att, GLuint t, GLint level, GLint layer) { fb_attach(target, att, 1, t, level, layer); }
 GLB(glFramebufferTexture3D, void, GLenum target, GLenum att, GLenum textarget, GLuint t, GLint level, GLint z) { (void)textarget; fb_attach(target, att, 1, t, level, z); }
 GLB(glFramebufferRenderbuffer, void, GLenum target, GLenum att, GLenum rbt, GLuint r) { (void)rbt; fb_attach(target, att, 2, r, 0, 0); }
+GLB(glNamedFramebufferTexture, void, GLuint fb, GLenum att, GLuint t, GLint level) {
+    fb_t *f = fb_of(fb);
+    if (!f || !f->bound) { gl_error(GL_INVALID_OPERATION); return; }
+    if (t) {
+        tex_t *x = tex_of(t);
+        if (!x || !x->target) { gl_error(GL_INVALID_VALUE); return; }
+        if (x->target == GL_TEXTURE_BUFFER) { gl_error(GL_INVALID_OPERATION); return; }
+        if (level < 0 || level >= MAXLV) { gl_error(GL_INVALID_VALUE); return; }
+    }
+    fb_attach_obj(fb, att, 1, t, t ? level : 0, 0, 1);
+}
 
 GL(glGetFramebufferAttachmentParameteriv, void, GLenum target, GLenum attachment, GLenum p, GLint *v) {
     if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER) { gl_error(GL_INVALID_ENUM); return; }

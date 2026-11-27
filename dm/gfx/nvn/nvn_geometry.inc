@@ -815,6 +815,8 @@ static void mesh_tasks_draw(const p_draw *dw) {
     ua_prepare_prog(pr, 1u << 3 | 1u << 4);
     image_prepare(pr, 1u << 3 | 1u << 4);
     if (g_nubd && (g_enc || ubd_lazy()) && ((ts && ubd_conflict_sh(ts, 3)) || ubd_conflict_sh(ms, 4))) { g_ubd_conflicts++; rp_end(); ubd_land(); }   // as draw_ does for its stages
+    if (g_enc && g_pass_vbar) rp_end();   // an in-pass vertex barrier does not order task/mesh stages
+    rt_sub_check(pr);   // check task/mesh/fragment stages before draw_() swaps in the pixel-only stand-in
     NvProg *raster = pr->geo_lean_raster;   // the pixel stage alone
     if (!raster || raster->sh[1] != pr->sh[1] || raster->sh[0]) { raster = [NvProg new]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }
     uint32_t first = (uint32_t)dw->first, count = (uint32_t)dw->count;
@@ -855,6 +857,8 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     // draws do for their stages; shadowable uniform reads keep their deferral.
     NvShader *lean = pr->sh[2]->geo_lean_v[3];
     if (g_nubd && (g_enc || ubd_lazy()) && (ubd_conflict_sh(lean, 2) || (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + ((uint64_t)di->count << di->itype))))) { g_ubd_conflicts++; rp_end(); ubd_land(); }
+    if (g_enc && g_pass_vbar) rp_end();   // an in-pass vertex barrier does not order mesh stages
+    rt_sub_check(pr);   // check the real program including geometry stage before draw() swaps in raster
     uint32_t bi = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     NvProg *raster = pr->geo_lean_raster;
     if (!raster || raster->sh[0] != pr->sh[0] || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = pr->sh[0]; raster->sh[1] = pr->sh[1]; pr->geo_lean_raster = raster; }

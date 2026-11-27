@@ -27,12 +27,29 @@ static void run(int how) {
     write_content(&t, mem, poolsize, 0);
     mtl_sub_begin(); id<MTLTexture> first = tex_mtl(&t); finish();
     CHECK("first upload resolves", first != nil);
+    const view_t view = {.set_levels=1, .nlevels=1};
+    mtl_reg_tex(20, &t, &view);
+    mtl_reg_tex(21, &t, &view);
+    mtl_sub_begin();
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> first_view = tex_by_id(20), repeated = tex_by_id(21);
+    os_unfair_lock_unlock(&g_rmu);
+    finish();
+    CHECK("two IDs share one view of the uploaded backing", first_view && first_view.parentTexture == first && repeated == first_view);
     write_content(&t, mem, poolsize, 1);
     uint64_t re = g_pkg_reuploads;
     mtl_sub_begin(); id<MTLTexture> second = tex_mtl(&t); finish();
     CHECK("a write re-uploads", g_pkg_reuploads == re + 1 && second && second != first);
     NvPkg *pk = tex_get(t.serial);
     CHECK("the package keeps the old texture as its spare", [pk isKindOfClass:[NvPkg class]] && pk->spare == first);
+    CHECK("the old backing's cache is cleared when the package changes", !pk->tex_views);
+    mtl_sub_begin();
+    os_unfair_lock_lock(&g_rmu);
+    id<MTLTexture> second_view = tex_by_id(20);
+    os_unfair_lock_unlock(&g_rmu);
+    finish();
+    CHECK("a lookup makes a view of the replacement backing", second_view && second_view != first_view && second_view.parentTexture == second && pk->tex_views);
+    first_view = repeated = nil;
     CHECK("the spare is resident", resident(first));
     __weak id<MTLTexture> weak_first = first; first = nil;
     if (how == 2) {
@@ -56,6 +73,7 @@ static void run(int how) {
         CHECK("the next re-upload makes a new texture", third && third != second && pk->spare == second);
     }
     pk = nil; second = nil;
+    mtl_reg_tex(20, NULL, NULL); mtl_reg_tex(21, NULL, NULL);
     mtl_tex_release(&t); mtl_drain(); mtl_alias_drop_pool(&pool); nvn_dirty_remove_range(mem); mtl_pool_del(mem); mtl_drain(); free(mem);
 }
 int main(void) { @autoreleasepool {

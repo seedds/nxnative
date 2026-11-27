@@ -9,7 +9,8 @@
 void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
 uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
-void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
+static int applet_suspended;
+void guest_clock_freeze_for(int reason, int on) { if (reason == DM_CLOCK_APPLET) applet_suspended = on; }
 void dm_gfx_suspend(int on) { (void)on; }
 void dm_gfx_quit_begin(void) {}
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe_start, which never returns: this test checks its plan (oe_plan)
@@ -269,8 +270,15 @@ int main(void) {
     dm_applet_enter("test"); dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 2, "a nested applet: the outer one keeps the game out of focus");
     dm_applet_leave(); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "the outer applet closes: 15, state 1");
     h_oe_SetFocusMode(3); dm_applet_enter("test");
-    CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
-    dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    CHECK(empty() && h_oe_GetFocus() == 2 && applet_suspended, "AlwaysSuspend parks the guest while the applet is open");
+    dm_applet_enter("nested"); dm_applet_leave();
+    CHECK(applet_suspended, "closing the inner applet keeps the guest suspended");
+    h_oe_SetFocusMode(0);
+    CHECK(!applet_suspended, "SuspendHomeSleep keeps the guest running during an applet");
+    h_oe_SetFocusMode(3);
+    CHECK(applet_suspended, "switching to AlwaysSuspend applies to the active applet");
+    dm_applet_leave();
+    CHECK(empty() && h_oe_GetFocus() == 1 && !applet_suspended, "closing the last applet resumes the guest without a notification");
     // the graphics scale does not follow the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
     unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
     dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");

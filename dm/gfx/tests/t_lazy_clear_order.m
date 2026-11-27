@@ -13,6 +13,45 @@ static int checks, failed;
 static uint8_t ops[1024]; static size_t nops;
 static void *op(uint32_t code, size_t size) { op_hdr h = {code, (uint32_t)(sizeof h + size)}; memcpy(ops + nops, &h, sizeof h); void *a = ops + nops + sizeof h; memset(a, 0, size); nops += h.size; return a; }
 
+static void adjacent_texture_clears(void) {
+    tex_t t[2];
+    id<MTLTexture> targets[2];
+    const size_t snapshot_offset = (sizeof(p_clear_tex) + 7) & ~(size_t)7;
+    nops = 0;
+    for (int i = 0; i < 2; i++) {
+        t[i] = (tex_t){.magic = MAGIC('T', 'E', 'X', 0), .serial = (uint64_t)(99820 + i),
+            .d = {.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 1, .levels = 1, .samples = 1}};
+        MTLTextureDescriptor *desc = tex_desc(&t[i], 0);
+        desc.usage |= MTLTextureUsageRenderTarget;
+        targets[i] = [g_dev newTextureWithDescriptor:desc];
+        CHECK(targets[i], "the independent clear target allocates");
+        if (!targets[i]) return;
+        res_add(targets[i]); mtl_tex_init(&t[i]); serial_put(t[i].serial, targets[i]);
+        p_clear_tex *clear = op(OP_CLEAR_TEX, snapshot_offset + sizeof(tex_t));
+        tex_t *snap = (void *)((uint8_t *)clear + snapshot_offset);
+        *snap = t[i];
+        *clear = (p_clear_tex){.tex = snap, .r = {0, 0, 0, 8, 8, 1}, .mask = 0xf, .c.f = {i == 0, i == 1, 0, 1}};
+    }
+    op(OP_END, 0);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    int encoders = g_cm_enc;
+    mtl_exec(ops);
+    CHECK(g_cm_enc == encoders + 1, "consecutive full clears use one render encoder");
+    id<MTLBuffer> out = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    res_add(out);
+    for (int i = 0; i < 2; i++)
+        enc_b_copy_texture_buffer(blit(), targets[i], 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(8, 8, 1), out, (NSUInteger)i * 2048, 256, 2048);
+    CHECK(mtl_wait(mtl_sub_commit(), 10000000000ull) && !mtl_last_commit_error(), "batched clear completes with Metal validation");
+    for (int i = 0; i < 2; i++) {
+        const uint8_t want[4] = {i == 0 ? 255 : 0, i == 1 ? 255 : 0, 0, 255};
+        int exact = 1;
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++)
+            exact &= !memcmp((const uint8_t *)out.contents + i * 2048 + y * 256 + x * 4, want, sizeof want);
+        CHECK(exact, "each attachment has its exact clear colour");
+        mtl_tex_release(&t[i]);
+    }
+}
+
 int main(void) { @autoreleasepool {
     mtl_init();
     id<MTLCommandQueue> queue = [g_dev newCommandQueue];
@@ -74,6 +113,7 @@ int main(void) { @autoreleasepool {
         mtl_tex_release(&t);
     }
     CHECK(zero_buf(1).length == (4u << 20), "the large rectangle keeps the zero buffer at 4 MiB");
+    adjacent_texture_clears();
     printf("lazy clear order: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

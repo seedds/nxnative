@@ -385,7 +385,7 @@ class Nvn(Base):
     def cas(self, *names, when=0):   # cache entries with a source and a library, last changed at when
         s = self.store()
         for n in names:
-            s.put(f'shader/{n}/mac/k_b.metal', b'm' * 100 + n.encode()[:0], when); s.put(f'shader/{n}/mac/k_b.metallib', b'l' * 1000, when)
+            s.put(f'shader/{n}/mac/k_b.metal', bytes(range(100)), when); s.put(f'shader/{n}/mac/k_b.metallib', b'l' * 1000, when)
         s.close()
 
     def test_prune_shader_cache(self):   # entries the build did not list go once it succeeded; a listed one, one newer than the list and other names stay; only the sources count

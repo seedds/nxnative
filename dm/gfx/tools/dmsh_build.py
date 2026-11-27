@@ -517,8 +517,6 @@ def ps_omap(code):
     NaN above Ocarina of Time's horizon to the missing per-component mask (their commit 79c1516; Ocarina's agl_common depth pass has map 0x10f: output 0 RGBA, output 2 R only)"""
     return struct.unpack_from('<I', code, 18 * 4)[0] if len(code) >= 0x50 else None
 
-NVN2_STAGE_INDEX = {'vs': 0, 'hs': 1, 'ms': 1, 'ds': 2, 'gs': 3, 'ps': 4}   # NVN2 graphics stage indices (PRAGMATA's banks: vertex c[25], hull and mesh c[26], domain c[27], geometry c[28], pixel c[29])
-
 def unity_acescc_lut(code):
     # The Unity Post Processing v1 LUT generator in Outer Wilds lost the two
     # half-subnormal constants in ACES_to_ACEScc when compiled for Maxwell.
@@ -556,16 +554,12 @@ def job_for(key, name, rec, w):
         c1 = dmsh_ampere.c1_segment(rec[ci:], code)
         code = code[:dmsh_ampere.inst_len(rec[ci:])]
         extra['arch'] = 'sm86'
-        # compute lays out its driver constants in c[0] per shader: the control section gives its push constants' words (+0xa9), counts its uniform buffer, storage
-        # buffer, texture, separate texture and separate sampler entries (+0xb1, +0xb2, +0xb3, +0xb4, +0xb5; images, +0xb6, come last) and gives the size (+0xba);
-        # the translator maps them to c[24] and NVN's fixed tables (InstEmitAmpere.cs AMapC0). Graphics keeps NVN's tables.
-        # +0xaa counts the words of push block 1 (NVN2's own accessor reads +0xa9 + block): what the game pushes there (PRAGMATA: {address, size} buffer entries, or 8-byte handles),
-        # laid out right after push block 0, before the uniform entries; the translator maps it to c[24] + DMSH_PUSH_SIZE (dmsh_abi.h DMSH_PUSH_BLOCKS). With it every one of
-        # PRAGMATA's 6,856 compute shaders adds up to its size (+0xba); Donkey Kong Bananza's and Star Fox's sizes add up without it, as +0xaa is 0 there
-        if stage == 'cs': extra['nvn2_cs'] = [rec[ci + 0xb1], rec[ci + 0xb2], rec[ci + 0xb3], struct.unpack_from('<H', rec, ci + 0xba)[0], rec[ci + 0xa9] * 4, rec[ci + 0xb4], rec[ci + 0xb5], rec[ci + 0xaa] * 4]
-        # a graphics stage reads the buffer entries the game pushes into its push block 1 + stage index from a bank of its own, c[25 + stage index]; the translator maps
-        # that bank onto the block in c[24] (dmsh_abi.h DMSH_NVN2_STAGE_BANK). A task shader's bank has not been seen
-        if stage in NVN2_STAGE_INDEX: extra['stage_bank'] = abi.NVN2_STAGE_BANK + NVN2_STAGE_INDEX[stage]
+        # Compute lays out c[0] per shader. The control section counts the words of all eight push blocks (+0xa9..+0xb0), then the entries in the uniform,
+        # storage and texture tables (+0xb1..+0xb6). AMapC0 maps these to c[24] and the fixed driver tables. Graphics already uses the fixed tables.
+        if stage == 'cs':
+            push = [4 * words for words in rec[ci + 0xa9:ci + 0xb1]]
+            extra['nvn2_cs'] = [*rec[ci + 0xb1:ci + 0xb4], struct.unpack_from('<H', rec, ci + 0xba)[0],
+                                push[0], *rec[ci + 0xb4:ci + 0xb6], *push[1:]]
         if stage in ('ts', 'ms'):
             # A task or mesh shader: translated as compute, its SPH taken off and its stage memory in shared memory, then wrapped as the Metal stage function (dmsh_meshstage.py).
             # Graphics stages' c[0] and c[2] tables stay: the translator reads their addresses out of the code as for a vertex shader
@@ -997,8 +991,16 @@ def finish(key, w, j, c1):
         capture = dmsh_geometry.capture(src)   # and its capture entry, for a geometry shader after it (nvn_tess.inc, as a vertex shader's for nvn_geometry.inc)
         src, full = dmsh_entry.vs_depth(src); open(msl, 'w').write(full + capture)
     fu = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else None   # the typed-output entry point (see fs_uint); the analysis below uses the source with only main0
-    shared = dmsh_side.shared_body(src) if fu else None   # it calls main0's body; fs_uint gives none for a main0 whose shape it does not know
-    if shared and fu: plain = src; open(msl, 'w').write(shared + fu)
+    early = j['stage'] == 'ps' and dmsh_reflect.pool_early_variant(src)
+    shared = dmsh_side.shared_body(src) if fu or early else None
+    early_src = ''
+    if shared and early:
+        e = dmsh_side.entry(src, 'main0')
+        if e and not e['attr']:
+            early_src = dmsh_side.calling({**e, 'attr': '[[early_fragment_tests]] '}, 'main0_early', e['ret'], 'return out;')
+    if shared and (fu or early_src):
+        plain = src
+        open(msl, 'w').write(shared + (fu or '') + early_src)
     else: fu = None
     try: binds = dmsh_reflect.reflect(key, mesh['kind'] if mesh else j['stage'], src, res)   # before the compile: a pixel shader's readable-tile version needs its texture slots (ps_libraries)
     except ValueError as e: return 'reflection failed', str(e)[:160], None
@@ -1011,9 +1013,9 @@ def finish(key, w, j, c1):
         return {}, set()
     try: side, cut_targets = compile_targets()
     except subprocess.CalledProcessError as e:
-        if not lay and not fu: return 'metal failed', str(e)[:160], None
-        lost = [name for name, extra in (('layer', lay), ('integer output', fu)) if extra]   # kept in the reflection, as a cache hit compiles nothing: every build reports it (shader_regressions.report_losses)
-        open(msl, 'w').write(plain); lay = fu = None   # the layer and typed-output entry points are extras: a library that does not build with them is built without
+        if not lay and not fu and not early_src: return 'metal failed', str(e)[:160], None
+        lost = [name for name, extra in (('layer', lay), ('integer output', fu), ('pool early depth', early_src)) if extra]   # every build reports lost entries, including cache hits
+        open(msl, 'w').write(plain); lay = fu = None; early_src = ''
         try: side, cut_targets = compile_targets()
         except subprocess.CalledProcessError as e: return 'metal failed', str(e)[:160], None
     clone(msl, os.path.join(out, key + '_b.metal'))
@@ -1037,6 +1039,10 @@ def finish(key, w, j, c1):
             'vertex_inputs': [{'location': int(m.group(3)), 'msl_type': m.group(1)} for m in dmsh_reflect.attributes(src)],
             'raster': {**dmsh_reflect.raster_facts(j['stage'], src), **({'omap': ps_omap(open(j['code'], 'rb').read())} if j['stage'] == 'ps' else {})}, 'vs_pad': pad, **({'tess': tess} if tess else {})}
     refl.update(side)   # the alpha test and logic operation entry points and the readable-tile version (ps_libraries); the pulling and shadow-input libraries (vs_libraries)
+    if early_src:
+        refl['entry_early'] = 'main0_early'
+        if early == 'read_only':
+            refl['early_read_only'] = True
     write_refl(key, refl, cut_targets)
     return 'ok', '', refl
 

@@ -68,7 +68,7 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(s,c) do { int ok=!!(c); checks++; failed+=!ok; printf("%s: %s\n",s,ok?"PASS":"FAIL"); } while(0)
-typedef struct { uint8_t p[16384]; size_t n; } chain;
+typedef struct { uint8_t p[65536]; size_t n; } chain;
 static void emit(chain *c, unsigned op, const void *a, size_t n) {
     size_t sz=(8+n+7)&~7ull; if(c->n+sz>sizeof c->p) abort();
     op_hdr h={op,(uint32_t)sz}; memcpy(c->p+c->n,&h,8);
@@ -148,6 +148,173 @@ static void slices(id<MTLLibrary> lib) {
     p->sh[1]->rf.bindless=0; p->sh[1]->rf.dyn=1;
     CHECK("dynamic reflection splits merged pass",draw_samples_rt(p));
     g_exec_next=NULL; g_sm_plan.on=0;
+}
+static tex_t texture_lv(int target, int format, int layers, int levels);
+static void layers_zero(const tex_t *t, int levels, int layers);
+static void wait_sm_amp(void) {
+    for(int i=0;i<g_sm_amp_n;i++) for(int k=0;k<2000;k++) {
+        os_unfair_lock_lock(&g_sm_amp_lock); int done=g_sm_amp[i].done; os_unfair_lock_unlock(&g_sm_amp_lock);
+        if(done) break;
+        usleep(1000);
+    }
+}
+static int check_solid_2d_layers(const tex_t *t, int level, int lo, int hi, const uint8_t want[4]) {
+    id<MTLTexture> mt=tex_mtl(t); NSUInteger w=MAX(t->d.width>>level,1u), h=MAX(t->d.height>>level,1u), img=w*h*4;
+    int n=hi-lo+1; id<MTLBuffer> out=[g_dev newBufferWithLength:(NSUInteger)n*img options:MTLResourceStorageModeShared]; if(!out) return 1;
+    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    for(int s=0;s<n;s++) [e copyFromTexture:mt sourceSlice:(NSUInteger)(lo+s) sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(w,h,1) toBuffer:out destinationOffset:(NSUInteger)s*img destinationBytesPerRow:w*4 destinationBytesPerImage:img];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint8_t *bytes=out.contents;
+    for(NSUInteger i=0;i<(NSUInteger)n*w*h;i++) if(memcmp(bytes+4*i,want,4)) return 1;
+    return 0;
+}
+static int check_solid_3d_planes(const tex_t *t, int level, int lo, int hi, const uint8_t want[4]) {
+    id<MTLTexture> mt=tex_mtl(t); NSUInteger w=MAX(t->d.width>>level,1u), h=MAX(t->d.height>>level,1u), img=w*h*4;
+    int n=hi-lo+1; id<MTLBuffer> out=[g_dev newBufferWithLength:(NSUInteger)n*img options:MTLResourceStorageModeShared]; if(!out) return 1;
+    id<MTLCommandBuffer> cb=[g_q commandBuffer]; id<MTLBlitCommandEncoder> e=[cb blitCommandEncoder];
+    for(int z=0;z<n;z++) [e copyFromTexture:mt sourceSlice:0 sourceLevel:(NSUInteger)level sourceOrigin:MTLOriginMake(0,0,(NSUInteger)lo+z) sourceSize:MTLSizeMake(w,h,1) toBuffer:out destinationOffset:(NSUInteger)z*img destinationBytesPerRow:w*4 destinationBytesPerImage:img];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint8_t *bytes=out.contents;
+    for(NSUInteger i=0;i<(NSUInteger)n*w*h;i++) if(memcmp(bytes+4*i,want,4)) return 1;
+    return 0;
+}
+static void zero_3d(const tex_t *t, int depth) {
+    id<MTLTexture> mt=tex_mtl(t); id<MTLCommandBuffer> cb=[g_q commandBuffer];
+    for(int z=0;z<depth;z++) { MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];
+        d.colorAttachments[0].texture=mt; d.colorAttachments[0].depthPlane=(NSUInteger)z;
+        d.colorAttachments[0].loadAction=MTLLoadActionClear; d.colorAttachments[0].clearColor=MTLClearColorMake(0,0,0,0); d.colorAttachments[0].storeAction=MTLStoreActionStore;
+        [[cb renderCommandEncoderWithDescriptor:d] endEncoding]; }
+    [cb commit]; [cb waitUntilCompleted];
+}
+static void slices_mrt(id<MTLLibrary> lib) {
+    const uint8_t red[4]={255,0,0,255}, green[4]={0,255,0,255}, zero[4]={0,0,0,0};
+    prog_t pg={0}; NvProg *p=make_program(lib,&pg,"two"); p->sh[1]->rf.color_mask=3;
+    // Two 2D-array targets across six layers.
+    tex_t a=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6), b=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6);
+    chain c={0}; bind(&c,&pg,3);
+    for(int sl=0;sl<6;sl++) {
+        p_set_rt r={.n=2}; r.color[0]=&a; r.color[1]=&b;
+        for(int k=0;k<2;k++) { r.has_cview[k]=1; r.cview[k]=(view_t){.set_layers=1,.min_layer=(uint16_t)sl,.nlayers=1}; }
+        emit(&c,OP_SET_RT,&r,sizeof r); triangle(&c);
+    }
+    execute(&c); wait_sm_amp();
+    layers_zero(&a,1,6); layers_zero(&b,1,6);
+    c.n-=8; uint64_t before=g_sm_ncont; execute(&c);
+    int want_mrt=sm_on() && sm_mrt_on();
+    CHECK("two 2D-array targets merge across six layers",g_sm_ncont-before==(uint64_t)(want_mrt?5:0));
+    CHECK("both 2D-array targets hold their own colour in all six layers",!check_solid_2d_layers(&a,0,0,5,red) && !check_solid_2d_layers(&b,0,0,5,green));
+
+    // Two 3D targets across depth planes 2..5 (nonzero lo exercises depthPlane offset + renderTargetArrayLength).
+    tex_t d0=texture(NVN_TEXTURE_TARGET_3D,NVN_FORMAT_RGBA8,6), d1=texture(NVN_TEXTURE_TARGET_3D,NVN_FORMAT_RGBA8,6);
+    chain c3={0}; bind(&c3,&pg,3);
+    for(int z=2;z<6;z++) {
+        p_set_rt r={.n=2}; r.color[0]=&d0; r.color[1]=&d1;
+        for(int k=0;k<2;k++) { r.has_cview[k]=1; r.cview[k]=(view_t){.set_layers=1,.set_target=1,.min_layer=(uint16_t)z,.nlayers=1,.target=NVN_TEXTURE_TARGET_3D}; }
+        emit(&c3,OP_SET_RT,&r,sizeof r); triangle(&c3);
+    }
+    execute(&c3); wait_sm_amp();
+    zero_3d(&d0,6); zero_3d(&d1,6);
+    c3.n-=8; before=g_sm_ncont; execute(&c3);
+    CHECK("two 3D targets merge across depth planes 2..5",g_sm_ncont-before==(uint64_t)(want_mrt?3:0));
+    CHECK("3D planes 2..5 hold their colours and planes 0..1 stay untouched",
+        !check_solid_3d_planes(&d0,0,2,5,red) && !check_solid_3d_planes(&d1,0,2,5,green)
+        && !check_solid_3d_planes(&d0,0,0,1,zero) && !check_solid_3d_planes(&d1,0,0,1,zero));
+
+    // Duplicate/aliasing MRT targets must refuse slice merge.
+    void *mem=NULL; if(posix_memalign(&mem,getpagesize(),getpagesize())) abort();
+    tex_t alias0=a, alias1=b; alias0.mem=mem; alias1.mem=(uint8_t *)mem+64; alias0.L.size=256; alias1.L.size=256;
+    p_set_rt ra={.n=2}; ra.color[0]=&alias0; ra.color[1]=&alias1;
+    ra.has_cview[0]=ra.has_cview[1]=1;
+    ra.cview[0]=ra.cview[1]=(view_t){.set_layers=1,.min_layer=0,.nlayers=1};
+    p_set_rt rb=ra; rb.cview[0].min_layer=rb.cview[1].min_layer=1;
+    int sl=-1;
+    CHECK("storage-aliasing MRT targets refuse slice merge",!sm_rt_slice(&ra,&rb,&sl));
+    free(mem);
+
+    // Mip-level extent comparison: 16x16 level 1 matches 8x8 level 0, whereas 16x16 level 0 mismatches 8x8 level 0.
+    tex_t big=texture(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6);
+    big.d.width=16; big.d.height=16; big.d.levels=2; nvn_tex_layout(&big.d,&big.L);
+    reset(); R.has_rt=1; R.rt.n=2; R.rt.color[0]=&big; R.rt.color[1]=&b;
+    R.rt.has_cview[0]=R.rt.has_cview[1]=1;
+    R.rt.cview[0]=(view_t){.set_levels=1,.set_layers=1,.base_level=0,.nlevels=1,.min_layer=0,.nlayers=1};
+    R.rt.cview[1]=(view_t){.set_levels=1,.set_layers=1,.base_level=0,.nlevels=1,.min_layer=0,.nlayers=1};
+    chain nxt={0}; p_set_rt r1=R.rt; r1.cview[0].min_layer=r1.cview[1].min_layer=1; emit(&nxt,OP_SET_RT,&r1,sizeof r1); triangle(&nxt); emit(&nxt,OP_END,NULL,0);
+    g_exec_next=nxt.p; sm_plan(p);
+    CHECK("mismatched mip-level extents refuse slice merge",!g_sm_plan.on);
+    R.rt.cview[0].base_level=1; r1.cview[0].base_level=1;
+    nxt.n=0; emit(&nxt,OP_SET_RT,&r1,sizeof r1); triangle(&nxt); emit(&nxt,OP_END,NULL,0);
+    g_exec_next=nxt.p; sm_plan(p);
+    CHECK("matching mip-level extents (16x16 lv1 and 8x8 lv0) plan slice merge",!want_mrt || g_sm_plan.on);
+    g_exec_next=NULL; g_sm_plan.on=0;
+}
+static void emit_lv_seg(chain *c, const tex_t *t, int lv, int sl) {
+    float sz=(float)(8>>lv);
+    p_viewports vp={.first=0,.n=1,.v={{0,0,sz,sz}}}; emit(c,OP_VIEWPORTS,&vp,sizeof vp);
+    p_set_rt r={.n=1}; r.color[0]=t; r.has_cview[0]=1;
+    r.cview[0]=(view_t){.set_levels=1,.set_layers=1,.base_level=(uint8_t)lv,.nlevels=1,.min_layer=(uint16_t)sl,.nlayers=1};
+    emit(c,OP_SET_RT,&r,sizeof r); triangle(c);
+}
+static void level_group(id<MTLLibrary> lib) {
+    const uint8_t red[4]={255,0,0,255};
+    tex_t t=texture_lv(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6,3);
+    prog_t pg={0}; make_program(lib,&pg,"red");
+    // Face by face in order 0, 2, 1 so the last original segment is level 1 (not the highest level), exercising last_lv post-run state preservation.
+    const int lorder[3]={0,2,1};
+    chain c={0}; bind(&c,&pg,3);
+    for(int sl=0;sl<6;sl++) for(int i=0;i<3;i++) emit_lv_seg(&c,&t,lorder[i],sl);
+    execute(&c); wait_sm_amp();
+    layers_zero(&t,3,6);
+    c.n-=8; uint64_t r0=g_rg_runs, c0=g_sm_ncont; execute(&c);
+    int want=sm_on() && rg_on();
+    CHECK("face-by-face multi-level run regroups once and merges all 3 levels",g_rg_runs-r0==(uint64_t)want && g_sm_ncont-c0==(uint64_t)(want?15:0));
+    CHECK("every pixel of all 3 levels and 6 layers is red",
+        !check_solid_2d_layers(&t,0,0,5,red) && !check_solid_2d_layers(&t,1,0,5,red) && !check_solid_2d_layers(&t,2,0,5,red));
+    CHECK("post-run viewport and target match the last original segment (level 1, layer 5)",
+        S.vp[0][2]==4.0f && S.vp[0][3]==4.0f && R.rt.has_cview[0] && R.rt.cview[0].base_level==1 && R.rt.cview[0].min_layer==5);
+
+    // Guard 1: same opcode (OP_BIND_UBO) writing different slots across levels must refuse regrouping.
+    chain bad_slot={0}; bind(&bad_slot,&pg,3);
+    for(int sl=0;sl<6;sl++) for(int lv=0;lv<3;lv++) {
+        p_bind_buf u={.stage=1,.index=(lv&1),.addr=0,.size=0};
+        emit(&bad_slot,OP_BIND_UBO,&u,sizeof u);
+        emit_lv_seg(&bad_slot,&t,lv,sl);
+    }
+    r0=g_rg_runs; execute(&bad_slot);
+    CHECK("mismatched UBO slot across segments refuses level grouping",g_rg_runs==r0);
+
+    // Guard 2: OP_BIND_TEX binding a texture whose storage overlaps the target must refuse regrouping; a disjoint texture is allowed.
+    tex_t targ=texture_lv(NVN_TEXTURE_TARGET_2D_ARRAY,NVN_FORMAT_RGBA8,6,3);
+    size_t pg_sz=(size_t)getpagesize(), msz=(targ.L.size+pg_sz-1)&~(pg_sz-1); if(msz<pg_sz) msz=pg_sz;
+    void *m0=NULL, *m1=NULL;
+    if(posix_memalign(&m0,pg_sz,msz) || posix_memalign(&m1,pg_sz,msz)) abort();
+    memset(m0,0,msz); memset(m1,0,msz); mtl_pool_add(m0,msz); mtl_pool_add(m1,msz);
+    targ.mem=m0;
+    tex_t alias=texture(NVN_TEXTURE_TARGET_2D,NVN_FORMAT_RGBA8,1); alias.mem=(uint8_t *)m0+128; alias.L.size=256;
+    tex_t disjoint=texture(NVN_TEXTURE_TARGET_2D,NVN_FORMAT_RGBA8,1); disjoint.mem=m1; disjoint.L.size=256;
+    mtl_reg_tex(505,&alias,NULL); mtl_reg_tex(506,&disjoint,NULL);
+    for(int use_alias=0;use_alias<2;use_alias++) {
+        chain bt={0}; bind(&bt,&pg,3);
+        p_bind_handles h={.stage=1,.first=0,.n=1,.h={use_alias?505u:506u}};
+        for(int sl=0;sl<6;sl++) for(int lv=0;lv<3;lv++) {
+            emit(&bt,OP_BIND_TEX,&h,sizeof h);
+            emit_lv_seg(&bt,&targ,lv,sl);
+        }
+        r0=g_rg_runs; execute(&bt);
+        CHECK(use_alias?"storage-aliasing OP_BIND_TEX refuses level grouping":"disjoint OP_BIND_TEX allows level grouping",
+            g_rg_runs-r0==(uint64_t)(!use_alias && want));
+    }
+    mtl_pool_del(m0); mtl_pool_del(m1); free(m0); free(m1);
+
+    // Guard 3: 3D texture levels must not enter level grouping.
+    tex_t t3=texture_lv(NVN_TEXTURE_TARGET_3D,NVN_FORMAT_RGBA8,6,2);
+    chain c3={0}; bind(&c3,&pg,3);
+    for(int z=0;z<4;z++) for(int lv=0;lv<2;lv++) {
+        p_set_rt r={.n=1}; r.color[0]=&t3; r.has_cview[0]=1;
+        r.cview[0]=(view_t){.set_levels=1,.set_layers=1,.set_target=1,.base_level=(uint8_t)lv,.nlevels=1,.min_layer=(uint16_t)(z>>lv),.nlayers=1,.target=NVN_TEXTURE_TARGET_3D};
+        emit(&c3,OP_SET_RT,&r,sizeof r); triangle(&c3);
+    }
+    r0=g_rg_runs; execute(&c3);
+    CHECK("3D texture targets refuse level grouping",g_rg_runs==r0);
 }
 // A draw into six layers of one level, a colour target per layer (fsp_plan): split into one draw per layer with one output each, every layer gets its own output.
 // Target i is layer 5 - i, so the layer each output goes to is the attachment's, not the output's number. A fragment that may discard keeps its targets and gives the same pixels
@@ -463,6 +630,8 @@ int main(int argc, char **argv) { @autoreleasepool {
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i [[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
         "fragment float4 red() { return float4(1,0,0,1); }\n"
+        "struct Two { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\n"
+        "fragment Two two() { return {float4(1,0,0,1),float4(0,1,0,1)}; }\n"
         "struct Six { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; float4 c2 [[color(2)]]; float4 c3 [[color(3)]]; float4 c4 [[color(4)]]; float4 c5 [[color(5)]]; };\n"
         "fragment Six six() { Six o; o.c0=float4(0,1,1,1); o.c1=float4(0.2,0.8,1,1); o.c2=float4(0.4,0.6,1,1); o.c3=float4(0.6,0.4,1,1); o.c4=float4(0.8,0.2,1,1); o.c5=float4(1,0,1,1); return o; }\n"
         "struct ReadArgs { texture2d<float> t [[id(0)]]; };\n"
@@ -470,6 +639,6 @@ int main(int argc, char **argv) { @autoreleasepool {
         "struct Args { device uint *p [[id(0)]]; };\n"
         "kernel void compute_one(constant Args &a [[buffer(0)]]) { *a.p=73; }\n" options:nil error:&error];
     if(!lib) { fprintf(stderr,"%s\n",error.localizedDescription.UTF8String); return 2; }
-    slices(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
+    slices(lib); slices_mrt(lib); level_group(lib); faces(lib); merges(lib); merge_read_order(lib); hoists(lib); posts();
     printf("performance ordering: %d checks, %d failed\n",checks,failed); return failed!=0;
 } }

@@ -114,6 +114,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN | — |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN | — |
 | [DOOM 3](010029D00E740000/README.md) | `010029D00E740000` | 1.0.5 | 14.3.0 | id Tech 4 (BFG Edition renderer), FMOD | OpenGL | — |
+| [DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH](010078D000F88000/README.md) | `010078D000F88000` | 1.26.01 | 10.4.1 | Dimps' engine, Havok, CRIWARE | NVN | — |
 | [DRAGON BALL: Sparking! ZERO](010035F022078000/README.md) | `010035F022078000` | 2.0.76 | 14.3.0 | Unreal Engine 5.1.1, CRIWARE | NVN | 60 fps target, [120 fps option](010035F022078000/README.md#frame-rate) |
 | [DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET](010051C0134F8000/README.md) | `010051C0134F8000` | 1.70 | 9.3.1 | Unreal Engine 4.24, CRIWARE | NVN | — |
 | [DRAGON QUEST BUILDERS 2](010042000A986000/README.md) | `010042000A986000` | 1.7.3d | 5.4.0 | Koei Tecmo's KTGL | NVN | — |
@@ -245,6 +246,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Sonic Superstars](01008F701C074000/README.md) | `01008F701C074000` | 1.1.8 | 16.2.0 | Unity 2021.3.25f1 IL2CPP, CRIWARE, FMOD | NVN | — |
 | [South Park: The Fractured But Whole](01008F2005154000/README.md) | `01008F2005154000` | 1.05 | 3.5.1 | Ubisoft Snowdrop | NVN | 60 fps target |
 | [South Park: The Stick of Truth](010095300B6A4000/README.md) | `010095300B6A4000` | 1.01 | 4.5.0 | Obsidian's Onyx engine, Bink | NVN | [60 fps mode](010095300B6A4000/README.md#frame-rate) |
+| [Splatoon 2](01003BC0000A0000/README.md) | `01003BC0000A0000` | 5.5.2 (provisional Mac profile) | 3.4.1 | Nintendo EPD (sead / agl / gsys) | NVN | — |
 | [STEINS;GATE RE:BOOT](01008BC024FDE000/README.md) | `01008BC024FDE000` | 1.0.3 | 20.5.17 | M2's ADV engine | NVN | — |
 | [Star Ocean: The Second Story R](010065301A2E0000/README.md) | `010065301A2E0000` | 1.1.0 | 15.3.2 | Unity 2021.3.22f1 IL2CPP, CRIWARE, FMOD | NVN | — |
 | [Stardew Valley](0100E65002BB8000/README.md) | `0100E65002BB8000` | 1.6.15.13 | 20.5.27 | MonoGame (C# → C++ by BRUTE) | NVN | — |
@@ -283,6 +285,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [The Legend of Zelda: Tears of the Kingdom](0100F2C0115B6000/README.md) | `0100F2C0115B6000` | 1.4.3 | 20.5.22 | Nintendo EPD (sead / agl / gsys) | NVN | 60 fps target |
 | [The Rogue Prince of Persia](01008D9022462000/README.md) | `01008D9022462000` | 1.1.0 | 20.5.29 | Unity 6000.0.64f1 IL2CPP, FMOD | NVN | 60 fps target, [120 fps option](01008D9022462000/README.md#frame-rate) |
 | [The Witcher 3: Wild Hunt — Complete Edition](0100A0800E9C4000/README.md) | `0100A0800E9C4000` | 4.04b | 15.3.0 | CD PROJEKT RED's REDengine 3 (Saber Interactive port) | NVN | 60 fps target |
+| [Thronebreaker: The Witcher Tales](0100E910103B4000/README.md) | `0100E910103B4000` | 1.0.2 (provisional Mac profile) | 8.2.1 | Unity 2018.4.2f1 IL2CPP, Wwise | NVN | [60 fps target](0100E910103B4000/README.md#frame-rate) |
 | [Trails in the Sky 2nd Chapter](01007A2027548000/README.md) | `01007A2027548000` | 1.0.4 | 21.4.4 | Nihon Falcom's engine | NVN | — |
 | [TRIANGLE STRATEGY](0100CC80140F8000/README.md) | `0100CC80140F8000` | 1.1.1 | 12.3.2 | Unreal Engine 4.27 | NVN | 60 fps target |
 | [TSUKIHIME A piece of blue glass moon](010057A01E4D4000/README.md) | `010057A01E4D4000` | 1.0.2 | 17.5.4 | its own (not named) | NVN | — |

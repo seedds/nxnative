@@ -303,6 +303,84 @@ static void handles(tex_t *t) {
     g_samples_fb_left=0; CHECK(draw_samples_rt(pr),"slice merge retains the conservative handle guard");
     t->mem=NULL; mtl_pool_del(mem); free(mem);
 }
+static void leading_subset(prog_t *red_pg, prog_t *green_pg, id<MTLLibrary> lib, NvShader *vs) {
+    // Leading-target continuation (DM_NVN_RT_SUBSET): 2 targets -> leading 1 target -> back to 2 targets.
+    prog_t two_pg={.serial=882020}, read_pg={.serial=882021};
+    NvProg *two=[NvProg new]; two->sh[0]=vs; two->sh[1]=[NvShader new];
+    two->sh[1]->stage=1; two->sh[1]->fn=[lib newFunctionWithName:@"two_rg"]; strcpy(two->sh[1]->key,"rt-subset-two");
+    two->sh[1]->rf.color_known=1; two->sh[1]->rf.color_mask=3; serial_put(two_pg.serial,two);
+    NvProg *rd=[NvProg new]; rd->sh[0]=vs; rd->sh[1]=[NvShader new];
+    rd->sh[1]->stage=1; rd->sh[1]->fn=[lib newFunctionWithName:@"read_tex"]; strcpy(rd->sh[1]->key,"rt-subset-read");
+    rd->sh[1]->ae=[rd->sh[1]->fn newArgumentEncoderWithBufferIndex:0]; rd->sh[1]->arg_len=rd->sh[1]->ae.encodedLength;
+    rd->sh[1]->rf.nb=1; rd->sh[1]->rf.color_known=1; rd->sh[1]->rf.color_mask=1;
+    rd->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TEX,.reg=0,.aid=0,.dtt=MTLTextureType2D}; serial_put(read_pg.serial,rd);
+
+    tex_t c0=texture(882022), c1=texture(882023), small=texture(882024);
+    small.d.width=4; small.d.height=4; nvn_tex_layout(&small.d,&small.L);
+    mtl_reg_tex(610,&c1,NULL);
+    p_set_rt full={.n=2,.color={&c0,&c1}}, sub={.n=1,.color={&c0}}, shrunk={.n=2,.color={&c0,&small}};
+    int cont = rtc_on() && rtsub_on();
+
+    // 1. 2 targets (red, green) -> 1 target (green into c0 only) -> back to 2 targets (red into c0 only): 1 pass, c1 untouched (green)
+    {
+        chain c={0};
+        emit(&c,OP_SET_RT,&full,sizeof full); program(&c,&two_pg,3); triangle(&c);
+        emit(&c,OP_SET_RT,&sub,sizeof sub); program(&c,green_pg,3); triangle(&c);
+        emit(&c,OP_SET_RT,&full,sizeof full); program(&c,red_pg,3); triangle(&c);
+        chain warm=c; run(&warm);
+        uint64_t before=g_stat_pass; run(&c);
+        CHECK(g_stat_pass-before==(cont?1u:3u),"leading-target subset and return to full targets continue one pass");
+        pixels(&c0,255,0,"leading-target continuation writes c0 cleanly");
+        pixels(&c1,0,255,"leading-target continuation leaves trailing target c1 untouched");
+    }
+    // 2. Subset draw whose fragment shader writes past the subset (color_mask=3) must split so c1 keeps its earlier red value
+    {
+        chain c={0};
+        emit(&c,OP_SET_RT,&full,sizeof full); program(&c,green_pg,3);
+        p_clear_color clr={.index=1,.rgba={1,0,0,1},.mask=15}; emit(&c,OP_CLEAR_COLOR,&clr,sizeof clr); triangle(&c);
+        emit(&c,OP_SET_RT,&sub,sizeof sub); program(&c,&two_pg,3); triangle(&c);
+        chain warm=c; run(&warm);
+        uint64_t before=g_stat_pass; run(&c);
+        CHECK(g_stat_pass-before==2u,"subset draw writing past the game's targets splits the pass");
+        pixels(&c0,255,0,"split subset draw still writes c0");
+        pixels(&c1,255,0,"split subset draw does not overwrite trailing target c1");
+    }
+    // 3. Subset draw that reads trailing target c1 must split the pass and read c1's stored pixels
+    {
+        p_bind_handles th={.stage=1,.first=0,.n=1,.h={610}};
+        chain c={0};
+        emit(&c,OP_SET_RT,&full,sizeof full); program(&c,&two_pg,3); triangle(&c);   // c0=red, c1=green
+        emit(&c,OP_SET_RT,&sub,sizeof sub); program(&c,&read_pg,3); emit(&c,OP_BIND_TEX,&th,sizeof th); triangle(&c);
+        chain warm=c; run(&warm);
+        uint64_t before=g_stat_pass; run(&c);
+        CHECK(g_stat_pass-before==2u,"subset draw reading a trailing target splits the pass");
+        pixels(&c0,0,255,"subset draw reads stored trailing target c1 cleanly");
+    }
+    // 4. Trailing target smaller than leading target shrinks pass bounds: rt_prefix must refuse so c0 is not clipped to 4x4
+    {
+        chain c={0};
+        p_clear_color clr0={.index=0,.rgba={0,0,0,1},.mask=15};
+        emit(&c,OP_SET_RT,&sub,sizeof sub); emit(&c,OP_CLEAR_COLOR,&clr0,sizeof clr0);
+        emit(&c,OP_SET_RT,&shrunk,sizeof shrunk); program(&c,&two_pg,3); triangle(&c);
+        emit(&c,OP_SET_RT,&sub,sizeof sub); program(&c,green_pg,3); triangle(&c);
+        chain warm=c; run(&warm);
+        uint64_t before=g_stat_pass; run(&c);
+        CHECK(g_stat_pass-before==2u,"smaller trailing target refuses leading-subset continuation");
+        pixels(&c0,0,255,"non-continued full-size subset draw covers all 8x8 pixels");
+    }
+    // 5. Clear arriving while in a leading-subset continuation and returning to full targets applies the clear and keeps c1
+    {
+        chain c={0};
+        p_clear_color clr0={.index=0,.rgba={0,1,0,1},.mask=15};
+        emit(&c,OP_SET_RT,&full,sizeof full); program(&c,&two_pg,3); triangle(&c);   // c0=red, c1=green
+        emit(&c,OP_SET_RT,&sub,sizeof sub); emit(&c,OP_CLEAR_COLOR,&clr0,sizeof clr0);
+        emit(&c,OP_SET_RT,&full,sizeof full);
+        chain warm=c; run(&warm); run(&c);
+        pixels(&c0,0,255,"clear during leading-subset continuation lands on c0");
+        pixels(&c1,0,255,"clear during leading-subset continuation leaves trailing target c1 intact");
+    }
+    mtl_tex_release(&c0); mtl_tex_release(&c1); mtl_tex_release(&small);
+}
 int main(void) { @autoreleasepool {
     alarm(60); setvbuf(stdout,NULL,_IONBF,0); mtl_init();
     NSError *error=nil;
@@ -311,6 +389,8 @@ int main(void) { @autoreleasepool {
         "vertex float4 v(uint i [[vertex_id]]) { return position(i); }\n"
         "fragment float4 red() { return float4(1,0,0,1); }\n"
         "fragment float4 green() { return float4(0,1,0,1); }\n"
+        "struct Two { float4 c0 [[color(0)]]; float4 c1 [[color(1)]]; };\n"
+        "fragment Two two_rg() { return {float4(1,0,0,1), float4(0,1,0,1)}; }\n"
         "struct A { texture2d<float,access::read> source [[id(0)]]; };\n"
         "fragment float4 read_tex(float4 p [[position]], constant A &a [[buffer(0)]]) { return a.source.read(uint2(p.xy)); }\n"
         "struct D { depth2d<float,access::read> source [[id(0)]]; };\n"
@@ -334,6 +414,7 @@ int main(void) { @autoreleasepool {
     replay_planes(&pg, lib, pr->sh[0], &t, &depth);
     replay_vertex_handles(&pg, lib, &t, &depth, &other);
     replay_handles(&pg,&green_pg,lib,pr->sh[0],&t,&cp); handles(&t);
+    leading_subset(&pg,&green_pg,lib,pr->sh[0]);
     mtl_tex_release(&t); mtl_tex_release(&cp);
     mtl_tex_release(&depth); mtl_tex_release(&other);
     printf("render target unbind: %d checks, %d failed\n",checks,failed); return failed!=0;

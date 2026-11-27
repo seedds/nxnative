@@ -107,7 +107,7 @@ def unit(msl) -> tuple[str | None, dict]:
     # entry point beside it (that one needed a specialization anyway). main0's alpha test entry point stays: it has no constant, so the alpha-tested draws of the common case take it with no
     # specialization at run time (nvn_mtl.m at_fn)
     typed = bool(re.search(r'\bfragment\s+main0_out_u\s+main0_u\s*\(', msl))
-    try: es = entries(msl, skip=('main0_u',))
+    try: es = entries(msl, skip=('main0_u', 'main0_early'))
     except ValueError as e: return None, {'why': str(e)}
     if not es or es[0]['name'] != 'main0': return None, {'why': 'no fragment entry point main0'}
     no_alpha, no_logic = dmsh_alpha.refused(msl), dmsh_logic.refused(msl)

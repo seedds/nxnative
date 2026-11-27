@@ -193,6 +193,15 @@ HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolution
     static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k_buf_max_res[r][0], k_buf_max_res[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
 }
+// The SDK only accepts its own default display (SDK 20.5.3, sdk+0x55dbd0). Answer for the display OpenDefaultDisplay returns here,
+// with the guest's fixed refresh rate in Hz. Cyberpunk 2077 treats a zero as VRR and keeps rebuilding its swap chain when trying to use four active textures.
+int nvn_vsync_hz(void);   // hle_nvn.c, shared with GetDisplayVsyncEvent's nominal pacing
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPKNS0_7DisplayE", "display refresh rate in Hz from guest vsync", Result, h_vi_RefreshRate,
+          uint32_t *out, const void *disp) {
+    if (disp != &g_display) return 0x272;
+    if (out) *out = (uint32_t)nvn_vsync_hz();
+    return RES_OK;
+}
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
 HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,
           void *layer, int a, int b) {

@@ -74,8 +74,8 @@ int main(void) {
     init_pool(&dev, &phys2, p2_mem, 2 * pg, NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
 
     map_req mrs[2] = {
-        { &phys1, 0, (int64_t)(2 * pg), 2 * pg, 0, 0 },
         { &phys2, 0, (int64_t)(4 * pg), 2 * pg, 0, 0 },
+        { &phys1, 0, (int64_t)(2 * pg), 2 * pg, 0, 0 },
     };
     CHECK("map two misaligned CPU physical pools adjacently", h_nvnMemoryPoolMapVirtual(&virt, 2, (const NVNmappingRequest *)mrs));
     CHECK("g_sh_bytes tracks exact shadow bytes", atomic_load(&g_sh_bytes) == 4 * pg);
@@ -116,6 +116,73 @@ int main(void) {
     uint32_t ev_word = 0; memcpy(&ev_word, p1_mem + 512, 4);
     CHECK("event writeback reached physical page", ev_word == 0x12345678u);
 
+    // A wide writeback starts and ends in partial pages, with an unchanged
+    // whole page between them and GPU changes on both sides.
+    uint64_t wide_start = sh_va + 13, wide_size = 2 * pg - 30;
+    CHECK("wide writeback armed", nvn_shadow_arm(wide_start, wide_size));
+    p1_mem[pg] = 0x55;
+    vbase[2 * pg + 13] = 0xA3;
+    vbase[4 * pg - 18] = 0xB4;
+    uint64_t wb_before = atomic_load(&g_sh_wb);
+    nvn_shadow_writeback(wide_start, wide_size);
+    CHECK("wide writeback reaches both partial pages", p1_mem[13] == 0xA3 && p1_mem[2 * pg - 18] == 0xB4);
+    CHECK("wide writeback skips the unchanged whole page", p1_mem[pg] == 0x55 && atomic_load(&g_sh_wb) - wb_before == (64 - 13) + (64 - 17));
+
+    // Completion must publish the physical bytes even when a mapping holds
+    // the sparse mutex and no subsequent rendering submission runs.
+    const uint64_t waited_offset = 768;
+    CHECK("contended writeback armed", nvn_shadow_arm(sh_va + waited_offset, 1));
+    vbase[2 * pg + waited_offset] = 0xC5;
+    dispatch_semaphore_t started = dispatch_semaphore_create(0), finished = dispatch_semaphore_create(0);
+    __block post_rec completion = {.n = 1, .ops = malloc(sizeof(post_op))};
+    *completion.ops = (post_op){.kind = POST_SHADOW_WB, .addr = sh_va + waited_offset, .copy_end = sh_va + waited_offset + 1};
+    pthread_mutex_lock(&g_vp_mu);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        pthread_mutex_lock(&g_post_mu);
+        dispatch_semaphore_signal(started);
+        post_run(&completion, 0, 0);
+        dispatch_semaphore_signal(finished);
+    });
+    dispatch_semaphore_wait(started, DISPATCH_TIME_FOREVER);
+    long waiting = dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC));
+    CHECK("completion waits for the sparse mutex", waiting != 0 && !atomic_load(&completion.claimed));
+    pthread_mutex_unlock(&g_vp_mu);
+    if (waiting) dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
+    CHECK("completion publishes the GPU write without another submit", atomic_load(&completion.claimed) && p1_mem[waited_offset] == 0xC5);
+
+    // Coalesce repeats that the short look-back missed without including
+    // gaps or moving a writeback across a CPU-side effect.
+    g_npost = 0;
+    post((post_op){.kind = POST_SHADOW_WB, .addr = 512, .copy_end = 576});
+    post((post_op){.kind = POST_SHADOW_WB, .addr = 128, .copy_end = 192});
+    post((post_op){.kind = POST_SHADOW_WB, .addr = 160, .copy_end = 256});
+    post((post_op){.kind = POST_BUFFER_COPY, .addr = 384, .copy_end = 448});
+    post((post_op){.kind = POST_SHADOW_WB, .addr = 576, .copy_end = 640});
+    post_shadow_coalesce();
+    CHECK("writeback coalescing merges the overlap and leaves the gap", g_npost == 4 && g_post[0].addr == 128 && g_post[0].copy_end == 256 && g_post[1].addr == 512 && g_post[1].copy_end == 576);
+    CHECK("writeback coalescing keeps the CPU-side effect in order", g_npost == 4 && g_post[2].kind == POST_BUFFER_COPY && g_post[3].addr == 576);
+    g_npost = 0;
+
+    // A raw shader's predicted set can include two sparse pools while the
+    // GPU's write log names only one. Completion must read that log itself.
+    mtl_sub_begin();
+    id<MTLBuffer> raw_map = [g_dev newBufferWithLength:3 * DMSH_GMEM_MAP_ENTRY options:MTLResourceStorageModeShared];
+    uint64_t *table = raw_map.contents;
+    table[DMSH_GMEM_MAP_ENTRY / 8] = sh_va;
+    table[DMSH_GMEM_MAP_ENTRY / 8 + 1] = sh_va + 2 * pg;
+    table[2 * DMSH_GMEM_MAP_ENTRY / 8] = sh_va + 2 * pg;
+    table[2 * DMSH_GMEM_MAP_ENTRY / 8 + 1] = sh_va + 4 * pg;
+    g_gml_n = g_gml_stable = 2;
+    g_gml_lo[0] = sh_va; g_gml_hi[0] = g_gml_lo[1] = sh_va + 2 * pg; g_gml_hi[1] = sh_va + 4 * pg;
+    (void)gml_take(raw_map);
+    CHECK("raw shadow tracking preserves hazards without predicted writebacks", sbw_hits(sh_va, sh_va + 1) && sbw_hits(sh_va + 2 * pg, sh_va + 2 * pg + 1) && g_npost == 0);
+    ((uint32_t *)g_gml_last->b.contents)[0] = 1u << 1;
+    vbase[2 * pg + 1024] = 0xA1;
+    vbase[4 * pg + 1024] = 0xB2;
+    CHECK("raw GPU writeback completed", mtl_wait(mtl_sub_commit(), 5000000000ull));
+    CHECK("raw writeback uses the recorded pool before fence completion", p1_mem[1024] == 0xA1 && p2_mem[1024] == 0x22);
+    vbase[4 * pg + 1024] = 0x22;
+
     // 4. Clipped buffer texture over sparse pool (declared 16 * pg bytes, only 6 * pg mapped)
     NVNtextureBuilder tb; NVNtexture t_buf, t_bc, t_rgba;
     h_nvnTextureBuilderSetDefaults(&tb);
@@ -143,10 +210,60 @@ int main(void) {
     CHECK("RGBA8 IMAGE texture init", h_nvnTextureInitialize(&t_rgba, &tb));
     CHECK("tex_from_storage rejects RGBA8+IMAGE in sparse pool", tex_from_storage((const tex_t *)&t_rgba) == 0);
 
-    // 6. Unmap shadowed ranges -> g_sh_bytes returns to 0
+    // 6. Cutting across two shadows leaves their outer portions addressable.
+    map_req middle = { NULL, 0, (int64_t)(3 * pg), 2 * pg, 0, 0 };
+    CHECK("unmap spans the tail and head of two shadows", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&middle));
+    CHECK("only outer pages count as shadow bytes", atomic_load(&g_sh_bytes) == 2 * pg);
+    CHECK("lowest remaining shadow can be armed", nvn_shadow_arm(sh_va + pg - 1, 1));
+    CHECK("shadow lookup skips the gap", !nvn_shadow_arm(sh_va + pg, 2 * pg));
+    CHECK("highest remaining shadow can be armed", nvn_shadow_arm(sh_va + 3 * pg, 1));
+
     map_req unmap = { NULL, 0, (int64_t)(2 * pg), 4 * pg, 0, 0 };
     CHECK("unmap shadowed ranges", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&unmap));
     CHECK("g_sh_bytes returned to 0 after unmap", atomic_load(&g_sh_bytes) == 0);
+
+    // Consecutive requests over one backing range share a shadow. GPU stores
+    // can cross the old request boundary, and an unmap can still trim one side.
+    map_req adjacent[2] = {
+        { &phys1, 0, (int64_t)(2 * pg), pg, 0, 0 },
+        { &phys1, (int64_t)pg, (int64_t)(3 * pg), pg, 0, 0 },
+    };
+    CHECK("map adjacent physical and virtual ranges", h_nvnMemoryPoolMapVirtual(&virt, 2, (const NVNmappingRequest *)adjacent));
+    CHECK("adjacent requests use one shadow", ((pool_t *)&virt)->vp->nsh == 1);
+    CHECK("combined shadow contains both source ranges", !memcmp(vbase + 2 * pg, p1_mem, 2 * pg));
+    mtl_sub_begin();
+    mtl_sub_fill(sh_va + pg - 32, 64, 0x5C5C5C5Cu);
+    CHECK("GPU write across the former boundary completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
+    CHECK("GPU writeback reaches both sides", p1_mem[pg - 1] == 0x5C && p1_mem[pg] == 0x5C);
+    map_req tail = { NULL, 0, (int64_t)(3 * pg), pg, 0, 0 };
+    CHECK("unmap the tail of a combined shadow", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&tail));
+    CHECK("trimming leaves only the first side", atomic_load(&g_sh_bytes) == pg && nvn_shadow_arm(sh_va, pg) && !nvn_shadow_arm(sh_va + pg, pg));
+    p1_mem[pg - 1] = 0x91;
+    mtl_sub_begin();
+    CHECK("CPU write still syncs into the trimmed shadow", vbase[3 * pg - 1] == 0x91);
+    CHECK("submission after trimming completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
+    CHECK("unmap the remaining side", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&unmap));
+
+    // A new mapping spanning two existing shadows can keep their backing.
+    CHECK("map adjacent shadows for remap", h_nvnMemoryPoolMapVirtual(&virt, 2, (const NVNmappingRequest *)mrs));
+    void *before = NULL, *after = NULL;
+    uint64_t before_off = 0, after_off = 0;
+    CHECK("original run resolves", mtl_addr(sh_va, 4 * pg, &before, &before_off));
+    id<MTLBuffer> original_run = (__bridge id<MTLBuffer>)before;
+    uint64_t old_gen = nvn_sparse_gen(), old_stamp = nvn_dirty_now();
+    map_req replace = { &phys2, 0, (int64_t)(3 * pg), 2 * pg, 0, 0 };
+    CHECK("remap across both shadows", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&replace));
+    CHECK("remap keeps the existing run buffer", mtl_addr(sh_va, 4 * pg, &after, &after_off) &&
+          after == (__bridge void *)original_run && before_off == after_off);
+    CHECK("remap updates sparse texture generation", nvn_sparse_since(&virt, sh_va + pg, 2 * pg, old_gen, old_stamp));
+    CHECK("remap copies only the replaced span", !memcmp(vbase + 2 * pg, p1_mem, pg) &&
+          !memcmp(vbase + 3 * pg, p2_mem, 2 * pg) && !memcmp(vbase + 5 * pg, p2_mem + pg, pg));
+    uint8_t old_source = p1_mem[pg];
+    mtl_sub_begin();
+    mtl_sub_fill(sh_va + pg, 4, 0x75757575u);
+    CHECK("GPU write through remapped run completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
+    CHECK("remapped run writes back to the new source", p2_mem[0] == 0x75 && p1_mem[pg] == old_source);
+    CHECK("unmap the remapped shadows", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&unmap));
 
     // 7. bind_handles_ex & BindTexturesDeferred >32 handles (49 handles)
     NVNcommandBuffer cmd; NVNmemoryPool cpool;

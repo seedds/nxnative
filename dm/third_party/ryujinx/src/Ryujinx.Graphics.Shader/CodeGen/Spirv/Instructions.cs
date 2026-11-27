@@ -727,18 +727,20 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             // first; dmsh_atomic.wide_atomics turns that pair into one texture2d<ulong>::atomic_max / atomic_min on the RG32Uint texture and fails the shader on any other
             // access of the image. The pair is only ever a marker: it never runs as two 32-bit atomics. After uncraftablexd's PR #1801
             bool wide = bounded && texOp.Format == TextureFormat.R32G32Uint;
-            if (wide && (!texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
+            if (wide && (declaration.IsIndexed || !texOp.Flags.HasFlag(TextureFlags.AtomicDiscardResult) ||
                 ((texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Minimum && (texOp.Flags & TextureFlags.AtomicMask) != TextureFlags.Maximum) ||
                 texOp.Type == SamplerType.TextureBuffer))
             {
                 throw new NotSupportedException("Metal 64-bit image atomics support a max or min with no result on 2D/2D-array/3D images only.");
             }
-            if (bounded && (declaration.IsIndexed ||
+            // nxnative: an indexed declaration is an image pool array (BindlessElimination.GenerateBindlessAccess): SPIRV-Cross writes the atomic on the indexed element, and
+            // dmsh_reflect.pool_arrays moves a buffer image's coordinate by the element's lead as it does for its reads and writes
+            if (bounded && (
                 (texOp.Type != SamplerType.TextureBuffer && texOp.Type != SamplerType.Texture2D &&
                  texOp.Type != (SamplerType.Texture2D | SamplerType.Array) && texOp.Type != SamplerType.Texture3D) ||
                 (texOp.Format != TextureFormat.R32Uint && texOp.Format != TextureFormat.R32Sint && !wide)))
             {
-                throw new NotSupportedException("Metal image atomics support non-indexed 32-bit buffer/2D/2D-array/3D images only.");
+                throw new NotSupportedException("Metal image atomics support 32-bit buffer/2D/2D-array/3D images only.");
             }
 
             SpvInstruction resultType = context.GetType(componentType);
@@ -748,7 +750,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             {
                 SpvInstruction textureIndex = Src(AggregateType.S32);
 
-                image = context.AccessChain(imagePointerType, image, textureIndex);
+                image = context.AccessChain(declaration.ImagePointerType, image, textureIndex);
                 MarkNonUniform(context, image);
             }
 

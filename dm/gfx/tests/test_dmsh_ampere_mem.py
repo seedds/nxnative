@@ -75,9 +75,22 @@ class GuardedWrites(Translated):
         self.assertIn('cb0_40000000', msl)   # the pool arrays (dmsh_build.py pool_arrays makes them pointers)
         self.assertIn('gather(', msl)
 
-    def test_size_query_through_a_uniform_register_translates(self):   # TXQ R10, UR6, R10 (0xf6f; PRAGMATA, as encoded there): the size of a texture the pools hold
-        msl = self.translate(inst(0x000f4200080001ff, 0x000006000a0a7f6f) + inst(SUATOM[0], 0x00000c0a030c7593) + inst(*EXIT))   # the size added by an image atomic, so it stays
-        self.assertIn('get_width(', msl)
+    def test_size_query_through_a_uniform_register_uses_descriptor_metadata(self):
+        # TXQ R10, UR6, R10 (0xf6f; PRAGMATA). The same handle can name a volume.
+        # Keep each queried component alive with an atomic add.
+        import dmsh_reflect
+        mov = (0x000fe20000000f00, 0x0100000000107a02)    # MOV R16, c[4][0]
+        mask_id = (0x000fe400078ec0ff, 0x00007fff10107812)    # R16 &= 0x7fff
+        r2ur = (0x000fe20000000000, 0x00000000100673c2)    # R2UR UR6, R16
+        for mask, query in ((1, 0), (4, 0), (8, 0), (4, 1)):
+            with self.subTest(mask=mask, query=query):
+                msl = self.translate(inst(*mov) + inst(*mask_id) + inst(*r2ur) +
+                                     inst(0x000f4200080000ff | mask << 8, 0x00000600ff0a7f6f | query << 62) +
+                                     inst(SUATOM[0] | 1 << 57, 0x00000c0a030c7593) + inst(*EXIT))  # wait for TXQ's scoreboard 5
+                self.assertRegex(msl, r'nvn_texture_query\s*\[\[id\(')
+                self.assertFalse(self.res['textures'])
+                binds = dmsh_reflect.reflect('test', 'cs', msl, self.res)
+                self.assertEqual([b['kind'] for b in binds if b['msl_name'] == 'nvn_texture_query'], ['tex_query'])
 
     def test_lod_query_handle_forms_translate(self):   # TMML through a uniform register and a register (Kirby Air Riders' 4,776 pixel shaders, as encoded there)
         for code in ((0x000f4200080002ff, 0x600004ff20277f69), (0x000f4200000002ff, 0x68000018141d736a)):

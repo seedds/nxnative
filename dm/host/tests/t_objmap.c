@@ -13,6 +13,7 @@ void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NU
 void *guest_sym(const char *name) { (void)name; return NULL; }
 int dm_sdk_ounce(void) { return 1; }
 void crash_watch_frame(void) {}
+void dm_thread_native_wait(int entering) { (void)entering; }
 
 // The first key above `after` whose home slot is `home`
 static const void *key_at(unsigned home, uintptr_t after) {

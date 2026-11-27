@@ -144,6 +144,13 @@ class Plan(unittest.TestCase):
         bases, _, _ = po.plan(self.d, CHAIN, pairs[:2], True)   # near = 0: the entry_z entries
         self.assertEqual(bases, [('pull_bp', 'main0_z', 'fs_b', 'main0'), ('plain_b', 'main0_z', 'fs_b', 'main0')])
 
+    def test_fragment_early_depth_keeps_both_pipeline_bases(self):
+        self.shader('vs', {}, {'_b': [('main0', False)]})
+        self.shader('fs', {'entry_early': 'main0_early'}, {'_b': [('main0', False), ('main0_early', False)]})
+        bases, rest, _ = po.plan(self.d, CHAIN, [('vs', 'fs')], False)
+        self.assertEqual(bases, [('vs_b', 'main0', 'fs_b', 'main0'), ('vs_b', 'main0', 'fs_b', 'main0_early')])
+        self.assertEqual(rest, [])
+
     def test_vertex_entry_is_the_name_the_reflection_gives_the_library(self):   # nvn_mtl.m side_entry, as shader_load and pre_desc take it
         own = {'entry': 'main0', 'entry_z': 'main0_z'}
         self.assertEqual([po.vertex_entry(own, z) for z in (False, True)], ['main0', 'main0_z'])   # no pulling library: the shader's own, in <key>_b

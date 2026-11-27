@@ -1746,7 +1746,7 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Check:** `make -C dm/gfx/tests GAME=01005CA01580E000 check_t_pso_archive` runs `spec_desc` against two stand-in bases, one that returns the descriptor retained and one that returns it autoreleased. On the first call and on later ones, the descriptor outlives every pool and is freed once dropped. The previous direct call dies on the autoreleased stand-in. Axiom Verge with `DM_PSO_MTL4=1`:
   - on the iPad, it crashed on every start before the fix. Now it runs at 60 fps: the cold start compiled 18 bases and made 25 specializations, and later starts take the bases from the archive. The log says `returned autoreleased`;
   - on the Mac, it says `returned retained`.
-- **Found on:** Axiom Verge 1.0.3 (`0100052004384000`, its profile a separate change) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
+- **Found on:** [Axiom Verge](../../dm/games/0100052004384000/README.md) 1.0.3 (`0100052004384000`) with the launcher's **Metal 4 pipelines** on: an iPhone 16 Pro Max (iOS 26.0, LiveContainer) and an iPad Pro 11-inch (M4, iPadOS 26.0, from Xcode and in LiveContainer) crashed the same way.
 
 ### A specialized Metal 4 pipeline keeps its base's fixed state in its descriptor
 

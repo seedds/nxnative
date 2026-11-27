@@ -17,9 +17,10 @@ GAMES = REPO / 'dm/games'
 NVN = REPO / 'dm/gfx/nvn'
 SHADER_TOOLS = NVN.parent / 'tools'
 PARSER_SOURCE = REPO / 'dm/tools/prewarm_skey.c'
-sys.path[:0] = [str(GAMES), str(SHADER_TOOLS)]
+sys.path[:0] = [str(GAMES), str(SHADER_TOOLS), str(PARSER_SOURCE.parent)]
 from dmsh_chain import table_pairs
-from game import Game
+from game import Game, extra_dirs
+from nacp import bundle_version
 
 FILENAME = re.compile(r'([A-F0-9]{16})--([A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63})--([a-f0-9]{64})\.tsv')
 HASH = r'[a-f0-9]{16}'
@@ -124,37 +125,78 @@ def optional_bytes(path: Path) -> bytes | None:
         return None
 
 
-def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: ImportPlan) -> None:
-    shader_map = profile.table('shader_map.tsv')
-    if not shader_map.is_file():
-        for capture in captures:
-            print(f'{capture.path.name}: skipped {len(capture.rows):,} rows (profile has no shader map)')
-        return
+def read_shader_map(profile: Game) -> dict[str, str]:
     shaders = {}
-    for line in shader_map.read_text(encoding='utf-8').splitlines():
+    data = optional_bytes(profile.table('shader_map.tsv')) or b''
+    for line in data.decode('utf-8').splitlines():
         columns = line.split('\t', 4)
         if not line.startswith(('#', 'package')) and len(columns) >= 4:
             shaders[columns[3] + '_b'] = columns[2]
+    return shaders
+
+
+def covered_versions(profile: Game, registered: dict[str, dict[str, str]]) -> set[str]:
+    builds = profile.builds()
+    covered = profile.words('shader_versions', profile.get('package', '')) + profile.words('shader_covers', '')
+    versions = set()
+    for version in covered:
+        if version not in builds:
+            continue
+        build = builds[version]
+        known = registered.get(version)
+        if known is not None:
+            # Older derived profiles may have no display label. Recover it from the same registered modules.
+            if (build | {'display': known['display']}) != known:
+                continue
+            versions.update((known['display'], bundle_version(known['display'])))
+        versions.update((version, build['display'], bundle_version(build['display'])))
+    return versions
+
+
+def validation_tables(profile: Game, versions: set[str]):
+    repository_shaders = read_shader_map(profile)
+    registered = profile.builds()
+    tables: dict[str, tuple[dict[str, str], set[tuple[str, ...]]]] = {}
+    sources = [profile]
+    for root in extra_dirs():
+        folder = root / profile.id
+        if (folder / 'game.tsv').is_file() and folder.resolve() != profile.dir:
+            sources.append(Game(folder))
+    for source in sources:
+        if source.get('title_id', '').upper() != profile.id:
+            continue
+        matches = (covered_versions(source, registered) & versions) - tables.keys()
+        if not matches:
+            continue
+        shaders = repository_shaders if source is profile else read_shader_map(source)
+        if shaders:
+            pairs = {('G', *pair) for pair in table_pairs(source.table('geo_pairs.tsv'))}
+            tables.update(dict.fromkeys(matches, (shaders, pairs)))
+    return repository_shaders, tables
+
+
+def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: ImportPlan) -> None:
+    repository_shaders, tables = validation_tables(profile, {capture.version for capture in captures})
     path = profile.table('pso_manifest.tsv')
     original = optional_bytes(path)
     seed = original.decode('utf-8') if original is not None else HEADER
     existing = [row for row in seed.splitlines() if ROW.fullmatch(row)]
     parsed = parse_pipelines(parser, existing)
     seen = {row_key(row, parsed) for row in existing}
-    for table in GEOMETRY_TABLES:
-        seen.update(('G', *pair) for pair in table_pairs(profile.table(table)))
-    package = profile.builds().get(profile.get('package', ''), {}).get('display')
+    seen.update(('G', *pair) for pair in table_pairs(profile.table('geo_mesh.tsv')))
     additions = []
     kinds: Counter[str] = Counter()
     versions: dict[str, None] = {}
     for capture in captures:
+        exact = tables.get(capture.version)
+        shaders, pairs = exact if exact is not None else (repository_shaders, set())
         parsed = parse_pipelines(parser, capture.rows)
         counts: Counter[str] = Counter()
         for row in capture.rows:
             key = row_key(row, parsed)
             if not key:
                 counts['invalid pipeline'] += 1
-            elif key in seen:
+            elif key in seen or key in pairs:
                 counts['duplicate'] += 1
             elif reason := check_stages(row, parsed, shaders):
                 counts[reason] += 1
@@ -164,7 +206,9 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
                 kinds[row[0]] += 1
                 counts['added'] += 1
                 versions[capture.version] = None
-        note = f' (profile package {package})' if package and package != capture.version else ''
+        note = ''
+        if exact is None:
+            note = ' (no matching version map, using repository shader map)' if repository_shaders else ' (no shader map available)'
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
         if counts['added'] + counts['duplicate'] == len(capture.rows):

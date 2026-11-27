@@ -46,6 +46,13 @@
 - **Fix:** `profile_derivation_reason` treats committed shader tables as covering `shader_versions` plus any additional registered builds explicitly verified in `shader_covers` (Hades II `v655360`, FIFA 23 `v196608`); any other registered build derives its own shader tables even when `shader_versions` is present (and avoids extracting `shader_versions` unnecessarily). `report_profile_status` compares `pkg_ver`'s module build IDs (ignoring `display`) against `reg.builds().get(pkg_ver)` and reports registered builds without `[RED]`, while mismatched, mixed, or unregistered modules stay red. `dm/tools/tests/test_nsp_registered_update.py` covers all cases.
 - **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md) 1.8.0 (`v917504`, 11,601 shaders vs `v0`'s 11,558; PR #2621) and existing multi-build profiles such as [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) when packed without all `shader_versions`.
 
+### An update's prewarm capture reports missing shaders
+
+- **Symptom:** `merge_prewarm_seeds.py` reports `profile package v0` and `missing shader` for rows captured on an update. A capture with only duplicates and missing shaders can disappear from the local inbox.
+- **Cause:** the importer checked every capture against the repository profile's shader map. Its cleanup treated a key absent from that map as missing from the capture's version.
+- **Fix:** resolve the capture's version against shader coverage in the repository and local build profiles. Import shared rows using the repository map when a matching map is unavailable, and keep the capture if any rows remain unresolved. [Prewarm import usage](../development.md#prewarm-lists)
+- **Found on:** [Mario Kart World](../../dm/games/0400C3F00006E000/README.md#180). The same 1.8.0 compute key was accepted with the derived map and reported missing with the v0 map.
+
 ### A NUP or a dump of a game with no profile stops before the survey
 
 - **Symptom:** `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder ([issue #1265](https://github.com/seedds/nxnative/issues/1265)). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`.

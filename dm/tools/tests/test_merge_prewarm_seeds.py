@@ -16,6 +16,8 @@ MESH = '0000000000000003_b'
 TASK = '0000000000000004_b'
 GEOMETRY = '0000000000000005_b'
 SECOND_VERTEX = '0000000000000006_b'
+UPDATE_COMPUTE = '0000000000000007_b'
+UPDATE_BUILD = 'a' * 32
 
 
 def key(shader, stage=0):
@@ -32,7 +34,7 @@ class ImportSeeds(unittest.TestCase):
         self.repo = self.root / 'repo'
         self.inbox = self.root / 'inbox'
         self.inbox.mkdir()
-        for path in (SCRIPT, Path('dm/games/game.py'), Path('dm/tools/prewarm_skey.c'),
+        for path in (SCRIPT, Path('dm/games/game.py'), Path('dm/tools/prewarm_skey.c'), Path('dm/tools/nacp.py'),
                      Path('dm/gfx/tools/dmsh_chain.py')):
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +43,10 @@ class ImportSeeds(unittest.TestCase):
                         ignore=shutil.ignore_patterns('*.m', '*.c', '*.inc'))
         profile = self.repo / 'dm/games' / TITLE
         profile.mkdir()
-        (profile / 'game.tsv').write_text(f'title_id\t{TITLE}\nname\tExample Game\nbuild\tv0\t1.0.0\npackage\tv0\n')
+        (profile / 'game.tsv').write_text(
+            f'title_id\t{TITLE}\nname\tExample Game\nbuild\tv0\t1.0.0\n'
+            f'build\tv65536\t1.0.1\tmain={UPDATE_BUILD}\n'
+            'build\tv131072\t1.0.2 b723\npackage\tv0\nshader_versions\tv0\nshader_covers\tv131072\n')
         (profile / 'shader_map.tsv').write_text(''.join(
             f'shaders\t{index}\t{stage}\t{shader[:-2]}\n'
             for index, (stage, shader) in enumerate([('vertex', VERTEX), ('compute', COMPUTE),
@@ -51,6 +56,17 @@ class ImportSeeds(unittest.TestCase):
         self.original = f'# Original header\nR\t{key(VERTEX)}\n'
         self.manifest.write_text(self.original)
         self.env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, PYTHONDONTWRITEBYTECODE='1')
+        self.env.pop('DM_GAMES_DIR', None)
+
+    def add_local_profile(self, display='?', build=UPDATE_BUILD):
+        root = self.root / 'local profiles'
+        profile = root / TITLE
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / 'game.tsv').write_text(f'title_id\t{TITLE}\nbuild\tv65536\t{display}\tmain={build}\n'
+                                          'package\tv65536\nshader_versions\tv65536\n')
+        (profile / 'shader_map.tsv').write_text(f'cs.bin\t0\tcompute\t{UPDATE_COMPUTE[:-2]}\n')
+        self.env['DM_GAMES_DIR'] = str(root)
+        return profile
 
     def upload(self, *rows, title=TITLE, version='1.0.0', corrupt=False):
         data = ('\n'.join(rows) + '\n').encode()
@@ -88,7 +104,7 @@ class ImportSeeds(unittest.TestCase):
         self.upload(shader, title='0100000000000001')
         preview = self.run_import().stdout
         for expected in ('3 added', '2 duplicate', 'invalid pipeline', '2 missing shader',
-                         'stage mismatch', 'profile package 1.0.0', 'SHA-256 mismatch',
+                         'stage mismatch', 'no matching version map', 'SHA-256 mismatch',
                          'no repository profile', 'Preview'):
             self.assertIn(expected, preview)
         self.assertEqual(self.manifest.read_text(), self.original)
@@ -184,6 +200,59 @@ class ImportSeeds(unittest.TestCase):
         self.assertIn('Deleted 1 inbox capture(s).', result)
         self.assertFalse(capture.exists())
         self.assertEqual(self.manifest.read_text(), partial + f'# Inbox captures from 1.0.1.\n{missing}\n')
+
+    def test_unavailable_version_keeps_unresolved_capture_until_matching_map_is_available(self):
+        shared = f'C\t{COMPUTE}'
+        update = f'C\t{UPDATE_COMPUTE}'
+        capture = self.upload(f'R\t{key(VERTEX)}', shared, update, version='1.0.1')
+
+        applied = self.run_import('--apply').stdout
+        self.assertIn('1 added, 1 duplicate, 1 missing shader', applied)
+        self.assertTrue(capture.is_file())
+        self.assertIn(shared, self.manifest.read_text())
+        self.assertNotIn(update, self.manifest.read_text())
+
+        self.add_local_profile(display='1.0.1', build='b' * 32)
+        retry = self.run_import('--apply').stdout
+        self.assertIn('no matching version map', retry)
+        self.assertIn('2 duplicate, 1 missing shader', retry)
+        self.assertTrue(capture.is_file())
+
+        local = self.add_local_profile()
+        applied = self.run_import('--apply').stdout
+        self.assertIn('1 added, 2 duplicate', applied)
+        self.assertFalse(capture.exists())
+        self.assertIn(update, self.manifest.read_text())
+        self.assertFalse((local / 'pso_manifest.tsv').exists())
+
+    def test_mixed_versions_use_their_own_shader_coverage(self):
+        self.add_local_profile()
+        base = self.upload(f'C\t{COMPUTE}', f'C\t{UPDATE_COMPUTE}')
+        update = self.upload(f'C\t{UPDATE_COMPUTE}', version='1.0.1')
+        covered = self.upload(f'S\t{SECOND_VERTEX}\t0', version='1.0.2')
+
+        applied = self.run_import('--apply').stdout
+        self.assertIn(f'{base.name}: 1 added, 1 missing shader', applied)
+        self.assertIn(f'{update.name}: 1 added', applied)
+        self.assertIn(f'{covered.name}: 1 added', applied)
+        self.assertFalse(update.exists())
+        self.assertFalse(covered.exists())
+        self.assertTrue(base.exists())
+
+    def test_generated_geometry_pairs_follow_the_capture_version(self):
+        local = self.add_local_profile()
+        shutil.copyfile(self.manifest.with_name('shader_map.tsv'), local / 'shader_map.tsv')
+        base_pair = f'{VERTEX[:-2]}\t{GEOMETRY[:-2]}'
+        update_pair = f'{SECOND_VERTEX[:-2]}\t{GEOMETRY[:-2]}'
+        self.manifest.with_name('geo_pairs.tsv').write_text(base_pair + '\n')
+        (local / 'geo_pairs.tsv').write_text(update_pair + '\n')
+        capture = self.upload(f'G\t{base_pair}', f'G\t{update_pair}', version='1.0.1')
+
+        applied = self.run_import('--apply').stdout
+        self.assertIn('1 added, 1 duplicate', applied)
+        self.assertIn(f'G\t{base_pair}', self.manifest.read_text())
+        self.assertNotIn(f'G\t{update_pair}', self.manifest.read_text())
+        self.assertFalse(capture.exists())
 
     def test_push_updates_main_without_including_local_commits(self):
         bare = self.init_origin()

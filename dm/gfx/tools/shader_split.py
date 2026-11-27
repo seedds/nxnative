@@ -72,6 +72,7 @@
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 names the source chosen for the key); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table> (geo_pairs.tsv and mesh_pairs.tsv are written beside it) [<output pipeline pair table (pso_pairs.tsv)> [<DLC RomFS dirs, comma-separated> [<play capture file list, JSON>]]]]   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
+#   Prefix the arguments with --json-paths to pass the RomFS, main and DLC path lists as JSON arrays, including paths that contain commas.
 #   Unity type trees need Unity's common string table, which is taken from the first main
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import base64, collections, concurrent.futures as cf, functools, glob, hashlib, json, lzma, os, re, struct, subprocess, sys, time, zlib
@@ -5417,13 +5418,22 @@ def plan_jobs(files, heads, romfs_v, main_v):
 
 
 def main():
-    romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
-    pairsout = sys.argv[6] if len(sys.argv) > 6 else None
-    psopairsout = sys.argv[7] if len(sys.argv) > 7 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
-    dlc_v = sys.argv[8].split(',') if len(sys.argv) > 8 and sys.argv[8] else []   # extra content has no ExeFS; each root is the extracted DLC index
-    # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
+    args = sys.argv[1:]
+    json_paths = args[:1] == ['--json-paths']
+    if json_paths:
+        args = args[1:]
+    romfs_l, main_l, pkg, mapout, factsout = args[:5]
+    pairsout = args[5] if len(args) > 5 else None
+    psopairsout = args[6] if len(args) > 6 else None   # pso_pairs.tsv: supplemental BAHS program variations and legacy Unity pass-input covers
+    dlc_l = args[7] if len(args) > 7 else ''
+    if json_paths:
+        romfs_v, main_v = json.loads(romfs_l), json.loads(main_l)
+        dlc_v = json.loads(dlc_l) if dlc_l else []
+    else:
+        romfs_v, main_v = romfs_l.split(','), main_l.split(',')
+        dlc_v = dlc_l.split(',') if dlc_l else []
+    # The RomFS and main lists pair one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
-    romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
     registered = read_registered_sources(os.environ.get('DM_SPLIT_REGISTERED_MAP', ''))
     files, results, common = [], [], None
@@ -5491,8 +5501,8 @@ def main():
     bad = [extra for *_, extra in results if isinstance(extra, tuple)]
     if bad: print(f'[RED] {sum(e[2] for e in bad)} file(s) could not be read, their shaders are left out (first: {bad[0][1]})', flush=True)   # build_ipa_from_nsp.py reads this line
     play_pairs = set()
-    if len(sys.argv) > 9:
-        played, play_pairs = glslc_play(sys.argv[9])
+    if len(args) > 8:
+        played, play_pairs = glslc_play(args[8])
         results.append(('glslc_play', played, set(), {}))   # game files, boot captures and DLC retain ownership of any keys they share with play captures
     keys, pairs, per_src = merge_keys(results, registered)
     pairs.update(pair for pair in play_pairs if any(k in keys and keys[k][0].startswith('/glslc_play/') for k in pair[:3]))

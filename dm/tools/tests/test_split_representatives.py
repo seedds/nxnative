@@ -122,6 +122,35 @@ class Representatives(unittest.TestCase):
             ss.skey(*c): ('vs_main.bin', 2, 'vertex', 'main@v327680#BNSH@0x80#var2', *c),
         })
 
+    def test_packing_splits_base_update_and_dlc_under_a_path_with_commas(self):
+        root = self.root / "Game, with spaces"
+        roms = [root / version / 'RomFS' for version in ('v0', 'v65536')]
+        mains = [rom.parent / 'main' for rom in roms]
+        dlc = root / 'aoc/7'
+        for path in (*roms, dlc):
+            path.mkdir(parents=True)
+        for main in mains:
+            main.write_bytes(nso(b''))
+
+        ctl, code = fz.VS
+        expected = {}
+        for i, (folder, prefix) in enumerate(zip((*roms, dlc), ('', '/v65536', '/aoc/7'))):
+            shader = code[:-1] + bytes([code[-1] ^ i])
+            data, _ = bnsh([[(8, ctl, shader)]])
+            (folder / 'one.bnsh').write_bytes(data)
+            expected[ss.skey(ctl, shader)] = f'{prefix}/one.bnsh#BNSH@0x0#var0'
+
+        profile = root / 'profile'
+        profile.mkdir()
+        (profile / 'game.tsv').write_text('modules\tmain\n')
+        with mock.patch.object(nsp, 'PROG'):
+            nsp.split_shaders(sys.executable, REPO, roms, mains, root / 'pkg',
+                              self.split_env(), root / 'logs', game.Game(profile), provisional=True, dlc_roms=[dlc])
+
+        rows = nsp.data_rows((profile / 'shader_map.tsv').read_bytes())
+        actual = dict(line.decode().split('\t')[3:] for line in rows if not line.startswith(b'package\t'))
+        self.assertEqual(actual, expected)
+
     def test_ue_duplicates_keep_first_archive_entry_and_record_order(self):
         ctl, _ = nvn2_stage(0)
         a = ctl, struct.pack('<I', 0x461) + bytes(28)

@@ -2746,12 +2746,12 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     def counted(ln):   # shader_split.py's 'progress: <done>/<total>'
         if m := re.fullmatch(r'progress: (\d+)/(\d+)', ln): PROG.set(done=int(m[1]), total=int(m[2]), unit='files')
-    extra = [','.join(map(str, dlc_roms))] if dlc_roms or play_files else []
+    extra = [json.dumps(list(map(str, dlc_roms)))] if dlc_roms or play_files else []
     if play_files:
         manifest = tmp / 'glslc_play.json'
         manifest.write_text(json.dumps([str(p) for p in play_files]))
         extra.append(str(manifest))
-    run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + extra,
+    run([py, repo / 'dm/gfx/tools/shader_split.py', '--json-paths', json.dumps(list(map(str, roms))), json.dumps(list(map(str, mains))), tmp / 'pkg'] + [tmp / 'tables' / n for n in names + ('pso_pairs.tsv',)] + extra,
         logs / 'shader_split.log', env=dict(env, DM_SPLIT_REGISTERED_MAP=registered_map), on_line=counted)
     text = (logs / 'shader_split.log').read_text(errors='replace')
     m = re.search(r'shaders: (\d+) \(', text)

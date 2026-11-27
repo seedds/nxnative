@@ -178,6 +178,13 @@
 - **Fix:** `dmsh_build.py` now flushes the final count of `cache check` and `compiling`, flushes immediately on every step change, reports `compiling mesh libraries` across `_mesh`, passes an `on_progress` callback through `publish_library` to `shader_lib.write` for `writing the library image` (or `writing the Mac library image` and `writing the iOS library image` on dual-image builds, with file counts and bytes written), and reports `c1 guard` and `uniform read extents` before unlinking `DMSH_PROGRESS` at exit. `ShaderWatch` reads `step`, counts, unit and formatted bytes directly from `DMSH_PROGRESS`.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072 on an M3 Max ([PR #2684](https://github.com/seedds/nxnative/pull/2684)). Checked in `dm/tools/tests/test_shader_lib.py` (`test_write_reports_progress`), `dm/tools/tests/test_nsp_mac.py` (`test_shader_watch_follows_all_phases`) and `dm/tools/tests/test_shader_toolchain_cache.py` (`BuildProgress`).
 
+### A comma in the build path stops the shader split
+
+- **Symptom:** `shader_split.py` stops with `FileNotFoundError` naming only the part of the NSP folder before a comma.
+- **Cause:** the NSP script joined the RomFS, ExeFS and DLC paths with commas, and the splitter used the same character to separate the paths for each game version.
+- **Fix:** the NSP script sends each path list as a JSON array. The direct splitter CLI still accepts its original comma-separated arguments. A synthetic base, update and DLC under a path with a comma verify that all three shader sources reach the split.
+- **Found on:** Pokémon: Let's Go, Pikachu! 1.0.2 (`010003F003A34000`).
+
 ### The split shader tables differ from a game profile's
 
 - **Symptom:** the shader split stops with `the split shader tables differ from game profile <id>'s`, on the game version the profile registers.

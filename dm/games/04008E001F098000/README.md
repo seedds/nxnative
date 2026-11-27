@@ -24,7 +24,7 @@ There is no game-specific patch and no rewriter cut. Everything else it needed i
 
 ## Shaders
 
-- 11,057 shaders (`Nin_Ounce_NVN2` BNSH and BAHS) in [`shader_map.tsv`](shader_map.tsv). A full Mac build takes about 9 minutes on the M6 and 4:46 for a second one.
+- 11,057 shaders (`Nin_Ounce_NVN2` BNSH and BAHS) in `shader_map.tsv`. A full Mac build takes about 9 minutes on the M6 and 4:46 for a second one.
 - 6 sea shaders (4 task, 2 mesh of agl `AnnaSea`, plus 2 mesh shaders whose 21 KB payloads exceeded Metal's 16 KB limit) now build through the device-buffer payload spill ([A task shader's payload past Metal's 16 KB](../../../docs/reference/shaders.md#a-task-shaders-payload-past-metals-16-kb)); all 11,057 shaders build. No draw has been seen to use them in play yet.
 - 612 pixel shaders read the fragment's shading-rate size; until it read 1 x 1 the sea and the avatars' hair and clothes were black ([The fragment's shading-rate size reads 1 x 1](../../../docs/reference/shaders.md#the-fragments-shading-rate-size-reads-1-x-1)).
 - [`pso_manifest.tsv`](pso_manifest.tsv) is this Mac's own list (3,474 shaders, 1,868 render, 41 compute and 22 task / mesh pipelines): a first start, the menus and a doubles match. The pull requests' lists were recorded by an older host: none of their render or mesh pipeline keys matches the current one's.

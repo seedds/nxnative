@@ -8074,6 +8074,7 @@ static int clear_rect_zero(int i) {
 static os_unfair_lock g_rmu = OS_UNFAIR_LOCK_INIT;
 // ---------- Shader mapping table: Switch control section hash → PC metallib (produced by dm/gfx/tools/shader_map.py) ----------
 static NSMutableDictionary<NSString *, NSString *> *g_shmap;
+static NSMutableSet<NSString *> *g_up_keys;
 static NSString *g_shmap_path, *g_msl_dir;
 #include "nvn_live.inc"
 // The library may be one file beside its folder, b-<chain>.img (dm/tools/shader_lib.py, msl_image.h), read in place. Each file comes from the folder first: what a partial dmsh_build.py run rebuilt goes
@@ -8136,7 +8137,13 @@ static void shmap_read(void) {
     for (NSString *ln in [txt componentsSeparatedByString:@"\n"]) {
         if (!ln.length || [ln hasPrefix:@"#"] || [ln hasPrefix:@"package"]) continue;
         NSArray *c = [ln componentsSeparatedByString:@"\t"];
-        if (c.count > 3) g_shmap[c[3]] = c[2];
+        if (c.count > 3) {
+            g_shmap[c[3]] = c[2];
+            if (c.count > 4 && [c[2] isEqualToString:@"compute"] && [c[4] rangeOfString:@"#NDSR@0x"].location != NSNotFound) {
+                if (!g_up_keys) g_up_keys = [NSMutableSet set];
+                [g_up_keys addObject:c[3]];
+            }
+        }
     }
     g_shmap_path = path;
     const char *m = getenv("DM_MSL_DIR");
@@ -23606,9 +23613,14 @@ static int up_mfx_color(const void *code, size_t n) {
     if (dec16 && !enc16 && !enc32 && !dec32) return UP_COLOR_SRGB;
     return up_mfx_plain(code, n, part) ? UP_COLOR_SAME : UP_COLOR_KEEP;
 }
-// Whether cs is one of the game's upscaler shaders (DM_GAME_UPSCALER_KEYS: comma-separated 16-digit keys)
+// Whether cs is one of the game's upscaler shaders (compile-time DM_GAME_UPSCALER_KEYS or runtime #NDSR@0x entries from DM_NVN_SHMAP)
+static int up_mfx_has_keys(void) { return DM_GAME_UPSCALER_N || (g_up_keys && g_up_keys.count); }
 static int up_mfx_named(NvShader *cs) {
     for (const char *k = DM_GAME_UPSCALER_KEYS; *k; k += k[16] == ',' ? 17 : 16) if (!strncmp(k, cs->key, 16)) return 1;
+    if (g_up_keys && cs->key[0]) {
+        NSString *k = [[NSString alloc] initWithBytes:cs->key length:strnlen(cs->key, 16) encoding:NSUTF8StringEncoding];
+        if ([g_up_keys containsObject:k]) return 1;
+    }
     return 0;
 }
 // Whether cs binds exactly one texture and one image (rejects multi-texture shaders inside an NDSR pack, such as Ocarina's VR pre-passes and NDVE's 4f41ccf24f163e0d resampler)
@@ -23626,7 +23638,7 @@ static int up_mfx_1tex_1img(NvShader *cs, int *ti_out, int *oi_out) {
     return 1;
 }
 static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
-    if (cs->up_color || !DM_GAME_UPSCALER_N || !up_mfx_on() || !up_mfx_named(cs)) return;
+    if (cs->up_color || !up_mfx_has_keys() || !up_mfx_on() || !up_mfx_named(cs)) return;
     if (!up_mfx_1tex_1img(cs, NULL, NULL)) {
         cs->up_color = UP_COLOR_KEEP;
         MLOG("upscaler %s: not one texture and one image; the game's shader runs", cs->key);
@@ -23642,7 +23654,7 @@ static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd) {
 static int up_mfx_wanted(NvShader *cs) {
     if (cs->up_mfx) return cs->up_mfx == 1;
     cs->up_mfx = 2;
-    if (!DM_GAME_UPSCALER_N || !up_mfx_on()) return 0;
+    if (!up_mfx_has_keys() || !up_mfx_on()) return 0;
     if (up_mfx_named(cs) && (cs->up_color == UP_COLOR_LINEAR || cs->up_color == UP_COLOR_SRGB || cs->up_color == UP_COLOR_ROOT || cs->up_color == UP_COLOR_SAME)) cs->up_mfx = 1;
     return cs->up_mfx == 1;
 }

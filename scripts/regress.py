@@ -253,10 +253,18 @@ class Game:
         self.patched = bench.newest(build.glob('patched_v*'))
         self.ver = self.patched.name.removeprefix('patched_') if self.patched else None
         self.kind = 'nvn' if (build / 'shader/pkg').is_dir() else 'vk' if (build / 'shader/vk').is_dir() else 'gl' if (build / 'shader/gl').is_dir() else None
-        # The build's own profile runs instead of dm/games' only when it is derived (the NSP script's <id>.derived.key beside it: a version the game's profile was not brought up
-        # on) or the game has no profile here (a provisional one). A provisional profile the NSP script left from before the game's profile was added would test its guesses
+        # The build's own profile runs instead of dm/games' only when it is derived for another version/title (not a shader-only working profile
+        # materialized from a registered dm/games profile) or the game has no profile here (a provisional one). A provisional profile the NSP script
+        # left from before the game's profile was added would test its guesses
         own = build / 'profile' / self.id
-        self.derived = (own / 'game.tsv').is_file() and ((build / 'profile' / f'{self.id}.derived.key').is_file() or not (REPO / 'dm/games' / self.id / 'game.tsv').is_file())
+        own_game = own / 'game.tsv'
+        shader_only = False
+        if own_game.is_file():
+            try: shader_only = own_game.read_text(encoding='utf-8').startswith('# Derived shader tables from game profile ')
+            except OSError: pass
+        self.derived = own_game.is_file() and (not (REPO / 'dm/games' / self.id / 'game.tsv').is_file()
+                                               or ((build / 'profile' / f'{self.id}.derived.key').is_file() and not shader_only))
+        self._pkg = {}
 
     def romfs(self):
         r = bench.rfs.source(self.build / 'extract' / self.ver)
@@ -282,10 +290,75 @@ class Game:
             # a game the revision does not know (its profile is new in the candidate: a bring-up PR): the baseline's chain translates its shaders with the candidate's profile,
             # the same inputs, so the comparison is of the chains alone
             src = REPO / 'dm/games' / self.id
-        key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED))[:16]   # validated.tsv records a result about the profile, it is not an input of it
+        extra = []
+        if getattr(self, 'kind', None) == 'nvn' and not (src / 'shader_map.tsv').is_file():
+            own = self.build / 'profile' / self.id
+            if (own / 'shader_map.tsv').is_file():
+                extra = [own / n for n in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv') if (own / n).is_file()]
+        key = digest(sorted(p for p in src.glob('*') if p.is_file() and p.name != VALIDATED) + extra)[:16]   # validated.tsv records a result about the profile, it is not an input of it
         dst = game_root(self) / 'profiles' / key / self.id
         if not (dst / 'game.tsv').is_file(): shutil.copytree(src, dst, ignore=shutil.ignore_patterns(VALIDATED))
+        if hasattr(self, '_ensure_split'): self._ensure_split(tree, dst)
         return dst
+
+    def _ensure_split(self, tree, dst):
+        if getattr(self, 'kind', None) != 'nvn': return
+        tid = getattr(tree, 'id', str(tree.path))
+        if (dst / 'shader_map.tsv').is_file():
+            ptr = dst.with_name(self.id + '.pkg')
+            if ptr.is_file() and tid not in self._pkg:
+                p = Path(ptr.read_text().strip())
+                if p.is_dir(): self._pkg[tid] = p
+            return
+        own = self.build / 'profile' / self.id
+        if (own / 'shader_map.tsv').is_file():
+            for n in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv'):
+                if (own / n).is_file(): shutil.copyfile(own / n, dst / n)
+            return
+        # Build folder from before Option 2A (no build/profile/<id>/shader_map.tsv): run shader_split.py once into a cached split folder.
+        vers = [self.ver] if self.ver else []
+        for ln in (dst / 'game.tsv').read_text(encoding='utf-8').splitlines():
+            if ln.startswith('shader_versions\t'):
+                want = ln.split('\t', 1)[1].split()
+                if want and all((self.build / 'extract' / v / 'ExeFS/main').is_file() for v in want): vers = want
+                break
+        roms = [str(bench.rfs.source(self.build / 'extract' / v)) for v in vers]
+        mains = [str(self.build / 'extract' / v / 'ExeFS/main') for v in vers]
+        aoc = self.build / 'aoc'
+        dlc = [str(p) for p in sorted(aoc.iterdir()) if p.is_dir() or p.suffix == '.img'] if aoc.is_dir() else []
+        split_py = tree.path / 'dm/gfx/tools/shader_split.py'
+        manual = dst / 'shader_facts_manual.tsv'
+        key_parts = [digest([split_py, dst / 'game.tsv'] + ([manual] if manual.is_file() else []))]
+        for r, m in zip(roms, mains):
+            rp, mp = Path(r), Path(m)
+            key_parts.append(f'{rp}:{rp.stat().st_size if rp.is_file() else "dir"}:{mp}:{mp.stat().st_size}')
+        if dlc: key_parts.append('dlc:' + ','.join(Path(p).name for p in dlc))
+        skey = hashlib.sha256('\0'.join(key_parts).encode()).hexdigest()[:16]
+        sdir = game_root(self) / 'split' / skey
+        if not (sdir / 'done.ok').is_file():
+            part = sdir.with_name(skey + '.partial')
+            shutil.rmtree(part, ignore_errors=True); (part / 'tables').mkdir(parents=True)
+            senv = dict(os.environ, DM_GAME=self.id, DM_GAMES_DIR=str(dst.parent), DM_GAMES_FIRST='1', DM_SPLIT_REGISTERED_MAP='')
+            if (self.build / 'tools/dmhost').is_file() and self.patched:
+                senv.update(DM_OODLE_HOST=str(self.build / 'tools/dmhost'), DM_OODLE_MODULES=str(self.patched))
+            if self.patched and (self.patched / 'nro').is_dir():
+                senv['DM_NRO_DIR'] = str(self.patched / 'nro')
+            cmd = [sys.executable, str(split_py), '--json-paths', json.dumps(roms), json.dumps(mains), str(part / 'pkg'),
+                   str(part / 'tables/shader_map.tsv'), str(part / 'tables/shader_facts.tsv'), str(part / 'tables/shader_pairs.tsv'), str(part / 'tables/pso_pairs.tsv')]
+            if dlc: cmd.append(json.dumps(dlc))
+            say(f'  {self.id}: splitting shaders into {sdir}')
+            r = sh(cmd, cwd=tree.path, env=senv)
+            if r.returncode: raise HarnessError(f'{self.id}: shader_split.py failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-400:]}')
+            (part / 'done.ok').write_text(f'{skey}\n')
+            shutil.rmtree(sdir, ignore_errors=True); part.rename(sdir)
+        for n in ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv', 'pso_pairs.tsv', 'geo_pairs.tsv'):
+            if (sdir / 'tables' / n).is_file(): shutil.copyfile(sdir / 'tables' / n, dst / n)
+        self._pkg[tid] = sdir / 'pkg'
+        dst.with_name(self.id + '.pkg').write_text(str(sdir / 'pkg') + '\n')
+
+    def pkg_dir(self, tree):
+        self.profile_dir(tree)
+        return self._pkg.get(getattr(tree, 'id', str(tree.path)), self.build / 'shader/pkg')
 
     def shader_roots(self):
         roots = [self.romfs()]
@@ -397,7 +470,7 @@ def chain_key(tree, g, tools):
     if g.kind == 'nvn':
         v, inp = json.loads(tree.py("import sys, json; sys.path.insert(0, 'dm/gfx/tools'); import dmsh_chain as c; g = c.load_game(); print(json.dumps([c.version(), c.inputs(g)]))", g.env(tree)))
         side = digest([tree.path / 'dm/gfx/tools' / f for f in ('c1_guard.py', 'cb_extent.py', 'dmsh_mtlcache.py', 'dmsh_pch.py', 'own_compilers.py', 'tool_lock.py')] + [tree.path / 'dm/games/game.py'])
-        pkg = g.build / 'shader/pkg'
+        pkg = g.pkg_dir(tree) if hasattr(g, 'pkg_dir') else g.build / 'shader/pkg'
         sources = digest(sorted(p for p in pkg.rglob('*') if p.is_file()), root=pkg)
         pairs = g.profile_dir(tree) / 'pso_pairs.tsv'
         if not pairs.is_file(): pairs = g.build / 'shader/pso_pairs.tsv'
@@ -584,10 +657,11 @@ def chain_build_locked(tree, g, a, v, inp, key, out):
         entry = tools_dir / ('own_compilers.py' if (tools_dir / 'own_compilers.py').is_file() else 'dmsh_build.py')
         lib = out / f'b-{v}'
         if not done:
+            pkg = g.pkg_dir(tree) if hasattr(g, 'pkg_dir') else g.build / 'shader/pkg'
             say(f'  {g.id}: chain {v} (inputs {inp}) of {tree.id}: translating the shaders ({jobs} workers) → {out}')
-            command = [sys.executable, entry, g.build / 'shader/pkg', out]
+            command = [sys.executable, entry, pkg, out]
             if cas.suffix == '.db':
-                command = [sys.executable, REPO / 'dm/tools/shader_cache.py', '--run', '--readonly', g.build / 'shader/cache', entry, g.build / 'shader/pkg', out]
+                command = [sys.executable, REPO / 'dm/tools/shader_cache.py', '--run', '--readonly', g.build / 'shader/cache', entry, pkg, out]
                 rc, paused = run_heavy(command, log, tree.path, env, a, f'{g.id} shader build')
             else:
                 tree_tar.unpack(cas, say)

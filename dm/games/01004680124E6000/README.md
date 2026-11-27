@@ -5,7 +5,7 @@ Update 1.3.2 (v327680), Nintendo SDK 10.6.0, Inti Creates' engine on NVN. The Ma
 ## What it needs
 
 - [`game.tsv`](game.tsv) registers update 1.3.2 and loads `main`, `subsdk0` (GLSLC) and `sdk`. The NPDM declares no system resource, so virtual address memory is disabled. The game takes a 3.14 GB heap within the standard 3.25 GB heap region.
-- [Runtime GLSLC capture](../../../docs/reference/shaders.md#built-in-shaders-compiled-with-the-games-own-glslc) records four compiler outputs from the game, two vertex and two pixel stages. The NSP script captures them at boot. The [shader map](shader_map.tsv) and [prewarm list](pso_manifest.tsv) cover the Mac route through Stage 1.
+- [Runtime GLSLC capture](../../../docs/reference/shaders.md#built-in-shaders-compiled-with-the-games-own-glslc) records four compiler outputs from the game, two vertex and two pixel stages. The NSP script captures them at boot. The shader map and [prewarm list](pso_manifest.tsv) cover the Mac route through Stage 1.
 - The port uses the existing NSO rewrite, NVN renderer and AudioOut implementation.
 
 ## Mac validation

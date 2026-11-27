@@ -199,7 +199,7 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
                 counts['invalid pipeline'] += 1
             elif key in seen or key in pairs:
                 counts['duplicate'] += 1
-            elif reason := check_stages(row, parsed, shaders):
+            elif shaders and (reason := check_stages(row, parsed, shaders)):
                 counts[reason] += 1
             else:
                 seen.add(key)
@@ -209,7 +209,7 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
                 versions[capture.version] = None
         note = ''
         if exact is None:
-            note = ' (no matching version map, using repository shader map)' if repository_shaders else ' (no shader map available)'
+            note = ' (no matching version map, using repository shader map)' if repository_shaders else ' (no shader map available, format-validated only)'
         summary = ', '.join(f'{count:,} {kind}' for kind, count in sorted(counts.items()))
         print(f'{capture.path.name}{note}: {summary}')
         if counts['added'] + counts['duplicate'] + counts['ignored S'] == len(capture.rows):

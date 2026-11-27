@@ -17,7 +17,7 @@ There is no game-specific patch and no rewriter cut. The profile is the NSP scri
 
 ## Shaders
 
-42,313 in [`shader_map.tsv`](shader_map.tsv): 18,248 pixel, 15,705 vertex, 7,568 compute, 680 mesh, 49 domain, 33 hull, 30 geometry, from 23 SDF files and one OCIO file. On chain `6e1d6cb7b703` all build for the Mac; a full Mac build with nothing cached took about 35 minutes on the M6.
+42,313 in `shader_map.tsv`: 18,248 pixel, 15,705 vertex, 7,568 compute, 680 mesh, 49 domain, 33 hull, 30 geometry, from 23 SDF files and one OCIO file. On chain `6e1d6cb7b703` all build for the Mac; a full Mac build with nothing cached took about 35 minutes on the M6.
 
 - Resolved: 7,225 pixel shaders read an attribute at each vertex of the triangle ([LDTRAM](../../../docs/reference/shaders.md#ldtram-an-attribute-at-each-vertex-of-the-triangle)); before, 7,246 shaders did not build and the draws with them were skipped. In the first minutes of play 112 of them were used, and the forest path draws whole.
 - Resolved: 21 compute shaders with [YIELD](../../../docs/reference/shaders.md#yield).

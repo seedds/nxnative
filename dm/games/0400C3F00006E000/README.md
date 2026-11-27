@@ -16,7 +16,7 @@ Render conditions, which the host evaluates for every game ([Conditional renderi
 ## Files
 
 - Packed from a dump folder (`base/` only) with [`scripts/pack_dump.py`](../../../scripts/pack_dump.py): 205,902 RomFS entries, 21.7 GB.
-- [`shader_map.tsv`](shader_map.tsv) lists 11,558 shaders (726 compute, 18 mesh, 7,261 pixel, 7 task, 3,546 vertex) from `Shader/` (bfsha, `Drive.Nin_Ounce_NVN2.release.sarc.zs`), `Lib/` (agl, gsys), `Effect/`, `Layout/` and `main` (40 shaders).
+- `shader_map.tsv` lists 11,558 shaders (726 compute, 18 mesh, 7,261 pixel, 7 task, 3,546 vertex) from `Shader/` (bfsha, `Drive.Nin_Ounce_NVN2.release.sarc.zs`), `Lib/` (agl, gsys), `Effect/`, `Layout/` and `main` (40 shaders).
 - The rewriter (`dm/tools/patch_nso.py`) rewrites the three modules with no cut. The SDK-wide address region rules of `dm/tools/sdk_patches.py` match no function of this `sdk`.
 
 ## Shaders

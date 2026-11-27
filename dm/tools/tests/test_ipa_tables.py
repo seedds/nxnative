@@ -50,11 +50,14 @@ class IpaTables(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual((self.tables / 'pso_manifest.tsv').read_bytes(), seed)
 
-    def test_missing_required_shader_map_still_fails(self):
+    def test_missing_required_shader_map_fails_for_nvn_only(self):
         (self.profile / 'shader_map.tsv').unlink()
-        for api in ('nvn', 'vulkan', 'gl'):
+        self.assertNotEqual(self.stage('nvn').returncode, 0)
+        for api in ('vulkan', 'gl'):
             with self.subTest(api=api):
-                self.assertNotEqual(self.stage(api).returncode, 0)
+                result = self.stage(api)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse((self.tables / 'shader_map.tsv').exists())
 
     def test_missing_required_nvn_constants_still_fails(self):
         (self.profile / 'c1_full.tsv').unlink()

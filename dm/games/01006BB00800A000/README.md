@@ -7,7 +7,7 @@ Switch update 1.0.1 (v65536), SDK 4.4.0, `main` build `1f3bde8d5e55742767b332bc9
 | Setting | Where | Why |
 |---|---|---|
 | 5 GiB reservation, 2.25 GiB alias region, 32 MiB system resource | [`game.tsv`](game.tsv) | The NPDM enables virtual address memory. The Mac heap check measured a 2.15 GiB request, which fits in the 2.25 GiB heap region. |
-| NVN shader library | [`shader_map.tsv`](shader_map.tsv), [`shader_pairs.tsv`](shader_pairs.tsv) | The standard splitter found 460 stages, 458 in RomFS and two in `main`. All 460 built on macOS. |
+| NVN shader library | `shader_map.tsv`, `shader_pairs.tsv` | The standard splitter found 460 stages, 458 in RomFS and two in `main`. All 460 built on macOS. |
 
 ## Found on this game
 

@@ -294,6 +294,21 @@ class ImportSeeds(unittest.TestCase):
         self.assertNotIn(f'R\t{key(SECOND_VERTEX)}', self.manifest.read_text())
         self.assertTrue(pending.is_file())
 
+    def test_without_shader_map_validates_format_and_cleans_up(self):
+        self.manifest.with_name('shader_map.tsv').unlink()
+        seed = f'C\t{COMPUTE}'
+        bad = 'R\t00'
+        ok_capture = self.upload(f'S\t{VERTEX}\t0', seed)
+        bad_capture = self.upload(bad)
+        applied = self.run_import('--apply').stdout
+        self.assertIn('no shader map available, format-validated only', applied)
+        self.assertIn('1 added, 1 ignored S', applied)
+        self.assertIn('1 invalid pipeline', applied)
+        self.assertIn('Deleted 1 inbox capture(s).', applied)
+        self.assertFalse(ok_capture.exists())
+        self.assertTrue(bad_capture.is_file())
+        self.assertIn(seed + '\n', self.manifest.read_text())
+
     def test_rejected_push_keeps_capture(self):
         bare = self.init_origin()
         hook = bare / 'hooks/pre-receive'

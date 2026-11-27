@@ -397,12 +397,25 @@ int dm_net_poll(void *fds, uint64_t count, int timeout_ms) {
 // Read again at most once a second: games ask nifm in loops (Hades queries about once a millisecond), and getifaddrs walks every interface
 static pthread_mutex_t g_ip_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_ip_at; static int g_ip_found = -1; static uint32_t g_ip_address, g_ip_mask;
+// The address the system sends from to the internet: a UDP socket connected to an address past the local networks (192.0.2.1, a documentation address, so the default route
+// takes it; connect sends nothing) has the route's source as its own address. 0 when there is no IPv4 route
+static uint32_t net_route_source(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0); if (s < 0) return 0;
+    struct sockaddr_in to = {.sin_len = sizeof to, .sin_family = AF_INET, .sin_port = htons(9)}, me = {0}; socklen_t n = sizeof me; uint32_t a = 0;
+    to.sin_addr.s_addr = htonl(0xc0000201);
+    if (!connect(s, (struct sockaddr *)&to, sizeof to) && !getsockname(s, (struct sockaddr *)&me, &n) && me.sin_family == AF_INET) a = me.sin_addr.s_addr;
+    close(s); return a;
+}
+// Of the eligible interfaces, the one the default route leaves by. getifaddrs' order is not the route's: with Wi-Fi and Ethernet both up, or an iPhone's hotspot bridge beside
+// its Wi-Fi, the first listed can be the other one, and a game offers the address nifm gives to other players for a direct link (Pia). The first eligible one when none
+// carries the route (no route, or it leaves by an interface that is not eligible, such as a VPN tunnel)
 static int net_ip_scan(uint32_t *address, uint32_t *mask) {
     struct ifaddrs *list = NULL; if (getifaddrs(&list)) return -1;
-    int found = -1;
-    for (struct ifaddrs *p = list; p; p = p->ifa_next) {
+    uint32_t source = net_route_source(); int found = -1;
+    for (int pass = source ? 0 : 1; pass < 2 && found; pass++) for (struct ifaddrs *p = list; p; p = p->ifa_next) {
         unsigned need = IFF_UP | IFF_RUNNING | IFF_BROADCAST;
         if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET || (p->ifa_flags & need) != need || (p->ifa_flags & (IFF_LOOPBACK | IFF_POINTOPOINT))) continue;
+        if (!pass && ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr != source) continue;
         *address = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr;
         *mask = p->ifa_netmask && p->ifa_netmask->sa_family == AF_INET ? ((struct sockaddr_in *)p->ifa_netmask)->sin_addr.s_addr : 0;
         found = 0; break;

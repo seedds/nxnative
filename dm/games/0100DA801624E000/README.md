@@ -7,7 +7,7 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 | Setting | Where | Why |
 |---|---|---|
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | the NSP script's guess after its heap check (no heap set; with the hardware pool the alias region filled to +4.26 GB of 4.38 GB, so a 1 GB pool), which held in play; see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | the NSP script's guess after its heap check (no heap set; with the hardware pool the alias region filled to +4.26 GB of 4.38 GB, so a 1 GB pool), which held in play; see [Memory](#memory) |
 | `depth_mode zero` | `game.tsv` | the game calls `nvnDeviceSetDepthMode` with near = 0, so the pipeline bases made before it runs take that mode |
 | `fps_target 60` | `game.tsv` | 60 fps instead of the Switch's 30; see [Frame rate](#frame-rate) |
 
@@ -26,7 +26,7 @@ Update 1.0.3 (v196608) over the base game, SDK 14.3.0. Andrew Shouldice's game (
 
 **Allocator integration check, 2026-11-17 (PR #2843):** an isolated copy of the provisional profile was restored to the original Switch's `app_pool 0xCD500000` (3285 MiB), without an allocator cap. The real heap check on main `2925d7af` plus the PR reached alias +4.26 GB of 4.38 GB and set `stdalloc_cap 0x40000000`, preserving the hardware pool. The real address-region check kept that cap: StandardAllocator took 1 GB at alias +64 MB, with 0.34 GB mapped; all regions reached +2.24 GB in the first 15 s of `nnMain`. This exercises the same heap-check rule that originally reduced this game's pool.
 
-A paired `scripts/bench.py` invocation then compared the old 1 GB pool with the hardware pool plus the cap. Both hosts were built from the same source, on Apple M6, macOS 27.2, Xcode 27.2, shader chain `5ea15f2c8240`. Both used `DM_ALIAS_SIZE=0x118000000`, `DM_FPS_TARGET=60`, visible windows with the Metal HUD, copied saves, `40:A` to load the starting beach, and a 90–110 s standing measurement window; screenshots followed the measurement. The registered profile is unchanged.
+A paired `scripts/bench.py` invocation then compared the old 1 GB pool with the hardware pool plus the cap. Both hosts were built from the same source, on Apple M6, macOS 27.2, Xcode 27.2, shader chain `5ea15f2c8240`. Both used `DM_ALIAS_SIZE=0x118000000`, `DM_FPS_TARGET=60`, visible windows with the Metal HUD, copied saves, `40:A` to load the starting beach, and a 90–110 s standing measurement window; screenshots followed the measurement. The registered profile now uses `app_pool 0xCD500000` with `stdalloc_cap 0x40000000`.
 
 | Setting or measurement | Old 1 GB pool, no cap | Hardware pool, 1 GB cap |
 |---|---|---|

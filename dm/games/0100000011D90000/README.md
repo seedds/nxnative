@@ -8,7 +8,7 @@ Update 1.3.0 (v393216) over the base game. Unity 2019.4.27f1 IL2CPP, SDK 11.4.3,
 |---|---|---|
 | SDK node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (`sdk+0x34e0c8` / `+0x34e164`; `sdk+0x34e2bc` / `+0x34e2c4` / `+0x34e2c8`) | `StandardAllocator::Initialize` aborts before `nnMain` without the node area cut; see [Memory](#memory) |
 | 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | [`game.tsv`](game.tsv) | virtual address memory: StandardAllocator and Unity reserve regions independently |
-| `app_pool 0x80000000` (2 GB) | `game.tsv` | 1 GB exhausts the game's malloc while loading; the hardware pool leaves little alias space beside StandardAllocator |
+| `app_pool 0xCD500000`, `stdalloc_cap 0x80000000` (2 GB) | `game.tsv` | 1 GB exhausts the game's malloc while loading; the hardware pool leaves little alias space beside StandardAllocator |
 | `sys_resource 0x1000000` | `game.tsv` | the NPDM's 16 MB system resource selects virtual address memory |
 | `fps_target 60`, `present_interval display` | `game.tsv`; Unity's `targetFrameRate` and `vSyncCount` found by the rewriter | raises Unity's own cap and the interval-2 present cap; see [Frame rate](#frame-rate) |
 
@@ -63,6 +63,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 
 ## Open
 
+- The profile was migrated from `app_pool 0x80000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x80000000` (2 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - [FPSLocker Warehouse](https://github.com/masagrator/FPSLocker-Warehouse/blob/v4/README.md#L847) flags physics issues above 30 fps for this exact build. A short movement check cannot rule out every physics issue in later areas.
 - First battle and later areas remain untested.
 - User testing on iOS remains required.

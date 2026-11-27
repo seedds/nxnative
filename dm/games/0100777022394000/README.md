@@ -11,7 +11,7 @@ Original bring-up reported in [PR #2167](https://github.com/seedds/nxnative/pull
 | Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py`: the SDK-wide rule (`MATCH_CUTS`) of the SDK 15.3.2 to 18.3.5 constructor, which the `sdk` build `71b1a025…` has at Ace Attorney Investigations Collection's SDK 17.5.3 offsets (`sdk+0x139458`, the movs at `+0x139468` and `+0x1394fc`) | `StandardAllocator::Initialize` aborted in `nninitStartup`; see [Memory](#memory) |
 | Codec-backed H.264 output and release-driven pumping | existing host, `hle_movie_avc.c` / `hle_movie.c` | Unity never sends EOS for the splash; see [Movies](#movies) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | the heap/address check measured initial alias use and selected a 1 GB pool; see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | the heap/address check measured initial alias use and selected a 1 GB pool; see [Memory](#memory) |
 | `pad_layout full` | `game.tsv` | the D-pad zooms and reshapes the plot; see [Input](#input) |
 | `depth_mode zero` | `game.tsv` | the game selects near = 0; pipeline prebuilding must use the same vertex entry |
 | `shader_groups /Data/=data` | `game.tsv` | everything is under `Data/`: the player's serialized files and the Addressables bundles in `StreamingAssets/aa` |
@@ -66,5 +66,6 @@ General mechanisms used by this game:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - Current iPhone gameplay, long-session memory behavior, touch input and the untried controls above remain unverified. The original iPhone report predates the landed H.264 replacement.
 - The prewarm list (`pso_manifest.tsv`) is intentionally empty; there is no demonstrated need for additional seeds.

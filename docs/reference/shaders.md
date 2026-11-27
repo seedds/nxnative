@@ -237,7 +237,7 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Symptom:** the split reports `SARC data at 0x10000, its 20323 entries and the names end at 0x50a44` or `common.sharcfb BAHS code region out of bounds` for intact archives.
 - **Cause:** the SARC reader interpreted all fields as little-endian, including the count and offset of big-endian archives. The `common.sharcfb` members in both byte orders share the `BAHS` signature with `sharcb`. They store reflection and fallback data and have no NVN control sections. The `sharcb` reader misread their first name as code-region fields.
 - **Fix:** decode the SARC header, count and entries in the byte order named by its mark. Recognize a `BAHS` member named `.sharcfb` with a matching file size and no NVN control magic as carrying zero NVN shaders. Files with NVN controls still use the binary reader and its bounds checks.
-- **Found on:** Splatoon 2 5.5.2. `gsys_resource_nvn.szs` and `gsys_resource_nvn_dev.szs` are big-endian. The little-endian `gsys_resource_nvn_win.szs` contains the same four members as the dev archive. All three yield zero shader keys. The `gsys_resource.Nin_NX_NVN.release.szs` and debug files yield 70 and 72 keys respectively.
+- **Found on:** [Splatoon 2](../../dm/games/01003BC0000A0000/README.md) 5.5.2. `gsys_resource_nvn.szs` and `gsys_resource_nvn_dev.szs` are big-endian. The little-endian `gsys_resource_nvn_win.szs` contains the same four members as the dev archive. All three yield zero shader keys. The `gsys_resource.Nin_NX_NVN.release.szs` and debug files yield 70 and 72 keys respectively.
 
 ### A control section's words read as a BAHS entry
 

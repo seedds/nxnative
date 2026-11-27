@@ -1269,7 +1269,7 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Symptom:** a null read in `oe::EnableGamePlayRecording` before the first frame.
 - **Cause:** Splatoon 2 5.5.2 calls this SDK 3.4.1 entry point unconditionally with a 96 MiB work buffer (`main+0x3a3e28`). The SDK creates transfer memory, then dereferences the absent `am::GetApplicationFunctions` proxy at `sdk+0x14f778` to initialize system video recording.
 - **Fix:** `hle_oe.c` handles this overload alongside the other system recording switches. On a host without a system recorder it returns without borrowing the game's buffer.
-- **Found on:** Splatoon 2 5.5.2. The Mac startup probe passed the call, opened the audio renderer and reached frame 1,200.
+- **Found on:** [Splatoon 2](../../dm/games/01003BC0000A0000/README.md) 5.5.2. The Mac startup probe passed the call, opened the audio renderer and reached frame 1,200.
 
 ### Copyright frame buffer overlay
 

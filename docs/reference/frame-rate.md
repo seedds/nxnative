@@ -631,7 +631,7 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 
 ### Presents miss their target in fixed-rate external fullscreen
 
-- **Symptom:** in fullscreen on a fixed 60 Hz external screen (a TV or monitor shown by direct scanout), a 60 fps game stutters and its frame step falls to 30 fps in stretches, while the same area holds 60 fps on the Mac's built-in screen at a fixed 60 Hz. GPU time is 12–13 ms a frame. In `DM_NVN_TSV`, `@pres_q_ms` reads about 16 ms and `@gpu_q_ms` rises with it.
+- **Symptom:** in fullscreen on a fixed 60 Hz external screen (a TV or monitor shown by direct scanout), a 60 fps game stutters and its frame step falls to 30 fps in stretches, while the same area holds 60 fps on the Mac's built-in screen at a fixed 60 Hz. GPU time is 12–13 ms a frame. In `DM_NVN_TSV`, `@pres_q_ms` reads about 16 ms, and a frame whose GPU work starts late has `@gpu_q_ms` of about 18 ms, against about 10 ms for the others.
 - **Cause:** `present_now` (`nvn_mtl.m`) issued `waitForDrawable:` on `g_q4`, the one Metal 4 queue that also carries the game's rendering. On the external screen the drawable is released one refresh later than on the built-in screen. Game command buffers committed after the present waited behind it on the queue, the next frame's GPU work started one refresh late, and the frame step fell to 30 fps.
   - With `DM_PRESENT_QUEUE=0` on the TV below, 582 frames started their GPU work after an idle gap. 417 of them started 14–21 ms after the previous frame's present was taken.
   - In those 417, `@gpu_q_ms` is 18.05 ms p50, and the frame's first commit lands at that take (GPU start after the take minus `@gpu_q_ms`: −0.17 ms p50). The queue wait is the whole late start.
@@ -639,10 +639,10 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - `present_copy` copies the picture on `g_q4` into ring slot `ticket % 3` of `g_pring` (three private textures of the source's size and format), behind the frame's work and ahead of the game's next, and signals `g_pring_ev` to the present's ticket there.
   - On `g_pq4` the present waits for that event, then `waitForDrawable:`; MetalFX and the present pass read the ring slot; then `signalDrawable:`.
   - The game's texture is still read only on `g_q4`, so the release rules for window textures are unchanged.
-  - A source that is not a single-sample 2D texture, or a ring slot that cannot be made, presents on `g_q4` after the presents in flight on `g_pq4`.
+  - When `present_copy` cannot copy (a ring slot that cannot be made, or a source under Limits), the present runs on `g_q4` after the presents in flight on `g_pq4`.
   - `DM_PRESENT_QUEUE=0` keeps the whole present on `g_q4`.
-- **Check:** two rows of the `DM_NVN_TSV` capture. `@gpu_q_ms` is the frame's first game command buffer, GPU start minus CPU commit; `@pres_q_ms` is the same for the present's command buffer.
-  - With the fix on the TV, `@pres_q_ms` reads about 16.5 ms: the drawable wait, now on `g_pq4`. `@gpu_q_ms` no longer follows it (correlation 0.02, against 0.55 with `DM_PRESENT_QUEUE=0`).
+- **Check:** two rows of the `DM_NVN_TSV` capture. `@gpu_q_ms` is the GPU start of the frame's first command buffer minus the frame's first commit to `g_q4`; `@pres_q_ms` is the GPU start of the present's command buffer minus its commit.
+  - With the fix on the TV, `@pres_q_ms` reads about 16.5 ms. On `g_pq4` it covers the wait for the copy's event and the wait for the drawable, and these rows do not separate the two. `@gpu_q_ms` no longer follows it (correlation 0.02, against 0.55 with `DM_PRESENT_QUEUE=0`).
   - The 8–10 ms left in `@gpu_q_ms` on every screen is the frame's first command buffer waiting behind the previous frame's GPU work.
   - `make -C dm/gfx/tests GAME=<id> check_t_present_queue check_t_present_copy check_t_present_probes`. `t_present_queue`: a game submission completes while a present is held, a held present shows its own picture after the game draws over its texture, and a fourth present waits for its ring slot. `t_present_copy`: sRGB and swizzled sources, slots remade on a new size or format, a crop outside the texture, MetalFX reading the slot, the suspend drain. `t_present_probes`: the two rows on both paths.
 - **Measured:** MacBook Pro M5 Max, macOS 27.2; LG TV at 3840×2160, fixed 60 Hz, fullscreen, not mirrored; Ocarina of Time in the same area, one hand-played run per column, all from one build; display link on, frame latency 1; MetalFX spatial 2560×1440 to 3840×2160 (3456×1944 on the built-in screen). Frames at the 60 fps hold; a late frame has `@frame_ms` of 18.5 or more.
@@ -657,25 +657,29 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   | `@pres_q_ms` p50 | 16.18 ms | 16.5 ms | 0.52 ms |
   | `@pres_at_ms` − `@link_target_ms` p50 | 16.65 ms | 16.65 ms | −0.05 ms |
   | GPU busy p50, on-time frames | 12.68 ms | 12.78 ms | 13.31 ms |
-  | Game enqueue to screen p50 (log) | 42.7–62.4 ms | 57.7–60.7 ms | 42.0–44.1 ms |
+  | Game enqueue to screen p50, the log's 300-frame windows from frame 900 on | 42.7–60.3 ms | 57.7–59.9 ms | 42.0–44.1 ms |
+  | Game enqueue to link target p50, the log's 300-tick windows from then on | 42.6–44.7 ms | 41.1–43.3 ms | 42.1–44.4 ms |
 
 - **Cost:** one copy of the picture per present on `g_q4`.
   - Copy time alone on the M5 Max: 0.042 / 0.074 / 0.108 ms at 1280×720 / 1920×1080 / 2560×1440 for RGBA8, 0.055 / 0.105 / 0.175 ms for RGBA16F.
   - The ring of three at those sizes: 10.5 / 23.7 / 42.2 MB for RGBA8, 21.1 / 47.5 / 84.4 MB for RGBA16F.
-- **Open:** on the TV each present reaches the screen one refresh after the link's target on both paths (16.65 ms above), so game enqueue to screen is about 59 ms against 43 ms on the built-in screen. The fix removes the 30 fps drops, not this refresh. Why the direct path to this TV shows the present one refresh after its target is not known.
+- **Open:** on the TV each present reaches the screen one refresh after the link's target on both paths (16.65 ms above). With the fix, game enqueue to link target is 41–44 ms on both screens, and game enqueue to screen 58–60 ms on the TV against 42–44 ms on the built-in screen. The fix removes the 30 fps drops, not this refresh. Why the direct path to this TV shows the present one refresh after its target is not known.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) v131072.
   - [Issue #2362](https://github.com/seedds/nxnative/issues/2362), before the fix: M5 Pro MacBook Pro, macOS 27.3, external Mi Monitor at 2560×1440 and fixed 60 Hz, frame latency 2: 1,184 of 6,000 frames over 25 ms, 54% of presents one refresh after the link's target. With `DM_PRESENT_LINK=0`, frames over 25 ms fell from 19.7% to 0.52%. The built-in screen at a fixed 60 Hz: 16 of 7,200.
   - The M5 Max and LG TV of the table.
+  - The same TV with `DM_PRESENT_LINK=0` and the fix, one run on the same build and area, not analysed further: the frame step fell to 30 fps 5 times in about 1,850 presents, twice from frame 900 on; from frame 900 on, 4, 8 and 10 frames dropped per 300 and game enqueue to screen p50 26.1–57.7 ms.
 - **Not checked:**
   - The iPhone.
   - The Mi Monitor of #2362 with the fix.
-  - `DM_PRESENT_LINK=0` on the TV with the fix.
+  - A Vulkan or OpenGL title with the fix. No test reaches `mtl_wait_gl_event`'s queue wait under `g_res_commit_mu`.
   - The [built-in M5 MacBook Air report on #2362](https://github.com/seedds/nxnative/issues/2362#issuecomment-6810253539) (233–279 of 300 frames dropped per log sample at latency 1): not retested.
   - Metal's ordering of the empty command buffer that follows a queue event wait on `g_pq4`, sent only when the present's encoder fails after the copy.
 - **Limits:**
   - A cropped present with MetalFX copies the picture twice.
   - A profile with `present_snap on` copies it twice per present.
   - A sparse mapping update on `g_q4` can still land between a copy and its signal and delay that one present.
+  - A source that is not a single-sample 2D texture (an array or multisampled one) keeps the present, and its drawable wait, on `g_q4`.
+  - MetalFX writing the drawable directly (`DM_FX_DIRECT`) after the copy has no test: `t_present_copy` turns it off, as its offscreen drawables are not private.
 
 ### The callback took the frame queued after the previous tick
 

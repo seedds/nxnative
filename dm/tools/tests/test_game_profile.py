@@ -72,9 +72,6 @@ class UpscalerKeys(unittest.TestCase):
         self.assertEqual(macros(MAP), ['#define DM_GAME_UPSCALER_KEYS "7629d857a0a93833,805f2de96bd6d78d,c2fc2ddd604c25e7,c56db3d5a0f1b5af,ddc729bcdb4c8df9,fa3033d05c0a41d6"', '#define DM_GAME_UPSCALER_N 6'])
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class BuildModules(unittest.TestCase):
     """Versions of a game with different modules (Mario Kart World: the base game has main subsdk0 sdk, 1.8.0 main subsdk0 subsdk1 sdk): each build row's own modules, in the load order
@@ -187,3 +184,7 @@ class ShaderCovers(unittest.TestCase):
             for v in cov:
                 self.assertIn(v, builds, f'{g.id}: shader_covers {v} is not a registered build')
                 self.assertNotIn(v, sv, f'{g.id}: shader_covers repeats shader_versions {v}')
+
+
+if __name__ == '__main__':
+    unittest.main()

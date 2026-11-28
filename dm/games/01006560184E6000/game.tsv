@@ -1,13 +1,12 @@
 # Mortal Kombat 1 for Nintendo Switch, update v1900544 (1.29.0), SDK 15.3.2.
-# NetherRealm Studios' Unreal Engine game; NVN, Havok and Wwise. Profile brought up on the Mac.
-# The supplied v1835008 add-on package is license-only; it contains no game content.
-
+# NetherRealm Studios Unreal Engine title; NVN, Havok, Wwise and the Nintendo movie module.
+# Profile generated from a fresh survey, rewriter pass, heap check and Mac address-region check.
 # ---- Identity ----
 title_id	01006560184E6000
 program_id	01006560184E6000
 
 # ---- App ----
-name	Mortal Kombat 1
+name	Mortal Kombat™ 1
 ipa	MortalKombat1.ipa
 app_category	public.app-category.games
 
@@ -31,13 +30,15 @@ app_pool	0xCD500000
 # the NPDM declares 12 MB of system resource
 sys_resource	0xc00000
 
-# ---- Graphics ----
-# The game selects near-zero depth; offline pipeline bases use the same mode.
-depth_mode	zero
-
 # ---- Shader split ----
 # the decoded shader code archives: the engine's global shaders and the game's material shaders
 shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
 shader_note	Mortal Kombat™ 1 shaders
 
-# The Mac build provided a 64 GB alias region; this game's runtime region use exceeds the iPhone layout and has not been checked there.
+# heap check: 2026-11-27, heap 0.01 GB
+
+# ---- Address region check ----
+# the game calls nvnDeviceSetDepthMode with near = 0 in the check boot: the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# address regions: 2026-11-27, in its first 15 s in nnMain the game's regions reach alias +62.06 GB, within this Mac-only build's 64.00 GB alias region (what it takes later in play is not measured here; past the profile's 4.38 GB iPhone layout; a build for an iPhone checks again) (rewrite 1101eb990a02, Mac only)

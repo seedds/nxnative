@@ -145,6 +145,12 @@ $(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
+$(B)/t_network_clock: t_network_clock.c ../hle_network_clock.c ../hle_thread.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-frame-address -Wno-missing-field-initializers -I.. $(GINC) -o $@ t_network_clock.c ../hle_bigstack.c
+.PHONY: network-clock
+network-clock: $(B)/t_network_clock
+	$(B)/t_network_clock
+run: network-clock
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro
@@ -531,12 +537,13 @@ asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
 TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait t_ue_heap_span
-TSAN_T += t_net_eventfd t_net_loopback t_account
+TSAN_T += t_net_eventfd t_net_loopback t_account t_network_clock
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
 tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	$(B)/t_account
+	$(B)/t_network_clock
 	$(B)/t_net_eventfd
 	$(B)/t_net_loopback
 	$(B)/t_audio

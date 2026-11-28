@@ -1186,6 +1186,38 @@ static void rop_f16_probe(void) {
     }
 }
 
+// DM_GPU_CANARY=1: once a second, a fixed compute dispatch (about 1 G dependent FMAs, no memory traffic) on the app's own queue, its GPU time logged ("gpu canary"). The game's
+// GPU time per frame moves with its scene and with the GPU clock; this one does not move with the scene, so a step in it at the same moment the game's GPU time steps (Mario Kart World on an
+// iPhone: 9 to 30 ms after 30 to 50 s) says the GPU clock fell, and a flat canary says the scene got heavier. It shares the GPU with the game, so a sample taken during a game pass includes the wait:
+// read the smallest of a few samples. Off by default; a few milliseconds of GPU a second (7.6 ms per sample on an M-series Mac)
+static void mtl_gpu_canary_start(void) {
+    const char *e = getenv("DM_GPU_CANARY"); if (!e || !atoi(e)) return;
+    NSError *err = nil;
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nkernel void canary(device float *o [[buffer(0)]], uint t [[thread_position_in_grid]]) { float x = float(t) * 1e-6f + 1.0f; for (uint i = 0; i < 4096; i++) x = fma(x, 0.999999f, 1e-7f); o[t & 1023] = x; }" options:nil error:&err];
+    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"canary"] : nil;
+    id<MTLComputePipelineState> pso = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+    if (!pso) { MLOG("gpu canary: pipeline failed: %s", err.localizedDescription.UTF8String ?: "no error given"); return; }
+    id<MTLBuffer> buf = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    dispatch_queue_t q = dispatch_queue_create("dm.gpu.canary", DISPATCH_QUEUE_SERIAL);
+    static dispatch_source_t t;   // kept: a timer source that nothing holds is released at the end of this function and never fires
+    t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+    static uint64_t n; static CFTimeInterval t0;
+    dispatch_source_set_event_handler(t, ^{
+        id<MTLCommandBuffer> cb = [g_q commandBuffer];
+        id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+        [ce setComputePipelineState:pso]; [ce setBuffer:buf offset:0 atIndex:0];
+        [ce dispatchThreads:MTLSizeMake(262144, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [ce endEncoding];
+        uint64_t k = ++n; CFTimeInterval sub = CACurrentMediaTime(); if (!t0) t0 = sub;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+            MLOG("gpu canary #%llu at %.0f s: GPU %.3f ms, submit to done %.3f ms", (unsigned long long)k, sub - t0 + 5, (c.GPUEndTime - c.GPUStartTime) * 1e3, (CACurrentMediaTime() - sub) * 1e3);
+        }];
+        [cb commit];
+    });
+    dispatch_resume(t);
+    MLOG("DM_GPU_CANARY=1: a fixed compute dispatch every second, its GPU time logged");
+}
 static void mtl_init_once(void) {
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
@@ -1276,6 +1308,7 @@ static void mtl_init_once(void) {
     MLOG("Metal device %s", g_dev.name.UTF8String);
     rop_f16_probe();
     udc_selftest();
+    mtl_gpu_canary_start();
 }
 
 void mtl_init(void) {

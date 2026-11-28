@@ -168,6 +168,7 @@ static void advance_timers(uint64_t ns) {
 #undef dispatch_time
 #undef dispatch_after
 
+static int hidpad_available(IOHIDDeviceRef device) { (void)device; return 1; }   // controllers_mac.m's answer: no Steam Controller adapter here
 static int attached, changes;
 static void hidpad_attach(hid_pad *d) { (void)d; attached++; }
 static void hidpad_detach(hid_pad *d) { (void)d; attached--; }

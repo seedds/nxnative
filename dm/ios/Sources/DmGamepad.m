@@ -879,8 +879,8 @@ static void s2pad_read(s2_pad *d) {
     if (m) merge_rumble_to_s2(1);
     if (g_merge) dm_pad_set(m, st[0], st[1], st[2], st[3]); else dm_pad_set_player(p, m, st[0], st[1], st[2], st[3]);
 }
-static int s2pad_attach(s2_pad *d) {   // 1: kept (a player, or waiting for its first button press); 0: no free player (pad_switch2_apple.h)
-    if (g_press_to_join && !g_merge) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); [g_view padsChanged:nil]; cp_poll(); return 1; }
+static int s2pad_attach(s2_pad *d, int split) {   // 1: kept (a player, or waiting for its first button press); 0: no free player. A Joy-Con split off a pair (split) takes its player now or goes back into the pair (pad_switch2_apple.h)
+    if (g_press_to_join && !g_merge && !split) { LOG("controller '%s' (Bluetooth) connected: press a button to play (DM_PAD_PRESS_TO_JOIN)", d->name); [g_view padsChanged:nil]; cp_poll(); return 1; }
     int p = g_merge ? 0 : pad_slot_take(&g_slots, d, d->name); char nb[16];
     if (p < 0) { LOG("controller '%s' (Bluetooth) connected: all %d players are taken, not used", d->name, DM_PLAYERS); return 0; }
     npad_name(p, nb, sizeof nb); LOG("controller '%s' (Bluetooth) connected: player %d (npad %s)", d->name, p + 1, nb);

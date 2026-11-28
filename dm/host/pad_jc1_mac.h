@@ -175,7 +175,9 @@ static void jc1_gesture_check(jc1_dev *d, uint64_t now) {
         if (o == d || o->right == d->right || !o->pad || jc1_pad_sides(o->pad) == 3 || o->hold.kind != JC1_GESTURE_JOIN || o->hold.done || now - o->hold.since < JC1_GESTURE_NS) continue;
         d->hold.done = o->hold.done = 1;
         int pd = jc1pad_player(d->pad), po = jc1pad_player(o->pad);   // the one with the later player (or none) moves into the other's pad
-        jc1_dev *mover = (pd < 0 ? DM_PLAYERS : pd) > (po < 0 ? DM_PLAYERS : po) ? d : o, *stay = mover == d ? o : d;
+        jc1_dev *mover, *stay;
+        if ((pd < 0 ? DM_PLAYERS : pd) > (po < 0 ? DM_PLAYERS : po)) { mover = d; stay = o; }
+        else { mover = o; stay = d; }
         jc1_leave(mover); jc1_enter(mover, stay->pad); jc1_pad_sync(stay->pad); jc1pad_read(stay->pad);
         LOG("[jc1] left and right Joy-Con play as one pair now (L + R held): player %d", jc1pad_player(stay->pad) + 1);
         return;

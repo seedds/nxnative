@@ -7,6 +7,10 @@
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then dm/mac/Launcher.swift (sharing dm/ios/Sources/LauncherSettings.swift's LauncherModel)
 // resolves the app's settings from Resources/dm/launcher.json: saved choices (launcher.<VAR> strings in the app's preferences domain, checked against launcher.json; DM_SAVED_CHOICES=0
 // ignores them) and, for any unset setting, launcher.json's tested default.
+// DM_KEYMAP and DM_PAD_MAP are saved choices too (launcher.DM_KEYMAP, launcher.DM_PAD_MAP) but no launcher.json rows, so Launcher.swift does not resolve them: this file
+// applies them after it (saved_controls), checked by the host's own parser (dm/host/input_map.h, input_map_valid); a value it would not take whole is ignored. They are
+// read whether or not the settings window ran, since the window does not offer them, and a launch-environment value is listed in DM_ENV_LAUNCH_KEYS so the host
+// keeps it fixed (input_map_fixed).
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, launcher.json's tested defaults, then the host's fallbacks (docs/frontends.md, Saved choices).
 // Before the host starts, dm_mac_launcher runs in this process and puts the resolved settings into the environment while keeping what the launch environment and env files set
 // (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window, applying the same resolved saved choices and
@@ -26,6 +30,10 @@
 #include <unistd.h>
 #include "romfs_image.h"
 #include "save_sync.h"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"   // the header is the host's: this file uses only input_map_valid
+#include "input_map.h"
+#pragma clang diagnostic pop
 
 extern char **environ;
 void dm_mac_record_launch_keys(void);   // Launcher.swift: records settings from dm/launcher.json already set in the launch environment into DM_ENV_LAUNCH_KEYS
@@ -88,6 +96,33 @@ static void env_file(const char *path) {   // KEY=VALUE lines, # starts a commen
         if (!getenv(k)) { setenv(k, eq + 1, 0); add_key(&g_file_keys, k); fprintf(stderr, "launcher: env %s=%s (%s)\n", k, eq + 1, path); }
     }
     fclose(f);
+}
+
+static void saved_control(CFStringRef domain, const char *env, int pad) {   // DM_KEYMAP / DM_PAD_MAP: checked by the host's parser (launcher.json has no rows for them)
+    CFStringRef key = CFStringCreateWithFormat(NULL, NULL, CFSTR("launcher.%s"), env);
+    CFPropertyListRef v = CFPreferencesCopyAppValue(key, domain); CFRelease(key);
+    if (!v) return;
+    char s[1024];
+    if (CFGetTypeID(v) != CFStringGetTypeID() || !CFStringGetCString(v, s, sizeof s, kCFStringEncodingUTF8)) fprintf(stderr, "launcher: saved choice for %s ignored: not a string of at most %zu bytes\n", env, sizeof s - 1);
+    else if (!input_map_valid(s, pad)) fprintf(stderr, "launcher: saved choice %s=%s ignored: the host does not take it\n", env, s);
+    else if (getenv(env)) fprintf(stderr, "launcher: saved choice %s=%s not used: %s=%s is set (environment or env.txt)\n", env, s, env, getenv(env));
+    else { setenv(env, s, 0); fprintf(stderr, "launcher: env %s=%s (saved choice)\n", env, s); }
+    CFRelease(v);
+}
+
+static void saved_controls(void) {   // after dm_mac_launcher, which resolves launcher.json's rows only: a control already set keeps its value
+    CFStringRef domain = CFBundleGetIdentifier(CFBundleGetMainBundle());
+    const char *off = getenv("DM_SAVED_CHOICES");
+    if (!domain) return;
+    if (off && !strcmp(off, "0")) { fprintf(stderr, "launcher: saved choices ignored (DM_SAVED_CHOICES=0) for DM_KEYMAP and DM_PAD_MAP\n"); return; }
+    saved_control(domain, "DM_KEYMAP", 0); saved_control(domain, "DM_PAD_MAP", 1);
+}
+
+static void record_control_launch_keys(void) {   // dm_mac_record_launch_keys lists launcher.json's rows: a control the launch environment set is fixed too
+    char *keys = NULL; const char *now = getenv("DM_ENV_LAUNCH_KEYS");
+    if (now && *now) add_key(&keys, now);
+    for (const char **key = (const char *[]){"DM_KEYMAP", "DM_PAD_MAP", NULL}; *key; key++) if (getenv(*key)) add_key(&keys, *key);
+    setenv("DM_ENV_LAUNCH_KEYS", keys ? keys : "", 1); free(keys);
 }
 
 // Cloud saves: the folder chosen in the settings window (Launcher.swift CloudSavesSection, cloudSaves.folder in the app's preferences) becomes DM_SAVE_SYNC
@@ -169,6 +204,7 @@ int main(int argc, char **argv) {
     if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); close(fd); setvbuf(stdout, NULL, _IOLBF, 0); }
     fprintf(stderr, "launcher: %s (%s), host %s\n", name, id, host);
     dm_mac_record_launch_keys();   // the settings the launch environment already set: fixed across env files and launcher defaults
+    record_control_launch_keys();
     snprintf(p, sizeof p, "%s/env.txt", sup); env_file(p);
     snprintf(p, sizeof p, "%s/env.txt", dm); env_file(p);
     setenv("DM_ENV_FILE_KEYS", g_file_keys ? g_file_keys : "", 1);
@@ -178,6 +214,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--no-launcher")) window = 0;
     if (!window) fprintf(stderr, "launcher: no settings window (DM_LAUNCHER=0 or --no-launcher)\n");
     if (!dm_mac_launcher(window)) return 0;   // Quit: no game
+    saved_controls();   // the window and Launcher.swift applied launcher.json's settings; the controls are not among them
     dm_prewarm_upload_schedule();
     cloud_saves_folder();
     microphone_at_launch();

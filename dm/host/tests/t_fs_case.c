@@ -90,10 +90,13 @@ int main(void) {
     CHECK(mount("rom", save, 1) == RES_OK && content("rom:/LEGACY", "old"), "a read-only mount reads mapped names");
     CHECK(h_fs_GetEntryType(&type, "rom:/Legacy") == RES_PATH_NOT_FOUND, "a read-only mount also looks up by exact case");
     const uint64_t uid[2] = {DM_UID0, DM_UID1};
-    // MountSaveDataReadOnly: this game's own save data is its committed save (Nintendo Switch Sports Resort mounts it as SaveReadOnly), another program's has none
-    CHECK(h_fs_MountSaveRO("SaveReadOnly", DM_GAME_PROGRAM_ID, uid) == RES_OK, "this game's own save data mounts read-only");
-    CHECK(content("SaveReadOnly:/LEGACY", "old") && h_fs_GetEntryType(&type, "SaveReadOnly:/plain") == RES_PATH_NOT_FOUND, "it reads the committed save, not the work directory's uncommitted files");
-    CHECK(h_fs_CreateFile("SaveReadOnly:/new", 0) != RES_OK && h_fs_GetEntryType(&type, "save:/new") == RES_PATH_NOT_FOUND, "it refuses writes");
+    // MountSaveDataReadOnly: an application id of 0 is the calling application's own save (a guest that mounts its save data read-only may still save through that
+    // mount), which is this game's save transaction -- the same one MountSaveData gives; another program's save data has none
+    CHECK(h_fs_MountSaveRO("SaveReadOnly", DM_GAME_PROGRAM_ID, uid) == RES_OK, "this game's own save data mounts");
+    CHECK(h_fs_MountSaveRO("OwnZeroRO", 0, uid) == RES_OK, "app id 0 = the calling application: the same save, a second name, one transaction");
+    CHECK(content("SaveReadOnly:/LEGACY", "old"), "it reads the save");
+    CHECK(h_fs_CreateFile("SaveReadOnly:/new", 0) == RES_OK && write_text("SaveReadOnly:/new", "kept"), "a write through the mount the guest named read-only is a save write");
+    CHECK(h_fs_Commit("SaveReadOnly") == RES_OK && content("save:/new", "kept"), "its Commit swaps the work directory into the committed save");
     CHECK(h_fs_MountSaveRO("OtherRO", DM_GAME_PROGRAM_ID ^ 0x1000, uid) == 0x7d402u, "another program's save data: TargetNotFound");
     snprintf(p, sizeof p, "%s/fresh", root); setenv("DM_SAVE", p, 1);
     CHECK(h_fs_MountSaveRO("FreshRO", DM_GAME_PROGRAM_ID, uid) == RES_OK && h_fs_GetEntryType(&type, "FreshRO:/") == RES_OK && type == ENT_DIR,

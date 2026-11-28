@@ -75,6 +75,7 @@ Current: Game's HDR (`DM_HDR=2`) shows the game's own HDR picture, and BT.2446 (
   | BT.2446 | 8.64 | | 8.00 | 8.86 |
 
   Game's HDR stays within about 1.8 x SDR white in that frame, while vi reported peaks up to 1,737 nits (8.56 x SDR white) in that run.
+- Colors outside BT.709 (current): its PQ window holds them. On the title frame (raw window values, a built-in XDR screen, peaks of 1,000 to 1,330 nits told) 0.9-3.1 % of the lit pixels lie outside BT.709, and clipped at 0 about 2 % moved by a ΔE_ITP above 10, up to 31. The title draws at most 175 nits while it declares up to 2,396. Kept since [HDR colors more saturated than Off](../../../docs/reference/rendering.md#hdr-colors-more-saturated-than-off-and-off-after-hdr).
 
 ## Frame rate
 
@@ -182,6 +183,7 @@ Mac regression on the M4 Pro with macOS 27.2.1 and Xcode 27.2, 2026-11-19. Both 
 
 ## Found on this game
 
+- [HDR colors more saturated than Off, and Off after HDR](../../../docs/reference/rendering.md#hdr-colors-more-saturated-than-off-and-off-after-hdr): its HDR picture has colors outside BT.709, which Game's HDR clipped; both HDR modes showed every color more saturated than Off on a P3 screen. Resolved.
 - [A game that changes its present interval every frame filled the log](../../../docs/reference/frame-rate.md#a-game-that-changes-its-present-interval-every-frame-filled-the-log): 11,614 interval changes in a 7-minute 1.8.0 iPhone race before the host frame step covered 1.8.0.
 - [A lone acquire thread kept its time-constraint policy through a long CPU burst](../../../docs/reference/frame-rate.md#a-lone-acquire-thread-kept-its-time-constraint-policy-through-a-long-cpu-burst): the freezes of up to about a minute at the end of a race ([GitHub issue #1859](https://github.com/seedds/nxnative/issues/1859)). Fixed from its logs and a synthetic measurement, not run on the game; the 12 to 16 s burst itself stays open.
 - [A residency commit stays blocked in the iPhone kernel](../../../docs/reference/rendering.md#a-residency-commit-stays-blocked-in-the-iphone-kernel) (open).

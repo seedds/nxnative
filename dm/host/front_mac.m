@@ -149,35 +149,52 @@ static double g_match_switched, g_match_undone;   // when this host last switche
 static int g_match_bounces, g_match_bounced;   // switches in a row due soon after an undone one; the rate is left alone until fullscreen is left or the frame rate changes
 static int g_match_recheck;   // a delayed settle check is already scheduled on the main queue
 // HDR output (front.h front_layer_hdr, front_edr_poll; nvn_mtl.m, HDR output). The layer the present asks for, applied on the main thread: SDR is the layer as made below
-// (BGRA8Unorm, no colour space, so its bytes reach the panel as they are); HDR is RGBA16Float with extended range content and no EDR metadata, in the screen's own colour space
-// extended and linear (the same colours as the SDR layer; Display P3 when the screen has none), for both HDR routes: the present writes BT.709 values for a PQ window too. The
+// (BGRA8Unorm, to which Core Animation gives kCGColorSpaceSRGB: its sRGB bytes are colour-matched to the screen, measured on macOS 27.2.1); HDR is RGBA16Float with extended
+// range content and no EDR metadata, in that colour space extended and linear (kCGColorSpaceExtendedLinearSRGB), for both HDR routes: the present writes BT.709 values, which
+// then show as the SDR layer's bytes do, and a PQ window's colours outside BT.709 as the negative values the extended space carries. Leaving HDR gives the SDR layer back the
+// colour space it was made with: set to NULL, a layer is not colour-matched at all (CAMetalLayer.h), and its bytes would show in the panel's primaries, more saturated on a P3
+// screen than before HDR was on. A layer made without a colour space (none measured) takes the screen's own, extended and linear, as the colours its bytes show in. The
 // screen's headroom goes to the present: maximumPotentialExtendedDynamicRangeColorComponentValue, what the screen can show, and maximumExtendedDynamicRangeColorComponentValue, what
 // it shows now (above 1.0 only once a layer wants extended range content)
 void mtl_present_edr(float potential, float live);   // nvn_mtl.h
 static _Atomic int g_hdr_want;   // the mode the present asked for (front.h): 0 SDR, 1 HDR
 static int g_hdr_mode;   // main thread: the mode the layer has
-static CGColorSpaceRef hdr_itm_space(NSScreen *screen) {   // the HDR layer's colour space: the screen's own, extended and linear; Display P3 when the screen or its space is not known (+1)
-    CGColorSpaceRef sc = screen.colorSpace.CGColorSpace, cs = sc ? CGColorSpaceCreateExtendedLinearized(sc) : NULL;
+static CGColorSpaceRef g_sdr_space; static int g_sdr_space_kept;   // main thread: the SDR layer's colour space as made (NULL: none), kept at the first switch to HDR
+static CGColorSpaceRef hdr_itm_space(NSScreen *screen) {   // the HDR layer's colour space (+1): the SDR layer's, extended and linear; without one, the screen's own (Display P3 when not known)
+    CGColorSpaceRef cs = g_sdr_space ? CGColorSpaceCreateExtendedLinearized(g_sdr_space) : NULL;
+    if (cs) return cs;
+    CGColorSpaceRef sc = screen.colorSpace.CGColorSpace; cs = sc ? CGColorSpaceCreateExtendedLinearized(sc) : NULL;
     return cs ? cs : CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
+}
+static const char *hdr_space_name(CGColorSpaceRef cs, char *b, size_t n) {   // for the log
+    CFStringRef s = cs ? CGColorSpaceCopyName(cs) : NULL;
+    if (!cs) snprintf(b, n, "none (not colour-matched)"); else if (!s || !CFStringGetCString(s, b, (CFIndex)n, kCFStringEncodingUTF8)) snprintf(b, n, "an unnamed colour space");
+    if (s) CFRelease(s);
+    return b;
 }
 static void hdr_screen(NSScreen *screen) {   // main thread: the screen's headroom to the present, and the HDR layer's colour space for this screen
     if (!screen) return;
     mtl_present_edr((float)screen.maximumPotentialExtendedDynamicRangeColorComponentValue, (float)screen.maximumExtendedDynamicRangeColorComponentValue);
     if (!g_hdr_mode || !g_layer) return;
     CGColorSpaceRef cs = hdr_itm_space(screen);
-    if (!g_layer.colorspace || !CFEqual(g_layer.colorspace, cs)) { g_layer.colorspace = cs; LOG("front end: HDR layer in %s", screen.colorSpace.localizedName.UTF8String ?: "Display P3"); }
+    if (!g_layer.colorspace || !CFEqual(g_layer.colorspace, cs)) { char b[96]; g_layer.colorspace = cs; LOG("front end: HDR layer in %s", hdr_space_name(cs, b, sizeof b)); }
     CGColorSpaceRelease(cs);
 }
 static void hdr_apply(void) {   // main thread
     int m = g_hdr_want;
     if (m == g_hdr_mode || !g_layer) return;
+    if (m && !g_sdr_space_kept) { g_sdr_space = CGColorSpaceRetain(g_layer.colorspace); g_sdr_space_kept = 1; }   // the SDR layer as made, before the first change
     g_hdr_mode = m;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];   // the format, colour space and extended range together
     g_layer.wantsExtendedDynamicRangeContent = m != 0;
     g_layer.pixelFormat = m ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
-    // never an RGBA16Float layer without a colour space: without one its linear values would reach the panel as they are; the window's screen refines it below (hdr_screen)
-    CGColorSpaceRef cs = m ? hdr_itm_space(g_win.screen) : NULL;
-    g_layer.colorspace = cs; CGColorSpaceRelease(cs);   // SDR: none, as before
-    LOG("front end: %s", m ? "HDR layer (RGBA16Float, extended range, the screen's colour space linear)" : "SDR layer (BGRA8Unorm)");
+    // never an RGBA16Float layer without a colour space: without one its linear values would reach the panel as they are; the window's screen refines it below (hdr_screen).
+    // SDR: the colour space the layer was made with (kCGColorSpaceSRGB), set after the format, which would otherwise choose it
+    CGColorSpaceRef cs = m ? hdr_itm_space(g_win.screen) : CGColorSpaceRetain(g_sdr_space);
+    g_layer.colorspace = cs; CGColorSpaceRelease(cs);
+    [CATransaction commit];
+    char b[96];
+    LOG("front end: %s, in %s", m ? "HDR layer (RGBA16Float, extended range, linear)" : "SDR layer (BGRA8Unorm)", hdr_space_name(g_layer.colorspace, b, sizeof b));
     hdr_screen(g_win.screen);   // the colour space of the window's screen, and the live headroom, which changes once the layer wants extended range content
     hdr_menu_log("layer");
 }

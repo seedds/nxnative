@@ -191,6 +191,12 @@ $(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../hle_account_use
 fs-directory: $(B)/t_fs_directory
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_directory
 run: fs-directory
+$(B)/t_fs_stall: t_fs_stall.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_stall.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
+.PHONY: fs-stall
+fs-stall: $(B)/t_fs_stall
+	TMPDIR="$(abspath $(B))" $(B)/t_fs_stall
+run: fs-stall
 $(B)/t_fs_commit_list: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 $(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

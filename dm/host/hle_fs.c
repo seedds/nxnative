@@ -107,6 +107,105 @@ __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(e
 static FILE *g_fslog; static char *g_fdpath[4096]; static pthread_mutex_t g_fslog_lock = PTHREAD_MUTEX_INITIALIZER;
 static void fslog_init(void) { static int done; if (done) return; done = 1; const char *e = getenv("DM_FSLOG"); if (e && !(g_fslog = fopen(e, "w"))) die("cannot open DM_FSLOG %s", e); if (g_fslog) setvbuf(g_fslog, NULL, _IOLBF, 0); }   // line-buffered: runs end at the time-limit alarm or a crash, which never flush stdio
 
+// First-use stalls of the RomFS image's reads (DM_FS_STALL_MS=<ms>, default 8; 0 = off): each successful read of the first image mount is timed (one clock pair) and told apart by the
+// bytes it covers, as a set of the image ranges read this session: a read with any byte not read before waited on new bytes ("first use": the storage's cold latency), a read of
+// bytes already read is served by the OS cache ("repeat"). Totals and the worst read of both classes, and a histogram of the first-use reads' times for p50 and p99, sit under one
+// mutex (a game's loader threads read in parallel). Folder mounts, add-on content and every image after the first are not measured: their reads never touch these counters
+typedef struct { uint64_t a, b; } fs_rng;   // [a, b) in image coordinates
+enum { STALL_BUCKETS = 160, STALL_DEFAULT_MS = 8, STALL_FLOOD = 16 };
+static struct { fs_rng *r; uint64_t n, cap;   // the coverage set: ascending, no empty entries
+    uint64_t reads[2], bytes[2], ns[2], worst[2];   // [0] first use, [1] repeat
+    uint32_t hist[STALL_BUCKETS];   // first-use read times in quarter-octaves of microseconds
+    uint64_t stalls, sum_bytes, next_sum_ns; } g_stall;
+static pthread_mutex_t g_stall_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic int g_stall_ms = -1;   // -1 unread; 0 off: the read path then costs this one relaxed load
+static _Atomic int g_stall_mi = -1;   // the mount index whose image is measured: the first image mount that is not add-on content
+
+// Insert [a, b) and merge with the entries it overlaps (a right-adjacent one stays its own): returns the bytes it added, 0 when all of it was covered. O(log n) to find, O(k) over the k entries it touches
+static uint64_t fs_rng_add(uint64_t a, uint64_t b) {
+    fs_rng *s = g_stall.r; uint64_t *n = &g_stall.n;
+    if (a >= b) return 0;
+    uint64_t lo = 0, hi = *n;
+    while (lo < hi) { uint64_t mid = lo + (hi - lo) / 2; if (s[mid].b < a) lo = mid + 1; else hi = mid; }   // the first entry whose b >= a
+    uint64_t i = lo, covered = 0, ka = a, kb = b;
+    while (i < *n && s[i].a < b) {
+        uint64_t ia = s[i].a > a ? s[i].a : a, ib = s[i].b < b ? s[i].b : b;
+        if (ib > ia) covered += ib - ia;
+        if (s[i].a < ka) ka = s[i].a;
+        if (s[i].b > kb) kb = s[i].b;
+        i++;
+    }
+    if (covered >= b - a) return 0;
+    uint64_t rest = *n - i, need = lo + 1 + rest;
+    if (need > g_stall.cap) { uint64_t nc = g_stall.cap ? g_stall.cap * 2 : 64; while (need > nc) nc *= 2; fs_rng *t = realloc(s, nc * sizeof *t); if (!t) return 0; s = g_stall.r = t; g_stall.cap = nc; }
+    if (rest && i != lo + 1) memmove(s + lo + 1, s + i, rest * sizeof *s);
+    s[lo] = (fs_rng){ka, kb}; *n = need;
+    return b - a - covered;
+}
+static int stall_bucket(uint64_t ns) {   // microseconds below 4 take a bucket each, then four buckets to every doubling
+    uint64_t us = ns / 1000; if (us < 4) return (int)us;
+    int e = 63 - __builtin_clzll(us), b = (e - 1) * 4 + (int)((us >> (e - 2)) & 3);
+    return b < STALL_BUCKETS ? b : STALL_BUCKETS - 1;
+}
+static double stall_bucket_hi_ms(int b) {   // the upper edge of a bucket in ms
+    if (b < 4) return (b + 1) / 1e3;
+    int e = b / 4 + 1, sub = b % 4; return (double)((uint64_t)(5 + sub) << (e - 2)) / 1e3;
+}
+static double stall_pct_ms(double p) {   // the p-th percentile of the first-use reads, as the upper edge of its bucket (at most 25% over the read's time); caller holds the lock
+    uint64_t want = (uint64_t)(p * (double)g_stall.reads[0] + 0.999999), seen = 0;
+    if (want < 1) want = 1;
+    for (int b = 0; b < STALL_BUCKETS; b++) if ((seen += g_stall.hist[b]) >= want) return stall_bucket_hi_ms(b);
+    return g_stall.worst[0] / 1e6;
+}
+static void stall_summary_line(void) {   // the totals so far; caller holds no lock
+    pthread_mutex_lock(&g_stall_lock);
+    uint64_t r0 = g_stall.reads[0], b0 = g_stall.bytes[0], n0 = g_stall.ns[0], w0 = g_stall.worst[0], r1 = g_stall.reads[1], b1 = g_stall.bytes[1], n1 = g_stall.ns[1], w1 = g_stall.worst[1];
+    double p50 = stall_pct_ms(0.50), p99 = stall_pct_ms(0.99);
+    if (p99 > w0 / 1e6) p99 = w0 / 1e6;   // a bucket's edge never reads above the worst
+    if (p50 > w0 / 1e6) p50 = w0 / 1e6;
+    g_stall.sum_bytes = b0;
+    pthread_mutex_unlock(&g_stall_lock);
+    LOG("[fs] image reads: first use %llu reads, %.1f MiB, %.0f ms (p50 %.1f, p99 %.1f, worst %.1f); repeat %llu reads, %.1f MiB, %.0f ms (worst %.1f)",
+        (unsigned long long)r0, b0 / 1048576.0, n0 / 1e6, p50, p99, w0 / 1e6, (unsigned long long)r1, b1 / 1048576.0, n1 / 1e6, w1 / 1e6);
+}
+// The graceful exit and atexit (a player's quit): one summary when first-use bytes grew since the last one
+void dm_fs_stall_summary(void) {
+    pthread_mutex_lock(&g_stall_lock); int grew = g_stall.bytes[0] > g_stall.sum_bytes; pthread_mutex_unlock(&g_stall_lock);
+    if (grew) stall_summary_line();
+}
+static int stall_init(void) {
+    const char *e = getenv("DM_FS_STALL_MS"); int ms = e && *e ? atoi(e) : STALL_DEFAULT_MS;
+    if (ms < 0) ms = STALL_DEFAULT_MS;
+    int unset = -1; atomic_compare_exchange_strong_explicit(&g_stall_ms, &unset, ms, memory_order_relaxed, memory_order_relaxed);
+    return atomic_load_explicit(&g_stall_ms, memory_order_relaxed);
+}
+// Whether reads of mount mi are measured: an image that is not add-on content, the first one that reads
+static int stall_mount(int mi) {
+    const mount_t *m = &g_mnt[mi];
+    if (!m->img || m->releasable) return 0;
+    int cur = atomic_load_explicit(&g_stall_mi, memory_order_relaxed);
+    if (cur < 0) { int none = -1; if (atomic_compare_exchange_strong_explicit(&g_stall_mi, &none, mi, memory_order_relaxed, memory_order_relaxed)) { atexit(dm_fs_stall_summary); return 1; } cur = none; }
+    return cur == mi;
+}
+// One successful image read of [a, a + len) in image coordinates between t0 and t1. The first STALL_FLOOD stalls log, then the power-of-two counts; a summary follows at most every 10 s while first-use bytes grow
+static void stall_note(uint64_t a, size_t len, uint64_t t0, uint64_t t1, int thr_ms) {
+    if (!len) return;
+    uint64_t ns = t1 - t0, stall = 0; int sum = 0;
+    pthread_mutex_lock(&g_stall_lock);
+    uint64_t added = fs_rng_add(a, a + len);
+    int c = added ? 0 : 1;   // a read with any new byte waited on it
+    g_stall.reads[c]++; g_stall.bytes[c] += added ? added : len; g_stall.ns[c] += ns; if (ns > g_stall.worst[c]) g_stall.worst[c] = ns;
+    if (!c) { g_stall.hist[stall_bucket(ns)]++; if (ns >= (uint64_t)thr_ms * 1000000ull) stall = ++g_stall.stalls; }
+    if (!g_stall.next_sum_ns) g_stall.next_sum_ns = t1 + 10000000000ull;
+    else if (t1 >= g_stall.next_sum_ns) { g_stall.next_sum_ns = t1 + 10000000000ull; sum = g_stall.bytes[0] > g_stall.sum_bytes; }
+    pthread_mutex_unlock(&g_stall_lock);
+    if (stall && (stall <= STALL_FLOOD || !(stall & (stall - 1)))) {
+        if (stall <= STALL_FLOOD) LOG("[fs] first-use read waited %.1f ms for %.1f KiB at image offset 0x%llx", ns / 1e6, len / 1024.0, (unsigned long long)a);
+        else LOG("[fs] first-use read waited %.1f ms for %.1f KiB at image offset 0x%llx (stall %llu)", ns / 1e6, len / 1024.0, (unsigned long long)a, (unsigned long long)stall);
+    }
+    if (sum) stall_summary_line();
+}
+
 static const char *envdir(const char *var, const char *rel, char *buf, size_t n) {
     const char *v = getenv(var);
     if (v) return v;
@@ -1284,6 +1383,9 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         sz = off < 0 || (uint64_t)off >= x->b ? 0 : (size_t)(x->b - off) < sz ? (size_t)(x->b - off) : sz;
     }
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
+    int stall_ms = atomic_load_explicit(&g_stall_ms, memory_order_relaxed); if (stall_ms < 0) stall_ms = stall_init();
+    int timed = stall_ms && IMG_H(h) && stall_mount(IMG_M(h));   // DM_FS_STALL_MS=0: nothing past that load; a folder's fd is never an image handle, so its reads stay out
+    uint64_t t0 = timed ? now_ns() : 0;
     while (got < sz) {
         ssize_t r = pread(fd, (uint8_t *)buf + got, sz - got, base + off + got);
         if (r < 0) { if (errno == EINTR) continue;
@@ -1303,6 +1405,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         got += r;
     }
     *out = got;
+    if (timed) stall_note((uint64_t)base + (uint64_t)off, got, t0, now_ns(), stall_ms);
     if (g_fslog) { pthread_mutex_lock(&g_fslog_lock);
         static int hash_on = -1; if (hash_on < 0) hash_on = getenv("DM_FSLOG_HASH") != NULL;   // DM_FSLOG_HASH=1: append a column with the FNV-1a 64 of the content read (to compare whether the bytes read from two resource packs match)
         uint64_t fh = 0xcbf29ce484222325ull; if (hash_on) for (size_t i = 0; i < got; i++) fh = (fh ^ ((uint8_t *)buf)[i]) * 0x100000001b3ull;

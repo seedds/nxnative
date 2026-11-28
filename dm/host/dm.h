@@ -292,6 +292,7 @@ const char *dm_cheats_skipped_why(int i);
 int dm_cheats_nsources(void);         // anchored sources (*.cheats.toml) in the cheats folder
 const char *dm_cheats_source(int i);
 void dm_cheats_exit(void);            // a clean exit (hle_lifecycle.c, atexit): removes the safe-mode flag
+void dm_fs_stall_summary(void);       // a clean exit (hle_lifecycle.c, atexit): the image reads' first-use summary line, when first-use bytes grew since the last one (hle_fs.c)
 // Graphics lifecycle (hle_nvn.c): on=1 closes submission and waits up to three seconds for the drain, on=0 requests reopening once the drain completes.
 void dm_gfx_suspend(int on);
 void dm_fstep_settle(void);   // hle_nvn.c: the window changed size, visibility, screen or fullscreen state, or graphics resumed (nvn_fstep.h settle)

@@ -111,6 +111,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Star Fox](0400E88025B1A000/README.md) | `0400E88025B1A000` | v131072 (Switch 2) | 21.4.4 (Ounce) | Its own engine (`vrender`, `vfs`), Wwise | NVN2 | — |
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN | — |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN | — |
+| [DRAGON BALL FighterZ](0100A250097F0000/README.md) | `0100A250097F0000` | 1.50 | 4.5.0 | Unreal Engine (pak v11) | NVN | — |
 | [DOOM 3](010029D00E740000/README.md) | `010029D00E740000` | 1.0.5 | 14.3.0 | id Tech 4 (BFG Edition renderer), FMOD | OpenGL | — |
 | [DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH](010078D000F88000/README.md) | `010078D000F88000` | 1.26.01 | 10.4.1 | Dimps' engine, Havok, CRIWARE | NVN | — |
 | [DRAGON BALL: Sparking! ZERO](010035F022078000/README.md) | `010035F022078000` | 2.0.76 | 14.3.0 | Unreal Engine 5.1.1, CRIWARE | NVN | 60 fps target, [120 fps option](010035F022078000/README.md#frame-rate) |

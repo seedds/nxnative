@@ -268,7 +268,14 @@ class ImportSeeds(unittest.TestCase):
         self.assertNotIn(f'G\t{update_pair}', self.manifest.read_text())
         self.assertFalse(capture.exists())
 
-    def test_push_updates_main_without_including_local_commits(self):
+    def test_push_lands_one_commit_for_all_games_without_including_local_commits(self):
+        other_title = '0100000000000001'
+        other_profile = self.manifest.parent.with_name(other_title)
+        other_profile.mkdir()
+        other_profile.joinpath('game.tsv').write_text(
+            f'title_id\t{other_title}\nname\tAnother Game\nbuild\tv0\t1.0.0\npackage\tv0\n')
+        shutil.copyfile(self.manifest.with_name('shader_map.tsv'), other_profile / 'shader_map.tsv')
+        other_manifest = other_profile / 'pso_manifest.tsv'
         bare = self.init_origin()
         peer = self.root / 'peer'
         self.git('clone', str(bare), str(peer))
@@ -277,13 +284,17 @@ class ImportSeeds(unittest.TestCase):
         self.git('push', 'origin', 'HEAD:main', cwd=peer)
 
         imported = self.upload(f'C\t{COMPUTE}')
+        other_capture = self.upload(f'R\t{key(SECOND_VERTEX)}', title=other_title)
         self.run_import('--push')
         self.assertFalse(imported.exists())
+        self.assertFalse(other_capture.exists())
         self.assertEqual(self.git('rev-parse', 'HEAD^'), upstream)
         landed = self.git('rev-parse', 'HEAD')
         self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
-        self.assertEqual(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'),
-                         self.manifest.relative_to(self.repo).as_posix())
+        self.assertEqual(set(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines()),
+                         {manifest.relative_to(self.repo).as_posix() for manifest in (self.manifest, other_manifest)})
+        self.assertIn(f'C\t{COMPUTE}', self.git('show', f'HEAD:{self.manifest.relative_to(self.repo)}'))
+        self.assertIn(f'R\t{key(SECOND_VERTEX)}', self.git('show', f'HEAD:{other_manifest.relative_to(self.repo)}'))
 
         self.git('commit', '--allow-empty', '-m', 'local change')
         pending = self.upload(f'R\t{key(SECOND_VERTEX)}')

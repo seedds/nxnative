@@ -42,3 +42,11 @@ app_pool	0xCD500000
 # everything is under Data/: the player's serialized files and the StreamingAssets bundles
 shader_groups	/Data/=data
 shader_note	Hollow Knight: Silksong shaders
+
+# ---- Frame rate ----
+# 60 fps, as on the Switch, with 120 fps as an option on 120 Hz screens (tested on Mac; iPhone and iPad 120 fps open): Unity steps the game by the time that really passed.
+# The rewriter finds QualitySettings.vSyncCount and Application.targetFrameRate through Unity's internal-call table (dm/tools/unity_fps.py; on 1.0.30000 targetFrameRate at main+0x8020db0),
+# the host writes the target there (hle_fpslock.c) and presents at it.
+# The speed checked at 60 and 120: the credits scroll and Moss Grotto gameplay advance at the same rate at both targets
+fps_target	60
+fps_max	120

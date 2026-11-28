@@ -49,6 +49,10 @@ iPhone: no IPA was built, and the touch layout is untested.
 - Resident memory was 1370 MB with 1672 MB of Metal allocations at the end of a
   long run, after the game had loaded its opening scenes.
 
+## Found on this game
+
+- [Audio gap after switching stereo outputs](../../../docs/reference/audio.md#audio-gap-after-switching-stereo-outputs), reported on iPhone from the NX18 fork.
+
 ## Open
 
 - The memory keys are the provisional ones; they hold through the tested route

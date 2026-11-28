@@ -3,7 +3,7 @@
 // serial_del, tex_put and the upgrade's in-place replacement): two serials naming one object count twice and the object stays held until both go. Last, a takeover past 1,000
 // held entries with 20,000 serials in the table, which walked the serial table for each entry before (it prints the time).
 // The candidates come from the owner's index by pool and 64 KB cell, which its writers keep (own_alias_put_locked, own_alias_del_locked, the takeover, a pool drop): an entry that starts in an earlier cell is found, one in the same
-// cell that ends before the new texture is not, one that spans several of the new texture's cells goes once, another pool's entries are not met, and a removal or a pool drop
+// cell that ends before the new texture is not, one that spans several of the new texture's cells goes once and, spared, is looked at once, another pool's entries are not met, and a removal or a pool drop
 // leaves no cell behind. Last, a takeover with 100,000 entries in the table, which walked the table's whole capacity before (it prints the time).
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
@@ -108,6 +108,12 @@ int main(void) { @autoreleasepool {
         own_alias_take_over_locked(&big3);
         CHECK(!has(&big2) && ast().taken - t2 == n2 - ast().n && n2 - ast().n == 1u + (has(&after) ? 0 : !over), "an entry that spans several of the new texture's cells is taken once");
         seen_put(&big3, obj());
+        {   // a spared entry (looked up in this submission) that spans every cell of the new texture is looked at once, not once per cell
+            alias_key big4 = akey(P, 0, NVN_FORMAT_RGBA16F, 512); uint64_t l0 = ast().looks; int64_t cells = ((ksize(&big4) < ksize(&big3) ? ksize(&big4) : ksize(&big3)) - 1) >> ALIAS_CELL;
+            own_alias_take_over_locked(&big4);
+            CHECK(cells >= 4 && has(&big3), "the entry looked up lately stays");
+            CHECK(ast().looks - l0 == 1u + (has(&after) && after.off < ksize(&big4)), "and is looked at once, though it lies in every cell of the new texture");
+        }
         pthread_mutex_unlock(&g_smu);
         mtl_alias_drop_pool(P);
         pthread_mutex_lock(&g_smu);

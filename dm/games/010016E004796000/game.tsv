@@ -1,0 +1,51 @@
+# Game profile of Bridge Constructor Portal (Switch, update 1.1 = v131072, with its licence-only DLC Portal Proficiency). Plays on the Mac and an iPhone, by touch alone
+# Format: see dm/games/README.md
+# Unity 2019.1.14f1 (IL2CPP) with FMOD, SDK 8.3.2, NVN API 53.313; subsdk0 is NintendoSDK_movie.
+# The shaders are Unity shader objects in the player's serialized files and bundles under Data/, read by the shader split: 5,137 of them (2,704 vertex, 2,412 pixel, 20 compute, 1 geometry).
+# Started from the NSP script's provisional profile; op_mode and pad_layout added (README.md).
+
+# ---- Identity ----
+title_id	010016E004796000
+program_id	010016E004796000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Bridge Constructor Portal
+ipa	BridgeConstructorPortal.ipa
+app_category	public.app-category.games
+# handheld: the game plays by touch there, with its own touch tutorial (draw parts from an anchor with a finger, tap a part to turn it into road, double tap to remove it;
+# Test, Build and Drive are buttons on screen); on the iPhone those are the touches no gamepad control takes, on the Mac the mouse. Docked it reads only the pads
+op_mode	handheld
+# touch: the virtual gamepad starts in its Tap layout, every touch to the game; the in-game menu's Controller layout brings back 2D / 3D
+pad_layout	touch
+
+# ---- Versions ----
+build	v131072	1.1	main=26d590c0065958469119cf799e48e593	subsdk0=721b196b95fde7248f270bdbcad7ac53	sdk=0444aea83c4abc8f12a7ac7ba5c0dd3a
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Project/AssetBundles/prefabsbundle
+zip_store	._portal:.assets:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so the game takes its memory as address regions; it sets no heap. nninitStartup gives StandardAllocator the pool less what is used,
+# 3.14 GB at alias +0.06 GB; Unity's own regions after it stay within the iPhone's 4.375 GB alias region (README.md, Memory).
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split (shader_split.py; Unity shader objects) ----
+# everything is under Data/: the player's serialized files and its bundles
+shader_groups	/Data/=data
+shader_note	Bridge Constructor Portal shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the NSP script's heap check boot): the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# The game runs at 30 fps, as on the Switch (it asks for present interval 2), so no frame-rate key is needed.

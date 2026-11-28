@@ -10,6 +10,7 @@ targets:
       - path: Sources
       - path: ../../Sources/DmHostingController.swift
       - path: ../../Sources/GameMenu.swift
+      - path: ../../Sources/PrewarmUpload.swift
       - path: ../../Sources/LauncherSettings.swift
       - path: ../../Sources/DmGamepad.m
       - path: ../../Sources/front_ios.m

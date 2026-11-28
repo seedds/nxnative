@@ -1,0 +1,40 @@
+# Resident Evil 4 (Switch 2): update v131072, SDK 21.4.3 (Ounce), NVN2; Capcom's RE Engine with Havok and Wwise. See README.md
+
+# ---- Identity ----
+title_id	0400569027BF4000
+program_id	0400569027BF4000
+
+# ---- App ----
+name	Resident Evil 4
+ipa	ResidentEvil4.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+# the display version is not in the dump; the update's version stands in for it
+build	v131072	v131072	main=beb533cc1045e1ef3f33080b52df2324	subsdk2=5e5107c33c2dbda3f55deb1e455e33ec	sdk=1352b5ec49905e356da6c711ff55d9a9
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (C / libc), subsdk1 (NintendoSDK_DLSS); subsdk2 is NintendoSDK_movie
+modules	main subsdk2 sdk
+romfs_marker	re_chunk_000.pak
+zip_store	.pak:.metallib
+
+# ---- Memory ----
+# the Switch 2's 9 GB pool; main sets a heap (a 5 GB block with a large alias region)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+# the NPDM declares 20 MB of system resource, so virtual address memory is on
+sys_resource	0x1400000
+
+# ---- Shader split ----
+# RE Engine: the shaders are SDF definitions inside the KPKA PAKs (shader_split.py kpka_jobs / sdf_shaders), in a third layout (0x60-byte stage record headers)
+shader_groups	re_chunk=sdf
+shader_note	Resident Evil 4 shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the host log: depth mode near=0)
+depth_mode	zero

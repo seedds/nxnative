@@ -105,9 +105,9 @@ static void shader_alias(void) {
     for (int round = 0; round < 8; round++) {
         uint32_t s = 0x5a000000u + (uint32_t)round * 0x10000u; *(uint32_t *)seed.contents = s; memset(io.contents, 0, pg);
         mtl_sub_begin();
-        id<MTL4ComputeCommandEncoder> c = enc_c_begin(NULL); enc_c_args(c, a.gpuAddress, 0); enc_c_args(c, seed.gpuAddress, 2);
+        id<MTL4ComputeCommandEncoder> c = enc_c_begin(); enc_c_args(c, a.gpuAddress, 0); enc_c_args(c, seed.gpuAddress, 2);
         enc_c_pso(c, pw); enc_c_dispatch(c, MTLSizeMake(pg / 4 / 64, 1, 1), MTLSizeMake(64, 1, 1)); enc_c_end(c);
-        c = enc_c_begin(NULL); enc_c_args(c, b.gpuAddress, 0); enc_c_args(c, io.gpuAddress, 1);
+        c = enc_c_begin(); enc_c_args(c, b.gpuAddress, 0); enc_c_args(c, io.gpuAddress, 1);
         enc_c_pso(c, pr); enc_c_dispatch(c, MTLSizeMake(pg / 4 / 64, 1, 1), MTLSizeMake(64, 1, 1)); enc_c_end(c);
         finish();
         int ok = 1; const uint32_t *o = io.contents; for (size_t i = 0; i < pg / 4; i++) ok &= o[i] == s + (uint32_t)i;

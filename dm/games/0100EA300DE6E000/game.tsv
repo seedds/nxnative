@@ -1,0 +1,41 @@
+# Reussir: Code de la route, update 1.0.1 (v65536). Mac bring-up; iOS validation pending.
+# Unity 2018.3.9f1 IL2CPP with FMOD and NintendoSDK_movie, SDK 7.3.2.
+# The shared SDK build already has the address-region cuts in sdk_patches.py.
+
+# ---- Identity ----
+title_id	0100EA300DE6E000
+program_id	0100EA300DE6E000
+
+# ---- App ----
+name	Réussir : Code de la route
+ipa	ReussirCodeDeLaRoute.ipa
+app_category	public.app-category.educational-games
+pad_layout	simple
+
+# ---- Versions ----
+build	v65536	1.0.1	main=ec7cb9c01364c34f9c392a37ee06dc3d	subsdk0=95501e203c3f39918fcc7c25fee7cc84	sdk=fcf93a41b08c5193a1410d262602dc62
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/globalgamemanagers
+zip_store	.cdlr:.dat:.mp4:.png:.resource:.ress:.switch:.metallib
+
+# ---- Memory ----
+# Virtual address memory; the boot check sets no heap. Keep the shared 5 GB layout and hardware pool.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+# Observed near=0 in the original Mac bring-up log.
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Réussir : Code de la route shaders
+
+# heap check: 2026-11-02, no heap set

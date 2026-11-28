@@ -16,7 +16,7 @@ Build IDs (first 16 hex digits, as cheat files name them): 1.0.0 `DF154E1D08E396
 
 ## Code
 
-- **Rewriter: a jump-table form of its own.** `main+0x2d103cc` and `+0x2d10590` (1.0.0) index an offset table with a register masked in the block that branches in (`and x6,x17,#0x7ff; …; cbz w18,L`), while the bounds check in the dispatch block masks the same source again (`L: and w18,w17,#0x7ff; cmp w18,#3; b.hi`). `jump_masked_pred` in `dm/tools/patch_nso.py` resolves it, tried only after every older form has failed.
+- **Rewriter: a jump-table form of its own.** `main+0x2d103cc` and `+0x2d10590` (1.0.0) index an offset table with a register masked in the block that branches in (`and x6,x17,#0x7ff; …; cbz w18,L`), while the bounds check in the dispatch block masks the same source again (`L: and w18,w17,#0x7ff; cmp w18,#3; b.hi`). The [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow) proves it: both masks are of the same `w17`, so the check narrows the index too.
 - **The freeze.** All guest threads asleep on condition variables before the first frame; the main thread in `AcquireSemaphore` after posting a command to `UnityGfxDeviceWorker`, the worker one wait later. The cause is a store-release followed by a plain load in Unity's `ThreadedStreamBuffer` sleep handshake (details and the fix in the threads reference above). Since 2026-11-09 an engine-wide rule finds the 8 sites by their four functions in any build (`dm/tools/engine_patches.py`: 1.0.0 and 1.0.3, and Raging Loop's Unity 2018.3); until then 1.0.3's `patches.py` registered them. To carry the sites by hand, match ±24 instructions around each with PC-relative immediates masked: each 1.0.0 site had exactly one match in 1.0.3, all moved by +0x25380. On the base cartridge's build (1.0.0, main `df154e1d08e3964689eecef47fc057e6`) the rule puts them at `main+0x1e426d0`, `0x1e42cdc`, `0x1e42dd4`, `0x1e42e58`, `0x1e43028`, `0x1e43118`, `0x1e4319c` (`080140b9` → `08fddf88`) and `0x1e43448` (`290140b9` → `29fddf88`), the sites found by hand before.
 
 ## Files and shaders
@@ -38,7 +38,7 @@ Build IDs (first 16 hex digits, as cheat files name them): 1.0.0 `DF154E1D08E396
 
 General changes first needed here; each applies to every game:
 
-- **Jump tables masked in the predecessor block** (`jump_masked_pred`, `dm/tools/patch_nso.py`).
+- **Jump tables masked in the predecessor block** (now the [jump solver](../../../docs/reference/rewriter.md#jump-tables-proved-over-control-flow), `dm/tools/jump_solver.py`).
 - **`patches.py` of profiles in `DM_GAMES_DIR`** (a provisional profile can carry cuts; `patch_nso.py`, `build_ipa_from_nsp.py` `patch_files`).
 - **Unity ThreadedStreamBuffer memory order:** [threads reference](../../../docs/reference/threads.md#unitys-stream-buffer-handshake-loses-a-wake-up-on-apple-cores).
 - **GLSLC outputs in Unity TextAssets** (`unity_text_glslc`, `unityfs.text_assets`): [shaders reference](../../../docs/reference/shaders.md).

@@ -56,6 +56,7 @@ The NSP script's build directory is `<NSP folder>/010069C01AB82000_build`; analy
 - **Returning `IGN` image atomics** (the offline translator, `t_atomic_return.m`): [Bounds of image atomics](../../../docs/reference/shaders.md#bounds-of-image-atomics).
 - **A game's own frame-limit variable written instead of `t.MaxFPS`** (profile key `ue_fps_cvar`, `hle_fpslock.c`): [Unreal's frame limit and present interval, found by name](../../../docs/reference/frame-rate.md#unreals-frame-limit-and-present-interval-found-by-name).
 - **Buffer-image reflection preserves its Metal texture type** (`nvn_refl.m`, `t_refl.m`): [Buffer image reflection keeps its texture type](../../../docs/reference/shaders.md#buffer-image-reflection-keeps-its-texture-type).
+- **The battle stall after a landed hit** (issues #1034, #2345; `hle_uemalloc.c`): `AddPoolTaskListInner` (`main+0xe704f8`) reads its map entry after growing the map: [A read of a just-freed block on the host allocator](../../../docs/reference/memory.md#a-read-of-a-just-freed-block-on-the-host-allocator). This host change has not been run on the game here.
 
 ## Open
 

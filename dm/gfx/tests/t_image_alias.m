@@ -26,12 +26,24 @@ static void pixels(id<MTLTexture> t, uint32_t seed) {
     id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
     uint32_t *p=b.contents; for (NSUInteger i=0;i<bytes/4;i++) p[i]=seed^(uint32_t)i;
     res_add(b); enc_b_copy_buffer_texture(blit(), b, 0, t.width*4, bytes, MTLSizeMake(t.width,t.height,1), t, 0, 0, MTLOriginMake(0,0,0));
+    fam_mark_valid(t);
     id<MTLBuffer> out=read_image(t); CHECK(!memcmp(out.contents,b.contents,bytes), "every literal pixel survives alternating resolutions"); res_remove(b);
 }
 static void is_zero(id<MTLTexture> t) {
     id<MTLBuffer> b=read_image(t); uint32_t *p=b.contents; int zero=1;
     for (NSUInteger i=0;i<b.length/4;i++) zero &= p[i]==0;
     CHECK(zero, "fresh family is zero, including beyond its first-used small descriptor");
+}
+static void fragment_copy(id<MTLTexture> source, uint32_t seed) {
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat width:source.width height:source.height mipmapped:NO];
+    d.storageMode=MTLStorageModePrivate; d.usage=MTLTextureUsageRenderTarget;
+    id<MTLTexture> target=[g_dev newTextureWithDescriptor:d]; res_add(target);
+    NVNcopyRegion r={.width=(int)source.width,.height=(int)source.height,.depth=1};
+    CHECK(copy_t2t_draw(source,target,0,0,0,0,&r,&r,0,0),"heap-backed texture is copied by the fragment pipeline");
+    id<MTLBuffer> out=read_image(target); uint32_t *p=out.contents; int valid=1;
+    for (NSUInteger i=0;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
+    CHECK(valid,"fragment sampling reads every heap-backed texel");
+    res_remove(target);
 }
 static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
@@ -48,7 +60,7 @@ static void indirect_pixels(id<MTLTexture> t, uint32_t seed) {
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount=2;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
     [at setAddress:args.gpuAddress atIndex:0]; [at setAddress:out.gpuAddress atIndex:1];
-    id<MTL4ComputeCommandEncoder> e=enc_c_begin(nil); [e setArgumentTable:at]; enc_c_pso(e,ps);
+    id<MTL4ComputeCommandEncoder> e=enc_c_begin(); [e setArgumentTable:at]; enc_c_pso(e,ps);
     enc_c_dispatch(e,MTLSizeMake((t.width+7)/8,(t.height+7)/8,1),MTLSizeMake(8,8,1)); enc_c_end(e);
     mtl_sub_commit(); mtl_drain();
     CHECK(!mtl_last_commit_error(),"indirect Metal 4 read completes with only the heap resident");
@@ -61,12 +73,13 @@ static void atomic_pixel(id<MTLTexture> t, uint32_t seed) {
     NSError *error=nil;
     id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "kernel void bump(texture2d<uint,access::read_write> image [[texture(0)]]) { image.atomic_fetch_add(uint2(0,0),5u); }\n" options:nil error:&error];
-    id<MTLComputePipelineState> ps=lib?[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"bump"] error:&error]:nil;
+    id<MTLFunction> fn=[lib newFunctionWithName:@"bump"];
+    id<MTLComputePipelineState> ps=fn?[g_dev newComputePipelineStateWithFunction:fn error:&error]:nil;
     CHECK(ps!=nil,"native texture-atomic reader compiles"); if (!ps) return;
     MTL4ArgumentTableDescriptor *ad=[MTL4ArgumentTableDescriptor new]; ad.maxTextureBindCount=1;
     id<MTL4ArgumentTable> at=rec_table([g_dev newArgumentTableWithDescriptor:ad error:&error]);
     [at setTexture:t.gpuResourceID atIndex:0];
-    id<MTL4ComputeCommandEncoder> e=enc_c_begin(nil); [e setArgumentTable:at]; enc_c_pso(e,ps);
+    id<MTL4ComputeCommandEncoder> e=enc_c_begin(); [e setArgumentTable:at]; enc_c_pso(e,ps);
     enc_c_dispatch(e,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1)); enc_c_end(e);
     id<MTLBuffer> out=read_image(t); uint32_t *p=out.contents; int valid=p[0]==seed+5;
     for (NSUInteger i=1;i<out.length/4;i++) valid &= p[i]==(seed^(uint32_t)i);
@@ -147,10 +160,12 @@ static void same_cell(pool_t *pool) {
     CHECK(m[0].heap!=m[2].heap,"an offset 16 KB further in the same cell is another family");
     for (int i=0;i<4;i++) mtl_tex_release(&t[i]);
 }
-// A resolution family member read after another size wrote the shared storage sees that size's texels, misplaced but of the same format, as on the console (ASTRAL CHAIN, issue #1935)
+// Resolution-family cross-size safety: with compression on (default), cross-size loads clear to 0 (ASTRAL CHAIN #1935, OoT bloom), cross-size copies/binds return 0 without disturbing
+// the live owner, and combined depth-stencil half-clears initialize both planes. With DM_NVN_FAMILY_NOCOMPRESS=1, raw reads see misplaced texels of the same format
 static void cross_size_read(void) {
-    void *mem=NULL; posix_memalign(&mem,16384,16<<20); memset(mem,0,16<<20);
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
     pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
     tex_t a[2]; unsigned w[2]={1600,1440}, h[2]={900,810};
     for (int i=0;i<2;i++) { a[i]=image(&pool,993000+i,w[i],h[i]); a[i].d.format=NVN_FORMAT_RGBA16F; a[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&a[i].d,&a[i].L); mtl_tex_init(&a[i]); }
     id<MTLTexture> big=tex_mtl(&a[0]), small=tex_mtl(&a[1]);
@@ -160,16 +175,251 @@ static void cross_size_read(void) {
     ops.h=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
     ops.clear=(p_clear_color){.index=0,.mask=15,.rgba={1,.5f,.25f,1}}; ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
     mtl_exec((const uint8_t *)&ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
-    NSUInteger row=big.width*8, bytes=row*big.height;
-    id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
-    enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
-    mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
-    const uint64_t *p=b.contents, clear=0x3c00340038003c00ull; NSUInteger nclear=0, nzero=0, other=0;
-    for (NSUInteger i=0;i<bytes/8;i++) { if (p[i]==clear) nclear++; else if (!p[i]) nzero++; else other++; }
-    printf("cross-size read: %lu clear, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)nclear,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
-    CHECK(!other && nclear,"another size's writes read back as its texels, misplaced");
+    if (fam_nocomp()) {
+        NSUInteger row=big.width*8, bytes=row*big.height;
+        id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+        enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
+        const uint64_t *p=b.contents, clear=0x3c00340038003c00ull; NSUInteger nclear=0, nzero=0, other=0;
+        for (NSUInteger i=0;i<bytes/8;i++) { if (p[i]==clear) nclear++; else if (!p[i]) nzero++; else other++; }
+        printf("cross-size read (uncompressed): %lu clear, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)nclear,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
+        CHECK(!other && nclear,"another size's writes read back as its texels, misplaced");
+    } else {
+        CHECK(big.allowGPUOptimizedContents && small.allowGPUOptimizedContents,"family textures keep lossless compression by default");
+        CHECK(fam_is_valid(small) && !fam_is_valid(big),"clearing small marks small valid and big invalid");
+        // 1. Cross-size OP_COPY_T2B returns zeros without disturbing the live owner (small).
+        size_t bytes=(size_t)big.width*big.height*8;
+        void *rb=NULL; posix_memalign(&rb,16384,bytes); memset(rb,0x5a,bytes);
+        mtl_pool_add(rb, bytes);
+        struct { op_hdr h; p_copy_b2t cp; op_hdr end; } t2b={0};
+        t2b.h=(op_hdr){OP_COPY_T2B,sizeof(op_hdr)+sizeof(p_copy_b2t)};
+        t2b.cp=(p_copy_b2t){.tex=&a[0], .src=(uint64_t)(uintptr_t)rb, .r={0,0,0,(int)big.width,(int)big.height,1}};
+        t2b.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&t2b); mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+        const uint64_t *rp=(const uint64_t *)rb; NSUInteger bad_t2b=0;
+        for (NSUInteger i=0;i<bytes/8;i++) if (rp[i]!=0) bad_t2b++;
+        CHECK(!bad_t2b,"cross-size texture-to-buffer copy yields zeros, no compressed-block garbage");
+        CHECK(fam_is_valid(small),"cross-size copy leaves the live owner valid");
+        // Small must still hold its exact clear colour.
+        NSUInteger srow=small.width*8, sbytes=srow*small.height;
+        id<MTLBuffer> sb=[g_dev newBufferWithLength:sbytes options:MTLResourceStorageModeShared]; res_add(sb);
+        enc_b_copy_texture_buffer(blit(), small, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(small.width,small.height,1), sb, 0, srow, sbytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(sb); mtl_sub_begin();
+        const uint64_t *sp=sb.contents, clear=0x3c00340038003c00ull; NSUInteger sbad=0;
+        for (NSUInteger i=0;i<sbytes/8;i++) if (sp[i]!=clear) sbad++;
+        CHECK(!sbad,"cross-size copy leaves the live owner's compressed pixels intact");
+        mtl_pool_del(rb); free(rb);
+        // 2. Bindless pool gating: small is live, big is dummy until big becomes valid.
+        mtl_reg_tex(101, &a[1], NULL); mtl_reg_tex(102, &a[0], NULL);
+        int g0=0, l0=0, lr0=0, tr0=0, d0=0;
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t rid_s=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(rid_s!=0 && rid_b==0,"bindless pool exposes the valid family size and masks other sizes as dummy");
+        // 3. Cross-size render-pass Load (ASTRAL CHAIN #1935): load big with no full clear, write only a 16x16 scissor corner.
+        // The cross-size load is rewritten to Clear(0), so every untouched pixel is exact 0.0 and none is non-finite or garbage.
+        uint64_t sg_before=atomic_load(&g_ser_gen);
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&a[0];
+        struct { op_hdr h1; p_scissor sc; op_hdr h2; p_clear_color clear; op_hdr end; } sc_ops={0};
+        sc_ops.h1=(op_hdr){OP_SCISSOR,sizeof(op_hdr)+sizeof(p_scissor)};
+        sc_ops.sc=(p_scissor){0,0,16,16};
+        sc_ops.h2=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
+        sc_ops.clear=(p_clear_color){.index=0,.mask=15,.rgba={0.25f,0.5f,1,1}};
+        sc_ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&sc_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+        CHECK(fam_is_valid(big) && !fam_is_valid(small),"stored cross-size render pass transfers compressed family ownership to big");
+        CHECK(atomic_load(&g_ser_gen)>sg_before,"size switch bumps serial generation for pool-tracked family members");
+        os_unfair_lock_lock(&g_rmu);
+        uint64_t rid_s2=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b2=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        os_unfair_lock_unlock(&g_rmu);
+        CHECK(rid_s2==0 && rid_b2!=0,"bindless pool updates to expose big and mask small after size switch");
+        NSUInteger row=big.width*8;
+        id<MTLBuffer> b=[g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared]; res_add(b);
+        enc_b_copy_texture_buffer(blit(), big, 0, 0, MTLOriginMake(0,0,0), MTLSizeMake(big.width,big.height,1), b, 0, row, bytes);
+        mtl_sub_commit(); mtl_drain(); res_remove(b); mtl_sub_begin();
+        const uint64_t *p=b.contents, corner=0x3c003c0038003400ull; NSUInteger ncorner=0, nzero=0, other=0;
+        for (NSUInteger y=0;y<big.height;y++) for (NSUInteger x=0;x<big.width;x++) {
+            uint64_t v=p[y*big.width+x];
+            if (x<16 && y<16) { if (v==corner) ncorner++; else other++; }
+            else { if (!v) nzero++; else other++; }
+        }
+        printf("cross-size pass load (compressed): %lu corner, %lu zero, %lu other texels of %lu (compression %d)\n",(unsigned long)ncorner,(unsigned long)nzero,(unsigned long)other,(unsigned long)(bytes/8),(int)big.allowGPUOptimizedContents);
+        CHECK(!other && ncorner==256 && nzero==big.width*big.height-256,"cross-size render-pass load clears untouched pixels to 0 without compressed-block garbage");
+        // 4. Combined Depth32Float_Stencil8 half-clear across sizes: clear both on 32x32, then clear ONLY depth on 64x64; stencil must load as clean 0 and store valid blocks.
+        tex_t ds[2];
+        for (int i=0;i<2;i++) { ds[i]=image(&pool,993100+i,32u<<i,32u<<i); ds[i].off=12<<20; ds[i].mem=pool.mem+ds[i].off;
+            ds[i].d.format=NVN_FORMAT_DEPTH32F_STENCIL8; nvn_tex_layout(&ds[i].d,&ds[i].L); mtl_tex_init(&ds[i]); }
+        id<MTLTexture> ds0=tex_mtl(&ds[0]), ds1=tex_mtl(&ds[1]);
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.depth=&ds[0];
+        struct { op_hdr h; p_clear_ds clear; op_hdr end; } ds_ops={0};
+        ds_ops.h=(op_hdr){OP_CLEAR_DS,sizeof(op_hdr)+sizeof(p_clear_ds)};
+        ds_ops.clear=(p_clear_ds){.depth=0.5f,.depth_mask=1,.stencil=0x77,.stencil_mask=0xff}; ds_ops.end=(op_hdr){OP_END,sizeof(op_hdr)};
+        mtl_exec((const uint8_t *)&ds_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+        state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.depth=&ds[1];
+        ds_ops.clear=(p_clear_ds){.depth=0.25f,.depth_mask=1,.stencil=0,.stencil_mask=0};   // depth clear only, stencil loaded across sizes
+        mtl_exec((const uint8_t *)&ds_ops); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+        CHECK(fam_is_valid(ds1) && ds0.heap==ds1.heap,"combined depth-stencil half-clear transfers ownership to 64x64");
+        id<MTLBuffer> dbuf=[g_dev newBufferWithLength:ds1.width*ds1.height*4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> sbuf=[g_dev newBufferWithLength:ds1.width*ds1.height options:MTLResourceStorageModeShared];
+        id<MTLCommandBuffer> cb=q_cb(); id<MTLBlitCommandEncoder> be=[cb blitCommandEncoder];
+        [be copyFromTexture:ds1 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ds1.width,ds1.height,1) toBuffer:dbuf destinationOffset:0 destinationBytesPerRow:ds1.width*4 destinationBytesPerImage:ds1.width*ds1.height*4 options:MTLBlitOptionDepthFromDepthStencil];
+        [be copyFromTexture:ds1 sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(ds1.width,ds1.height,1) toBuffer:sbuf destinationOffset:0 destinationBytesPerRow:ds1.width destinationBytesPerImage:ds1.width*ds1.height options:MTLBlitOptionStencilFromDepthStencil];
+        [be endEncoding]; [cb commit]; [cb waitUntilCompleted];
+        const uint32_t *dp=dbuf.contents; const uint8_t *stp=sbuf.contents; int ds_ok=cb.status==MTLCommandBufferStatusCompleted;
+        for (NSUInteger i=0;i<ds1.width*ds1.height;i++) ds_ok &= dp[i]==0x3e800000u && stp[i]==0;
+        CHECK(ds_ok,"combined depth-stencil half-clear stores clean 0 stencil and cleared depth");
+        mtl_reg_tex_gone(101); mtl_reg_tex_gone(102);
+        for (int i=0;i<2;i++) mtl_tex_release(&ds[i]);
+    }
     for (int i=0;i<2;i++) mtl_tex_release(&a[i]);
-    mtl_alias_drop_pool(&pool); free(mem);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
+}
+// A pool ID re-registered repeatedly with a new texture over one family's storage (each re-initialization gets a new serial), and a transient burst of live IDs later unregistered:
+// fam_track_pool_serial drops unregistered serials on each new-serial miss so the list keeps only live pool serials and fam_set_valid does not flood own_note past SER_NOTES.
+static void pool_serials(void) {
+    if (fam_nocomp()) return;
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
+    pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
+    enum { ROUNDS=1000, ID=201, BURST=16, BURST_ID=210 };
+    tex_t t[2], big; int cur=0; uint64_t wh=0, live=0;
+    big=image(&pool,995999,1600,900); big.d.format=NVN_FORMAT_RGBA16F; big.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&big.d,&big.L); mtl_tex_init(&big);   // the target's other size, live throughout
+    NvImageHeap *o=nil;
+    for (int i=0;i<ROUNDS;i++) { @autoreleasepool {
+        tex_t *n=&t[cur]; *n=image(&pool,996000+i,1440,810); n->d.format=NVN_FORMAT_RGBA16F; n->d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&n->d,&n->L); mtl_tex_init(n);
+        if (!i) { o=fam_owner(tex_mtl(&big),NULL); CHECK(o && o->compressed,"the target's two sizes form a compressed family"); }
+        NvImageHeap *no=fam_owner(tex_mtl(n),&wh);
+        CHECK(no && no==o,"each texture over the storage joins that family");
+        mtl_reg_tex(ID,n,NULL); live=n->serial;
+        int g=0,l=0,lr=0,tr=0,d=0;
+        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        if (i) mtl_tex_release(&t[!cur]);   // the texture it replaced ends
+        cur=!cur;
+    } }
+    if (o) {
+        os_unfair_lock_lock(&o->pool_lk); uint32_t n=o->npool_sers; int has=n==1 && o->pool_sers[0].serial==live; os_unfair_lock_unlock(&o->pool_lk);
+        printf("family pool serials after %d registrations of one ID: %u\n",ROUNDS,n);
+        CHECK(n==1,"the family keeps only the live registered serial, not obsolete serials from re-registrations");
+        CHECK(has,"it keeps the serial the ID holds now");
+        uint64_t sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);   // a size switch to the ID's size and away: each notes only the live serial
+        uint64_t notes=atomic_load(&g_ser_gen)-sg;
+        CHECK(notes==2,"a size round trip notes only the live serial (2 notes), not obsolete serials");
+        // Grow capacity via a burst of live IDs, unregister them all, then insert one new serial: all burst serials must drop immediately without waiting to refill capacity.
+        tex_t burst[BURST];
+        for (int i=0;i<BURST;i++) {
+            burst[i]=image(&pool,998000+i,1440,810); burst[i].d.format=NVN_FORMAT_RGBA16F; burst[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&burst[i].d,&burst[i].L); mtl_tex_init(&burst[i]);
+            CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"burst texture joins the compressed family");
+            mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
+            int g=0,l=0,lr=0,tr=0,d=0;
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        }
+        os_unfair_lock_lock(&o->pool_lk); uint32_t nb=o->npool_sers, capb=o->cappool_sers; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(nb==1+BURST && capb>=1+BURST,"live burst serials grow the family list while registered");
+        for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
+        // Even before another fam_track_pool_serial miss, fam_set_valid must prune the unregistered burst serials and emit notes only for the live serial.
+        sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);
+        uint64_t notes_b=atomic_load(&g_ser_gen)-sg;
+        os_unfair_lock_lock(&o->pool_lk); uint32_t nb2=o->npool_sers; int hasb2=nb2==1 && o->pool_sers[0].serial==live; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(nb2==1 && hasb2 && notes_b==2,"size round trip immediately after unregistering a burst prunes dead serials and emits only 2 notes");
+        // Re-create a burst, unregister it, then insert one new serial: fam_track_pool_serial must also drop all unregistered burst serials immediately.
+        for (int i=0;i<BURST;i++) {
+            burst[i]=image(&pool,998500+i,1440,810); burst[i].d.format=NVN_FORMAT_RGBA16F; burst[i].d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&burst[i].d,&burst[i].L); mtl_tex_init(&burst[i]);
+            CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"second burst texture joins the compressed family");
+            mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
+            int g=0,l=0,lr=0,tr=0,d=0;
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        }
+        for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
+        tex_t *after=&t[cur]; *after=image(&pool,999000,1440,810); after->d.format=NVN_FORMAT_RGBA16F; after->d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&after->d,&after->L); mtl_tex_init(after);
+        CHECK(fam_owner(tex_mtl(after),NULL)==o,"post-burst texture joins the compressed family");
+        mtl_reg_tex(ID,after,NULL); live=after->serial;
+        int g=0,l=0,lr=0,tr=0,d=0;
+        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        mtl_tex_release(&t[!cur]); cur=!cur;
+        os_unfair_lock_lock(&o->pool_lk); uint32_t n2=o->npool_sers; int has2=n2==1 && o->pool_sers[0].serial==live; os_unfair_lock_unlock(&o->pool_lk);
+        CHECK(n2==1 && has2,"a new serial after a transient burst prunes all unregistered burst serials immediately");
+        sg=atomic_load(&g_ser_gen);
+        fam_set_valid(o,wh); fam_set_valid(o,0);
+        uint64_t notes2=atomic_load(&g_ser_gen)-sg;
+        CHECK(notes2==2,"size round trip after post-burst prune emits only 2 notes");
+    }
+    mtl_reg_tex_gone(ID); mtl_tex_release(&t[!cur]); mtl_tex_release(&big);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
+}
+// Reentrant family size transition during a pool lookup (issue #3404): a compressed resolution family has live and unregistered tracked pool serials,
+// an open render pass stores a new size of that family, and pool_entry (under g_rmu) resolves a format-view texture that triggers
+// tex_upgrade_pfv -> blit() -> rp_end() -> sd_finish() -> fam_set_valid(). Must not recursively lock g_rmu, must prune unregistered serials,
+// and must still invalidate live family serials via own_note.
+static void reentrant_pool_upgrade(void) {
+    if (fam_nocomp()) return;
+    void *mem=NULL; posix_memalign(&mem,16384,32<<20); memset(mem,0,32<<20);
+    pool_t pool={.magic=MAGIC('P','O','O','L'), .flags=NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS|NVN_MEMORY_POOL_FLAGS_GPU_CACHED|NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem=mem, .size=16<<20};
+    mtl_pool_add(pool.mem, pool.size);
+    enum { ID_SMALL=240, ID_BIG=241, ID_DEAD=242, ID_UPG=243 };
+    tex_t fam_s=image(&pool,999100,64,64), fam_b=image(&pool,999101,128,128), fam_d=image(&pool,999102,64,64);
+    fam_s.d.format=fam_b.d.format=fam_d.d.format=NVN_FORMAT_RGBA16F;
+    fam_s.d.flags=fam_b.d.flags=fam_d.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE;
+    nvn_tex_layout(&fam_s.d,&fam_s.L); nvn_tex_layout(&fam_b.d,&fam_b.L); nvn_tex_layout(&fam_d.d,&fam_d.L);
+    mtl_tex_init(&fam_s); mtl_tex_init(&fam_b); mtl_tex_init(&fam_d);
+    id<MTLTexture> ms=tex_mtl(&fam_s), mb=tex_mtl(&fam_b), md=tex_mtl(&fam_d);
+    NvImageHeap *o=fam_owner(ms,NULL);
+    CHECK(o && o->compressed && fam_owner(mb,NULL)==o && fam_owner(md,NULL)==o,"reentrant test family members share one compressed heap");
+    // Establish initial valid size = small, then track all three serials in o->pool_sers and unregister the dead one.
+    state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&fam_s;
+    struct { op_hdr h; p_clear_color clear; op_hdr end; } clr={0};
+    clr.h=(op_hdr){OP_CLEAR_COLOR,sizeof(op_hdr)+sizeof(p_clear_color)};
+    clr.clear=(p_clear_color){.index=0,.mask=15,.rgba={0.25f,0.5f,0.75f,1}}; clr.end=(op_hdr){OP_END,sizeof(op_hdr)};
+    mtl_exec((const uint8_t *)&clr); mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+    CHECK(fam_is_valid(ms) && !fam_is_valid(mb),"reentrant test starts with small valid");
+    mtl_reg_tex(ID_SMALL,&fam_s,NULL); mtl_reg_tex(ID_BIG,&fam_b,NULL); mtl_reg_tex(ID_DEAD,&fam_d,NULL);
+    int g=0,l=0,lr=0,tr=0,d=0;
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_s0=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b0=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_DEAD,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_s0!=0 && r_b0==0,"pool_entry tracks family serials before the reentrant transition");
+    mtl_reg_tex(ID_DEAD,NULL,NULL); mtl_tex_release(&fam_d);
+    // Separate texture created without PixelFormatView, registered with a cross-class format view so pool_entry triggers tex_upgrade_pfv -> blit() -> rp_end().
+    tex_t upg=image(&pool,999103,32,32); upg.off=8<<20; upg.mem=pool.mem+upg.off;
+    upg.d.format=NVN_FORMAT_RGBA8; upg.d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&upg.d,&upg.L); mtl_tex_init(&upg);
+    id<MTLTexture> mu=tex_mtl(&upg);
+    CHECK(mu && !(mu.usage & MTLTextureUsagePixelFormatView),"upgrade target starts without PixelFormatView");
+    view_t uv={.set_format=1, .format=NVN_FORMAT_R32UI};
+    mtl_reg_tex(ID_UPG,&upg,&uv);
+    // Open a render pass that clears and will store fam_b (size switch small -> big on rp_end), leaving g_enc open.
+    state_reset(); memset(&R,0,sizeof R); R.has_rt=1; R.rt.n=1; R.rt.color[0]=&fam_b; R.clear_c[0]=1;
+    id<MTL4RenderCommandEncoder> en=rp_begin();
+    CHECK(en!=nil && g_enc==en,"render pass is open on the new family size before pool_entry");
+    CHECK(fam_is_valid(ms) && !fam_is_valid(mb),"family size has not transitioned while render pass is still open");
+    uint64_t upg_before=g_pfv_upgrades, sg_before=atomic_load(&g_ser_gen);
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_u=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_UPG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_u!=0 && g_pfv_upgrades==upg_before+1 && g_enc==nil,"pool_entry upgraded the view texture and ended the open render pass under g_rmu");
+    CHECK(fam_is_valid(mb) && !fam_is_valid(ms),"family size transitioned to big during the reentrant pool lookup");
+    os_unfair_lock_lock(&o->pool_lk);
+    uint32_t np=o->npool_sers;
+    int has_s=0, has_b=0;
+    for (uint32_t i=0;i<np;i++) { if (o->pool_sers[i].serial==fam_s.serial) has_s=1; if (o->pool_sers[i].serial==fam_b.serial) has_b=1; }
+    os_unfair_lock_unlock(&o->pool_lk);
+    CHECK(np==2 && has_s && has_b,"reentrant fam_set_valid pruned the unregistered serial and kept only the two live serials");
+    uint64_t s1=0, s2=0; int k1=own_note_at(sg_before+1,&s1), k2=own_note_at(sg_before+2,&s2);
+    CHECK(k1 && k2 && ((s1==fam_s.serial && s2==fam_b.serial) || (s1==fam_b.serial && s2==fam_s.serial)),
+          "reentrant fam_set_valid still emitted exact live-serial own_note invalidations");
+    os_unfair_lock_lock(&g_rmu);
+    uint64_t r_s1=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b1=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    os_unfair_lock_unlock(&g_rmu);
+    CHECK(r_s1==0 && r_b1!=0,"bindless pool reflects the transitioned size after the reentrant upgrade");
+    mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);
+    mtl_reg_tex(ID_SMALL,NULL,NULL); mtl_reg_tex(ID_BIG,NULL,NULL); mtl_reg_tex(ID_UPG,NULL,NULL);
+    mtl_tex_release(&fam_s); mtl_tex_release(&fam_b); mtl_tex_release(&upg);
+    mtl_alias_drop_pool(&pool); mtl_pool_del(pool.mem); free(mem);
 }
 int main(void) { @autoreleasepool {
     mtl_init(); __weak id<MTLHeap> weak_heap; void *mem=NULL;
@@ -184,8 +434,8 @@ int main(void) { @autoreleasepool {
     CHECK(small.width==512 && small.height==512,"the first descriptor retains its NVN dimensions");
     CHECK(small.heap!=nil,"live resolution family has physical backing");
     CHECK(!(small.usage&MTLTextureUsagePixelFormatView),"a family texture gets no forced format-view usage");
-    CHECK(!small.allowGPUOptimizedContents,"family textures are uncompressed: a size reading another's compressed blocks decodes garbage");
-    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=NO;   // family members are sized uncompressed, as they are made (image_texture)
+    CHECK(small.allowGPUOptimizedContents == !fam_nocomp(),"family textures keep lossless compression by default (DM_NVN_FAMILY_NOCOMPRESS=1 disables it)");
+    MTLTextureDescriptor *largest=tex_desc(&a[N-1],0); largest.allowGPUOptimizedContents=!fam_nocomp();   // family members are sized with the same compression mode they are made with (image_texture)
     MTLSizeAndAlign max_size=[g_dev heapTextureSizeAndAlignWithDescriptor:largest];
     CHECK(small.heap.size>=max_size.size && small.heap.size<=(sw_on(rh_mode()) ? max_size.size+max_size.size/4 : max_size.size),"heap capacity holds the largest declared size (with the recycled heaps' eighth of headroom)");
     is_zero(small);
@@ -206,12 +456,15 @@ int main(void) { @autoreleasepool {
     pixels(big,0x55667788); pixels(tex_mtl(&a[63]),0xa1b2c3d4); pixels(small,0x76543210);
     separate_storage(&pool,small.heap);
     same_cell(&pool);
+    fragment_copy(small,0x76543210);
     indirect_pixels(small,0x76543210);   // writes to other pools, offsets and formats left it intact
     atomic_colour(&pool);
     depth_planes(&pool);
     cross_size_read();
+    pool_serials();
+    reentrant_pool_upgrade();
     CHECK([g_res_objects containsObject:small.heap],"the parent heap is resident for indirect access");
-    CHECK(![g_res_objects containsObject:small],"aliases do not each register a separate allocation");
+    CHECK([g_res_objects containsObject:small],"the view parent descriptor is resident alongside its heap");
     // Different offsets, formats, CPU-visible and sparse flags cannot join this family.
     tex_t other=image(&pool,991000,64,64); other.off=10<<20; other.mem=pool.mem+other.off; mtl_tex_init(&other);
     CHECK(!objc_getAssociatedObject(tex_mtl(&other),&g_image_heap_owner_key),"single-description storage stays out of the family heaps (its memory is a recycled heap of its own, rh_texture)");
@@ -234,9 +487,10 @@ int main(void) { @autoreleasepool {
     // Finish a second submission: release calls are deferred to the next fence.
     mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
     // GPU completion publishes the fence before its feedback handler drains deferred objects.
-    dispatch_sync(g_feedback_q, ^{}); defer_drain();
+    dispatch_sync(g_feedback_q, ^{}); defer_drain(); res_commit();
     CHECK(g_image_desc.n==0,"finalization releases every recorded description");
     }
+    res_commit();   // apply descriptor retirements queued while the fixture's autorelease pool drained
     if (sw_on(rh_mode())) {   // the heap waits, resident, for the next texture it fits (rh_wait)
         int waits=0; os_unfair_lock_lock(&g_rh_lk); for (unsigned i=0;i<g_rh_n;i++) waits |= (__bridge id)g_rh[i].heap==weak_heap; os_unfair_lock_unlock(&g_rh_lk);
         CHECK(weak_heap && waits && [g_res_objects containsObject:weak_heap],"the last texture hands its heap to the recycled heaps, resident while it waits");
@@ -250,8 +504,9 @@ int main(void) { @autoreleasepool {
         CHECK(tex_mtl(&a).heap!=nil,"a recreated family allocates its backing");
         mtl_tex_release(&a); mtl_tex_release(&b); mtl_alias_drop_pool(&pool);
         mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); mtl_sub_commit(); mtl_drain();
-        dispatch_sync(g_feedback_q,^{}); defer_drain();
+        dispatch_sync(g_feedback_q,^{}); defer_drain(); res_commit();
     } }
+    res_commit();
     CHECK(g_image_heap_n==0,"repeated destruction leaves no heap owner");
     CHECK(g_dev.currentAllocatedSize<=settled+(3<<20),"repeated families do not retain their old physical allocations");
     free(mem);

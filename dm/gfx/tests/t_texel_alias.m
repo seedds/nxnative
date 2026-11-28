@@ -310,7 +310,7 @@ int main(void) { @autoreleasepool {
     CHECK(g_ua_copies == c0 + 1, "it is copied to on its read");
     CHECK(!memcmp(bytes_of(base_of(&mv2)).contents, p13.contents, SIZE), "the store reaches the ID registered again at other storage");
 
-    // 12a. Pool drop drained during blit() -> rp_end() -> ua_flush() inside ua_sync_tex() must not UAF w.
+    // 12a. Pool drop drained during rp_end() inside ua_sync_tex() must not UAF w, and drops the finalized pool's write.
     static uint8_t s11[STOR], s12[STOR];
     pool_t drop_pool = {.magic = MAGIC('P','O','O','L'), .mem = s11, .size = STOR};
     tex_t dp_w = tex2d(NVN_FORMAT_R32UI, W, H, s11), dp_r = tex2d(NVN_FORMAT_RGBA8, W, H, s11);
@@ -323,16 +323,15 @@ int main(void) { @autoreleasepool {
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &dp_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
     mtl_sub_begin(); CHECK(rp_begin() != nil, "pending RT pass opens for 12a");
     g_stat_draw++;
-    ua_drop_pool(&drop_pool);   // deferred until ua_drain_drops inside rp_end -> ua_flush -> ua_note_write
+    ua_drop_pool(&drop_pool);   // deferred until ua_drain_drops inside ua_sync_tex -> rp_end
     c0 = g_ua_copies;
     ua_sync_tex(&dp_r, mdp_r, nvn_hm_get(&g_ua_wr, &dp_w.mem), UA_RSN_DIRECT);
-    CHECK(g_ua_copies == c0 + 1, "ua_sync_tex completes safely when rp_end drains writer pool drop");
+    CHECK(g_ua_copies == c0, "ua_sync_tex safely skips copying after rp_end drains writer pool drop");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12a submission completes");
-    CHECK(!memcmp(bytes_of(mdp_r).contents, p1.contents, SIZE), "12a copied writer bytes before drop");
     R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
 
-    // 12b. When rp_end() inside ua_before_read's blit updates g_ua_wr[mem] in place to a newer RT write,
-    //      the read texture must be stamped with the earlier writer's gen, not the newer RT's gen.
+    // 12b. When rp_end() inside ua_before_read updates g_ua_wr[mem] to a newer different-format RT write,
+    //      ua_sync_tex immediately copies the newer RT pixels and stamps its gen (one copy, fresh on first read).
     static uint8_t s13[STOR];
     tex_t mut_w0 = tex2d(NVN_FORMAT_R32UI, W, H, s13), mut_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s13), mut_r = tex2d(NVN_FORMAT_R8, W * 4, H, s13);
     mtl_tex_init(&mut_w0); mtl_tex_init(&mut_rt); mtl_tex_init(&mut_r);
@@ -342,17 +341,113 @@ int main(void) { @autoreleasepool {
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &mut_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
     mtl_sub_begin(); CHECK(rp_begin() != nil, "mutating RT pass opens for 12b");
     g_stat_draw++;
-    ua_before_read(&mut_r, mmut_r);   // copies p1 from mut_w0 while rp_end updates g_ua_wr[s13] to green mut_rt
+    c0 = g_ua_copies;
+    ua_before_read(&mut_r, mmut_r);   // ends mut_rt pass first, refreshes g_ua_wr[s13] to green mut_rt, and copies it once
+    CHECK(g_ua_copies == c0 + 1, "12b mid-pass read copies newer RT pixels once");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12b first submission completes");
     R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
-    c0 = g_ua_copies;
-    sample_tex(cs_r, 27);   // must observe mut_rt's newer gen and sync green RT pixels into mut_r
-    CHECK(g_ua_copies == c0 + 1, "subsequent read sees newer RT gen after in-place g_ua_wr update");
     {
         id<MTLBuffer> got_mut = bytes_of(mmut_r);
         const uint32_t *px_mut = (const uint32_t *)got_mut.contents;
-        CHECK(px_mut[0] == 0xff00ff00u && px_mut[W * H - 1] == 0xff00ff00u, "R8 alias receives green render-pass pixels");
+        CHECK(px_mut[0] == 0xff00ff00u && px_mut[W * H - 1] == 0xff00ff00u, "R8 alias receives green render-pass pixels on first read");
     }
+    sample_tex(cs_r, 27);   // already stamped with mut_rt's gen: no redundant second copy
+    CHECK(g_ua_copies == c0 + 1, "12b subsequent read copies nothing more");
+
+    // 12c. A read whose copy ends the writer's own open pass takes the generation that pass end gave the writer:
+    //      the pass's draws are in the copied bytes. Stamped with the earlier generation the reader stayed stale,
+    //      and every later read copied the level and ended the pass again (issue #3429).
+    static uint8_t s12c[STOR];
+    tex_t own_w = tex2d(NVN_FORMAT_RGBA8, W, H, s12c), own_r = tex2d(NVN_FORMAT_R32UI, W, H, s12c);
+    mtl_tex_init(&own_w); mtl_tex_init(&own_r); mtl_reg_tex(28, &own_w, NULL); mtl_reg_tex(29, &own_r, NULL);
+    id<MTLTexture> mown_r = base_of(&own_r);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &own_w; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12c first pass opens");
+    g_stat_draw++;
+    rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12c first pass completes");
+    R.clear_c[0] = 0;
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12c second pass opens, loading the writer");
+    g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_before_read(&own_r, mown_r);   // the copy ends the pass, which notes the writer written again
+    CHECK(g_ua_copies == c0 + 1, "a read during the writer's open pass copies once");
+    id<MTL4RenderCommandEncoder> enc12c = rp_begin();
+    CHECK(enc12c != nil, "12c pass opens again after the copy");
+    ua_before_read(&own_r, mown_r);
+    CHECK(g_ua_copies == c0 + 1, "a second read in the same pass copies nothing more");
+    CHECK(g_enc == enc12c, "a second read in the same pass does not end the reopened pass");
+    g_stat_draw++;
+    rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12c second pass completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL;
+    sample_tex(cs_r, 29);
+    CHECK(g_ua_copies == c0 + 2, "a draw after the copy is copied at the next read after its pass ends");
+    {
+        id<MTLBuffer> got_own = bytes_of(mown_r);
+        const uint32_t *px_own = (const uint32_t *)got_own.contents;
+        CHECK(px_own[0] == 0xffff00ffu && px_own[W * H - 1] == 0xffff00ffu, "the reader holds the writer's render-pass pixels");
+    }
+
+    // 12d. After a mid-pass read ends the writer's pass and copies its bytes, a later read with no further draws copies nothing more.
+    static uint8_t s12d[STOR];
+    tex_t w12d = tex2d(NVN_FORMAT_RGBA8, W, H, s12d), r12d = tex2d(NVN_FORMAT_R32UI, W, H, s12d);
+    mtl_tex_init(&w12d); mtl_tex_init(&r12d); mtl_reg_tex(44, &w12d, NULL); mtl_reg_tex(45, &r12d, NULL);
+    id<MTLTexture> mr12d = base_of(&r12d);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &w12d; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0.0, 1.0, 1.0, 1.0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12d first pass opens"); g_stat_draw++; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12d first pass completes");
+    R.clear_c[0] = 0;
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12d second pass opens"); g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_before_read(&r12d, mr12d);
+    CHECK(g_ua_copies == c0 + 1, "12d mid-pass read copies once");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12d second pass submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL;
+    sample_tex(cs_r, 45);
+    CHECK(g_ua_copies == c0 + 1, "12d post-pass read with no further draws copies nothing more");
+
+    // 12e. Mid-pass read of a texture that is ITSELF the active RT in the open pass (over an older different-format writer):
+    //      ending the pass first publishes the RT as the latest writer so ua_sync_tex does not clobber it with stale bytes.
+    static uint8_t s12e[STOR];
+    tex_t old12e = tex2d(NVN_FORMAT_R32UI, W, H, s12e), self12e = tex2d(NVN_FORMAT_RGBA8, W, H, s12e);
+    mtl_tex_init(&old12e); mtl_tex_init(&self12e); mtl_reg_tex(51, &old12e, NULL); mtl_reg_tex(52, &self12e, NULL);
+    id<MTLTexture> mself12e = base_of(&self12e);
+    store_img(pr_w, 51, &old12e, p1, 0);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &self12e; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12e self-RT pass opens"); g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_before_read(&self12e, mself12e);   // must end pass, see self12e is now latest writer, and NOT overwrite with old12e
+    CHECK(g_ua_copies == c0, "12e mid-pass self-read performs zero stale copies");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12e submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+    {
+        id<MTLBuffer> got_self = bytes_of(mself12e);
+        const uint32_t *px_self = (const uint32_t *)got_self.contents;
+        CHECK(px_self[0] == 0xffff00ffu && px_self[W * H - 1] == 0xffff00ffu, "12e self-RT retains its magenta pass pixels");
+    }
+
+    // 12f. Prior whole-level zero clear followed by a non-zero render pass on the same writer:
+    //      a mid-pass read ends the pass first so the reader receives the drawn red pixels instead of stale zeros.
+    static uint8_t s12f[STOR];
+    tex_t z12f = tex2d(NVN_FORMAT_RGBA8, W, H, s12f), r12f = tex2d(NVN_FORMAT_R32UI, W, H, s12f);
+    mtl_tex_init(&z12f); mtl_tex_init(&r12f); mtl_reg_tex(53, &z12f, NULL); mtl_reg_tex(54, &r12f, NULL);
+    id<MTLTexture> mr12f = base_of(&r12f);
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &z12f; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 0, 0, 0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12f zero-clear pass opens"); rp_end();   // clear-only -> zero_clear=1
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12f zero-clear pass completes");
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(1.0, 0.0, 0.0, 1.0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "12f red draw pass opens"); g_stat_draw++;
+    uint64_t z0 = g_ua_zero_fills; c0 = g_ua_copies;
+    ua_before_read(&r12f, mr12f);
+    CHECK(g_ua_copies == c0 + 1 && g_ua_zero_fills == z0, "12f mid-pass read copies drawn red pixels instead of stale zero-fill");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "12f red draw submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+    {
+        id<MTLBuffer> got_z = bytes_of(mr12f);
+        const uint32_t *px_z = (const uint32_t *)got_z.contents;
+        CHECK(px_z[0] == 0xff0000ffu && px_z[W * H - 1] == 0xff0000ffu, "12f reader receives drawn red pixels");
+    }
+    sample_tex(cs_r, 54);
+    CHECK(g_ua_copies == c0 + 1, "12f subsequent read copies nothing more");
 
     // 13. ua_prepare_bindless calls pool_seen_scan() with g_pool_walk = 1 so scanned IDs are not stamped as slot-bind uses.
     (void)pool_seen_gpu();
@@ -371,6 +466,127 @@ int main(void) { @autoreleasepool {
     CHECK(g_pool_walk == 0, "g_pool_walk is restored after ua_prepare_bindless");
     CHECK(g_treg[27].used == 0, "ua_prepare_bindless does not stamp scanned IDs as slot-bind uses");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "13 submission completes");
+
+    // 14. Active level-0 colour attachment in g_ua_bdirty must not split an open pass in ua_prepare_bindless
+    //     (which would otherwise trigger rp_end -> ua_flush -> ua_note_write -> re-dirty -> 1-draw pass collapse),
+    //     and must still sync once a later compute dispatch or non-matching pass reads bindless textures.
+    static uint8_t s14[STOR];
+    tex_t act_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s14), act_al = tex2d(NVN_FORMAT_R32UI, W, H, s14);
+    mtl_tex_init(&act_rt); mtl_tex_init(&act_al);
+    mtl_reg_tex(42, &act_rt, NULL); mtl_reg_tex(43, &act_al, NULL);
+    id<MTLTexture> mact_al = base_of(&act_al);
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_typed[seen_sec((int)MTLTextureType2D)][43 >> 5] |= 1u << (43 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    NvShader *fs_bindless14 = [NvShader new];
+    fs_bindless14->rf.nb = 1;
+    fs_bindless14->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_UINT};
+    NvProg *pr_bindless14 = [NvProg new]; pr_bindless14->sh[1] = fs_bindless14;
+    NvShader *cs_bindless14 = [NvShader new];
+    cs_bindless14->rf.nb = 1;
+    cs_bindless14->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_UINT};
+    // First pass writes green into act_rt and ends, pushing act_rt into g_ua_bdirty.
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &act_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "14 first pass opens");
+    g_stat_draw++; rp_end();
+    CHECK(g_nua_bdirty > 0, "14 first pass end leaves act_rt dirty for bindless aliases");
+    // Second pass reopens on act_rt (e.g. after a mid-pass split) with blue clear; bindless draw inside it must not split!
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 0, 1, 1);
+    id<MTL4RenderCommandEncoder> enc14 = rp_begin();
+    CHECK(enc14 != nil, "14 second pass opens on act_rt");
+    g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_prepare_prog(pr_bindless14, 0x1f);
+    CHECK(g_enc == enc14, "14 ua_prepare_prog does not split open render pass for active RT in g_ua_bdirty");
+    CHECK(g_ua_copies == c0, "14 ua_prepare_prog performs zero alias copies while target is active RT");
+    rp_end();
+    // Subsequent compute dispatch (even while R.has_rt still holds act_rt) must sync the final blue pixels once.
+    ua_prepare_shader(cs_bindless14, 5);
+    CHECK(g_ua_copies == c0 + 1, "14 subsequent compute dispatch syncs act_rt to bindless alias once");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "14 submission completes");
+    {
+        id<MTLBuffer> got14 = bytes_of(mact_al);
+        const uint32_t *px14 = (const uint32_t *)got14.contents;
+        CHECK(px14[0] == 0xffff0000u && px14[W * H - 1] == 0xffff0000u, "14 bindless alias receives final blue RT pixels");
+    }
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+
+    // 14b. Recycled bindless slot registered mid-pass over an active R11G11B10F RT (Ocarina of Time 1.1.1, issue #3429):
+    //      inherits pool_seen from its prior texture, is deferred while the RT is active (0 mid-pass splits/copies), and syncs once after the pass.
+    static uint8_t s14b[STOR], s14b_old[STOR];
+    tex_t scene14b = tex2d(NVN_FORMAT_R11G11B10F, W, H, s14b), old14b = tex2d(NVN_FORMAT_RGBA8, W, H, s14b_old);
+    mtl_tex_init(&scene14b); mtl_tex_init(&old14b);
+    mtl_reg_tex(49, &scene14b, NULL); mtl_reg_tex(50, &old14b, NULL);
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_typed[seen_sec((int)MTLTextureType2D)][50 >> 5] |= 1u << (50 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    NvShader *fs_bindless_f = [NvShader new];
+    fs_bindless_f->rf.nb = 1;
+    fs_bindless_f->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT};
+    NvProg *pr_bindless_f = [NvProg new]; pr_bindless_f->sh[1] = fs_bindless_f;
+    NvShader *cs_bindless_f = [NvShader new];
+    cs_bindless_f->rf.nb = 1;
+    cs_bindless_f->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT};
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &scene14b; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(1.0, 0.5, 0.25, 1.0);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "14b first pass opens"); g_stat_draw++; rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "14b first pass completes");
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0.25, 0.75, 1.0, 1.0);
+    mtl_sub_begin();
+    id<MTL4RenderCommandEncoder> enc14b = rp_begin();
+    CHECK(enc14b != nil, "14b second scene pass opens");
+    g_stat_draw++;
+    tex_t rgb9_14b = tex2d(NVN_FORMAT_RGB9E5F, W, H, s14b);
+    mtl_tex_init(&rgb9_14b);
+    mtl_reg_tex(50, &rgb9_14b, NULL);   // recycled slot 50 retains pool_seen bit
+    c0 = g_ua_copies;
+    ua_prepare_prog(pr_bindless_f, 0x1f);
+    CHECK(g_enc == enc14b, "14b mid-pass recycled bindless alias does not split active scene RT pass");
+    CHECK(g_ua_copies == c0, "14b mid-pass recycled bindless alias performs zero copies while scene RT is active");
+    rp_end();
+    ua_prepare_shader(cs_bindless_f, 5);
+    CHECK(g_ua_copies == c0 + 1, "14b post-pass compute dispatch syncs active scene RT to recycled bindless alias once");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "14b second pass completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+
+    // 15. Non-RT fragment shader image store (from_rt=0) in an open pass followed by bindless draws with TWO
+    //     live bindless aliases in the same batch: ua_active_rt_mem does not cover non-RT image stores, so the
+    //     first bindless draw ends the pass and refreshes g_ua_wr for BOTH aliases; the next bindless draw copies nothing.
+    static uint8_t s15[STOR], s15_rt[STOR];
+    tex_t rt15 = tex2d(NVN_FORMAT_RGBA8, W, H, s15_rt);
+    tex_t img_w15 = tex2d(NVN_FORMAT_R32UI, W, H, s15), img_al15 = tex2d(NVN_FORMAT_RGBA8, W, H, s15), img_al15b = tex2d(NVN_FORMAT_RGB9E5F, W, H, s15);
+    img_w15.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+    mtl_tex_init(&rt15); mtl_tex_init(&img_w15); mtl_tex_init(&img_al15); mtl_tex_init(&img_al15b);
+    mtl_reg_tex(46, &rt15, NULL); mtl_reg_tex(47, &img_w15, NULL); mtl_reg_tex(48, &img_al15, NULL); mtl_reg_tex(55, &img_al15b, NULL);
+    (void)base_of(&img_al15); (void)base_of(&img_al15b);
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_typed[seen_sec((int)MTLTextureType2D)][48 >> 5] |= 1u << (48 & 31);
+    g_seen_typed[seen_sec((int)MTLTextureType2D)][55 >> 5] |= 1u << (55 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    NvShader *fs_img_w = [NvShader new];
+    fs_img_w->rf.nb = 1; fs_img_w->rf.b[0] = (nvn_rbind){.kind = NVN_RB_IMG, .dtt = MTLTextureType2D, .reg = 0, .rw = 1};
+    NvProg *pr_img_w = [NvProg new]; pr_img_w->sh[1] = fs_img_w;
+    S.img[1][0] = 47;
+    mtl_sub_begin(); image_prepare(pr_img_w, 0x2);
+    enc_b_copy_buffer_texture(blit(), p1, 0, ROW, SIZE, MTLSizeMake(W, H, 1), bcp_have(&img_w15), 0, 0, MTLOriginMake(0, 0, 0));
+    ua_flush(0);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "15 initial image store completes");
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &rt15; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 0, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "15 render pass opens on rt15");
+    image_prepare(pr_img_w, 0x2);   // adds img_w15 to g_ua_pend with from_rt=0
+    g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_prepare_prog(pr_bindless_f, 0x1f);   // ends pass once, refreshes g_ua_wr for both img_al15 and img_al15b
+    CHECK(g_ua_copies == c0 + 2, "15 first bindless draw syncs non-RT image store to both aliases once");
+    R.clear_c[0] = 0;
+    id<MTL4RenderCommandEncoder> enc15 = rp_begin();
+    CHECK(enc15 != nil, "15 render pass reopens on rt15");
+    g_stat_draw++;
+    ua_prepare_prog(pr_bindless_f, 0x1f);
+    CHECK(g_ua_copies == c0 + 2, "15 second bindless draw without new image write copies nothing more");
+    CHECK(g_enc == enc15, "15 second bindless draw does not split reopened pass");
+    rp_end();
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "15 submission completes");
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL;
 
     printf("t_texel_alias: %d checks, %d failed (ua_copies=%llu, zero_fills=%llu)\n", checks, failed, (unsigned long long)g_ua_copies, (unsigned long long)g_ua_zero_fills);
     return failed != 0;

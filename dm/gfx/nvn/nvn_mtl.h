@@ -8,6 +8,7 @@
 void mtl_init(void);
 void mtl_vbuf_stats(uint64_t *resolve, uint64_t *reuse, uint64_t *set, uint64_t *skip, uint64_t *copies, uint64_t *copy_bytes);
 void mtl_set_depth_zero(int on);          // NVN depth mode: 1 = near is 0 (D3D / Metal), 0 = near is -w (GL, NVN's default); picks the vertex shaders' entry point (see shader_load in nvn_mtl.m)
+void mtl_device_reset_depth(void);        // Reset depth mode to NVN's default (near = -w) and clear the per-device loaded-vertex counter on nvnDeviceInitialize
 void mtl_set_origin_lower_left(int on);   // NVN window origin: 1 = lower left (GL, NVN's default), 0 = upper left (D3D / Metal); see nvn_mtl.m
 void mtl_set_queue_origin_lower_left(int on); // Raster flip captured at NVN queue creation; selected under the submit lock.
 void bf_want_note(const char *key);
@@ -81,6 +82,17 @@ uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_v
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
 void mtl_set_fstep_fine(int on);                   // late frames at a 30 fps cap's hold 2 are shown on the 60 Hz link at frame latency 2 (hle_nvn.c fstep_tick)
+void mtl_present_edr(float potential, float live);   // the screen's EDR headroom, the most it can show and what it shows now (front ends; DM_HDR's layer and vi peak). Any thread
+#define MTL_HDR_PAPER_WHITE 203   // nits: BT.2408's reference white, the paper white vi reports and the HDR present's EDR 1.0
+// HDR modes (DM_HDR: 0 Off, 1 BT.2446, 2 Game's HDR), for a front end's menu. Any thread
+int mtl_hdr_requested(void);                                         // DM_HDR as the host reads it now
+void mtl_hdr_set_requested(int mode);                                // change the HDR mode while the game runs (0..2, anything else is 0); avoids runtime setenv
+int mtl_hdr_game_native(void);                                       // the game can render HDR itself: its modules import nn::vi::QueryDisplayHdrStatus
+int mtl_hdr_mode_shown(int requested, int game_native);              // the mode that runs: Game's HDR for a game without HDR is BT.2446
+int mtl_hdr_mode_allowed(int mode, int game_native, int screen_edr); // Off always; the HDR modes on a screen with EDR headroom, Game's HDR for a game with HDR
+int mtl_hdr_mode_next(int shown, int game_native, int screen_edr);  // the next allowed mode after shown (a cycling shortcut)
+int mtl_hdr_vi(uint16_t *peak);   // vi::QueryDisplayHdrStatus (hle_vi.c): 1 = HDR output with that peak in nits (DM_HDR=2 on a screen with EDR headroom), 0 = SDR
+int mtl_hdr_vi_answer(void);   // the last answer mtl_hdr_vi gave the game, taken on the game's thread when it queues a present (nvn_queue_present, mtl_present_ext)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
 int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check (copy == 0 checks ticket only)
 int mtl_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);   // bounded ticket wait: 1 ready, 0 timed out

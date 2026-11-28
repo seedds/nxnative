@@ -7,6 +7,7 @@ an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
+import io
 import struct
 import sys
 import zlib
@@ -177,10 +178,21 @@ def nsgz():
     return b'HSPK' + bytes(0x41c) + ss.NSGZ + struct.pack('<Q', len(packed)) + packed
 
 
+def apf():
+    """Vector Unit APF v7 package with one LZ4-compressed GLSLC shader asset."""
+    import lz4.block
+    body = glslc([VS, PS])
+    raw = struct.pack('<6I', 1, len(body), 0, len(body), 0, len(body)) + body
+    packed = lz4.block.compress(raw, store_size=False)
+    directory = b'VuShaderAsset/Fx/A\0' + struct.pack('<4I2H', ss.APF_HEADER, len(raw), len(packed), ss.fnv1a32(raw), 32, 5)
+    h = ss.VU_APF + struct.pack('<5I', 7, ss.APF_HEADER + len(packed), 1, len(directory), ss.fnv1a32(directory)) + b'Switch'.ljust(32, b'\0')
+    return h + struct.pack('<I', ss.fnv1a32(h)) + packed + directory
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx(), 'nsgz': nsgz()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx(), 'nsgz': nsgz(), 'apf': apf()}
 
 
 def check(data):
@@ -189,6 +201,8 @@ def check(data):
         elif data[:4] == b'NXSD':
             found = ss.nxsd_shaders(data, '/fuzz.nxsd'); ss.separable_pairs(ss.uniq_keys(found))
         elif data[:4] == b'arh1': ss.arh_entries(data); return
+        elif data[:4] == ss.VU_APF:
+            found = []; ss.apf_shaders_f(io.BytesIO(data), len(data), '/fuzz.apf', found)
         else:
             found = []; ss.scan_blob(data, '/fuzz', found)
             if not found and data[:4] != b'MSHD' and GLSLC in data: found += ss.glslc_shaders(data, '/fuzz', need=False)

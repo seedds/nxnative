@@ -104,9 +104,16 @@ class XcodePipelineTests(unittest.TestCase):
             self.assertEqual(environment['DM_TEAM_ID'], 'ABCDEFGHIJ')
             self.assertEqual(Path(environment['DM_XCODE_PROJECT_DIR']), root / f'{registered.id}_build/xcode')
             register.assert_called_once()
-            self.assertEqual(mocks['derive_profile'].call_count, int(derived))
+            derive_profile = mocks['derive_profile']
+            if derived or graphics == 'nvn':
+                derive_profile.assert_called_once()
+                self.assertEqual(derive_profile.call_args.kwargs.get('shader_only', False), not derived)
+            else:
+                derive_profile.assert_not_called()
             if graphics == 'nvn':
-                self.assertEqual(mocks['split_shaders'].call_args.args[8], derived)
+                split_shaders = mocks['split_shaders'].call_args
+                self.assertEqual(split_shaders.args[8], derived)
+                self.assertTrue(split_shaders.kwargs['write_tables'])
             else:
                 builder = mocks['build_vk_shaders' if graphics == 'vulkan' else 'build_gl_shaders']
                 self.assertTrue(builder.call_args.kwargs.get('reuse', True))   # reused (the default): a damaged copy is keyed by its files' times, not refused

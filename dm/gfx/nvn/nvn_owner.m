@@ -182,6 +182,8 @@ static void alias_index(const alias_key *k, int add) {
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → the submission of its last lookup or creation (own_hook_submission; alias_take_over spares entries looked up lately)
 static CFMutableSetRef g_alias_set;                           // the textures in the sharing table (non-owning; "is this shared")
 static uint64_t g_alias_evicted, g_alias_taken, g_alias_pool_entries, g_alias_looks;   // shared textures evicted on pool Finalize / when another texture took over their storage, serial entries that went with their pool, and entries takeovers looked at, in total (the memory report)
+static _Atomic uint64_t g_alias_takeover_gen;
+uint64_t own_alias_takeover_gen(void) { return atomic_load_explicit(&g_alias_takeover_gen, memory_order_acquire); }
 int own_shared_locked(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
 int own_keeps_locked(id o) { return tex_object_pinned(o) || own_shared_locked(o); }
 static void obj_drop(id o) { own_hook_drop(o, own_keeps_locked(o)); }   // caller holds g_smu
@@ -242,7 +244,7 @@ static uint32_t alias_take_over(const alias_key *nk, uint64_t now) {
         }
     }
     for (uint32_t j = 0; j < n; j++) alias_del(&ks[j]);
-    if (n) { own_note(0); g_alias_taken += n; }
+    if (n) { atomic_fetch_add_explicit(&g_alias_takeover_gen, 1, memory_order_release); own_note(0); g_alias_taken += n; }
     return n;
 }
 uint32_t own_alias_take_over_locked(const alias_key *k) { return alias_take_over(k, own_hook_submission()); }

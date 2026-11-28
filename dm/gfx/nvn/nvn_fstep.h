@@ -38,6 +38,8 @@
 // it stayed at hold 3 (18 fps, work 50 ms, GPU 12.5 ms) for about 1,470 presents where hold 1 held at 16.6 ms before. A game whose CPU really needs the longer hold fails the
 // probe; these probes have their own hold-off (uhold), doubled after each one fails up to FSTEP_UHOLD_MAX (60 s), so such a game pays one failed probe a minute at most
 // and not one every 8 s. Late frames with the GPU idle still step up after FSTEP_RUN of them in a row: a CPU-heavy scene that draws almost nothing is not a load.
+// The caller may also name a hold between kmin and k that the GPU's time at kmin's clock fits but kmin does not (gpu_to, from nvn_fgpu_between below): when nothing calls
+// for kmin, a probe goes there. Its hold-off is uhold too, since there as well the CPU may be what needs the longer hold.
 // Late frames at the longest hold allowed (kmax: 2 at a 30 fps cap, or kmin with fps_hold off) cannot step up. The caller's display link at the cap's rate (30 Hz) can then only
 // show a late frame on its next tick, 66.7 ms after the one before: Ocarina of Time on an iPhone at the launcher's 30 fps cap (frames 36.5 ms, GPU 32 ms) left one tick in 9 empty,
 // 33 intervals of 66.7 ms in each 300 and the rest 33.3, at 27 fps. So the same late frames that would step up (3 in a row, or FSTEP_RUN with the GPU idle among them) set fine:
@@ -86,7 +88,7 @@ typedef struct {
     double debt;              // real time the game is behind, in vsyncs
     int late_run, fit_run, trial;   // late frames in a row; frames in a row whose cost fits k − 1; frames left of a trial at k − 1 (0 = none)
     int sgrace;               // frames left of the grace after a stall (FSTEP_STALL or settle), whose lateness does not count toward a step up, fine mode, or trial completion
-    int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at kmin has not ended yet; frames left of the probe's grace
+    int probe, grace;         // 1: the trial in progress is a probe; 2: a probe held and its run at its hold has not ended yet; frames left of the probe's grace
     int ramp;                 // set by the caller (kept): 1 = a probe's grace is renewed while its frames keep getting cheaper (FSTEP_RAMP; the host's DM_FSTEP_PROBE_RAMP)
     double pa, pb; int plate, ptotal;   // the current grace window: the cost of its first and second halves (sums), its late frames; grace frames this probe has taken in all
     double hold, since;       // vsyncs a trial waits for after a step up; vsyncs since the last step up
@@ -103,10 +105,11 @@ typedef struct {
                               // crun when the last run of FSTEP_HOLD_MAX or more ended in a step up or a cap change (0 = none yet)
     double ccur; int ck, cn;  // the cost of the frames on time at the longer hold ck (running mean) and their count
     int gpu_on; double gpu;   // set by the caller before each call, then cleared: 1 = gpu is the frame's GPU time (the latest finished frame's, in the unit of shown); 0 = not reported
+    int gpu_to;               // set by the caller before each call, then cleared: a hold between kmin and k that the GPU's time at kmin's clock fits (nvn_fgpu_between), 0 = none
     int urun;                 // frames in a row at a hold above kmin whose GPU time fits k − 1 and that waited for nothing in the host's pacing (nvn_fstep_unpaced)
-    int ilate_run, uprobe;    // late frames in a row, those with the GPU idle included; 1 = the probe running was started by nvn_fstep_unpaced alone
+    int ilate_run, uprobe;    // late frames in a row, those with the GPU idle included; 1 = the probe running was started by nvn_fstep_unpaced alone, 2 = it goes to gpu_to
     int up_idle;              // 1 = the last step up came from FSTEP_RUN late frames with the GPU idle among them (for the caller's log)
-    double uhold;             // vsyncs since the last step up before such a probe: 1 s, doubled after each one fails up to FSTEP_UHOLD_MAX, back to 1 s when kmin holds
+    double uhold;             // vsyncs since the last step up before such a probe (uprobe): 1 s, doubled after each one fails up to FSTEP_UHOLD_MAX, back to 1 s when kmin holds or a probe's run lasts
     int ckmin;                // the kmin run, crun and cref belong to
     double cref_at[FSTEP_KMIN_MAX + 1];   // cref of each kmin, kept while another kmin is in force
     double over[FSTEP_RUN], over_sum; int over_i, over_k;   // the last FSTEP_RUN frames at the hold over_k: shown − k of each (clamped), their sum; the next slot
@@ -154,6 +157,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (!s->hold) s->hold = hold0;
     if (!s->uhold) s->uhold = hold0;
     int gpu_on = s->gpu_on; double gpu = s->gpu; s->gpu_on = 0; s->gpu = 0;   // cleared on every return
+    int gto = s->gpu_to; s->gpu_to = 0;
     int settle = s->settle; s->settle = 0;
     int scr = s->screen; s->screen = 0;
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
@@ -177,6 +181,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->debt < -u) s->debt = -u;   // ahead (a frame shorter than its step): nothing slows the game down, so at most one vsync is remembered
     s->since += dt; s->tsince += dt;
     if (s->tpend && s->tsince >= hold_max) { s->tpend = 0; s->hold = hold0; }   // the trial's run lasted
+    if (s->probe == 2 && s->since >= hold_max) s->hold = s->uhold = hold0;   // the probe's run at its hold lasted (an intermediate hold can step down again without stepping up first)
     int cap_probe = kmin < s->kmin && s->kmin <= FSTEP_KMIN_MAX && s->k > kmin;
     if (cap_probe) {   // the cap rose: a probe at once, whose grace covers the clocks still set for the longer hold
         s->k = kmin; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->uprobe = 0; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = s->ilate_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
@@ -226,7 +231,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (s->trial || s->tpend || (s->probe == 2 && s->since < hold_max)) {
             s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max;
             if (s->uprobe) s->uhold = s->uhold * 2 < uhold_max ? s->uhold * 2 : uhold_max;   // a CPU that needs the hold: probed ever more rarely
-        } else if (s->probe == 2) s->hold = s->uhold = hold0;   // the probe's run at kmin lasted
+        } else if (s->probe == 2) s->hold = s->uhold = hold0;   // the probe's run at its hold lasted
         if (held == kmin && s->run >= hold_max) { s->cref = s->crun; s->uhold = hold0; }   // kmin held 8 s at this cost
         s->up_idle = s->late_run < 3;
         s->k = want; s->ups++; s->late_run = s->ilate_run = s->fit_run = s->urun = 0; s->since = 0; s->probe = s->uprobe = 0; s->tpend = 0;
@@ -239,10 +244,13 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (s->k >= kmax && (s->late_run >= 3 || s->ilate_run >= FSTEP_RUN)) { if (!s->fine) s->fines++; s->fine = 1; s->fine_ok = 0; }
     else if (s->fine) { if (!sgrace) s->fine_ok = late && !idle ? 0 : s->fine_ok + dt; if (s->k < kmax || s->fine_ok >= hold_max) s->fine = 0; }
     if (!late) s->fit_run = s->k > kmin && fitc <= FSTEP_FIT * (s->k - q) ? s->fit_run + 1 : 0;
-    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k -= q; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
-    else if ((slow || nvn_fstep_same(s) || (nvn_fstep_unpaced(s) && s->since >= s->uhold)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
-        s->uprobe = !slow && !nvn_fstep_same(s);
-        s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = s->ilate_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // urun ends with the next frame at kmin (kept for the caller's log)
+    if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k -= q; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; s->probe = s->uprobe = 0; }
+    else if (s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline; else to the hold between that the GPU fits
+        int to = slow || nvn_fstep_same(s) || (nvn_fstep_unpaced(s) && s->since >= s->uhold) ? kmin : gto > kmin && gto < s->k && s->since >= s->uhold ? gto : 0;
+        if (to) {
+            s->uprobe = to > kmin ? 2 : !slow && !nvn_fstep_same(s);
+            s->k = to; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = s->ilate_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // urun ends with the next frame at kmin (kept for the caller's log)
+        }
     }
     s->step = s->k + (s->debt >= 1 && s->k < smax);
     s->paid += s->step > s->k;
@@ -268,6 +276,15 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // The ratio is the largest the failed probes gave, and one probe alone does not set it: a probe can fail before the clock is at its top (the iOS thermal cap's end, where it
 // took 1 s), which reads as a ratio too small, and one too small keeps a scene that fits kmin at the longer hold, where one too large costs a failed probe now and then, as
 // before the ratio, spaced out by the hold's doubling. A probe that holds gives none: it needs no gate, and its frames may be a lighter scene (a menu) than the hold's
+// The reference learns only the frames kmin holds (GPU time within FSTEP_LATE of kmin) once it has one; before that, every frame at kmin, as a game that starts in a scene kmin
+// does not hold has nothing else. A frame over kmin is a scene kmin does not hold, often at a clock still rising for it: Ocarina of Time's first heavy frames at hold 1 on an
+// M1 Pro, as a new area streamed in, took 2.0–2.7 vsyncs, where a probe's clock in another run gave 1.8. Stalls among them held off the step up for about 75 frames, the
+// reference rose to about 2, and hold 3's 2.0 was not slowed against it: no probe came in 25 s. A reference too low costs two failed probes, after which the ratio decides;
+// one too high keeps the longer hold for good, as no probe comes to give a ratio.
+// A scene that does not fit kmin by the ratio may still fit a hold between: a probe goes to the shortest hold that its time at kmin's clock fits within FSTEP_FIT
+// (nvn_fgpu_between; nvn_fstep.gpu_to). The M1 Pro lowers its clock at hold 3 until the work fills about two thirds of the frame, 2.0 vsyncs, over the fit of hold 2, which holds the
+// scene at 1.9. With hold 3's ratio at 1.11 (1.8 at hold 1) nothing tried hold 2, and the game stayed at 20 fps for minutes where 30 held before and after. No probe has measured
+// that hold, hence the margin; its frames give no ratio, and its hold-off is the unpaced probes' (nvn_fstep.uhold), as there too the CPU may need the longer hold
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
 #define FSTEP_GPU_PN 3        // a probe's frames at kmin after the first half of its grace before it gives a ratio
@@ -280,6 +297,7 @@ typedef struct {
     double pre, post; int pre_k, pn, was, fail;   // the last probe: the time at the hold pre_k it started from (0: none to compare), its frames' GPU time at kmin and their count; nvn_fstep.probe last
                                                   // frame; it failed, and its ratio waits for FSTEP_GPU_N frames at the hold after it
     double ratio_at[FSTEP_KMIN_MAX + 1][FSTEP_HOLD_TOP + 1]; int ratio_n[FSTEP_KMIN_MAX + 1][FSTEP_HOLD_TOP + 1];   // [kmin][k] (in ticks of 1/120 s with nvn_fstep.t120): GPU time at hold k against kmin's, the largest of the failed probes', and their count
+    int held_at[FSTEP_KMIN_MAX + 1];   // 1: ref_at[kmin] is learned from frames kmin holds; 0: from every frame at kmin, none held yet
 } nvn_fgpu;
 // The hold's ratio when it decides (0: the reference does)
 static inline double nvn_fgpu_ratio(const nvn_fgpu *g) {
@@ -307,7 +325,14 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, const nvn_fstep 
     if (probe == 1 && k <= kmin && gpu > 0 && s->grace <= FSTEP_GRACE / 2) { g->post = g->pn ? g->post + (gpu - g->post) / 4 : gpu; g->pn++; }   // weighted to the last frames: the clock at its highest
     g->ref = g->ref_at[kmin]; g->kmin = kmin;
     if (gpu <= 0) return nvn_fgpu_slow(g);
-    if (k <= kmin) { if (probe != 1) g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu; g->n = 0; g->k = k; g->fail = 0; return 0; }
+    if (k <= kmin) {
+        int held = gpu <= kmin + FSTEP_LATE * (s->t120 ? 2 : 1);   // a frame kmin holds (FSTEP_LATE in ticks with t120); one over it is a scene kmin does not hold, often at a clock still rising for it
+        if (probe != 1 && (held || !g->held_at[kmin])) {
+            if (held && !g->held_at[kmin]) { g->held_at[kmin] = 1; g->ref = 0; }   // the first one: the reference starts over from it
+            g->ref = g->ref_at[kmin] = g->ref > 0 ? g->ref + (gpu - g->ref) / 32 : gpu;
+        }
+        g->n = 0; g->k = k; g->fail = 0; return 0;
+    }
     if (k != g->k) { g->k = k; g->n = 0; }
     g->n++; g->cur = g->n > 1 ? g->cur + (gpu - g->cur) / 8 : gpu; g->avg = g->n > 1 ? g->avg + (gpu - g->avg) / (g->n < 32 ? g->n : 32) : gpu;
     if (g->fail && g->n >= FSTEP_GPU_N && k <= FSTEP_HOLD_TOP) {   // the failed probe's ratios: this hold's after it, and the hold it started from (the smaller time where they are one)
@@ -317,6 +342,15 @@ static inline int nvn_fstep_gpu_slowed(nvn_fgpu *g, double gpu, const nvn_fstep 
         g->fail = 0;
     }
     return nvn_fgpu_slow(g);
+}
+// After nvn_fstep_gpu_slowed: the hold a probe goes to when the ratio says the scene does not fit kmin, the shortest between kmin and the current one that its time at kmin's
+// clock fits within FSTEP_FIT (0: none, no ratio yet, or kmin fits it: nvn_fgpu_slow); in ticks of 1/120 s with s->t120, the holds nvn_fstep_next takes there
+static inline int nvn_fgpu_between(const nvn_fgpu *g, const nvn_fstep *s) {
+    double r = nvn_fgpu_ratio(g);
+    if (r <= 0 || g->n < FSTEP_GPU_N || g->cur / r <= g->kmin) return 0;
+    const int q = s->t120 && g->kmin % 2 == 0 ? 2 : 1;   // the holds nvn_fstep_next steps by: whole vsyncs, or one tick at 40 fps
+    for (int j = g->kmin + q; j < g->k; j += q) if (g->cur / r <= FSTEP_FIT * j) return j;
+    return 0;
 }
 
 // The frame step state page's target (+0 float fps, 0 = every stub runs the game's own instructions) and step unit (+0x38 u32: 120 = ticks of 1/120 s for FRAME_STEP_120 stubs,

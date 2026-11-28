@@ -50,7 +50,9 @@ int main(void) { @autoreleasepool {
     const pc_ent *c = pc_get(other, 16);
     CHECK("another page of a region already seen is found in the cache", c != NULL);
     CHECK("through the region table", c && in_table(c, t_pc.w) && c == &t_pc.w[pc_slot_w(other)]);
-    CHECK("as pool A", c && c->lo == A && c->hi == a_end && c->base == A);
+    CHECK("as pool A with cached buffer length", c && c->lo == A && c->hi == a_end && c->base == A && c->blen == a_size);
+    CHECK("the next lookup in the same pool hits the last-hit slot", pc_get(other + 0x20, 16) == &t_pc.last);
+    { uint64_t blen = 0; CHECK("mtl_gpu_addr_len answers it with cached length", mtl_gpu_addr_len(other, 16, &mb, &mo, &gpu, &blen) && mo == other - A && blen == a_size); }
     CHECK("mtl_gpu_addr answers it", mtl_gpu_addr(other, 16, &mb, &mo, &gpu) && mo == other - A);
     CHECK("without the lock and the pool index", slow_lookups(A) == slow0);
     { void *mb2 = NULL; uint64_t mo2 = 0; CHECK("mtl_addr finds the same buffer", mtl_addr(other, 16, &mb2, &mo2) && mb2 == mb && mo2 == mo && slow_lookups(A) == slow0); }
@@ -90,7 +92,28 @@ int main(void) { @autoreleasepool {
     c = pc_get(A2 + 0x9000, 16);
     CHECK("the new pool's region answers with the new pool", c && c->lo == A2 && c->base == A2 && c->hi == A2 + a2_size);
     CHECK("at the new offset", mtl_gpu_addr(A2 + 0x9000, 16, &mb, &mo, &gpu) && mo == 0x9000);
-    mtl_pool_del((void *)(uintptr_t)A2); mtl_pool_del((void *)(uintptr_t)C); for (int r = 0; r < OTHERS; r++) mtl_pool_del((void *)(uintptr_t)(B + (uint64_t)r * REGION)); mtl_drain(); munmap(mem, n);
+
+    // A sparse run added via mtl_pool_replace materializes its Metal buffer lazily on first lookup; blen must match the materialized length, not 0
+    uint64_t S = B + 22ull * REGION; const uint64_t s_size = REGION;
+    const void *s_add[1] = {(const void *)(uintptr_t)S};
+    const uint64_t s_sz[1] = {s_size};
+    mtl_pool_replace(NULL, 0, s_add, s_sz, 1);
+    { uint64_t blen = 0;
+      CHECK("a lazily materialized sparse run reports its materialized buffer length", mtl_gpu_addr_len(S + 0x100, 16, &mb, &mo, &gpu, &blen) && mo == 0x100 && blen == s_size);
+      const pc_ent *sc = pc_get(S + 0x200, 16);
+      CHECK("and caches that length in pc_ent", sc && sc == &t_pc.last && sc->blen == s_size); }
+    mtl_pool_del((void *)(uintptr_t)S);
+
+    // Claiming the replay-thread global pool table routes this thread to g_pc_rep and still invalidates on g_pool_gen changes
+    mtl_pc_claim();
+    CHECK("mtl_pc_claim routes the claiming thread to g_pc_rep", &t_pc == &g_pc_rep);
+    { uint64_t blen = 0;
+      CHECK("replay-thread lookup populates g_pc_rep", mtl_gpu_addr_len(C + 0x1000, 16, &mb, &mo, &gpu, &blen) && mo == 0x1000 && blen == 0x8000);
+      CHECK("and hits g_pc_rep.last", pc_get(C + 0x1040, 16) == &g_pc_rep.last && g_pc_rep.gen == atomic_load(&g_pool_gen)); }
+    mtl_pool_del((void *)(uintptr_t)C);
+    CHECK("removing a pool invalidates g_pc_rep via pool_gen_cur", pc_get(C + 0x1000, 16) == NULL && !mtl_gpu_addr(C + 0x1000, 16, &mb, &mo, &gpu));
+
+    mtl_pool_del((void *)(uintptr_t)A2); for (int r = 0; r < OTHERS; r++) mtl_pool_del((void *)(uintptr_t)(B + (uint64_t)r * REGION)); mtl_drain(); munmap(mem, n);
     printf("t_pool_region: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

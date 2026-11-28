@@ -129,6 +129,7 @@ int main(void) { @autoreleasepool {
         uint64_t expected_gpu = old_arena->gpu + expected_off;
 
         uint64_t p_before = patch_n();
+        g_arena_epoch++; // force cbsize_table_u to allocate so this test exercises arena rollover inside patch
         RUN2(vc, pvc);   // patched encode across arena rollover: x[0] += u2[0] + 1 (= 17 -> total 19)
         CHECK(patch_n() == p_before + 1, "cbsize shader used args_cbuf_only patch path");
         CHECK(g_cur_arena != old_arena, "cbsize_table inside patch rolled over to a new arena");

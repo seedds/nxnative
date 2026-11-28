@@ -265,8 +265,18 @@ typedef struct { int32_t prim, itype, count, base_vertex, base_instance, instanc
 // Games size command memory by what nvnCommandBufferGetCommandMemoryUsed reports, so a plain draw must not take more of it than the real driver's commands do. Breath of the Wild
 // records each mesh's draw into a scratch command buffer and reserves that many bytes per mesh for the model's prerecorded draws, in the heap its resource size table sizes:
 // at 0x50 bytes per recorded draw (0x30 now, with its END) three models needed one 4 KB page more than their table entry, and loading them crashed (main+0x155a7a4)
-static inline const p_draw *draw_rec(const void *a, uint32_t size, p_draw *t) { if (size - 8 >= sizeof *t) return a; memset(t, 0, sizeof *t); memcpy(t, a, size - 8); return t; }
-static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_draw_idx *t) { if (size - 8 >= sizeof *t) return a; memset(t, 0, sizeof *t); memcpy(t, a, size - 8); return t; }
+static inline const p_draw *draw_rec(const void *a, uint32_t size, p_draw *t) {
+    uint32_t n = size - 8;
+    if (n >= sizeof *t) return a;
+    if (__builtin_expect(n == offsetof(p_draw, ind), 1)) { memcpy(t, a, offsetof(p_draw, ind)); t->ind = 0; t->mdi_cnt = 0; t->mdi_i = 0; t->pad = 0; return t; }
+    memset(t, 0, sizeof *t); memcpy(t, a, n); return t;
+}
+static inline const p_draw_idx *draw_idx_rec(const void *a, uint32_t size, p_draw_idx *t) {
+    uint32_t n = size - 8;
+    if (n >= sizeof *t) return a;
+    if (__builtin_expect(n == offsetof(p_draw_idx, ind), 1)) { memcpy(t, a, offsetof(p_draw_idx, ind)); t->ind = 0; t->mdi_cnt = 0; t->mdi_i = 0; t->pad = 0; return t; }
+    memset(t, 0, sizeof *t); memcpy(t, a, n); return t;
+}
 typedef struct { int32_t x, y, z; uint64_t caller, ind; } p_dispatch;   // caller: return address of the game call site (to locate the dispatcher); ind != 0: DispatchComputeIndirect, the group counts are read by the GPU from that address
 typedef struct { const dpool_t *pool; } p_set_pool;
 typedef struct { uint64_t src; const tex_t *tex; view_t view; uint8_t has_view; NVNcopyRegion r; int32_t flags; } p_copy_b2t;
@@ -304,12 +314,16 @@ void mtl_exec(const uint8_t *handle);
 void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value);   // in-order buffer fill within the submission (OP_CLEAR_BUF)
 void mtl_exec_rest(const uint64_t *handles, int n);   // Tells which handles in this submission still follow the current handle (used by the pass lookahead across handles)
 // Present: draw the swapchain texture to the front-end CAMetalLayer (only counts when there is no window)
-uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4], uint64_t *copy);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited); *copy: its snapshot copy (0 = none), for mtl_present_wait_texture
+uint64_t mtl_present(const tex_t *t, double period_s, const int crop[4], int vi_hdr, uint64_t *copy);   // Enqueue a present and return the ticket immediately; period_s: minimum time this image is displayed (= present period, 0 = unlimited); vi_hdr: vi's HDR answer when the game queued the frame (mtl_hdr_vi_answer); *copy: its snapshot copy (0 = none), for mtl_present_wait_texture
 void mtl_present_wait(uint64_t ticket);                    // Wait until the present with this ticket has been processed (blit committed to the GPU queue)
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait
 int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check matching mtl_present_wait_texture (for nvnSyncWait with timeout 0)
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
+#ifdef __OBJC__
+@protocol MTLSharedEvent;
+void mtl_present_test_hold(id<MTLSharedEvent> ev, uint64_t v);   // Unit test: each present's drawable wait first waits on the GPU for ev to reach v (nil: no wait)
+#endif
 int mtl_display_hz(void);                                   // Maximum refresh rate of the screen (Hz) when there is a window, 0 without a window
 void mtl_set_tex_pool_n(int n);                            // Texture descriptor pool capacity: texture IDs outside the pool are treated as 'empty slots' (read 0)
 void mtl_set_samp_pool_n(int n);                           // Sampler descriptor pool capacity: sampler IDs outside the pool are treated as empty slots too
@@ -320,6 +334,7 @@ double mtl_gpu_ms(uint64_t f);
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
+double mtl_gpu_queue_ms(uint64_t f);   // From the frame's first commit to g_q4 to its first GPUStart (ms); -1 until all complete, or with no commit time
 int mtl_gpu_done(uint64_t f, uint64_t *t1);   // 1 when all of frame f's command buffers completed (latest GPUEnd in *t1, 0 if none had a time), 0 while running, -1 if no record
 void mtl_stats(uint64_t *passes, uint64_t *draws);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
@@ -340,6 +355,7 @@ int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 void mtl_link_mode_set(int mode);   // the display link's pacing mode (DM_PRESENT_LINK's values), applied at the next present
 double mtl_presented_time(uint64_t n);
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
+int mtl_present_queue_ms(uint64_t n, double *ms);   // from the n-th present's commit to its command buffer's GPU start (0 = not known yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void); int mtl_snap_acquire_wait_timeout(uint64_t timeout_ns, uint64_t *waited_ns); int mtl_snap_acquire_ready(void); int mtl_present_screen_ready(void);   // present snapshots (DM_PRESENT_SNAP): on, acquire's wait for ring capacity (returns ns spent pacing / 0 on timeout), and non-blocking readiness checks
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped

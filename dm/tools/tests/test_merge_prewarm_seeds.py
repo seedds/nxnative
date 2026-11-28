@@ -20,9 +20,10 @@ UPDATE_COMPUTE = '0000000000000007_b'
 UPDATE_BUILD = 'a' * 32
 
 
-def key(shader, stage=0):
-    # A single shader in the vertex slot of pso_skey, with zeroed render state.
-    return (shader.encode().ljust(48, b'\0') + bytes([stage]) + bytes(463)).hex()
+def key(shader, stage=0, fragment='', fs_stage=1):
+    # Shader names in the vertex and optional fragment slots of pso_skey, with zeroed render state.
+    return (shader.encode().ljust(24, b'\0') + fragment.encode().ljust(24, b'\0')
+            + bytes([stage, fs_stage if fragment else 0]) + bytes(462)).hex()
 
 
 @unittest.skipUnless(shutil.which('clang'), 'the host parser needs clang')
@@ -268,7 +269,14 @@ class ImportSeeds(unittest.TestCase):
         self.assertNotIn(f'G\t{update_pair}', self.manifest.read_text())
         self.assertFalse(capture.exists())
 
-    def test_push_updates_main_without_including_local_commits(self):
+    def test_push_lands_one_commit_for_all_games_without_including_local_commits(self):
+        other_title = '0100000000000001'
+        other_profile = self.manifest.parent.with_name(other_title)
+        other_profile.mkdir()
+        other_profile.joinpath('game.tsv').write_text(
+            f'title_id\t{other_title}\nname\tAnother Game\nbuild\tv0\t1.0.0\npackage\tv0\n')
+        shutil.copyfile(self.manifest.with_name('shader_map.tsv'), other_profile / 'shader_map.tsv')
+        other_manifest = other_profile / 'pso_manifest.tsv'
         bare = self.init_origin()
         peer = self.root / 'peer'
         self.git('clone', str(bare), str(peer))
@@ -277,13 +285,17 @@ class ImportSeeds(unittest.TestCase):
         self.git('push', 'origin', 'HEAD:main', cwd=peer)
 
         imported = self.upload(f'C\t{COMPUTE}')
+        other_capture = self.upload(f'R\t{key(SECOND_VERTEX)}', title=other_title)
         self.run_import('--push')
         self.assertFalse(imported.exists())
+        self.assertFalse(other_capture.exists())
         self.assertEqual(self.git('rev-parse', 'HEAD^'), upstream)
         landed = self.git('rev-parse', 'HEAD')
         self.assertEqual(self.git('rev-parse', 'refs/heads/main', cwd=bare), landed)
-        self.assertEqual(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'),
-                         self.manifest.relative_to(self.repo).as_posix())
+        self.assertEqual(set(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines()),
+                         {manifest.relative_to(self.repo).as_posix() for manifest in (self.manifest, other_manifest)})
+        self.assertIn(f'C\t{COMPUTE}', self.git('show', f'HEAD:{self.manifest.relative_to(self.repo)}'))
+        self.assertIn(f'R\t{key(SECOND_VERTEX)}', self.git('show', f'HEAD:{other_manifest.relative_to(self.repo)}'))
 
         self.git('commit', '--allow-empty', '-m', 'local change')
         pending = self.upload(f'R\t{key(SECOND_VERTEX)}')
@@ -297,17 +309,52 @@ class ImportSeeds(unittest.TestCase):
     def test_without_shader_map_validates_format_and_cleans_up(self):
         self.manifest.with_name('shader_map.tsv').unlink()
         seed = f'C\t{COMPUTE}'
+        reader = f'R\t{key(GEOMETRY[:-2] + "_bgv")}'
         bad = 'R\t00'
-        ok_capture = self.upload(f'S\t{VERTEX}\t0', seed)
+        ok_capture = self.upload(f'S\t{VERTEX}\t0', seed, reader)
         bad_capture = self.upload(bad)
         applied = self.run_import('--apply').stdout
         self.assertIn('no shader map available, format-validated only', applied)
-        self.assertIn('1 added, 1 ignored S', applied)
+        self.assertIn('2 added, 1 ignored S', applied)
         self.assertIn('1 invalid pipeline', applied)
         self.assertIn('Deleted 1 inbox capture(s).', applied)
         self.assertFalse(ok_capture.exists())
         self.assertTrue(bad_capture.is_file())
-        self.assertIn(seed + '\n', self.manifest.read_text())
+        text = self.manifest.read_text()
+        self.assertIn(seed + '\n', text)
+        self.assertIn(reader + '\n', text)
+
+    def test_geometry_reader_bgv_pipelines_validate_and_deduplicate(self):
+        bgv = GEOMETRY[:-2] + '_bgv'
+        pixel = '0000000000000008_b'
+        with self.manifest.with_name('shader_map.tsv').open('a') as shader_map:
+            shader_map.write(f'shaders\t6\tpixel\t{pixel[:-2]}\n')
+        valid = f'R\t{key(bgv, 0, pixel, 1)}'
+        valid_capture = self.upload(valid, valid)
+        applied = self.run_import('--apply').stdout
+        self.assertIn('1 added, 1 duplicate', applied)
+        self.assertIn('Deleted 1 inbox capture(s).', applied)
+        self.assertFalse(valid_capture.exists())
+        self.assertIn(valid + '\n', self.manifest.read_text())
+
+        # Re-importing the same _bgv pipeline deduplicates against the manifest and cleans up.
+        dup_capture = self.upload(valid)
+        retry = self.run_import('--apply').stdout
+        self.assertIn('1 duplicate', retry)
+        self.assertIn('Deleted 1 inbox capture(s).', retry)
+        self.assertFalse(dup_capture.exists())
+
+        # Reject missing base key, non-geometry base key, non-zero stage, fragment _bgv, and mesh _bgv.
+        bad_capture = self.upload(
+            f'R\t{key("0" * 16 + "_bgv", 0, pixel, 1)}',
+            f'R\t{key(VERTEX[:-2] + "_bgv", 0, pixel, 1)}',
+            f'R\t{key(bgv, 2, pixel, 1)}',
+            f'R\t{key(VERTEX, 0, bgv, 1)}',
+            f'M\t-\t{key(bgv, 4, pixel, 1)}',
+        )
+        rejected = self.run_import('--apply').stdout
+        self.assertIn('3 invalid pipeline, 1 missing shader, 1 stage mismatch', rejected)
+        self.assertTrue(bad_capture.is_file())
 
     def test_rejected_push_keeps_capture(self):
         bare = self.init_origin()

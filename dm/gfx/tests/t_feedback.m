@@ -5,6 +5,9 @@
 // 1 / the target's size, set by an inline update (Splatoon Raiders' ink stamps), on an RG8 attachment sampled through (red, green, zero, one): the tile read fills the missing
 // channels as a sample does.
 #include "../nvn/nvn_mtl.m"
+// This white-box test mutates S.tex/S.img/rf.b/R.rt directly without state_op or OP_SET_RT;
+// bump g_fbc_gen around fb_prepare here (t_scan_cache.m covers the live cache and invalidations).
+#define fb_prepare(pr) (fbc_gen_bump(), fb_prepare(pr))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
@@ -637,6 +640,9 @@ static void pool_depth_case(void) {
     rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "that submission completed");
 }
 static void pool_depth_snapshot_case(void) {
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "pool feedback readback buffer allocates");
+    if (!result) return;
     tex_t colour, depth, unrelated;
     target(&colour, 99810);
     depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99811, .mem=(uint8_t *)g_ubo_words,
@@ -663,7 +669,7 @@ static void pool_depth_snapshot_case(void) {
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureType2D, .dpf=NVN_DPF_FLOAT};
     fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureTypeCube, .dpf=NVN_DPF_FLOAT};
     const nvn_rbind *binding = &fs->rf.b[0];
-    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     g_fb_pass = UINT64_MAX;
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; R.rt.depth = &depth;

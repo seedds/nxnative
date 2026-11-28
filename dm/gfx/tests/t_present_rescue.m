@@ -32,6 +32,7 @@
 #define CAMetalDisplayLink SilentDisplayLink
 #define nvn_game_fps test_game_fps_now   // hle_nvn.c, linked here, has the strong nvn_game_fps; t_present_rescue_focus.c sets the rate
 #include "../nvn/nvn_mtl.m"
+#include "../../host/front_mac_present.h"   // the Mac front end's screen-mode decision, checked against the link's choice
 #undef nvn_game_fps
 #undef CAMetalDisplayLink
 static uint64_t test_now;
@@ -258,7 +259,7 @@ static void thirty(void) {   // A 30 fps target runs the link at 30 Hz, except i
     test_game_fps = 60; link_sync(); CHECK("60 fps in a window: the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     g_link = nil; g_link_started = 0;
 }
-static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh screen at a multiple of 120 Hz takes the 120 Hz link (a frame every other tick); everything else keeps the 60 Hz one.
+static void vrr120(void) {   // 60 and 30 fps in fullscreen on a variable-refresh screen at a multiple of 120 Hz take the 120 Hz link (2 or 4 ticks per frame); everything else keeps its own link.
     reset(); test_fullscreen = 0; test_variable_refresh = 1; test_screen_hz = 120; test_game_fps = 60; g_present_latency = 0; g_present_link_env = 0;
     SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
     link_sync(); CHECK("a window on a 120 Hz variable-refresh screen keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
@@ -266,21 +267,92 @@ static void vrr120(void) {   // 60 fps in fullscreen on a variable-refresh scree
     CHECK("fullscreen on a 120 Hz variable-refresh screen takes the 120 Hz link", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && mtl_link_rate() == 120);
     CHECK("the 120 Hz link leaves the requested mode as it was", g_dm_present_link == 1);
     CHECK("the 120 Hz link keeps frame latency 2", link.preferredFrameLatency == 2);
-    CHECK("the screen is asked for the game's 60, so it can go to a fixed 60 Hz mode", test_match_fps == 60);
+    CHECK("the screen is asked for 60 Hz", test_match_fps == 60);
+    CHECK("by default the front end keeps 120 Hz variable refresh when its fixed candidate is 60 Hz", front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
+    CHECK("DM_SCREEN_MATCH=1 switches it to fixed 60 Hz", !front_mac_keep_vrr(FRONT_MAC_MATCH_FIXED, 1, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
+    CHECK("a fixed-rate mode is not kept as a variable-refresh one", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 0, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
     test_variable_refresh = 0; link_sync(); CHECK("fullscreen on a fixed-rate screen keeps the 60 Hz link", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
     test_variable_refresh = 1; test_screen_hz = 144; link_sync(); CHECK("a variable-refresh screen at 144 Hz keeps the 60 Hz link", g_link_mode == 1);
+    CHECK("a variable-refresh screen at 144 Hz switches to a fixed-rate mode", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 120, mtl_link_vrr_120_hz(test_screen_hz)));
     test_screen_hz = 0; link_sync(); CHECK("a screen of unknown rate keeps the 60 Hz link", g_link_mode == 1);
     test_screen_hz = 240; link_sync(); CHECK("a variable-refresh screen at 240 Hz takes the 120 Hz link", g_link_mode == 2);
+    CHECK("a 240 Hz variable-refresh screen with a fixed 120 Hz mode switches to fixed 120 Hz", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 120, mtl_link_vrr_120_hz(test_screen_hz)));
+    CHECK("a 240 Hz variable-refresh screen with only a fixed 60 Hz mode keeps variable refresh", front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
     test_screen_hz = 120; g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link in fullscreen", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60);
+    CHECK("with DM_PRESENT_LINK=1 the screen goes to a fixed-rate mode", !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
     g_present_link_env = 0; link_sync(); CHECK("without DM_PRESENT_LINK the 120 Hz link again", g_link_mode == 2);
-    test_game_fps = 30; link_sync(); CHECK("30 fps in variable-refresh fullscreen defaults to the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
-    g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link at 30 fps", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && test_match_fps == 60);
+    test_game_fps = 30; link_sync(); CHECK("30 fps in 120 Hz variable-refresh fullscreen stays on the 120 Hz link", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 60);
+    CHECK("at 30 fps on 120 Hz ProMotion the front end still keeps variable refresh", front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, 1, test_match_fps, 60, mtl_link_vrr_120_hz(test_screen_hz)));
+    test_screen_hz = 144; link_sync(); CHECK("30 fps on a 144 Hz variable-refresh screen takes the 30 Hz link (virtual ticks)", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 144 && test_match_fps == 30);
+    test_screen_hz = 60; link_sync(); CHECK("30 fps on a 60 Hz variable-refresh screen takes the 30 Hz link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
+    test_screen_hz = 120; g_present_link_env = 1; link_sync(); CHECK("DM_PRESENT_LINK=1 keeps the 60 Hz link at 30 fps", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && test_match_fps == 60);
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link at 30 fps", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 120);
-    g_dm_present_link = 1; g_present_link_env = 0; link_sync(); CHECK("unset DM_PRESENT_LINK restores the 30 Hz power-saving link", g_link_mode == 3 && link.preferredFrameRateRange.preferred == 30 && test_match_fps == 30);
+    g_dm_present_link = 1; g_present_link_env = 0; link_sync(); CHECK("unset DM_PRESENT_LINK restores the 120 Hz VRR link at 30 fps", g_link_mode == 2 && link.preferredFrameRateRange.preferred == 120 && test_match_fps == 60);
     test_game_fps = 60; link_sync(); CHECK("back at 60 fps: the 120 Hz link", g_link_mode == 2);
     test_fullscreen = 0; link_sync(); CHECK("leaving fullscreen: the 60 Hz link again", g_link_mode == 1 && link.preferredFrameRateRange.preferred == 60 && mtl_link_rate() == 60);
     g_dm_present_link = 2; link_sync(); CHECK("DM_PRESENT_LINK=2 keeps the 120 Hz link in a window", g_link_mode == 2 && test_match_fps == 120);
     g_dm_present_link = 1; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
+}
+// Verify agreement between front_mac_keep_vrr and link_sync across screen types (including 240 Hz with and without a fixed 120 Hz mode),
+// DM_SCREEN_MATCH, DM_PRESENT_LINK and frame-rate targets, plus 60 <-> 30 <-> 40 <-> 60 transitions on 120 Hz ProMotion (zero mode switches).
+static void vrr_agree(void) {
+    static const struct { int hz, fixed_hz; } screens[] = {
+        { 0, 60 }, { 60, 60 }, { 120, 60 }, { 144, 120 }, { 240, 120 }, { 240, 60 },
+    };
+    static const int fpss[] = { 30, 40, 60, 120 };
+    int cases = 0, bad = 0;
+    for (int match = FRONT_MAC_MATCH_FIXED; match <= FRONT_MAC_MATCH_AUTO; match++)
+    for (int link_set = 0; link_set < 4; link_set++)   // DM_PRESENT_LINK unset, 0, 1, 2
+    for (size_t s = 0; s < sizeof screens / sizeof *screens; s++)
+    for (size_t f = 0; f < sizeof fpss / sizeof *fpss; f++) {
+        reset(); g_present_latency = 0; g_link_drain_on = 1;
+        g_present_link_env = link_set != 0; g_dm_present_link = link_set ? link_set - 1 : (fpss[f] == 120 ? 2 : 1);   // 120 fps games set mode 2 via high_cap_tick when DM_PRESENT_LINK is unset
+        test_screen_hz = screens[s].hz; test_game_fps = fpss[f]; test_fullscreen = 0; test_variable_refresh = 1; test_match_fps = 0;
+        SilentDisplayLink *link = [SilentDisplayLink new]; g_link = link; g_link_started = 1;
+        link_sync();   // window request held at fullscreen entry
+        test_fullscreen = 1;
+        int fixed = 0, kept = 0;
+        for (int i = 0; i < 4; i++) {
+            int pick_hz = test_match_fps > 0 && screens[s].fixed_hz % test_match_fps == 0 ? screens[s].fixed_hz : 0;
+            int keep = test_match_fps > 0 && front_mac_keep_vrr(match, 1, test_match_fps, pick_hz, mtl_link_vrr_120_hz(test_screen_hz));
+            if (!fixed) kept = keep;
+            if (test_match_fps > 0 && !fixed && !keep && pick_hz > 0) { fixed = 1; test_variable_refresh = 0; test_screen_hz = pick_hz; }
+            link_sync();
+        }
+        int want_kept = match == FRONT_MAC_MATCH_AUTO && !link_set && (fpss[f] == 60 || fpss[f] == 30)
+                        && screens[s].hz >= 120 && screens[s].hz % 120 == 0 && screens[s].fixed_hz < 120;
+        int ok = kept == want_kept
+                 && (!kept || g_link_mode == 2)
+                 && !(test_variable_refresh && g_link_mode == 1)
+                 && !(fixed && g_link_mode == 2 && (fpss[f] == 60 || fpss[f] == 30) && link_set != 3)
+                 && (link_set != 1 || test_match_fps == 0);
+        cases++; bad += !ok;
+        if (!ok) printf("  vrr_agree FAIL: match=%d link_set=%d hz=%d fixed_hz=%d fps=%d -> kept=%d fixed=%d mode=%d asked=%d\n",
+                        match, link_set, screens[s].hz, screens[s].fixed_hz, fpss[f], kept, fixed, g_link_mode, test_match_fps);
+    }
+    CHECK("front end and display link agree across all VRR screen types, rates and switches", cases == 192 && bad == 0);
+
+    // 60 -> 30 -> 40 -> 30 (fine) -> 60 transitions on 120 Hz ProMotion (fixed candidate 60 Hz): zero mode switches, steady 120 Hz link
+    reset(); g_present_latency = 0; g_present_link_env = 0; g_dm_present_link = 1; g_link_drain_on = 1; mtl_set_fstep_fine(0);
+    test_screen_hz = 120; test_variable_refresh = 1; test_fullscreen = 1; test_match_fps = 0;
+    g_link = [SilentDisplayLink new]; g_link_started = 1;
+    int switches = 0;
+    static const struct { int fps, fine; } seq[] = { {60, 0}, {30, 0}, {40, 0}, {30, 0}, {60, 1}, {60, 0} };
+    int seq_ok = 1;
+    for (size_t i = 0; i < sizeof seq / sizeof *seq; i++) {
+        test_game_fps = seq[i].fps; mtl_set_fstep_fine(seq[i].fine);
+        link_sync();
+        int pick_hz = test_match_fps > 0 && 60 % test_match_fps == 0 ? 60 : 0;
+        if (test_match_fps > 0 && pick_hz > 0 && !front_mac_keep_vrr(FRONT_MAC_MATCH_AUTO, test_variable_refresh, test_match_fps, pick_hz, mtl_link_vrr_120_hz(test_screen_hz))) {
+            switches++; test_variable_refresh = 0; test_screen_hz = pick_hz;
+        }
+        link_sync();
+        if (!test_variable_refresh || g_link_mode != 2) seq_ok = 0;
+    }
+    CHECK("120 Hz ProMotion keeps VRR and 120 Hz link across 60/30/40/fine transitions with zero mode switches", seq_ok && switches == 0);
+
+    mtl_set_fstep_fine(0); g_dm_present_link = 1; g_present_link_env = 0; test_game_fps = 60; g_link_drain_on = -1;
+    test_fullscreen = 0; test_screen_hz = 0; test_variable_refresh = 0; link_sync(); g_link = nil; g_link_started = 0;
 }
 static void forty(void) {   // 40 fps automatically selects the 120 Hz link (3 ticks = 25 ms) and asks front_screen_match(120); movie/thermal drops to 30/60 and back return to 120 Hz
     reset(); test_fullscreen = 0; test_variable_refresh = 0; test_screen_hz = 120; test_game_fps = 40; g_present_link_env = 0; g_link_drain_on = 0;
@@ -442,7 +514,7 @@ static void metal_lifecycle(void) {
 int main(int argc, char **argv) { @autoreleasepool {
     alarm(10); setbuf(stdout, NULL);
     if (argc > 2 || (argc == 2 && strcmp(argv[1], "--metal"))) return 2;
-    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); covered(); latency(); thirty(); vrr120(); forty(); settling(); probation();
+    thresholds(); backoff(); settings(); startup_rescue(); lifecycle(); covered(); latency(); thirty(); vrr120(); vrr_agree(); forty(); settling(); probation();
     if (argc == 2) metal_lifecycle();
     printf("present rescue: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

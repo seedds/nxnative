@@ -14,7 +14,7 @@ typedef struct nq_node {
     unsigned kind, mode, closed, waiting; volatile uint32_t *event; uint32_t value;
     uint64_t wait_fence, event_predecessor, wait_since; unsigned wait_kind, wait_said, wait_present; const sync_t *sync_source; nq_receipt *receipt, *next_receipt;
     nq_signal *signals; unsigned signal_count;   // NQ_COMMANDS: every event signal it records, in order (nq_event_issued at its commit)
-    tex_t texture; double period; int crop[4];
+    tex_t texture; double period; int crop[4]; int vi_hdr;   // NQ_PRESENT: vi_hdr, vi's HDR answer when the game queued the frame (mtl_hdr_vi_answer)
 } nq_node;
 typedef struct nq_owned { struct nq_owned *next; unsigned kind; uint64_t data[]; } nq_owned;
 // An empty open job stays at the head of its queue until more nodes arrive.
@@ -61,6 +61,32 @@ static pthread_mutex_t nq_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t nq_cv = PTHREAD_COND_INITIALIZER;
 static pthread_once_t nq_once = PTHREAD_ONCE_INIT;
 static nq_queue *nq_queues;
+enum { NQ_BPOOL_N = 8, NQ_BPOOL_MAX = 8u << 20 };
+static struct { uint8_t *p; size_t cap; } g_nq_bpool[NQ_BPOOL_N];
+static int g_nq_bpool_n;
+static void nq_buf_give_locked(uint8_t *p, size_t cap) {
+    if (!p) return;
+    if (cap >= 4096 && cap <= NQ_BPOOL_MAX) {
+        if (g_nq_bpool_n < NQ_BPOOL_N) {
+            g_nq_bpool[g_nq_bpool_n].p = p; g_nq_bpool[g_nq_bpool_n].cap = cap; g_nq_bpool_n++;
+            return;
+        }
+        int sm = 0;
+        for (int i = 1; i < NQ_BPOOL_N; i++) if (g_nq_bpool[i].cap < g_nq_bpool[sm].cap) sm = i;
+        if (cap > g_nq_bpool[sm].cap) { free(g_nq_bpool[sm].p); g_nq_bpool[sm].p = p; g_nq_bpool[sm].cap = cap; return; }
+    }
+    free(p);
+}
+static void nq_buf_take(nq_node *n) {
+    pthread_mutex_lock(&nq_mu);
+    if (g_nq_bpool_n > 0) {
+        int pick = 0;
+        for (int i = 1; i < g_nq_bpool_n; i++) if (g_nq_bpool[i].cap > g_nq_bpool[pick].cap) pick = i;
+        n->bytes = g_nq_bpool[pick].p; n->capacity = g_nq_bpool[pick].cap;
+        g_nq_bpool[pick] = g_nq_bpool[--g_nq_bpool_n];
+    }
+    pthread_mutex_unlock(&nq_mu);
+}
 static int nq_test_held;   // nvn_queue_test_hold: replay takes no queued work while set (unit tests only)
 // The last GPU write of each event word not yet landed: its submission's fence, and for a WRITE signal the value it leaves (exact). A wait the queued value satisfies needs no
 // completion: its continuation is encoded after the writer's on the one ordered Metal queue, as the next submission of one NVN queue is, and memory the writer's completion lands
@@ -162,7 +188,7 @@ static void nq_cost_end(nq_cost c) {
     atomic_fetch_add(&g_cum_sub_cyc,cyc-c.cycles); atomic_fetch_add(&g_cum_sub_sys_ns,thr_sys_ns()-c.sys);
 }
 static void *nq_worker(void *unused) {
-    (void)unused; pthread_setname_np("NVN queue replay");
+    (void)unused; pthread_setname_np("NVN queue replay"); { void mtl_pc_claim(void); mtl_pc_claim(); }   // its address-to-pool cache needs no thread-local lookup (nvn_mtl.m pc_tab)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     void *rt=nvn_rt_join("queue replay thread");   // it carries the frame's submissions: it declares the frame's deadline too (hle_nvn.c rt_tick)
     uint64_t frame=UINT64_MAX;
@@ -249,12 +275,12 @@ static void *nq_worker(void *unused) {
                 mtl_exec_rest(NULL,0); mtl_exec(n->bytes); fence=mtl_sub_commit();
             } else {
                 nvn_cap_present(&n->texture,n->crop);
-                present=mtl_present(&n->texture,n->period,n->crop,&copy); mtl_tex_unpin(n->texture.serial);
+                present=mtl_present(&n->texture,n->period,n->crop,n->vi_hdr,&copy); mtl_tex_unpin(n->texture.serial);
                 { void dm_vi_frame_ticket(uint64_t,uint64_t); dm_vi_frame_ticket(j->frame+1,present); }
             }
             nq_cost_end(cost); gfx_leave(); objc_autoreleasePoolPop(pool); pthread_mutex_unlock(&g_sub_mu);
         }
-        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); if(n->next_receipt) nq_put(n->next_receipt); free(n->signals); free(n->bytes); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
+        pthread_mutex_lock(&nq_mu); if(n->kind==NQ_PRESENT) { q->present=present; q->copy=copy; j->receipt->present=present; j->receipt->copy=copy; } if(fence) { q->physical=fence; for(unsigned i=0;i<n->signal_count;i++) nq_event_issued(n->signals[i].event,fence,n->signals[i].mode,n->signals[i].value); } if(n->receipt) nq_put(n->receipt); if(n->next_receipt) nq_put(n->next_receipt); free(n->signals); nq_buf_give_locked(n->bytes, n->capacity); free(n); pthread_cond_broadcast(&nq_cv); pthread_mutex_unlock(&nq_mu);
     }
     return NULL;
 }
@@ -263,6 +289,7 @@ static void nq_start(void) { pthread_t t; if(pthread_create(&t,NULL,nq_worker,NU
 static nq_node *nq_append(nq_job *j,unsigned kind) {
     nq_node *n=calloc(1,sizeof *n); if(!n) die("queue continuation allocation failed");
     n->kind=kind;
+    if(kind==NQ_COMMANDS) nq_buf_take(n);
     if(j->staged_last) j->staged_last->next=n; else j->staged_first=n;
     j->staged_last=n;
     j->waits|=kind==NQ_EVENT || kind==NQ_SYNC;
@@ -283,20 +310,38 @@ static void nq_publish_staged(nq_job *j) {
     j->staged_first=j->staged_last=NULL;
 }
 // Grow geometrically so flattening a large submission does not reallocate its command records at every page.
-static void nq_bytes(nq_node *n, const void *bytes, size_t length) {
-    if (length > SIZE_MAX - n->length) die("queue commands allocation overflow");
-    size_t want = n->length + length;
-    if (want > n->capacity) {
-        size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
-        cap = cap < want ? want : cap;
-        if (cap < 4096) cap = 4096;
-        void *grown = realloc(n->bytes, cap);
-        if (!grown) die("queue commands allocation failed");
-        n->bytes = grown;
-        n->capacity = cap;
-    }
+static __attribute__((noinline, cold)) void nq_grow(nq_node *n, size_t want) {
+    size_t cap = n->capacity <= SIZE_MAX / 2 ? 2 * n->capacity : want;
+    cap = cap < want ? want : cap;
+    if (cap < 4096) cap = 4096;
+    void *grown = realloc(n->bytes, cap);
+    if (!grown) die("queue commands allocation failed");
+    n->bytes = grown;
+    n->capacity = cap;
+}
+static inline void nq_reserve(nq_node *n, size_t extra) {
+    if (__builtin_expect(extra > SIZE_MAX - n->length, 0)) die("queue commands allocation overflow");
+    size_t want = n->length + extra;
+    if (__builtin_expect(want > n->capacity, 0)) nq_grow(n, want);
+}
+static inline void nq_bytes(nq_node *n, const void *bytes, size_t length) {
+    nq_reserve(n, length);
     memcpy(n->bytes + n->length, bytes, length);
-    n->length = want;
+    n->length += length;
+}
+// Ops that need special handling in nq_record_one (control-flow rejection, wait/fence node cuts, event signals, AS descriptor snapshots, or CAP_K_PROG/CAP_K_TEX object snapshotting in cap_rec_fields).
+// All other canonical ops carry no snapshotted objects and can be copied in bulk during nq_flatten.
+_Static_assert(OP_COUNT_ == 65, "nvn_queue.inc: update NQ_SPECIAL_MASK for new ops");
+static const uint64_t NQ_SPECIAL_MASK =
+    (1ull << OP_END) | (1ull << OP_JUMP) | (1ull << OP_CALL) |
+    (1ull << OP_WAIT_EVENT) | (1ull << OP_WAIT_SYNC) | (1ull << OP_FENCE_SYNC) |
+    (1ull << OP_SIGNAL_EVENT) |
+    (1ull << OP_AS_BUILD) | (1ull << OP_AS_COPY) | (1ull << OP_BIND_AS) | (1ull << OP_RT_DISPATCH) |
+    (1ull << OP_SET_RT) | (1ull << OP_BIND_PROGRAM) |
+    (1ull << OP_COPY_B2T) | (1ull << OP_COPY_T2B) | (1ull << OP_COPY_T2T) |
+    (1ull << OP_CLEAR_TEX) | (1ull << OP_DLSS);
+static inline int nq_is_plain_op(uint32_t op) {
+    return op < 64 ? !((NQ_SPECIAL_MASK >> op) & 1u) : (op == OP_DEPTH_BOUNDS);
 }
 static void nq_signal_add(nq_node *n,nq_signal s) {
     if(!(n->signal_count&(n->signal_count-1))) { n->signals=realloc(n->signals,(n->signal_count?2*n->signal_count:1)*sizeof *n->signals); if(!n->signals) die("queue signals allocation failed"); } // NOLINT(bugprone-suspicious-realloc-usage): allocation failure aborts
@@ -333,12 +378,6 @@ static void nq_record_one(nq_job *j,const uint8_t *p,op_hdr h) {
         }
     }
 }
-// A compact record (nvn_obj.h OPC_*) goes into the job as the canonical records it stands for
-static void nq_record(nq_job *j,const uint8_t *p,op_hdr h) {
-    if(!rec_compact(h.op)) { nq_record_one(j,p,h); return; }
-    uint8_t x[REC_EXPAND_MAX] __attribute__((aligned(8))); size_t n=rec_expand(p,x);
-    for(size_t o=0;o<n;) { op_hdr c; memcpy(&c,x+o,8); nq_record_one(j,x+o,c); o+=c.size; }
-}
 // A handle is the recording's control list (nvn_obj.h ctl_e): its pieces of records, its links to more control memory. Calls were copied in when they were recorded.
 // A piece runs what its command memory holds at submit, as the GPU runs a command set's bytes: the records that fit in it (nvn_piece_record). A game may record over a called
 // recording before the list that calls it is submitted (docs/reference/nvn-objects.md, "A called recording recorded over before its caller is submitted")
@@ -348,7 +387,41 @@ static void nq_flatten(nq_job *j,const uint8_t *list) {
         if(k==CTL_LINK) { e=ctl_addr(v)-8; continue; }
         if(k!=CTL_CHUNK) die("NVN command list %p: corrupt control entry %#llx at %p",(const void *)list,(unsigned long long)v,(const void *)e);
         const uint8_t *p=ctl_addr(v),*pe=p+ctl_chunk_bytes(v); op_hdr h;
-        while(nvn_piece_record(list,v,p,pe,&h)) { nq_record(j,p,h); p+=h.size; }
+        nq_node *cur = (j->staged_last && j->staged_last->kind == NQ_COMMANDS && !j->staged_last->closed) ? j->staged_last : NULL;
+        for(int have = nvn_piece_record(list,v,p,pe,&h); have; ) {
+            if(nq_is_plain_op(h.op)) {
+                if(!cur) cur = nq_append(j, NQ_COMMANDS);
+                const uint8_t *run = p;
+                p += h.size;
+                have = nvn_piece_record(list,v,p,pe,&h);
+                while(have && nq_is_plain_op(h.op)) {
+                    p += h.size;
+                    have = nvn_piece_record(list,v,p,pe,&h);
+                }
+                nq_bytes(cur, run, (size_t)(p - run));
+            } else if(rec_compact(h.op)) {
+                if(!cur) cur = nq_append(j, NQ_COMMANDS);
+                uint8_t *base = cur->bytes, *dst = base ? base + cur->length : NULL, *dend = base ? base + cur->capacity : NULL;
+                do {
+                    if(__builtin_expect(!base || (size_t)(dend - dst) < REC_EXPAND_MAX, 0)) {
+                        cur->length = base ? (size_t)(dst - base) : 0;
+                        nq_reserve(cur, REC_EXPAND_MAX);
+                        base = cur->bytes;
+                        if(!base) die("queue commands allocation failed");
+                        dst = base + cur->length; dend = base + cur->capacity;
+                    }
+                    dst += rec_expand_h(h, p, dst);
+                    p += h.size;
+                    have = nvn_piece_record(list,v,p,pe,&h);
+                } while(have && rec_compact(h.op));
+                cur->length = (size_t)(dst - base);
+            } else {
+                nq_record_one(j,p,h);
+                p += h.size;
+                cur = (j->staged_last && j->staged_last->kind == NQ_COMMANDS && !j->staged_last->closed) ? j->staged_last : NULL;
+                have = nvn_piece_record(list,v,p,pe,&h);
+            }
+        }
         if(v&CTL_LAST) return;
     }
 }
@@ -383,6 +456,7 @@ uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int cro
     j->receipt=nq_new(); j->frame=dm_nvn_frame_count(); { void mtl_present_recorded(uint64_t); mtl_present_recorded(j->frame); }   // the game's own present count, for the screen wait (nvn_mtl.m)
     nq_node *n=nq_append(j,NQ_PRESENT);
     n->texture=*t; mtl_tex_pin(t->serial); n->period=period; if(crop) memcpy(n->crop,crop,sizeof n->crop);
+    n->vi_hdr=mtl_hdr_vi_answer();   // here, not on the worker: the game may ask vi again, and get another answer, before the worker replays this present
     pthread_mutex_lock(&nq_mu); nq_publish_staged(j); j->receipt->refs++; uint64_t ticket=(uintptr_t)j->receipt;
     nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu); return ticket;
 }

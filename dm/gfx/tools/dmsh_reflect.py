@@ -208,14 +208,19 @@ POOL_MIN = 33   # arrays at least this long are pools: Program.cs sizes Ryujinx'
 
 # The test is a plain load: an atomic one, even relaxed, goes to the shared cache every time, and the reads of a pass name a few IDs, so its pixels queue on the same word.
 # A 1536x864 pass of 16 marks a pixel over 16 IDs: 2.60 ms atomic, 0.34 plain, 0.18 with no mark (Apple M6). A stale 0 costs an OR that changes nothing; a bit only goes
-# from 0 to 1 while a submission runs, as the host clears one (pool_seen_clear) only for an ID registered anew, which work committed after it reads
-POOL_MARK = """template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)
-{
-    device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);
-    uint b = 1u << (i & 31u);
-    if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);
+# from 0 to 1 while a submission runs, as the host clears one (pool_seen_clear) only for an ID registered anew, which work committed after it reads.
+# Specializing dm_pool_mark_off = true (DMSH_POOL_MARK_FC, nvn_mtl.m FN_OFF_POOL_MARK) compiles out the bitmap read and atomic store when no deferred/evicted/stand-in entries
+# or usage probe need marks, restoring Apple Silicon TBDR hidden surface removal and hardware early-Z rejection on fragment shaders and removing the mark load in every stage.
+POOL_MARK = f"""constant bool dm_pool_mark_off [[function_constant({abi.POOL_MARK_FC})]];
+template<typename P> static inline __attribute__((always_inline)) uint dm_pool_mark(constant P* p, uint i)
+{{
+    if (!is_function_constant_defined(dm_pool_mark_off) || !dm_pool_mark_off) {{
+        device uint* w = reinterpret_cast<device uint*>(p->seen) + (i >> 5);
+        uint b = 1u << (i & 31u);
+        if (!(*w & b)) atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(w), b, memory_order_relaxed);
+    }}
     return i;
-}
+}}
 
 """
 

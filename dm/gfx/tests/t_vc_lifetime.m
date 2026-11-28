@@ -52,9 +52,11 @@ int main(void) { @autoreleasepool {
     // The ID outlives the texture: it resolves through the ghost table, to the same Metal texture, and reads the view it had
     id<MTLTexture> first = read_id(1);
     CHECK(first == live && g_vc_new == made, "the finalized texture's ID reads the view it had: none made");
-    CHECK(!g_treg[1].view, "the ID's own view goes at the submission's end");
+    CHECK(g_treg[1].view != NULL, "the ID's own view stays cached while the ghost table still holds the texture");
+    os_unfair_lock_lock(&g_rmu); treg_drop_transient_all(1); os_unfair_lock_unlock(&g_rmu);
+    CHECK(!g_treg[1].view, "forced drop (e.g. takeover) clears the ID's own view");
     id<MTLTexture> again = read_id(1);
-    CHECK(again == live && g_vc_new == made, "and so does the next submission");
+    CHECK(again == live && g_vc_new == made, "and the next submission reuses the cached view without making a new one");
 
     // The sharing table lets the texture go (a takeover of its storage): the ghost table still holds it, so its views stay
     pthread_mutex_lock(&g_smu); int left = own_alias_del_locked(&ak); pthread_mutex_unlock(&g_smu);

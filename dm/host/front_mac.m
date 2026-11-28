@@ -37,6 +37,7 @@ static void merge_rumble_to(void (*sink)(const dm_haptic_state *));
 #include "ctrl_prompt.h"
 #include "user_select_mac.h"
 #include <signal.h>
+#include <stdatomic.h>
 #include <math.h>
 #include <sys/stat.h>
 
@@ -62,6 +63,8 @@ static _Atomic int g_screen_variable_refresh;
 int front_screen_variable_refresh(void) { return g_screen_variable_refresh; }
 static CGDirectDisplayID g_match_id; static CGDisplayModeRef g_match_orig; static int g_match_orig_vrr;   // main thread: the screen this host switched, its own mode (NULL = none switched) and whether that mode is variable-refresh
 static int32_t g_match_pick; static int g_match_pick_vrr;   // main thread: the IO mode ID this host last switched to (valid while g_match_orig != NULL) and whether it is variable-refresh
+static void hdr_screen(NSScreen *screen);
+static void hdr_menu_screen(void); static void hdr_menu_log(const char *why);
 static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabilities of the current screen and mode, including a mode change without moving the window
     if (!screen) return;
     g_screen_fps = (int)screen.maximumFramesPerSecond;
@@ -79,6 +82,8 @@ static void screen_refresh(NSScreen *screen) {   // main thread: refresh capabil
     } else {
         g_screen_native_fps = g_screen_fps;
     }
+    hdr_screen(screen);   // its EDR headroom (AppKit posts the screen parameters notification when the live headroom changes) and colour space
+    hdr_menu_screen();    // the HDR menu's greyed-out items follow the screen
 }
 static _Atomic int g_fullscreen;   // the window is in fullscreen (set when it has entered and when it has left)
 // Workaround for a macOS Direct-to-Display scanout artifact (GitHub issue #1821: a flickering purple/pink horizontal
@@ -127,10 +132,11 @@ int front_screen_settling(void) {
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
 // screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks.
-// A variable-refresh screen (ProMotion) in fullscreen switches to a fixed-rate mode of the same size at a multiple of the game's rate (120 → 60 Hz for 60 and 30 fps), though its own
-// rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
-// 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
-// the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
+// A variable-refresh screen (ProMotion) in fullscreen: the 60 Hz display link misses its targets there (every present a 120 Hz refresh late and every other tick skipped,
+// 40 fps on an M5 Pro at frame latency 2; 1 → 2 → 3 vsync steps at latency 1, issue #347). A screen the 120 Hz link paces automatically (nvn_mtl.m link_vrr_120) whose best
+// fixed-rate candidate is below 120 Hz (e.g. 120 Hz ProMotion → fixed 60 Hz) keeps its variable mode at 60 and 30 fps (front_mac_keep_vrr), avoiding both the fixed-60 Hz
+// link's extra refresh of latency and mid-gameplay mode switches; DM_SCREEN_MATCH=1 switches to fixed 60 Hz for comparison runs. A variable-refresh screen with a fixed-rate
+// mode at 120 Hz or higher (e.g. 240 → 120 Hz), one at another rate (e.g. 144 Hz), or one with DM_PRESENT_LINK=1 still switches to a fixed-rate mode (docs/reference/frame-rate.md)
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 // A switch reconfigures every screen, and with several screens (a DisplayLink one among them) that moved the fullscreen window off the switched screen and back: each move
 // switched the screen back and then again, 18 times in a minute, until two of three screens lost their signal and the Dock and Finder stopped answering (LNPANDY/NX2Apple#1085).
@@ -143,6 +149,107 @@ static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window;
 static double g_match_switched, g_match_undone;   // when this host last switched a screen, when the screens last undid a switch (CACurrentMediaTime, 0 = never)
 static int g_match_bounces, g_match_bounced;   // switches in a row due soon after an undone one; the rate is left alone until fullscreen is left or the frame rate changes
 static int g_match_recheck;   // a delayed settle check is already scheduled on the main queue
+// HDR output (front.h front_layer_hdr, front_edr_poll; nvn_mtl.m, HDR output). The layer the present asks for, applied on the main thread: SDR is the layer as made below
+// (BGRA8Unorm, no colour space, so its bytes reach the panel as they are); HDR is RGBA16Float with extended range content and no EDR metadata, in the screen's own colour space
+// extended and linear (the same colours as the SDR layer; Display P3 when the screen has none), for both HDR routes: the present writes BT.709 values for a PQ window too. The
+// screen's headroom goes to the present: maximumPotentialExtendedDynamicRangeColorComponentValue, what the screen can show, and maximumExtendedDynamicRangeColorComponentValue, what
+// it shows now (above 1.0 only once a layer wants extended range content)
+void mtl_present_edr(float potential, float live);   // nvn_mtl.h
+static _Atomic int g_hdr_want;   // the mode the present asked for (front.h): 0 SDR, 1 HDR
+static int g_hdr_mode;   // main thread: the mode the layer has
+static CGColorSpaceRef hdr_itm_space(NSScreen *screen) {   // the HDR layer's colour space: the screen's own, extended and linear; Display P3 when the screen or its space is not known (+1)
+    CGColorSpaceRef sc = screen.colorSpace.CGColorSpace, cs = sc ? CGColorSpaceCreateExtendedLinearized(sc) : NULL;
+    return cs ? cs : CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearDisplayP3);
+}
+static void hdr_screen(NSScreen *screen) {   // main thread: the screen's headroom to the present, and the HDR layer's colour space for this screen
+    if (!screen) return;
+    mtl_present_edr((float)screen.maximumPotentialExtendedDynamicRangeColorComponentValue, (float)screen.maximumExtendedDynamicRangeColorComponentValue);
+    if (!g_hdr_mode || !g_layer) return;
+    CGColorSpaceRef cs = hdr_itm_space(screen);
+    if (!g_layer.colorspace || !CFEqual(g_layer.colorspace, cs)) { g_layer.colorspace = cs; LOG("front end: HDR layer in %s", screen.colorSpace.localizedName.UTF8String ?: "Display P3"); }
+    CGColorSpaceRelease(cs);
+}
+static void hdr_apply(void) {   // main thread
+    int m = g_hdr_want;
+    if (m == g_hdr_mode || !g_layer) return;
+    g_hdr_mode = m;
+    g_layer.wantsExtendedDynamicRangeContent = m != 0;
+    g_layer.pixelFormat = m ? MTLPixelFormatRGBA16Float : MTLPixelFormatBGRA8Unorm;
+    // never an RGBA16Float layer without a colour space: without one its linear values would reach the panel as they are; the window's screen refines it below (hdr_screen)
+    CGColorSpaceRef cs = m ? hdr_itm_space(g_win.screen) : NULL;
+    g_layer.colorspace = cs; CGColorSpaceRelease(cs);   // SDR: none, as before
+    LOG("front end: %s", m ? "HDR layer (RGBA16Float, extended range, the screen's colour space linear)" : "SDR layer (BGRA8Unorm)");
+    hdr_screen(g_win.screen);   // the colour space of the window's screen, and the live headroom, which changes once the layer wants extended range content
+    hdr_menu_log("layer");
+}
+void front_layer_hdr(int mode) { if (atomic_exchange(&g_hdr_want, mode) != mode) dispatch_async(dispatch_get_main_queue(), ^{ hdr_apply(); }); }
+// The Window menu's HDR submenu: Off, BT.2446, Game's HDR (DM_HDR 0, 1, 2), the running mode ticked, and Next HDR Mode (⌃⌘H) cycling through those that can be chosen.
+// A choice calls mtl_hdr_set_requested (atomic, no runtime setenv): the present and vi read it at use, so it takes effect on the next frame. Game's HDR is greyed out for a game
+// that cannot render HDR (mtl_hdr_game_native: its modules do not import nn::vi::QueryDisplayHdrStatus), and Game's HDR asked for runs and shows as BT.2446 there. BT.2446 and
+// Game's HDR are greyed out while the window's screen has no EDR headroom: the mode stays as chosen, the present shows SDR, and moving to an EDR screen resumes it. The state
+// is worked out again when the menu opens, for a key equivalent and on every screen change (AppKit asks validateMenuItem: then). The choice is kept as the launcher's saved
+// choice launcher.DM_HDR in the app's preferences domain (docs/frontends.md, Saved choices; Off, the tested default, removes it), so the next start begins in it
+int mtl_hdr_requested(void); void mtl_hdr_set_requested(int mode); int mtl_hdr_game_native(void);   // nvn_mtl.h
+int mtl_hdr_mode_shown(int requested, int game_native); int mtl_hdr_mode_allowed(int mode, int game_native, int screen_edr); int mtl_hdr_mode_next(int shown, int game_native, int screen_edr);
+static NSString *const k_hdr_titles[3] = {@"Off", @"BT.2446", @"Game's HDR"};
+static NSMenu *g_hdr_menu;
+static int hdr_screen_edr(void) { NSScreen *s = g_win.screen; return s && s.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.0; }   // main thread
+static int hdr_listed(const char *list) {   // DM_HDR in a space-separated list of names (the launcher's DM_ENV_FILE_KEYS, DM_ENV_LAUNCH_KEYS)
+    const char *k = "DM_HDR"; size_t n = strlen(k);
+    for (const char *p = list; p && (p = strstr(p, k)); p += n) if ((p == list || p[-1] == ' ') && (p[n] == ' ' || !p[n])) return 1;
+    return 0;
+}
+// the launcher's saved choice (dm/mac/launcher.c saved_choices), when the app's settings (Info.plist DMSettings) list this value of DM_HDR: the launcher ignores any other
+static void hdr_save_choice(int mode) {
+    CFBundleRef b = CFBundleGetMainBundle(); CFStringRef dom = b ? CFBundleGetIdentifier(b) : NULL; CFTypeRef values = NULL;
+    CFTypeRef rules = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMSettings")) : NULL;
+    for (CFIndex i = 0; rules && CFGetTypeID(rules) == CFArrayGetTypeID() && i < CFArrayGetCount(rules) && !values; i++) {
+        CFTypeRef r = CFArrayGetValueAtIndex(rules, i); CFTypeRef e = CFGetTypeID(r) == CFDictionaryGetTypeID() ? CFDictionaryGetValue(r, CFSTR("env")) : NULL;
+        if (e && CFGetTypeID(e) == CFStringGetTypeID() && CFStringCompare(e, CFSTR("DM_HDR"), 0) == kCFCompareEqualTo) values = CFDictionaryGetValue(r, CFSTR("values"));
+    }
+    CFStringRef v = CFStringCreateWithFormat(NULL, NULL, CFSTR("%d"), mode);
+    int listed = values && CFGetTypeID(values) == CFArrayGetTypeID() && CFArrayContainsValue(values, CFRangeMake(0, CFArrayGetCount(values)), v);
+    if (!dom || !listed) { LOG("front end: HDR %s for this run (the app's settings do not list it to keep)", k_hdr_titles[mode].UTF8String); CFRelease(v); return; }
+    CFPreferencesSetAppValue(CFSTR("launcher.DM_HDR"), mode ? v : NULL, dom); CFPreferencesAppSynchronize(dom); CFRelease(v);
+    if (hdr_listed(getenv("DM_ENV_FILE_KEYS")) || hdr_listed(getenv("DM_ENV_LAUNCH_KEYS")))
+        LOG("front end: HDR %s kept as the saved choice; the next start still takes DM_HDR from env.txt or its launch environment", k_hdr_titles[mode].UTF8String);
+    else LOG("front end: HDR %s kept as the saved choice for the next start", k_hdr_titles[mode].UTF8String);
+}
+static void hdr_menu_log(const char *why) {   // the menu's state, logged when it changes while an HDR mode is chosen (DM_HDR=0 logs nothing new)
+    if (!mtl_hdr_requested()) return;
+    static int last = -1; int nat = mtl_hdr_game_native(), edr = hdr_screen_edr(), shown = mtl_hdr_mode_shown(mtl_hdr_requested(), nat);
+    int key = shown | nat << 2 | edr << 3;
+    if (key == last) return;
+    last = key;
+    LOG("front end: HDR menu (%s): %s ticked; Game's HDR %s, the HDR modes %s", why, k_hdr_titles[shown].UTF8String, nat ? "offered" : "greyed out (the game does not import nn::vi::QueryDisplayHdrStatus)",
+        edr ? "offered (the screen has EDR headroom)" : "greyed out (the screen has no EDR headroom; the mode is kept)");
+}
+static void hdr_choose(int mode, const char *how) {
+    mtl_hdr_set_requested(mode);
+    LOG("front end: HDR %s (%s): DM_HDR=%d", k_hdr_titles[mode].UTF8String, how, mode);
+    hdr_save_choice(mode); hdr_menu_log(how); [g_hdr_menu update];
+}
+@interface DmHdrMenu : NSObject <NSMenuDelegate, NSMenuItemValidation>
+@end
+@implementation DmHdrMenu
+- (void)pick:(NSMenuItem *)item { int m = (int)item.tag; if (m != mtl_hdr_mode_shown(mtl_hdr_requested(), mtl_hdr_game_native()) || m != mtl_hdr_requested()) hdr_choose(m, "menu"); }
+- (void)cycle:(id)sender {
+    (void)sender; int nat = mtl_hdr_game_native(), edr = hdr_screen_edr(), shown = mtl_hdr_mode_shown(mtl_hdr_requested(), nat), next = mtl_hdr_mode_next(shown, nat, edr);
+    if (edr && next != shown) hdr_choose(next, "⌃⌘H");   // not on a screen without EDR: the chosen mode is kept for the next EDR screen
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    int nat = mtl_hdr_game_native(), edr = hdr_screen_edr(), shown = mtl_hdr_mode_shown(mtl_hdr_requested(), nat);
+    if (item.action == @selector(cycle:)) return edr && mtl_hdr_mode_next(shown, nat, edr) != shown;
+    item.state = item.tag == shown ? NSControlStateValueOn : NSControlStateValueOff;
+    return mtl_hdr_mode_allowed((int)item.tag, nat, edr);
+}
+- (void)menuNeedsUpdate:(NSMenu *)menu { (void)menu; hdr_menu_log("opened"); }
+@end
+static void hdr_menu_screen(void) { if (!g_hdr_menu) return; [g_hdr_menu update]; hdr_menu_log("screen"); }   // main thread: a screen change
+void front_edr_poll(void) {
+    static _Atomic int pending; if (atomic_exchange(&pending, 1)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ atomic_store(&pending, 0); hdr_screen(g_win.screen); });
+}
 static double mode_hz(CGDisplayModeRef m) { double hz = CGDisplayModeGetRefreshRate(m); return hz > 0 ? hz : 0; }   // 0 = not known (older built-in screens report none)
 static int hz_multiple(double hz, int fps) { double k = round(hz / fps); return k >= 1 && fabs(hz / fps - k) < 0.01; }   // 59.94 Hz counts as 60
 static CGError screen_set_mode(CGDirectDisplayID id, CGDisplayModeRef m) {   // for this app only (kCGConfigureForAppOnly)
@@ -164,11 +271,19 @@ static void screen_match_restore(int on_it, int undone) {   // main thread: the 
 }
 static void screen_match_apply(void);
 static void screen_match_once(void) {   // screen_match_apply's work, never entered twice at once
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
+    static int match = -1;
+    if (match < 0) {
+        match = front_mac_screen_match_mode(getenv("DM_SCREEN_MATCH"));
+        if (match == FRONT_MAC_MATCH_OFF) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)");
+        if (match == FRONT_MAC_MATCH_FIXED) LOG("front end: a variable-refresh screen goes to a fixed-rate mode in fullscreen too (DM_SCREEN_MATCH=1)");
+    }
+    int off = match == FRONT_MAC_MATCH_OFF;
     NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id, full);
     static int last_want;
+    static CGDirectDisplayID kept_id; static int kept_hz;
+    if (!full) { kept_id = kCGNullDirectDisplay; kept_hz = 0; }
     if (!full || want != last_want) {   // left fullscreen, or a new frame rate: the switches before do not count
         if (g_match_bounced && full) LOG("front end: the screen's rate is matched again for %d fps", want);
         last_want = want; g_match_undone = 0; g_match_bounces = 0; g_match_bounced = 0;
@@ -216,7 +331,12 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
         if (vrr && (CGDisplayModeGetIODisplayModeID(m) == cur_id || (hz > 0 && fabs(r - hz) < 0.5))) continue;
         if (hz_multiple(r, want) && r > pick_hz) { pick = m; pick_hz = r; }
     }
-    if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);
+    if (front_mac_keep_vrr(match, vrr, want, (int)round(pick_hz), mtl_link_vrr_120_hz(g_screen_fps))) {
+        if (kept_id != id || kept_hz != g_screen_fps) {
+            kept_id = id; kept_hz = g_screen_fps;
+            LOG("front end: variable-refresh screen at %d Hz keeps its mode in fullscreen: the 120 Hz display link paces it (DM_SCREEN_MATCH=1 switches it to a fixed-rate mode)", (int)g_screen_fps);
+        }
+    } else if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);
     else if (!pick) LOG("front end: screen at %.0f Hz has no mode of this size at a multiple of %d Hz: frames are paced on the nearest refreshes", hz, want);
     else if ((g_match_bounces = g_match_undone > 0 && CACurrentMediaTime() - g_match_undone < MATCH_SETTLE_S ? g_match_bounces + 1 : 0) >= MATCH_BOUNCES) {
         g_match_bounced = 1;
@@ -1860,6 +1980,17 @@ void front_run(void (*guest)(void)) {
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
+        {   // HDR (DmHdrMenu above): ⌃⌘H is free (⌘H hides the app, ⌥⌘H the others, ⌃⌘F is full screen)
+            static DmHdrMenu *hdrm; hdrm = [DmHdrMenu new];
+            NSMenu *hm = [[NSMenu alloc] initWithTitle:@"HDR"]; hm.delegate = hdrm;
+            for (int i = 0; i < 3; i++) { NSMenuItem *it = [hm addItemWithTitle:k_hdr_titles[i] action:@selector(pick:) keyEquivalent:@""]; it.tag = i; it.target = hdrm; }
+            [hm addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *cy = [hm addItemWithTitle:@"Next HDR Mode" action:@selector(cycle:) keyEquivalent:@"h"];
+            cy.keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand; cy.target = hdrm;
+            [wm addItem:[NSMenuItem separatorItem]];
+            [[wm addItemWithTitle:@"HDR" action:nil keyEquivalent:@""] setSubmenu:hm];
+            g_hdr_menu = hm;
+        }
         NSMenu *controls = [[NSMenu alloc] initWithTitle:@"Controls"];
         NSMenuItem *stickMotion = [controls addItemWithTitle:@"Right Stick Motion" action:@selector(toggleStickMotion:) keyEquivalent:@"g"];
         stickMotion.target = v;

@@ -96,7 +96,8 @@ enum {
     RO_NOTE,   // a[0] an _Atomic uint64_t, a[1] a value: the encode thread has made every call before this one (rec_note_wait)
 };
 typedef struct { uint32_t op, nobj; uint64_t a[15]; } rec_t;   // the first nobj slots hold retained objects (0 for nil), released once the call is made
-enum { REC_BLK = 256 };
+// 2,048 records per block (was 256): each publish wakes the encode thread with a syscall when it sleeps between blocks; a commit still publishes immediately
+enum { REC_BLK = 2048 };
 typedef struct rec_blk { struct rec_blk *next; int n; rec_t r[REC_BLK]; } rec_blk;
 
 // On by default on iOS: Breath of the Wild on an iPhone 17 Pro Max (handheld, the Great Plateau) took about 8 ms of submit thread per frame without it and 3.3–4.5 ms with it
@@ -117,8 +118,8 @@ static pthread_cond_t g_rb_work = PTHREAD_COND_INITIALIZER, g_rb_idle = PTHREAD_
 static rec_blk *g_rb_cur, *g_rb_head, *g_rb_tail, *g_rb_free;   // the submit thread's open block; blocks waiting for the encode thread; empty blocks
 static int g_rb_busy, g_rb_started, g_rb_sleeping;              // the encode thread is working through a block; the thread exists; it waits for work
 
-static inline uint64_t rec_obj(id o) { return o ? (uint64_t)(uintptr_t)CFBridgingRetain(o) : 0; }
-static inline id rec_id(uint64_t v) { return (__bridge id)(void *)(uintptr_t)v; }
+static inline uint64_t rec_obj(__unsafe_unretained id o) { return o ? (uint64_t)(uintptr_t)CFBridgingRetain(o) : 0; }
+#define rec_id(v) ((__bridge id)(void *)(uintptr_t)(v))
 static inline uint64_t rec_f(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 static inline float rec_fv(uint64_t v) { uint32_t u = (uint32_t)v; float f; memcpy(&f, &u, 4); return f; }
 
@@ -155,7 +156,7 @@ static int g_rx_after, g_rx_want_stamp;   // the last record was a held submissi
 static uint64_t g_rx_ubc;   // the newest uniform shadow the held submissions read (ubc_wait at the commit)
 static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed held commits: made after the real one, in order
 static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main command buffers committed and not reported back (DM_NVN_SUB_IDLE_FB); commits are held (rec_drain waits for them); rec_drain callers waiting; tests: synthetic in-flight commits
-static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark); highest fence a blocking waiter needs committed (rec_wake_for_fence)
+static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark_locked); highest fence a blocking waiter needs committed (rec_wake_for_fence)
 static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions / segments held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int rx_merge_on(void) {
@@ -174,11 +175,6 @@ static void rx_mark_locked(void) {   // after a commit on g_q4, under g_res_comm
     uint64_t s = atomic_load_explicit(&g_rx_seq, memory_order_relaxed) + 1;
     atomic_store_explicit(&g_rx_seq, s, memory_order_release);
     [g_q4 signalEvent:ev value:s];
-}
-static void rx_mark(void) {
-    pthread_mutex_lock(&g_res_commit_mu);
-    rx_mark_locked();
-    pthread_mutex_unlock(&g_res_commit_mu);
 }
 static uint64_t rx_inflight(void) {   // commits on g_q4 not yet completed by the GPU (plus any test hold)
     static int fbm = -1; if (fbm < 0) fbm = sw_mode("DM_NVN_SUB_IDLE_FB", 0);
@@ -229,6 +225,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
     }];
     pthread_mutex_lock(&g_res_commit_mu);
+    uint64_t at = commit_now(); for (id fb in fbs) if (fb != NSNull.null) gpu_tag_commit(fb, at);
     uint64_t elapsed = q4_commit_elapsed(buffers, (NSUInteger)nb, o);
     rx_mark_locked();
     pthread_mutex_unlock(&g_res_commit_mu);
@@ -244,7 +241,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
 }
 static void rx_flush(void) { if (g_rx_npend) rx_commit(0, nil, 0); }   // the held command buffers go to the queue now
 static void rec_exec(const rec_t *r) {
-    const uint64_t *a = r->a; id e = g_rx_enc;
+    const uint64_t *a = r->a; __unsafe_unretained id e = g_rx_enc;
     int after = g_rx_after; if (r->op != RO_SIGNAL && r->op != RO_NOTE) g_rx_after = 0;
     switch (r->op) {
     case RO_CB_NEW: g_rx_cb = [g_dev newCommandBuffer]; break;
@@ -385,8 +382,8 @@ static void rec_publish(void) {
     if (g_rb_sleeping) pthread_cond_signal(&g_rb_work);
     pthread_mutex_unlock(&g_rb_mu);
 }
-static rec_t *rec_put(uint32_t op, uint32_t nobj) {
-    if (g_rb_cur && g_rb_cur->n == REC_BLK) rec_publish();
+static __attribute__((noinline, cold)) rec_t *rec_put_slow(uint32_t op, uint32_t nobj) {
+    if (g_rb_cur && g_rb_cur->n >= REC_BLK) rec_publish();
     if (!g_rb_cur) {
         pthread_mutex_lock(&g_rb_mu);
         if (!g_rb_started) { pthread_t th; pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, 1 << 20);
@@ -397,6 +394,13 @@ static rec_t *rec_put(uint32_t op, uint32_t nobj) {
         g_rb_cur->n = 0;
     }
     rec_t *r = &g_rb_cur->r[g_rb_cur->n++]; r->op = op; r->nobj = nobj; return r;
+}
+static inline rec_t *rec_put(uint32_t op, uint32_t nobj) {
+    rec_blk *b = g_rb_cur;
+    if (__builtin_expect(b && b->n < REC_BLK, 1)) {
+        rec_t *r = &b->r[b->n++]; r->op = op; r->nobj = nobj; return r;
+    }
+    return rec_put_slow(op, nobj);
 }
 // Hand over what is recorded and wait until the encode thread has made every call
 static void rec_drain(void) {
@@ -441,7 +445,7 @@ static __attribute__((noreturn)) void rec_missing(id o, SEL s) { MDIE("deferred 
 
 // Argument tables: every stand-in is made once and kept for good (rec_table), so the real table is passed without a retain
 @interface DmRecTable : NSObject { @public id real; } @end
-static inline void rec_table_op(uint32_t op, id t, uint64_t v, NSUInteger i) { rec_t *r = rec_put(op, 0); r->a[0] = (uint64_t)(uintptr_t)(__bridge void *)((DmRecTable *)t)->real; r->a[1] = v; r->a[2] = i; }
+static inline void rec_table_op(uint32_t op, __unsafe_unretained id t, uint64_t v, NSUInteger i) { rec_t *r = rec_put(op, 0); r->a[0] = (uint64_t)(uintptr_t)(__bridge void *)((DmRecTable *)t)->real; r->a[1] = v; r->a[2] = i; }
 @implementation DmRecTable
 - (void)setAddress:(uint64_t)gpu atIndex:(NSUInteger)i { rec_table_op(RO_T_ADDR, self, gpu, i); }
 - (void)setTexture:(MTLResourceID)t atIndex:(NSUInteger)i { rec_table_op(RO_T_TEX, self, t._impl, i); }
@@ -449,7 +453,7 @@ static inline void rec_table_op(uint32_t op, id t, uint64_t v, NSUInteger i) { r
 - (void)setResource:(MTLResourceID)t atBufferIndex:(NSUInteger)i { rec_table_op(RO_T_RESOURCE,self,t._impl,i); }
 - (id)forwardingTargetForSelector:(SEL)s { rec_missing(self, s); }
 @end
-static inline id rec_table_real(id t) { return [t isKindOfClass:[DmRecTable class]] ? ((DmRecTable *)t)->real : t; }
+static inline id rec_table_real(__unsafe_unretained id t) { return [t isKindOfClass:[DmRecTable class]] ? ((DmRecTable *)t)->real : t; }
 
 @interface DmRecEnc : NSObject @end
 @implementation DmRecEnc
@@ -550,8 +554,12 @@ static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: REC_CMT_NOW /
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
+    // Under g_res_commit_mu as the encode thread's commits: nothing lands between a present's copy and its signal (nvn_mtl.m present_copy), which the present would wait for too
+    pthread_mutex_lock(&g_res_commit_mu);
+    gpu_tag_commit(fb, commit_now());
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit (main command buffer)");
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
@@ -562,8 +570,10 @@ static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
+    pthread_mutex_lock(&g_res_commit_mu);   // as rec_commit's
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit_upload (upload batch)");
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch

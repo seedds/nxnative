@@ -1,5 +1,5 @@
-// Residency by command buffer (nvn_mtl.m res_name, PR #2715): no residency set is attached to either queue, and every command buffer committed on g_q or g_q4 names g_res and the
-// present snapshots' set (useResidencySet) after its last begin; the present's also its drawable's layer set. Real Metal: the queues' addResidencySet and commits and the command
+// Residency by command buffer (nvn_mtl.m res_name, PR #2715): no residency set is attached to any queue, and every command buffer committed on g_q, g_q4 or g_pq4 (the present's
+// own, DM_PRESENT_QUEUE) names g_res and the present snapshots' set (useResidencySet) after its last begin; the present's also its drawable's layer set. Real Metal: the queues' addResidencySet and commits and the command
 // buffers' begin, useResidencySet and commit are wrapped, so the calls each command buffer gets are counted whichever path made it (calls, not what the driver keeps resident).
 // Checks, each run with the encode thread off and on (DM_NVN_ENC_THREAD): no set on a queue; a submission with a cut and an upload batch (three command buffers); a present snapshot
 // and its present through the display link; an offscreen present (present_offscreen_m4); a classic command buffer (q_cb, by mtl_drain); one each. That no other path ends a command
@@ -22,10 +22,11 @@ static int checks, failed;
 #define CHECK(name, ok) do { int pass = !!(ok); checks++; failed += !pass; printf("%s: %s\n", name, pass ? "PASS" : "FAIL"); } while (0)
 
 // What the wrappers saw, under g_t_mu: command buffers that named g_res and those that named g_snap_res since their last begin (pointers; a commit takes its buffer out); since mark(),
-// commits on each queue ([0] g_q, [1] g_q4), those whose buffer had not named both, and namings of g_t_layer_set (the test's drawable layer); and sets attached to a queue
+// commits on each queue ([0] g_q, [1] g_q4, [2] g_pq4), those whose buffer had not named both, and namings of g_t_layer_set (the test's drawable layer); and sets attached to a queue
 static pthread_mutex_t g_t_mu = PTHREAD_MUTEX_INITIALIZER;
 static CFMutableSetRef g_t_named, g_t_named_snap;
-static uint64_t g_t_commits[2], g_t_unnamed[2], g_t_layer_named; static int g_t_attached;
+static uint64_t g_t_commits[3], g_t_unnamed[3], g_t_layer_named; static int g_t_attached;
+static const char *const g_t_qname[3] = {"g_q", "g_q4", "g_pq4"};
 static id g_t_layer_set;
 static void t_committed(int q4, void *cb) {
     pthread_mutex_lock(&g_t_mu); g_t_commits[q4]++; if (!CFSetContainsValue(g_t_named, cb) || !CFSetContainsValue(g_t_named_snap, cb)) g_t_unnamed[q4]++;
@@ -51,11 +52,11 @@ static void h_commit_cl(id self, SEL s) {
     ((void (*)(id, SEL))o_commit_cl)(self, s);
 }
 static void h_commit_4(id self, SEL s, __unsafe_unretained id const *b, NSUInteger n) {
-    if (self == g_q4) for (NSUInteger i = 0; i < n; i++) t_committed(1, (__bridge void *)b[i]);
+    if (self == g_q4 || (self && self == g_pq4)) for (NSUInteger i = 0; i < n; i++) t_committed(self == g_q4 ? 1 : 2, (__bridge void *)b[i]);
     ((void (*)(id, SEL, __unsafe_unretained id const *, NSUInteger))o_commit_4)(self, s, b, n);
 }
 static void h_commit_4o(id self, SEL s, __unsafe_unretained id const *b, NSUInteger n, id o) {
-    if (self == g_q4) for (NSUInteger i = 0; i < n; i++) t_committed(1, (__bridge void *)b[i]);
+    if (self == g_q4 || (self && self == g_pq4)) for (NSUInteger i = 0; i < n; i++) t_committed(self == g_q4 ? 1 : 2, (__bridge void *)b[i]);
     ((void (*)(id, SEL, __unsafe_unretained id const *, NSUInteger, id))o_commit_4o)(self, s, b, n, o);
 }
 static void h_add(id self, SEL s, id set, IMP o) {
@@ -85,10 +86,10 @@ static void hooks(void) { @autoreleasepool {
 } }
 
 static void mark(void) { pthread_mutex_lock(&g_t_mu); memset(g_t_commits, 0, sizeof g_t_commits); memset(g_t_unnamed, 0, sizeof g_t_unnamed); g_t_layer_named = 0; pthread_mutex_unlock(&g_t_mu); }
-static void expect(const char *what, int q4, uint64_t want) {   // the command buffers committed on the queue since mark(): as many as the path commits, and each named both sets
-    pthread_mutex_lock(&g_t_mu); uint64_t c = g_t_commits[q4], u = g_t_unnamed[q4]; pthread_mutex_unlock(&g_t_mu);
-    char name[200]; printf("%s: %llu command buffers committed on %s, %llu without the set named\n", what, (unsigned long long)c, q4 ? "g_q4" : "g_q", (unsigned long long)u);
-    snprintf(name, sizeof name, "%s: commits %llu command buffer%s on %s", what, (unsigned long long)want, want == 1 ? "" : "s", q4 ? "g_q4" : "g_q"); CHECK(name, c == want);
+static void expect(const char *what, int q, uint64_t want) {   // the command buffers committed on queue q since mark(): as many as the path commits, and each named both sets
+    pthread_mutex_lock(&g_t_mu); uint64_t c = g_t_commits[q], u = g_t_unnamed[q]; pthread_mutex_unlock(&g_t_mu);
+    char name[200]; printf("%s: %llu command buffers committed on %s, %llu without the set named\n", what, (unsigned long long)c, g_t_qname[q], (unsigned long long)u);
+    snprintf(name, sizeof name, "%s: commits %llu command buffer%s on %s", what, (unsigned long long)want, want == 1 ? "" : "s", g_t_qname[q]); CHECK(name, c == want);
     snprintf(name, sizeof name, "%s: each one names the residency sets", what); CHECK(name, u == 0);
 }
 static CAMetalLayer *offscreen_layer(void) {
@@ -104,6 +105,7 @@ int main(void) { @autoreleasepool {
     printf("encode thread %s\n", rec_on() ? "on" : "off");
     CHECK("both host residency sets made", g_res && g_snap_res);
     { const char *e = getenv("DM_NVN_ENC_THREAD"); CHECK("the encode thread as DM_NVN_ENC_THREAD asks", e && rec_on() == (atoi(e) > 0)); }
+    { const char *e = getenv("DM_PRESENT_QUEUE"); if (e) CHECK("the present's own queue as DM_PRESENT_QUEUE asks", !g_pq4 == !atoi(e)); }
 
     // A submission: a segment cut off at a pass boundary, an upload batch, then its last command buffer
     state_reset(); memset(&R, 0, sizeof R); mark();
@@ -125,7 +127,7 @@ int main(void) { @autoreleasepool {
     a.d.width = a.d.height = 8; a.d.depth = a.d.levels = a.d.samples = 1;
     a.d.target = NVN_TEXTURE_TARGET_2D; a.d.format = NVN_FORMAT_RGBA8;
     serial_put(a.serial, am); res_add(am); res_commit(); mark();
-    uint64_t copies = g_snap_v; present_enqueue(&a, 1. / 60, NULL, 0, NULL); snap_commit_wait(g_snap_v);
+    uint64_t copies = g_snap_v; present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); snap_commit_wait(g_snap_v);
     CHECK("the present was copied into a snapshot", g_snap_v == copies + 1 && [g_snap_ev waitUntilSignaledValue:g_snap_v timeoutMS:2000]);
     expect("a present snapshot", 1, 1);
     CAMetalLayer *l = offscreen_layer(); g_t_layer_set = l.residencySet;
@@ -136,8 +138,27 @@ int main(void) { @autoreleasepool {
     while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
     int presented = !g_pq_inflight && g_pq_done > done; pthread_mutex_unlock(&g_pq_mu);
     CHECK("the present completed", presented);
-    expect("a present through the display link", 1, 1);
+    // Snapshot present reuses g_snap directly on g_pq4 (0 extra copy commits on g_q4, 1 present on g_pq4)
+    if (g_pq4) { expect("a snapshot present through the display link: no extra copy on g_q4", 1, 0); expect("a snapshot present through the display link", 2, 1); }
+    else expect("a present through the display link", 1, 1);
     CHECK("the present names its drawable's layer set", g_t_layer_named == 1);
+
+    // Non-snapshot present (ev_val != 0 bypasses snap_take): copies on g_q4 and presents on g_pq4 when DM_PRESENT_QUEUE=1
+    if (g_pq4) {
+        CAMetalLayer *l2 = offscreen_layer(); g_t_layer_set = l2.residencySet;
+        FakeLinkUpdate *u2 = [FakeLinkUpdate new]; u2.drawable = [l2 nextDrawable]; u2.targetPresentationTimestamp = CACurrentMediaTime() + 0.016;
+        uint64_t done2 = g_pq_done;
+        present_enqueue(&a, 1. / 60, NULL, 1, 0, NULL);   // ev_val=1 with g_ext_ev==nil skips snap_take without waiting
+        mark();
+        [link metalDisplayLink:(CAMetalDisplayLink *)(id)u2 needsUpdate:(CAMetalDisplayLinkUpdate *)u2];
+        pthread_mutex_lock(&g_pq_mu); clock_gettime(CLOCK_REALTIME, &ts); ts.tv_sec += 5;
+        while (g_pq_inflight && pthread_cond_timedwait(&g_pq_cv, &g_pq_mu, &ts) != ETIMEDOUT) {}
+        int presented2 = !g_pq_inflight && g_pq_done > done2; pthread_mutex_unlock(&g_pq_mu);
+        CHECK("the non-snapshot present completed", presented2);
+        expect("a non-snapshot present: its copy", 1, 1);
+        expect("a non-snapshot present", 2, 1);
+        CHECK("the non-snapshot present names its drawable's layer set", g_t_layer_named == 1);
+    }
 
     // An offscreen present (a whole-window screenshot's pass)
     d.pixelFormat = MTLPixelFormatBGRA8Unorm; d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -151,6 +172,6 @@ int main(void) { @autoreleasepool {
     expect("a classic command buffer", 0, 1);
 
     CHECK("no residency set is attached to a queue", g_t_attached == 0);
-    printf("t_res_cb (encode thread %s): %d checks, %d failed\n", rec_on() ? "on" : "off", checks, failed);
+    printf("t_res_cb (encode thread %s, DM_PRESENT_QUEUE %s): %d checks, %d failed\n", rec_on() ? "on" : "off", g_pq4 ? "on" : "off", checks, failed);
     return failed != 0;
 } }

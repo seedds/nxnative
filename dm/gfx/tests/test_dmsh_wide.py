@@ -218,5 +218,14 @@ class ConstantReads(unittest.TestCase):
         src += '    uint _11 = ref((*spvDescriptorSet0.fp_s0)._m0[0]);\n'
         self.assertEqual(constant_reads(src, {0}), src)
 
+    def test_non_element_device_refs_do_not_block_unrelated_buffers(self):
+        src = ('struct dm_loop_state { uint c; };\n'
+               'template<typename T, size_t N> struct spvUnsafeArray { device T& operator [] (size_t pos) device { return elements[pos]; } T elements[N]; };\n'
+               'static inline void raw(const device _40& fp_s2) {}\n'
+               'kernel void main0(device dm_loop_state& dm_loop [[buffer(28)]]) {}\n' + self.SRC)
+        out = constant_reads(src, {0, 2})
+        self.assertIn('constant _40* fp_s0 [[id(3)]];', out)
+        self.assertIn('const device _40* fp_s2 [[id(6)]];', out)
+
 if __name__ == '__main__':
     unittest.main()

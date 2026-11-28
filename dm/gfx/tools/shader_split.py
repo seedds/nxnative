@@ -57,6 +57,7 @@
 #   · Anvil / Scimitar forges (Ubisoft, forge.py): version 28 (Immortals Fenyx Rising, 'GPUCODEONLY' records in Oodle containers and loose ShaderDataNVN.bin), versions 25 / 31 (Assassin's
 #     Creed: The Ezio Collection, control sections followed by code areas in Oodle blocks), and version 27 (Assassin's Creed III Remastered, BNSH in LZO1X blocks), see forge_jobs and forge_shaders
 #   · IPK (Ubisoft's UbiArt, Rayman Legends: Definitive Edition v7, Just Dance 2022 v5): whole GLSLC outputs in the .fxb effect files of bundle_*.ipk (zlib entries), see ipk_shaders
+#   · APF (Vector Unit, Beach Buggy Racing 2: Island Adventure): whole GLSLC outputs in the VuShaderAsset entries (LZ4 blocks) of Assets.apf, see apf_entries and apf_shaders
 #   · Falcom .pkg / .pka (Trails into Reverie): headerless .pkg tables (LZ4 block or zstd entries) and deduplicated .pka archives (0x7ff7cf0d) holding BNSH or Phyre RYHP GLSLC effects, see falcom_pkg, falcom_pka_jobs
 #   · NXSD (TETRIS THE GRAND MASTER 4): descriptor-referenced NVN control sections and code areas, one stage per entry; see nxsd_shaders
 #   · MVGL / NXSH (Media.Vision, Digimon Story Time Stranger): MDB1 archives (wide 64-bit LZ4 or legacy 32-bit doboz, mvgl.py) whose .shad entries and embedded main records are NXVS / NXFS / NXCS containers with control and code spans; see mvgl_jobs and nxsh_shader
@@ -1008,6 +1009,13 @@ def gust_gz(d):
         o += n
     return None
 
+def ktgl_zl(d):
+    """Team Ninja's .ZL_ files (Marvel Ultimate Alliance 3: 5,470 of them; the stage packages STAGE/*/*.pktf.ZL_ hold 405 GLSLC outputs, the terrain's among them): a u32 inflated
+    length, then gust_gz's chunks (a u32 stored length and one zlib stream each) up to a zero length. → the inflated data, or None when d is not in that form or its length disagrees"""
+    if len(d) < 9 or d[8] != 0x78: return None
+    z = gust_gz(memoryview(d)[4:])
+    return z if z is not None and len(z) == struct.unpack_from('<I', d, 0)[0] else None
+
 def kt_shaders(d, label, out):
     """Three Houses' KTGL keeps its shaders in SPKG packages (patch*/nx/shader/*.spkg, and 132 entries of DATA1.bin), each holding G2S containers ('_S2G3000', as in Age of Calamity) of GLSLC outputs,
     and in '_SPK4100' packages without G2S (DATA1.bin entry 549, the post effects: 27 outputs); map and model archives in DATA1.bin carry packages of their own. So every inflated file or entry is
@@ -1373,6 +1381,100 @@ def ipk_shaders(path, rel, out):
             scan_blob(b, f'{label}/{name}', found)
             if not found: found = glslc_shaders(b, f'{label}/{name}', need=False)
             out += found
+
+VU_APF = b'FPUV'   # Vector Unit's asset package ('.apf')
+APF_HEADER = 0x3c
+
+def fnv1a32(d):
+    """FNV-1a, 32 bits: what Vector Unit's APF packages check their header, directory and entries with"""
+    h = 0x811c9dc5
+    for c in d: h = (h ^ c) * 0x01000193 & 0xffffffff
+    return h
+
+def apf_decompress(raw, usz, comp, where):
+    """One APF entry's data: compression 0 = stored, 1 = zlib, 5 = one LZ4 block. None for another compression (the caller counts them in one [WARN] per package)"""
+    if comp == 0:
+        if len(raw) != usz: red(f'{where}: {len(raw):#x} stored bytes, the entry says {usz:#x}')
+        return raw
+    if comp == 1:
+        # RFC 1951 deflate max expansion is 1032:1 (258 bytes per 2-bit match); reject an inflated-size bomb before decoding.
+        if usz > 1032 * len(raw): red(f'{where}: {usz:#x} bytes from {len(raw):#x} stored is more than a zlib stream can hold (1032 to 1)')
+        dec = zlib.decompressobj()
+        try: m = dec.decompress(raw, usz + 1)
+        except zlib.error as e: red(f'{where}: invalid zlib stream ({e})')
+        if not dec.eof or dec.unused_data or len(m) != usz:
+            red(f'{where}: {len(m):#x} bytes decoded, the entry says {usz:#x}')
+        return m
+    if comp == 5:
+        if usz > 255 * len(raw): red(f'{where}: {usz:#x} bytes from {len(raw):#x} stored is more than an LZ4 block can hold (255 to 1)')
+        import lz4.block
+        try: m = lz4.block.decompress(raw, uncompressed_size=usz)
+        except lz4.block.LZ4BlockError as e: red(f'{where}: its {len(raw):#x} stored bytes are not an LZ4 block ({e})')
+        if len(m) != usz: red(f'{where}: {len(m):#x} bytes decoded, the entry says {usz:#x}')
+        return m
+    return None
+
+def apf_entries(f, size, label):
+    """The directory of a Vector Unit APF package (Beach Buggy Racing 2: Island Adventure, 0100C43012344000: one 343 MB Assets.apf of 7,749 entries). Little-endian header of 0x3c bytes:
+    'FPUV', u32 version (7), u32 directory offset, u32 entry count, u32 directory length, u32 FNV-1a of the directory, the platform's name ('Switch', 32 bytes NUL-padded), u32 FNV-1a of
+    the 0x38 bytes before it. Per entry: its name ('<asset type>/<asset path>', NUL-terminated), u32 offset, u32 length, u32 stored length, u32 FNV-1a of the decoded data, u16 the asset
+    type's version, u16 compression (apf_decompress). 'Assets/AssetData' (zlib) lists every asset by type, without offsets.
+    → [(name, offset, length, stored length, compression)], every non-empty entry checked to lie in [APF_HEADER, size] without overlapping the directory [at, at + dlen)"""
+    h = f.read(APF_HEADER)
+    if len(h) < APF_HEADER: red(f'{label}: {len(h)} bytes, shorter than a Vector Unit APF header ({APF_HEADER:#x})')
+    if h[:4] != VU_APF: red(f'{label}: magic {h[:4]!r}, not a Vector Unit APF package ({VU_APF!r})')
+    ver, at, n, dlen, dsum = struct.unpack_from('<5I', h, 4)
+    if ver != 7: red(f'{label}: Vector Unit APF version {ver} (only version 7 is read)')
+    if fnv1a32(h[:0x38]) != struct.unpack_from('<I', h, 0x38)[0]: red(f'{label}: the APF header does not match its FNV-1a sum')
+    if at < APF_HEADER or at > size or dlen > size - at: red(f'{label}: the APF directory ({dlen:#x} bytes at {at:#x}) lies outside the file ({size:#x} bytes)')
+    if n > dlen // 21: red(f'{label}: the APF directory lists {n} entries, more than fit in its {dlen:#x} bytes')
+    f.seek(at); t = f.read(dlen)
+    if len(t) != dlen or fnv1a32(t) != dsum: red(f'{label}: the APF directory does not match its FNV-1a sum')
+    dend = at + dlen
+    p, es = 0, []
+    for i in range(n):
+        e = t.find(b'\0', p)
+        if e < 0 or e + 21 > len(t): red(f'{label}: entry {i} of {n} runs past the APF directory ({dlen:#x} bytes)')
+        name = t[p:e].decode('utf-8', 'replace')
+        off, usz, csz, _sum, _ver, comp = struct.unpack_from('<4I2H', t, e + 1)
+        if csz and (off < APF_HEADER or off > size or csz > size - off or (off < dend and at < off + csz)):
+            red(f'{label}/{name}: its {csz:#x} stored bytes at {off:#x} lie outside the APF data ({APF_HEADER:#x}..{size:#x}, directory {at:#x}..{dend:#x})')
+        es.append((name, off, usz, csz, comp)); p = e + 21
+    if p != len(t): red(f'{label}: {len(t) - p} bytes after the {n} entries of the APF directory')
+    return es
+
+def apf_shaders_f(f, size, label, out):
+    """Read and scan one Vector Unit APF package from an open binary stream f of length size, entry by entry without reading the package whole."""
+    other = collections.Counter()
+    seen = set()
+    for name, off, usz, csz, comp in apf_entries(f, size, label):
+        if not usz and not csz: continue
+        if comp not in (0, 1, 5): other[comp] += 1; continue
+        span_key = (off, usz, csz, comp)
+        if span_key in seen: continue
+        seen.add(span_key)
+        where = f'{label}/{name}'
+        if csz:
+            f.seek(off); raw = f.read(csz)
+        else:
+            raw = b''
+        if len(raw) != csz: red(f'{where}: short read ({len(raw):#x} of {csz:#x} bytes)')
+        m = apf_decompress(raw, usz, comp, where)
+        if m is None: continue
+        found = []
+        scan_blob(m, where, found)
+        if not found and GLSLC_MAGIC in m: found = glslc_shaders(m, where, need=False)
+        out += found
+    if other:
+        print(f'[WARN] {label}: {sum(other.values())} entries not read, their compression (' + ', '.join(f'{c} × {k}' for c, k in sorted(other.items())) +
+              ') is not one this reader knows (0 = stored, 1 = zlib, 5 = LZ4)', flush=True)
+
+def apf_shaders(path, rel, out):
+    """The entries of a Vector Unit APF package (apf_entries), each decoded and scanned like a file. Beach Buggy Racing 2's shaders are its 233 VuShaderAsset entries (LZ4): a small header,
+    then whole GLSLC outputs of a vertex and a pixel program each. No asset type is relied on; the package is read entry by entry, never whole"""
+    with open(path, 'rb') as f:
+        size = f.seek(0, 2); f.seek(0)
+        apf_shaders_f(f, size, f'/{rel}', out)
 
 CPK = b'CPK '
 def cpk_jobs(files, parts=64):
@@ -3745,11 +3847,94 @@ def ue3_body(d, label):
         i = o
     return b''.join(out)
 
+UE3_COMPACT_CTL_LEN = 0x880
+UE3_COMPACT_HDR_LEN = 0x30
+UE3_COMPACT_META_MAX = 0x40
+# Match the 6 zero bytes spanning ml's high half (u16 0) and the trailing u32 0 right before a Maxwell SPH type/version byte (0x41..0x65).
+UE3_COMPACT_RE = re.compile(rb'\x00{6}[\x41-\x65]')
+
+def _ue3_compact_template():
+    """Fixed NVN control-section template built by UE3's compact shader loader (Batman: Arkham Asylum 1.0.1 main+0xcc6194) before per-shader metadata fields are written."""
+    ctl = bytearray(UE3_COMPACT_CTL_LEN)
+    ctl[:4] = CTL_MAGIC
+    struct.pack_into('<5I', ctl, 0x04, 1, 0x10, 0x120, 0xb, 0x878)
+    struct.pack_into('<I', ctl, 0x20, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<Q', ctl, 0x6f0, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x708, UE3_COMPACT_HDR_LEN)
+    struct.pack_into('<I', ctl, 0x790, 0x2a0035)
+    struct.pack_into('<Q', ctl, 0x7c8, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x7e8, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x7f4, 0x0c)
+    return bytes(ctl)
+
+UE3_COMPACT_CTL = _ue3_compact_template()
+
+def ue3_compact_build(region, meta):
+    """Synthesize the 0x880-byte NVN control section and aligned code area from a compact UE3 shader record (Batman: Arkham Asylum 1.0.1 main+0xcc6194).
+    The metadata (up to 0x40 bytes read over a zeroed block) gives the first module's instruction size (+4), c1 constant size (+8), GLSLC register/stage fields
+    (+0x0c..+0x1b, +0x24, +0x28..+0x3f), and an optional inline second vertex module (+0x1c size, +0x20 field) placed after the aligned c1 constants with a zeroed 0x30-byte header."""
+    a256 = lambda n: (n + 0xff) & ~0xff
+    m = bytearray(UE3_COMPACT_META_MAX)
+    m[:min(len(meta), UE3_COMPACT_META_MAX)] = meta[:UE3_COMPACT_META_MAX]
+    csz, ksz, x0, f710 = struct.unpack_from('<4I', m, 0x04)
+    f724, gsz, x1, f794 = struct.unpack_from('<4I', m, 0x18)
+    c1_off = a256(csz)
+    data_end = c1_off + a256(ksz)
+    ctl = bytearray(UE3_COMPACT_CTL)
+    if gsz:
+        mod1_off = data_end + UE3_COMPACT_HDR_LEN
+        ctl_total = a256(mod1_off + gsz)
+        struct.pack_into('<6I', ctl, 0x748, UE3_COMPACT_HDR_LEN, csz, x0, mod1_off, gsz, x1)
+    else:
+        ctl_total = data_end
+    struct.pack_into('<4I', ctl, 0x6f8, csz, ksz, c1_off, ctl_total)
+    struct.pack_into('<4I', ctl, 0x70c, x0, f710, m[0x14], 0x10000 if m[0x15] else 0)
+    struct.pack_into('<I', ctl, 0x724, f724)
+    struct.pack_into('<I', ctl, 0x734, m[0x16])
+    struct.pack_into('<I', ctl, 0x794, f794)
+    ctl[0x7d0:0x7e8] = m[0x28:0x40]
+    c_end = a256(UE3_COMPACT_HDR_LEN + csz)
+    code_data_end = c_end + a256(ksz)
+    code_total = a256(code_data_end + UE3_COMPACT_HDR_LEN + gsz) if gsz else code_data_end
+    code = bytearray(code_total)
+    code[:4] = GFX_MAGIC
+    code[UE3_COMPACT_HDR_LEN:UE3_COMPACT_HDR_LEN + csz] = region[:csz]
+    code[c_end:c_end + ksz] = region[csz:csz + ksz]
+    if gsz:
+        o = code_data_end + UE3_COMPACT_HDR_LEN
+        code[o:o + gsz] = region[csz + ksz:csz + ksz + gsz]
+    return bytes(ctl), bytes(code)
+
+def ue3_compact_shaders(d, label):
+    """Compact Unreal Engine 3 shader records with no stored NVN control section: {u32 region_len, u32 meta_len (< 0x880), u32 0}, region (ins0 || c1 || ins1), meta.
+    Reconstructs each record through ue3_compact_build and skips lookalike non-shader data that lacks a valid graphics SPH or fails GLSLC's 256-byte code-end alignment."""
+    out, end, n = [], 0, len(d)
+    for m in UE3_COMPACT_RE.finditer(d):
+        p = m.start() - 6
+        if p < end: continue
+        cl, ml = struct.unpack_from('<II', d, p)
+        mo = p + 12 + cl
+        if not (0x50 <= cl <= 0x100000 and 0x20 <= ml < UE3_COMPACT_CTL_LEN) or mo + ml > n: continue
+        csz, ksz = struct.unpack_from('<II', d, mo + 4)
+        gsz = struct.unpack_from('<I', d, mo + 0x1c)[0]
+        if csz < 0x50 or (gsz and gsz < 0x50) or csz + ksz + gsz != cl: continue
+        if ((csz + 0xff) & ~0xff) != ((UE3_COMPACT_HDR_LEN + csz + 0xff) & ~0xff): continue
+        ctl, code = ue3_compact_build(d[p + 12:mo], d[mo:mo + ml])
+        st = sph_stage(code)
+        if not st or check(label, st, ctl, code): continue
+        if gsz:
+            mod1_off = struct.unpack_from('<I', ctl, 0x754)[0]
+            if st != 'vs' or sph_stage(code[mod1_off - UE3_COMPACT_HDR_LEN:mod1_off + 4]) != 'vs': continue
+        out.append((f'{label}#UE3@{p:x}', st, ctl, code))
+        end = mo + ml
+    return out
+
 def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
     Mortal Kombat 11 stores control-first records: {u32 control size, u32 code size, u32 0, u32 control size}, then the control (with trailing compiler text/reflection) and the code area.
+    Compact UE3 caches (Batman: Arkham Asylum) store no control section at all, only {u32 region_len, u32 meta_len (< 0x880), u32 0, region, meta}, reconstructed via ue3_compact_shaders when the body holds no CTL_MAGIC.
     The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
@@ -3777,6 +3962,8 @@ def ue3_shaders(d, label):
         why = check(label, st, ctl, code) if st else 'no stage in the code area header'
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
+    if CTL_MAGIC not in d:
+        out.extend(ue3_compact_shaders(d, label))
     return out
 
 
@@ -5209,6 +5396,9 @@ def scan_file_in(args):
     if head[:4] == UBIART_IPK:   # a UbiArt IPK archive (ipk_shaders): its .fxb effect files, without reading the rest
         ipk_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == VU_APF:   # a Vector Unit APF package (apf_shaders): every entry decoded and scanned, without reading the package whole
+        apf_shaders(path, rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if head[:8] in (IDRK, PDRK):
         idrk_shaders(path, '/' + rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -5378,7 +5568,8 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
-    if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
+    if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z; head = d[:16]   # Gust's chunked zlib (gust_gz)
+    if head[8:9] == b'\x78' and path.upper().endswith('.ZL_') and (z := ktgl_zl(d)) is not None: d = z; head = d[:16]   # Team Ninja's sized chunked zlib (ktgl_zl)
     if is_shadercache_nx(d):   # BioShock Remastered / BioShock 2 Remastered RomFS shader cache: zlib blocks joined, then NVN records (shadercache_nx)
         found = shadercache_nx(d, '/' + rel, need=False)
         if found: return rel, uniq_keys(found), var_pairs(found), trees

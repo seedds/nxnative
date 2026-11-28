@@ -22,6 +22,23 @@ static void run(sim *m, int n, double w, int kmin, int kmax, int fixed) {
 // frames among frames on time are paid back by the step and keep hold 1 (below)
 static void hitch(sim *m) { run(m, 7, 1.6, 1, 3, 0); }
 
+// The GPU clock of an M1 Pro (Ocarina of Time, 2026-11-24): a scene takes at1 vsyncs at the clock a probe reaches, at2 at hold 2 and at3 at hold 3, where macOS lowers the clock
+// until the work fills about two thirds of the frame; the first 20 frames back at hold 1 run as slowly as the hold before. ±0.04 of jitter
+typedef struct { int k0, ramp; double prev; uint32_t r; } m1clock;
+static double m1_gpu(m1clock *c, int k, double at1, double at2, double at3) {
+    if (k == 1 && c->k0 > 1) c->ramp = 20;
+    double t = k == 1 ? at1 : k == 2 ? at2 : at3;
+    if (k > 1) c->prev = t; else if (c->ramp > 0) { c->ramp--; t = c->prev; }
+    c->k0 = k; c->r = c->r * 1664525u + 1013904223u;
+    return t + ((c->r >> 8) % 1000) / 1000.0 * 0.08 - 0.04;
+}
+// One frame of a GPU-bound game on it: the GPU's state and the hold between kmin and k it may probe (hle_nvn.c fstep_tick)
+static void gpu_frame_at(sim *m, nvn_fgpu *g, double gpu, double w, int kmin, int kmax) {
+    m->slow = nvn_fstep_gpu_slowed(g, gpu, &m->s, kmin); m->s.gpu_to = nvn_fgpu_between(g, &m->s);
+    run(m, 1, w, kmin, kmax, 0);
+}
+static void gpu_frame(sim *m, nvn_fgpu *g, double gpu, double w) { gpu_frame_at(m, g, gpu, w, 1, 3); }
+
 int main(void) {
     {   // 120 fps (hle_nvn.c fps_high): kmin 1, kmax 2, in ticks of 1/120 s. The target follows the hold, so a hold above what frames take is the game at the right speed
         sim m = {0}; m.s.per_vsync = 2; m.s.no_payback = 1;
@@ -241,10 +258,16 @@ int main(void) {
         snprintf(b, sizeof b, "  game time %.0f against real time %.2f (debt %.2f, dropped %.0f)", m.game, m.real, m.s.debt, m.s.dropped);
         check(m.real - m.game - m.s.debt > -1.01 && m.real - m.game - m.s.debt < 1.01 && m.s.dropped == 0, b);
     }
-    {   // a heavier scene at the same clock: 0.86 at hold 1, then 1.12 (19 ms) for good, which is 1.3 times less than enough to call the GPU slowed
-        sim m = {0}; nvn_fgpu g = {0};
-        for (int i = 0; i < 2000; i++) { double w = i < 600 ? 0.86 : 1.12; m.slow = nvn_fstep_gpu_slowed(&g, w, &m.s, 1); run(&m, 1, w, 1, 3, 0); }
-        check(m.s.k == 2 && m.s.probes == 0, "heavier scene, GPU 0.86 → 1.12 at hold 2: not slowed, no probe");
+    {   // a heavier scene at the same clock: 0.9 at hold 1, then 1.12 (19 ms) for good, 1.24 times it, less than enough to call the GPU slowed. At 1.3 times (0.86 before it) it
+        // is slowed: the reference learns only frames hold 1 holds, not the heavier scene's late ones there (before, they moved it to 1.01 and kept 1.12 under 1.3 times it).
+        // Two probes fail, and their ratio (1) starts no other
+        for (int v = 0; v < 2; v++) {
+            sim m = {0}; nvn_fgpu g = {0};
+            for (int i = 0; i < 4000; i++) { double w = i < 600 ? (v ? 0.86 : 0.9) : 1.12; m.slow = nvn_fstep_gpu_slowed(&g, w, &m.s, 1); run(&m, 1, w, 1, 3, 0); }
+            snprintf(b, sizeof b, v ? "  0.86 → 1.12, 1.3 times: two probes fail, then none (k %d, probes %llu, failed %llu)" : "heavier scene, GPU 0.9 → 1.12 at hold 2: not slowed, no probe (k %d, probes %llu)",
+                     m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+            check(m.s.k == 2 && m.s.probes == (v ? FSTEP_GPU_FAILS : 0) && m.s.failed == m.s.probes, b);
+        }
     }
     {   // a loading screen: the GPU at 0.03, then lag on the CPU steps to 2, where the GPU takes 0.17 (5.7 times as much but 3 ms): the CPU holds the frame back, not the GPU
         sim m = {0}; nvn_fgpu g = {0}; int slowed = 0;
@@ -359,6 +382,120 @@ int main(void) {
         }
         snprintf(b, sizeof b, "two probes failed by a stall give no ratio, the next probe holds (k %d, probes %llu, failed %llu, ratios %d)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed, g.ratio_n[1][2] + g.ratio_n[1][3]);
         check(m.s.k == 1 && m.s.failed == 2 && m.s.probes == 3 && g.ratio_n[1][2] + g.ratio_n[1][3] == 0, b);
+    }
+    {   // Ocarina of Time on an M1 Pro (2026-11-24, m1_gpu): a scene of 1.8 vsyncs at hold 1, 1.9 at hold 2, 2.0 at hold 3 (over the fit of hold 2) holds 30 fps. A hitch at hold 2
+        // (six frames of 2.8: a controller joining) steps to 3; the probes back to hold 1 fail there and give hold 3 its ratio (1.11), by which the scene takes 1.8 at hold 1: not
+        // slowed, so from the third such hitch on nothing tried hold 2, which holds it (20 fps for minutes). With the probe to the hold between, each hitch costs seconds at hold 3
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 5}; int at3 = 0; uint64_t f0 = 0;
+        for (int i = 0; i < 12600; i++) {
+            int k = m.s.k ? m.s.k : 1, h = i >= 1500 && (i - 1500) % 1800 < 6;
+            double gt = i < 600 ? 0.5 : h ? 2.8 : m1_gpu(&c, k, 1.8, 1.9, 2.0);
+            if (g.ratio_n[1][3] < FSTEP_GPU_FAILS) f0 = m.s.failed; else at3 += k == 3;
+            gpu_frame(&m, &g, gt, gt);
+        }
+        snprintf(b, sizeof b, "GPU 2.0 at hold 3, 1.9 at 2, 1.8 at 1 (OoT, M1 Pro): hold 2 after each hitch (k %d, %d frames at hold 3 after the ratio, failed %llu)", m.s.k, at3,
+                 (unsigned long long)(m.s.failed - f0));
+        check(g.ratio_n[1][3] >= FSTEP_GPU_FAILS && g.ratio_at[1][3] > 1.05 && m.s.k == 2 && at3 <= 600 && m.s.failed == f0, b);
+    }
+    {   // the same in ticks of 1/120 s (nvn_fstep.t120: Ocarina of Time's FRAME_STEP_120 stubs): holds of 2 / 4 / 6 ticks, the scene 3.6 / 3.8 / 4.0 ticks there;
+        // the probe goes to 4 ticks, the hold between that whole vsyncs give (never 3 or 5 at a kmin of 2)
+        sim m = {0}; m.s.t120 = 1; m.s.per_vsync = 2; nvn_fgpu g = {0}; m1clock c = {.r = 5}; int at6 = 0, odd = 0; uint64_t f0 = 0;
+        for (int i = 0; i < 12600; i++) {
+            int k = m.s.k ? m.s.k : 2, h = i >= 1500 && (i - 1500) % 1800 < 6;
+            double gt = i < 600 ? 1.0 : h ? 5.6 : 2 * m1_gpu(&c, k / 2, 1.8, 1.9, 2.0);
+            if (g.ratio_n[2][6] < FSTEP_GPU_FAILS) f0 = m.s.failed; else at6 += k == 6;
+            odd += k % 2;
+            gpu_frame_at(&m, &g, gt, gt, 2, 6);
+        }
+        snprintf(b, sizeof b, "  in ticks of 1/120 s: 4 ticks after each hitch (k %d, %d frames at 6 after the ratio, failed %llu, odd holds %d)", m.s.k, at6,
+                 (unsigned long long)(m.s.failed - f0), odd);
+        check(g.ratio_n[2][6] >= FSTEP_GPU_FAILS && m.s.k == 4 && at6 <= 600 && m.s.failed == f0 && !odd, b);
+    }
+    {   // the same Mac, a fresh start (2026-11-24): a light scene (0.85), a load (0.15), then the heavy scene's first frames at hold 1 take 2.5 vsyncs (2.0–2.7 in the run) at the
+        // clock the load left, among stalls (592, 177 and 152 ms frames) whose grace kept them from stepping up for about 75 frames (100 here); three late frames then step to 3,
+        // where the clock falls until the work fills two thirds of the frame (2.5 → 2.0 over 200 frames). Learned, those frames make the GPU's reference at hold 1 about 2.4,
+        // against which hold 3 is not slowed: no probe came in the run's 25 s. The reference learns only frames hold 1 holds: the probes come, two fail, and hold 2 holds
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 9}; int at3 = 0, n3 = 0;
+        for (int i = 0; i < 6000; i++) {
+            int k = m.s.k ? m.s.k : 1; n3 += k == 3;
+            double gt = i < 600 ? 0.85 : i < 900 ? 0.15 : k == 1 && !m.s.ups ? 2.5 : m1_gpu(&c, k, 1.8, 1.9, fmax(2.0, 2.5 - n3 * 0.0025));
+            at3 += i >= 3000 && k == 3;
+            gpu_frame(&m, &g, gt, i >= 900 && i < 1000 && i % 20 == 0 ? 10 : gt);   // the stalls
+        }
+        snprintf(b, sizeof b, "  a load, then 2.5 at hold 1 among stalls, 1 → 3: hold 2 (k %d, %d of the last 3000 frames at hold 3, failed %llu, reference %.2f)", m.s.k, at3,
+                 (unsigned long long)m.s.failed, g.ref_at[1]);
+        check(m.s.k == 2 && at3 == 0 && m.s.failed <= 2 * FSTEP_GPU_FAILS && g.ref_at[1] < 0.5, b);
+    }
+    {   // a scene the clock cannot bring under hold 2 (2.4 at every hold): two probes back to hold 1 fail and give the ratio 1, by which it fits no hold between: hold 3, no more probes
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 11};
+        for (int i = 0; i < 6000; i++) { int k = m.s.k ? m.s.k : 1; double gt = i < 600 ? 0.5 : m1_gpu(&c, k, 2.4, 2.4, 2.4); gpu_frame(&m, &g, gt, gt); }
+        snprintf(b, sizeof b, "  2.4 at every hold: hold 3, no probe to hold 2 (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(m.s.k == 3 && m.s.probes == FSTEP_GPU_FAILS && m.s.failed == FSTEP_GPU_FAILS, b);
+    }
+    {   // the GPU fits hold 2 by the ratio (as above) but the CPU needs 2.3 vsyncs at every hold: each probe to hold 2 fails, and they wait as the unpaced ones do (uhold), 1 s doubled
+        // up to 60 s, not the 8 s of a probe to hold 1
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 13}; uint64_t p = 0; double last = 0, gap = 1e9; int late_probes = 0;
+        for (int i = 0; i < 36000; i++) {
+            int k = m.s.k ? m.s.k : 1; double gt = i < 600 ? 0.5 : m1_gpu(&c, k, 1.8, 1.9, 2.0);
+            gpu_frame(&m, &g, gt, i < 600 ? gt : fmax(gt, 2.3));
+            if (m.s.probes != p) { p = m.s.probes; if (m.real >= 18000 * 3) { late_probes++; if (last) gap = fmin(gap, m.real - last); } last = m.real; }
+        }
+        snprintf(b, sizeof b, "  the CPU needs hold 3 (2.3): probes to hold 2 fail at most once a minute (%d in the last %.0f min, %.0f s apart at least)", late_probes, (m.real - 18000 * 3) / 3600,
+                 gap / 60);
+        check(m.s.k == 3 && late_probes >= 2 && gap >= FSTEP_UHOLD_MAX, b);
+    }
+    {   // genuinely overloaded GPU under strong DVFS (2.1 at hold 1, 3.0 at hold 2, 3.4 at hold 3: ~1.6x slowdown): cur / ratio is ~2.1 > FSTEP_FIT * 2, so after two failed
+        // probes to hold 1 learn hold 3's ratio there is no probe to hold 2, and game time stays paced at hold 3
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 17};
+        for (int i = 0; i < 6000; i++) { int k = m.s.k ? m.s.k : 1; double gt = i < 600 ? 0.5 : m1_gpu(&c, k, 2.1, 3.0, 3.4); gpu_frame(&m, &g, gt, gt); }
+        snprintf(b, sizeof b, "  overloaded GPU under 1.6x DVFS (2.1 / 3.0 / 3.4): hold 3, no probe to hold 2 (k %d, probes %llu, failed %llu)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed);
+        check(m.s.k == 3 && m.s.probes == FSTEP_GPU_FAILS && m.s.failed == FSTEP_GPU_FAILS && g.ratio_at[1][3] > 1.5, b);
+    }
+    {   // borderline GPU-overloaded scene: hold 1's clock reaches 1.85 (<= FSTEP_FIT * 2) and hold 3 takes 2.15 (ratio ~1.16), yet hold 2 itself cannot hold (2.20 > 2.1):
+        // probes to hold 2 fail, back off via uhold to at most once a minute, and stay paced (game time = real time within debt)
+        sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 19}; uint64_t p = 0; double last = 0, gap = 1e9; int late_probes = 0;
+        for (int i = 0; i < 36000; i++) {
+            int k = m.s.k ? m.s.k : 1; double gt = i < 600 ? 0.5 : m1_gpu(&c, k, 1.85, 2.20, 2.15);
+            gpu_frame(&m, &g, gt, gt);
+            if (m.s.probes != p) { p = m.s.probes; if (m.real >= 18000 * 3) { late_probes++; if (last) gap = fmin(gap, m.real - last); } last = m.real; }
+        }
+        snprintf(b, sizeof b, "  borderline GPU-overloaded at hold 2 (1.85 / 2.20 / 2.15): backs off to 60 s (%d in last %.0f min, gap %.0f s)", late_probes, (m.real - 18000 * 3) / 3600, gap / 60);
+        check(m.s.k == 3 && late_probes >= 2 && gap >= FSTEP_UHOLD_MAX && fabs(m.real - m.game - m.s.debt) < 1.01, b);
+    }
+    {   // intermediate-hold probe that holds (probe == 2, uprobe == 2 at hold 2) resets hold/uhold after 8 s, and a later fit trial 2 → 1 clears probe/uprobe cleanly
+        // (neither doubling uhold on failure nor leaving probe == 2 on success)
+        for (int fail_fit = 0; fail_fit < 2; fail_fit++) {
+            sim m = {0}; nvn_fgpu g = {0}; m1clock c = {.r = 5};
+            for (int i = 0; i < 8000 && (g.ratio_n[1][2] < FSTEP_GPU_FAILS || g.ratio_n[1][3] < FSTEP_GPU_FAILS); i++) {
+                int k = m.s.k ? m.s.k : 1, h = i >= 1500 && (i - 1500) % 1800 < 6;
+                double gt = i < 600 ? 0.5 : h ? 2.8 : m1_gpu(&c, k, 1.8, 1.9, 2.0);
+                gpu_frame(&m, &g, gt, gt);
+            }
+            // Step to hold 3 and fail one hold-2 probe (CPU 2.3) so uhold doubles above FSTEP_HOLD0, then let the next hold-2 probe hold
+            run(&m, 6, 2.8, 1, 3, 0);
+            uint64_t f0 = m.s.failed;
+            for (int i = 0; i < 600 && m.s.failed == f0; i++) { int k = m.s.k ? m.s.k : 1; double gt = m1_gpu(&c, k, 1.8, 1.9, 2.0); gpu_frame(&m, &g, gt, fmax(gt, 2.3)); }
+            int uhold_raised = m.s.uhold > FSTEP_HOLD0;
+            for (int i = 0; i < 1200 && !(m.s.k == 2 && m.s.probe == 2); i++) { int k = m.s.k ? m.s.k : 1; double gt = m1_gpu(&c, k, 1.8, 1.9, 2.0); gpu_frame(&m, &g, gt, gt); }
+            int at2_p2 = m.s.k == 2 && m.s.probe == 2 && m.s.uprobe == 2;
+            // After 8 s at hold 2, hold and uhold return to FSTEP_HOLD0 without needing a step-up
+            if (fail_fit) for (int i = 0; i < 300; i++) { double gt = m1_gpu(&c, 2, 1.8, 1.9, 2.0); gpu_frame(&m, &g, gt, gt); }
+            int reset_ok = !fail_fit || (m.s.k == 2 && m.s.hold == FSTEP_HOLD0 && m.s.uhold == FSTEP_HOLD0);
+            // Scene becomes light (0.6) with GPU probes gated off (e.g. LPM / thermal): fit trial 2 → 1 starts with probe and uprobe cleared
+            m.slow = 0; m.s.gpu_to = 0;
+            for (int i = 0; i < 600 && m.s.k != 1; i++) run(&m, 1, 0.6, 1, 3, 0);
+            int trial_clean = m.s.k == 1 && m.s.trial == FSTEP_RUN && m.s.probe == 0 && m.s.uprobe == 0;
+            double uhold_before = m.s.uhold;
+            if (fail_fit) {
+                run(&m, 15, 1.5, 1, 3, 0);   // fail the fit trial: uhold must not double
+                snprintf(b, sizeof b, "  hold-2 probe held > 8 s then failed fit trial 2 → 1: uhold stays %.0f (k %d)", m.s.uhold, m.s.k);
+                check(uhold_raised && at2_p2 && reset_ok && trial_clean && m.s.k == 2 && m.s.uhold == uhold_before, b);
+            } else {
+                run(&m, FSTEP_RUN + 5, 0.6, 1, 3, 0);   // fit trial holds: enters tpend, not probe == 2
+                snprintf(b, sizeof b, "  hold-2 probe then held fit trial 2 → 1: enters tpend (k %d, tpend %d, probe %d, uprobe %d)", m.s.k, m.s.tpend, m.s.probe, m.s.uprobe);
+                check(uhold_raised && at2_p2 && trial_clean && m.s.k == 1 && m.s.tpend == 1 && m.s.probe == 0 && m.s.uprobe == 0, b);
+            }
+        }
     }
     // A GPU clock that follows the hold (dvfs): w is the scene's GPU time at hold 1's clock; at a longer hold it takes drop times as long, and the first 20 frames back at hold 1
     // still do. Each case starts on a title screen (0.25), whose reference the heavy scene's few frames at hold 1 move only part of the way before it steps up

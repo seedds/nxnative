@@ -329,6 +329,65 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+static void geometry_reader(NSString *dir) {
+    NSString *base = @"0123456789abcdef", *reader = [base stringByAppendingString:@"_bgv"];
+    for (NSString *ext in @[@"metallib", @"json"]) {
+        NSString *src = [dir stringByAppendingPathComponent:[@"warm-vs." stringByAppendingString:ext]];
+        NSString *dst = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", reader, ext]];
+        EXPECT("bgv fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:src toPath:dst error:nil]);
+    }
+    g_shmap[base] = @"geometry";
+    nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array];
+    warm_load_begin();
+    g_warm_rps = g_warm_claim_rps = 0; atomic_store(&g_warm_ready, 0);
+    uint64_t stale0 = g_warm_skip_stale;
+    pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
+    NvShader *vs = [NvShader new], *fs = [NvShader new];
+    strlcpy(vs->key, reader.UTF8String, sizeof vs->key); vs->stage = 0;
+    strlcpy(fs->key, "warm-fs", sizeof fs->key); fs->stage = 1;
+    pso_skey sk; char hex[sizeof sk * 2 + 1];
+    pso_skey_from(&key, vs, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    NSString *valid = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 2; pso_skey_hex(&sk, hex);
+    NSString *bad_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 0; strlcpy(sk.vs, "warm-vs_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *wrong_map_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "fedcba9876543210_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *missing_map = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "warm-vs", sizeof sk.vs); strlcpy(sk.fs, reader.UTF8String, sizeof sk.fs); pso_skey_hex(&sk, hex);
+    NSString *bgv_in_fs = [NSString stringWithFormat:@"R\t%s\n", hex];
+    NSString *manifest = [dir stringByAppendingPathComponent:@"bgv.tsv"];
+    NSString *text = [NSString stringWithFormat:@"%@%@%@%@%@", bad_stage, wrong_map_stage, missing_map, bgv_in_fs, valid];
+    EXPECT("bgv manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    EXPECT("only valid _bgv R row accepted", 1, lines == 1 && tasks.count == 1 ? 1 : 0);
+    EXPECT("missing _bgv base key and _bgv in fs counted as stale", 2, g_warm_skip_stale - stale0);
+    if (tasks.count != 1) return;
+    g_warm_t0 = bp_now(); atomic_store(&g_warm_running, 1);
+    warm_task(tasks[0]);
+    warm_finish();
+    EXPECT("bgv render pipeline enqueued", 1, g_warm_rps);
+    warm_claim();
+    EXPECT("bgv render pipeline claimed", 1, g_warm_claim_rps);
+    NvShader *claimed_vs = shader_get(reader, 0), *claimed_fs = shader_get(@"warm-fs", 1);
+    EXPECT("bgv reader cached by shader_get", 1, claimed_vs != nil && claimed_fs != nil);
+    if (!claimed_vs || !claimed_fs) return;
+    state_reset(); S.chmask.mask = 15;
+    memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
+    g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;
+    uint64_t before = g_pb_spec + g_pb_legacy;
+    NvProg *program = [NvProg new]; program->sh[0] = claimed_vs; program->sh[1] = claimed_fs;
+    id<MTLRenderPipelineState> warmed = pso_get(program, nil);
+    EXPECT("bgv draw hits warmed pipeline without compiling", before, g_pb_spec + g_pb_legacy);
+    EXPECT("bgv draw returns a pipeline", 1, warmed != nil);
+    if (warmed) {
+        uint8_t px[4]; pixels(warmed, 0, px);
+        EXPECT("bgv warmed pipeline renders expected pixels", 1, abs((int)px[0] - 128) <= 1 && abs((int)px[1] - 64) <= 1 && px[2] == 255 && abs((int)px[3] - 128) <= 1);
+    }
+    [g_shmap removeObjectForKey:base];
+    g_shcache = nil; nvn_hm_clear(&g_pso, hm_rel);
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -341,6 +400,7 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    geometry_reader(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

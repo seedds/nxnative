@@ -11,8 +11,9 @@ typedef struct {
     uint32_t atest, logic;   // atest: 1 = drawn with the alpha test, the fragment from the shader's side library <key>_bx (nvn_mtl.m atest_key); last, so a prewarm row written before it reads as 0
                              // logic: 1 = drawn with a logic operation, the fragment from the side library <key>_bx (lop_key); in what was padding (0 in older rows)
     va_st attr_hi[16];       // NVN2's attributes 16 to 31 (pso_key_attr); last, so a prewarm row written before them reads as 0
-    uint32_t border, early_read_only;   // border: a sampler has a twin (border_need). early_read_only: a fragment with discard can test read-only depth early.
-                                        // early_read_only occupies the former zero padding, so older prewarm rows keep their original pipelines.
+    uint32_t border;                    // border: a sampler has a twin (border_need).
+    uint8_t early_read_only, pool_mark_off, pso_pad[2];   // early_read_only: a fragment with discard can test read-only depth early. pool_mark_off: bindless pool read marks compiled out (FN_OFF_POOL_MARK).
+                                                          // Both occupy the former zero padding, keeping sizeof(pso_key) unchanged so older prewarm rows deserialize identically.
 } pso_key;
 static inline va_st pso_key_attr(const pso_key *k, int a) { return a < 16 ? k->attr[a] : k->attr_hi[a - 16]; }
 
@@ -53,7 +54,7 @@ static inline void pso_skey_hex(const pso_skey *key, char *out) {
 }
 
 static inline int pso_skey_parse(const char *hex, pso_skey *out) {
-    size_t n = sizeof *out * 2, old2 = n - 2 * (sizeof out->k.border + sizeof out->k.early_read_only), old1 = old2 - 2 * sizeof out->k.attr_hi, old = old1 - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the border field, before the high attributes, or also before the alpha test field: the key without them
+    size_t n = sizeof *out * 2, old2 = n - 2 * (sizeof out->k.border + sizeof out->k.early_read_only + sizeof out->k.pool_mark_off + sizeof out->k.pso_pad), old1 = old2 - 2 * sizeof out->k.attr_hi, old = old1 - 2 * (sizeof out->k.atest + sizeof out->k.logic);   // a row from before the border field, before the high attributes, or also before the alpha test field: the key without them
     if (!hex || (strlen(hex) != n && strlen(hex) != old2 && strlen(hex) != old1 && strlen(hex) != old)) return -1;
     if (strlen(hex) != n) { n = strlen(hex); memset(out, 0, sizeof *out); }
     uint8_t *p = (uint8_t *)out;

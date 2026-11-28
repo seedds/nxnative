@@ -115,14 +115,25 @@ _RO_DECL = re.compile(r'^\s*(const device) ' + _IDENT + r'\* (' + _BUF + r') \[\
 _STORAGE_NAME = re.compile(r'\b' + _BUF + r'\b')
 _WORD_READ = re.compile(r'(?:\*\((?P<cast>const device) packed_uint[234]\*\)(?=&\(\*))?'
                         r'(?P<address>&\s*(?:\(\s*)*)?\(\*spvDescriptorSet0\.(?P<buf>' + _BUF + r')\)\._m0\[')
-_DEVICE_REFERENCE = re.compile(r'\bdevice\s+[^;{}()]*&')
+_DEVICE_REFERENCE = re.compile(r'\bdevice\s+([^;{}()&]*)&')
+
+
+def _has_elem_device_ref(msl):
+    """True if msl declares a device reference parameter that could bind an array element (_m0[i]) without '&'."""
+    for m in _DEVICE_REFERENCE.finditer(msl):
+        # Ignore loop watchdog (dm_loop_state&), BufferBlock struct refs (_NN&), and spvUnsafeArray::operator[] (device T& operator []).
+        body = m.group(1).strip()
+        if body == 'dm_loop_state' or re.fullmatch(r'_\d+', body): continue
+        if body == 'T' and re.match(r'\s*operator\s*\[', msl[m.end():m.end() + 16]): continue
+        return True
+    return False
 
 
 def constant_reads(msl, read_only, mode='fp'):
     """Promote translator-confirmed read-only slots with no escaping pointer or reference."""
     if mode in ('0', 'off', '') or not read_only or not _RO.search(msl): return msl
-    # A helper taking a device reference can borrow an array element without an address-of operator.
-    if _DEVICE_REFERENCE.search(msl): return msl
+    # A helper taking a device element reference can borrow an array element without an address-of operator.
+    if _has_elem_device_ref(msl): return msl
     stages = {stage.strip() for stage in mode.split(',')}
     mentions = Counter(_STORAGE_NAME.findall(msl))
     reads = defaultdict(list)

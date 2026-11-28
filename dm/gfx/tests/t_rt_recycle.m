@@ -78,21 +78,23 @@ int main(void) { @autoreleasepool {
         printf("t_rt_recycle (off): %d checks, %d failed\n", checks, failed); return failed != 0;
     }
     __weak id<MTLHeap> first_heap;
+    __weak id<MTLTexture> first_tex;
     {
         tex_t a = target(&pool, 95001, 0, 640, 360); mtl_tex_init(&a);
         id<MTLTexture> ta = tex_mtl(&a);
         CHECK(ta && ta.heap && ta.width == 640 && ta.height == 360, "a GPU-only pool's target is placed in a heap of its own, at its own size");
-        CHECK(resident(ta.heap) && !resident(ta), "its heap is what the residency set holds");
+        CHECK(resident(ta.heap) && resident(ta), "both the placed texture and its heap are resident");
         CHECK(g_rh_made == 1 && g_rh_reused == 0, "a new heap is counted as made");
         MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&a, 0)];
         CHECK(ta.heap.size >= need.size + need.size / 8, "the heap is made an eighth larger than its first target");
         fill(ta, 0x5a);
-        first_heap = ta.heap;
+        first_heap = ta.heap; first_tex = ta;
         ta = nil; mtl_tex_release(&a); mtl_alias_drop_pool(&pool);   // the pool goes: the sharing table lets its texture go (deferred)
         settle();
     }
     CHECK(first_heap && waiting() == 1, "once its texture is freed the heap waits");
-    CHECK(first_heap && resident(first_heap), "and stays resident while it waits");
+    CHECK(!first_tex || !resident(first_tex), "the retired placed texture leaves the residency set");
+    CHECK(first_heap && resident(first_heap), "and its heap stays resident while it waits");
     {
         tex_t b = target(&pool, 95002, 8 << 20, 632, 356); mtl_tex_init(&b);   // another place, a slightly smaller size
         id<MTLTexture> tb = tex_mtl(&b);

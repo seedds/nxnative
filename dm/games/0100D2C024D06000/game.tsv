@@ -1,0 +1,40 @@
+# Love Is All Around 2, Switch update 1.16.0.223 (v131072)
+# Unity 2022.3.62f1 IL2CPP with FMOD, SDK 19.3.14. See README.md for the Mac playtest.
+
+# ---- Identity ----
+title_id	0100D2C024D06000
+program_id	0100D2C024D06000
+
+# ---- App ----
+name	Love Is All Around 2
+ipa	LoveIsAllAround2.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.16.0.223	main=c6aaf8b1ceed794031b7dcde3835a205	subsdk0=b94b22a35b112945c8a43e9c40a93821	sdk=871fb219c95d507fd5b45f667d51f9c1
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# Horizon load order; subsdk0 is NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	Data/globalgamemanagers
+zip_store	.ab:.asset:.bytes:.dat:.inputactions:.jpg:.mp3:.png:.prefab:.rendertexture:.ress:.ttf:.webm:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resources. Unity starts StandardAllocator in virtual address memory and sets no heap.
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The 3.14 GiB startup reservation left too little contiguous space for Unity's font atlas allocations in the iPhone layout.
+stdalloc_cap	0xa0000000
+
+# ---- Graphics ----
+# Unity calls nvnDeviceSetDepthMode with near = 0. Build the pipeline bases for that mode.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Love Is All Around 2 shaders

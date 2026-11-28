@@ -1058,9 +1058,13 @@ HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend sav
     return save_size_extend(0, user, size, journal);
 }
 HLE_FORCE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", "fsp-srv; the save directory is created at mount time", Result, h_fs_EnsureSave, const void *uid) { (void)uid; return RES_OK; }
+// An ApplicationId of 0 is the Horizon/SDK sentinel for the calling application, not another program:
+// resolve 0 to this profile's program ID in both save-data calls that take an ApplicationId; any other
+// non-zero ID still names another program's save data (the host has none)
+static uint64_t save_app_self(uint64_t app) { return app ? app : DM_GAME_PROGRAM_ID; }
 // Another application's save data (Tears of the Kingdom asks by application ID and would mount it read-only): the host keeps only this game's own save, which exists once mounted
-HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; only this game's own save data exists", int, h_fs_SaveExisting, uint64_t app, const void *uid) {
-    return app == DM_GAME_PROGRAM_ID && dm_account_user(uid) >= 0;
+HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; only this game's own save data exists (ApplicationId 0 is the calling application)", int, h_fs_SaveExisting, uint64_t app, const void *uid) {
+    return save_app_self(app) == DM_GAME_PROGRAM_ID && dm_account_user(uid) >= 0;
 }
 HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv; this game's own save data exists for registered users (returns bool)", int, h_fs_SaveExists, const void *uid) {
     return h_fs_SaveExisting(DM_GAME_PROGRAM_ID, uid);
@@ -1087,9 +1091,9 @@ static Result mount_own_save_ro(const char *name, int user) {
     if (stat(dd, &st) || !S_ISDIR(st.st_mode)) { LOG("[RED] fs read-only mount of this game's save data %s: the save folder %s is not a folder, answered as no save data", name, dd); return 0x7d402u; }
     return mount_ex(name, dd, 1, 0);
 }
-HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own save data read-only (the committed save); another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
+HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own save data read-only (the committed save; ApplicationId 0 is the calling application); another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
     int user = dm_account_user(uid);
-    if (app == DM_GAME_PROGRAM_ID) return user >= 0 ? mount_own_save_ro(name, user) : 0x7d402u;
+    if (save_app_self(app) == DM_GAME_PROGRAM_ID) return user >= 0 ? mount_own_save_ro(name, user) : 0x7d402u;
     LOG("[RED] fs read-only mount of another program's save data %s: program %016llx, the host has none", name, (unsigned long long)app); return 0x7d402u;   // fs ResultTargetNotFound
 }
 const char *dm_save_title(void) { return DM_GAME_ID; }   // save_sync.h: the iPhone launcher names the cloud file with it before the game runs

@@ -92,6 +92,7 @@ t_mtl_init: t_mtl_init.m $(MTL_T_DEP)
 .PHONY: check_t_mtl_init
 check_t_mtl_init: t_mtl_init
 	./t_mtl_init
+	DM_PRESENT_QUEUE=1 ./t_mtl_init
 	DM_TEST_NO_METAL4=1 ./t_mtl_init
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -DDM_TEST_NVN_SDK -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
@@ -348,7 +349,7 @@ check_t_present_crop: t_present_crop
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
-t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
+t_present_rescue: t_present_rescue.m t_present_rescue_focus.c ../../host/front_mac_present.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
 check_t_present_rescue: t_present_rescue
@@ -358,6 +359,36 @@ t_present_alloc: t_present_alloc.m $(MTL_T_DEP)
 .PHONY: check_t_present_alloc
 check_t_present_alloc: t_present_alloc
 	MTL_DEBUG_LAYER=1 ./t_present_alloc
+t_present_probes: t_present_probes.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_probes.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_probes
+check_t_present_probes: t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=0 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_probes
+t_present_queue: t_present_queue.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_queue.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_queue
+check_t_present_queue: t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_queue snap
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_queue snap
+t_present_copy: t_present_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_copy.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_copy
+check_t_present_copy: t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_copy
+t_present_hdr_copy: t_present_hdr_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_hdr_copy.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_hdr_copy
+check_t_present_hdr_copy: t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_hdr_copy
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)
@@ -638,7 +669,7 @@ t_res_cb: t_res_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_cb.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_res_cb
 check_t_res_cb: t_res_cb
-	@set -e; for enc in 0 1; do DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
+	@set -e; for enc in 0 1; do for pq in 0 1; do DM_NVN_ENC_THREAD=$$enc DM_PRESENT_QUEUE=$$pq MTL_DEBUG_LAYER=1 ./t_res_cb; done; done
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_src
@@ -782,6 +813,12 @@ t_pkg_spare: t_pkg_spare.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_spare.m $(MTL_T_SRC) $(FW)
 t_pkg_evict: t_pkg_evict.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_evict.m $(MTL_T_SRC) $(FW)
+t_mem_census: t_mem_census.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_census.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_mem_census
+check_t_mem_census: t_mem_census
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mem_census
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mem_census
 t_storage_pair: t_storage_pair.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_pair.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_storage_pair
@@ -1082,3 +1119,24 @@ t_cpuprof: t_cpuprof.m $(MTL_T_DEP)
 check_t_cpuprof: t_cpuprof
 	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=0 ./t_cpuprof
 	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=1 ./t_cpuprof
+
+# Per-shader negative caches for fb_prepare, fb_depth_rule, ubd_conflict_textures, ubd_conflict_sh, and ubd_conflict
+t_scan_cache: t_scan_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_scan_cache
+check_t_scan_cache: t_scan_cache
+	MTL_DEBUG_LAYER=1 ./t_scan_cache
+
+# Per-draw replay caches: cbsize_table_u, encode_args_patch_cb, g_args_geo_only, g_ed_dirty, per-program PSO cache, g_vbuf_dirty, border_need, vbuf_prepare, vconv_bind, udc_note_draw
+t_draw_cache: t_draw_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_draw_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_draw_cache
+check_t_draw_cache: t_draw_cache
+	MTL_DEBUG_LAYER=1 ./t_draw_cache
+
+# Multi-device NVN depth mode lifecycle and depth-keyed shader caching (issue #3382)
+t_depth_mode: t_depth_mode.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_mode.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_depth_mode
+check_t_depth_mode: t_depth_mode
+	./t_depth_mode

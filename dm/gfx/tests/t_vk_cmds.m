@@ -197,6 +197,119 @@ static void test_geometry_viewports(VkRenderPass rp, VkFramebuffer fb, VkImage t
     h_vkDestroyShaderModule(dev, gs, NULL); h_vkDestroyShaderModule(dev, vs, NULL); h_vkDestroyShaderModule(dev, fs, NULL);
 }
 
+// VK_EXT_extended_dynamic_state: the vertex stride and the viewport/scissor counts come from the command buffer. The vertex shader takes its position from the
+// buffer, so which half of the target a triangle covers says where the draw read its attributes: the pipeline's static stride 8 reads (0,-1) (3,-1) (0,3), the
+// right half, and a stride of 24 bound with vkCmdBindVertexBuffers2EXT reads (0,-1) (-1,-1) (-1,3), the left half. The with-count setters then replace the
+// pipeline's own rects and counts (the top left quarter), so the pixels they leave are the ones the command buffers asked for.
+static void test_dynamic_stride_and_counts(VkRenderPass rp, VkFramebuffer fb, VkImage target, VkShaderModule fs) {
+    VkShaderModule vs = module_of_fn("t_posv", "000000000000000d");
+    VkPipelineShaderStageCreateInfo stages[] = {stage(VK_SHADER_STAGE_VERTEX_BIT, vs), stage(VK_SHADER_STAGE_FRAGMENT_BIT, fs)};
+    VkVertexInputBindingDescription bind = {.binding = 0, .stride = 8, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription attr = {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = 0};
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .vertexBindingDescriptionCount = 1,
+                                               .pVertexBindingDescriptions = &bind, .vertexAttributeDescriptionCount = 1, .pVertexAttributeDescriptions = &attr};
+    // The pipeline's own viewport and scissor sit in the top left pixel (and its count is 2, where the device allows it): a with-count setter that was ignored
+    // would leave the draw there
+    const uint32_t nv = max_viewports() > 1 ? 2 : 1;
+    VkViewport static_vp[2] = {{0, 0, 1, 1, 0, 1}, {0, 0, 1, 1, 0, 1}};
+    VkRect2D static_sc[2] = {{{0, 0}, {1, 1}}, {{0, 0}, {1, 1}}};
+    VkPipelineViewportStateCreateInfo vsi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                                             .viewportCount = nv, .pViewports = static_vp, .scissorCount = nv, .pScissors = static_sc};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL,
+                                                 .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
+    VkPipelineColorBlendStateCreateInfo blend = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkDynamicState states[] = {VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 3, .pDynamicStates = states};
+    VkGraphicsPipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages, .pVertexInputState = &vi,
+                                       .pInputAssemblyState = &ia, .pViewportState = &vsi, .pRasterizationState = &rs, .pMultisampleState = &ms,
+                                       .pColorBlendState = &blend, .pDynamicState = &dy, .renderPass = rp};
+    VkPipeline p; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    CHECK(p->pso != nil && p->dyn_stride, "a pipeline with a dynamic vertex stride and with-count viewport and scissor is built");
+    CHECK(eds_applied(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE) && eds_applied(VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT) &&
+          eds_applied(VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT), "the three states the host applies answer yes");
+    // A pipeline that declares one of the extension's other states is still built, and draws with its static value: the host answers no for it, and says so once
+    VkDynamicState unapplied[] = {VK_DYNAMIC_STATE_CULL_MODE};
+    VkPipelineDynamicStateCreateInfo dy_no = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 1, .pDynamicStates = unapplied};
+    ci.pDynamicState = &dy_no;
+    VkPipeline plain; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &plain);
+    CHECK(plain->pso != nil && !plain->dyn_stride && !eds_applied(VK_DYNAMIC_STATE_CULL_MODE), "a state the host does not apply answers no, and its pipeline keeps the static value");
+    h_vkDestroyPipeline(dev, plain, NULL);
+
+    // Two buffers, each drawing a quad (six vertices) so the pixels a draw covers are a rectangle: one packed at 8 bytes a vertex for the pipeline's stride (the
+    // right half), one padded to 24 bytes a vertex for the dynamic stride (the left half). Which half a draw covers is therefore which buffer's vertices it read.
+    VkBuffer vba = new_buf(48, 0), vbb = new_buf(128, 0);
+    const float right_quad[12] = {0, -1, 1, -1, 0, 1, 1, -1, 1, 1, 0, 1}, left_quad[12] = {-1, -1, 0, -1, -1, 1, 0, -1, 0, 1, -1, 1};
+    memcpy(bytes(vba), right_quad, sizeof right_quad);
+    for (int i = 0; i < 6; i++) memcpy((float *)bytes(vbb) + i * 6, left_quad + 2 * i, 2 * sizeof(float));   // 24 bytes apart
+    VkDeviceSize off = 0, stride8 = 8, stride24 = 24;
+    const VkViewport full = {0, 0, 4, 4, 0, 1};
+    const VkRect2D all = {{0, 0}, {4, 4}}, row1 = {{0, 1}, {4, 1}};
+    uint8_t px[64]; int ok;
+
+    // The pipeline's own stride: no variant is built
+    VkCommandBuffer cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 1, &vba, &off, NULL, &stride8);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= x >= 2 ? near(px + 4 * (y * 4 + x), 255, 128, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "a stride that matches the pipeline's own draws the vertices it describes (the right half), with no variant");
+    CHECK(p->nvar == 0, "and builds no pipeline state for it");
+
+    // Stride 24: the attributes are read 24 bytes apart, from the padded buffer's vertices
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 1, &vbb, &off, NULL, &stride24);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= x < 2 ? near(px + 4 * (y * 4 + x), 255, 128, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "the stride bound with vkCmdBindVertexBuffers2EXT decides where the draw reads its vertices (the left half)");
+    CHECK(p->nvar == 1, "one pipeline state was built for the stride that differs from the pipeline's own (got %u)", p->nvar);
+
+    // The stride back to the pipeline's own: the variant stays cached, and the base state draws again
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 1, &vba, &off, NULL, &stride8);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= x >= 2 ? near(px + 4 * (y * 4 + x), 255, 128, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "binding the pipeline's own stride again draws the right half, from the pipeline state it was built with");
+    CHECK(p->nvar == 1, "and the variant built for the other stride is still the only one (got %u)", p->nvar);
+
+    // The with-count setters with the dynamic stride in the same draw: the padded buffer's left half under a full-target viewport and a one-row scissor, where the
+    // pipeline's own are a single pixel at the top left. The stride's variant is the one built above, found in the cache
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCount(cb, 1, &full); h_vkCmdSetScissorWithCount(cb, 1, &row1);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 1, &vbb, &off, NULL, &stride24);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= (x < 2 && y == 1) ? near(px + 4 * (y * 4 + x), 255, 128, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "vkCmdSetViewportWithCount and vkCmdSetScissorWithCount decide the drawn pixels: the left half, its second row only");
+    CHECK(p->nvar == 1, "and the draw reused the stride's cached variant (got %u)", p->nvar);
+
+    h_vkDestroyPipeline(dev, p, NULL);
+    h_vkDestroyBuffer(dev, vba, NULL); h_vkDestroyBuffer(dev, vbb, NULL); h_vkDestroyShaderModule(dev, vs, NULL);
+}
+
 int main(void) {
     dev = &g_device; queue = &g_queue;
     @autoreleasepool {
@@ -208,6 +321,8 @@ int main(void) {
                 "struct Routed { float4 p [[position]]; uint i [[viewport_array_index]]; };\n"
                 "vertex Routed vk_000000000000000b_vp1(uint v [[vertex_id]], uint i [[instance_id]]) { float2 p = float2((v << 1) & 2, v & 2); return {float4(p * 2.0 - 1.0, 0.0, 1.0), i}; }\n"
                 "fragment float4 t_vp_fs(uint i [[viewport_array_index]]) { return i ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1); }\n"
+                "struct TPos { float2 p [[attribute(0)]]; };\n"
+                "vertex float4 t_posv(TPos in [[stage_in]]) { return float4(in.p, 0.0, 1.0); }\n"
                 "fragment float4 t_fs() { return float4(1.0, 0.5, 0.0, 1.0); }\n" options:nil error:&err];
         CHECK(lib != nil, "the test shaders compile: %s", err.localizedDescription.UTF8String);
         g_lib = lib;
@@ -354,6 +469,26 @@ int main(void) {
         CHECK(all_near(px, 16, 255, 128, 0, 255), "an indexed indirect draw reads its arguments and the index buffer (first texel %u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
         test_indirect_fans(crp, cfb, target, fs);
         test_geometry_viewports(crp, cfb, target);
+        test_dynamic_stride_and_counts(crp, cfb, target, fs);
+
+        // ---- VK_EXT_extended_dynamic_state: the extension is listed (a title loads its entry points only when it finds it) and its one feature answers yes ----
+        {
+            uint32_t next_ext = 0; h_vkEnumerateDeviceExtensionProperties(dev, NULL, &next_ext, NULL);
+            VkExtensionProperties *exts = calloc(next_ext ? next_ext : 1, sizeof *exts);
+            h_vkEnumerateDeviceExtensionProperties(dev, NULL, &next_ext, exts);
+            int listed = 0;
+            for (uint32_t i = 0; i < next_ext; i++) if (!strcmp(exts[i].extensionName, "VK_EXT_extended_dynamic_state")) listed = 1;
+            free(exts);
+            CHECK(listed, "the device lists VK_EXT_extended_dynamic_state among its %u extensions", next_ext);
+            VkPhysicalDeviceExtendedDynamicStateFeaturesEXT q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+            VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q};
+            h_vkGetPhysicalDeviceFeatures2(dev, &f2);
+            CHECK(q.extendedDynamicState == VK_TRUE, "a VkPhysicalDeviceExtendedDynamicStateFeaturesEXT chained into the feature query is answered yes");
+            VkPhysicalDeviceExtendedDynamicStateFeaturesEXT cq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+            VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &cq};
+            VkDevice d2 = VK_NULL_HANDLE; h_vkCreateDevice(dev, &dci, NULL, &d2); (void)d2;
+            CHECK(cq.extendedDynamicState == VK_TRUE, "and vkCreateDevice writes the same answer back into the chain, for a title that asks there");
+        }
 
         // ---- Dynamic blend constants: the pipeline blends with CONSTANT_COLOR, the constants come from the command ----
         VkPipeline blended = make_pipe(crp, ok_st, 2, 1);

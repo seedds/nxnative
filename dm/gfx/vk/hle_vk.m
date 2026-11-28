@@ -347,6 +347,9 @@ typedef struct { uint8_t slot, set; __strong id<MTLArgumentEncoder> enc; VkDescr
 struct VkPipeline_T {
     __strong id<MTLRenderPipelineState> pso; __strong id<MTLDepthStencilState> dss;
     const shinfo *vs, *fs; uint32_t vb_mask; uint8_t vb_slot[14];
+    uint32_t vb_stride[14]; int dyn_stride;   // the binding strides the pipeline was built with, and whether VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE replaces them per draw
+    __strong MTLRenderPipelineDescriptor *pd;   // kept only for a pipeline whose strides are dynamic: pipe_variant copies it into one state per stride set
+    struct { uint64_t key; __strong id<MTLRenderPipelineState> pso; } *var; uint32_t nvar, varcap;   // those states, by the strides they were built for
     __strong id<MTLComputePipelineState> cpso; const shinfo *cs; MTLSize wg;
     uint32_t pc_size, nset; VkDescriptorSetLayout set[8];   // from its pipeline layout, which may be destroyed first: the push-constant size, and the set layouts (held) for a missing binding's report
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
@@ -407,7 +410,12 @@ static VkResult fill_names(const char *const *names, uint32_t n, uint32_t *count
 }
 static const char *const g_inst_ext[] = {"VK_KHR_surface", "VK_NN_vi_surface", "VK_KHR_get_physical_device_properties2", "VK_KHR_get_surface_capabilities2"};
 static const char *const g_dev_ext[] = {"VK_KHR_swapchain", "VK_KHR_descriptor_update_template", "VK_KHR_maintenance1", "VK_KHR_get_memory_requirements2",
-                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2"};
+                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2",
+                                        // The vertex-stride entry points (vkCmdBindVertexBuffers2EXT, vkCmdSetViewportWithCountEXT) are reached through it: a title
+                                        // loads them only when it finds the extension, and STAR WARS Battlefront Classic Collection's REI renderer calls its
+                                        // vkCmdBindVertexBuffers2EXT pointer unconditionally, so without the extension the first REI draw jumps to address 0.
+                                        // What the host applies of it is three of its dynamic states: see eds_applied()
+                                        "VK_EXT_extended_dynamic_state"};
 static void join_names(char *out, size_t n, const char *const *names, uint32_t count) {
     out[0] = 0; size_t o = 0;
     for (uint32_t i = 0; i < count && o + 2 < n; i++) o += snprintf(out + o, n - o, "%s%s", i ? " " : "", names[i]);
@@ -497,7 +505,15 @@ static void dedicated_req(void *pn) {
 VK(vkGetPhysicalDeviceProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties *p) { (void)pd; pdev_props(p); }
 VK(vkGetPhysicalDeviceProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p) { (void)pd; pdev_props(&p->properties); }
 VK(vkGetPhysicalDeviceFeatures, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures *f) { (void)pd; pdev_feats(f); }
-VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); }
+// VK_EXT_extended_dynamic_state, answered the way a driver that has the states the host applies would: the extension is one feature boolean, so a game that asks
+// for it is told yes as a whole. What the host applies of it is three of its dynamic states (eds_applied); the rest keep the report in pipe_make. Every other
+// feature struct keeps the host's old treatment: left as the game set it
+static void feats_eds(void *pn) {
+    for (VkBaseOutStructure *s = pn; s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT)
+            ((VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *)(void *)s)->extendedDynamicState = VK_TRUE;
+}
+VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); feats_eds(f->pNext); }
 VK(vkGetPhysicalDeviceMemoryProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m) { (void)pd; pdev_mem(m); }
 VK(vkGetPhysicalDeviceMemoryProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2 *m) { (void)pd; pdev_mem(&m->memoryProperties); }
 VK(vkGetPhysicalDeviceQueueFamilyProperties, void, VkPhysicalDevice pd, uint32_t *n, VkQueueFamilyProperties *p) {
@@ -616,6 +632,10 @@ VK(vkEnumerateDeviceExtensionProperties, VkResult, VkPhysicalDevice pd, const ch
 }
 VKB(vkCreateDevice, VkResult, VkPhysicalDevice pd, const VkDeviceCreateInfo *ci, const VkAllocationCallbacks *a, VkDevice *out) {
     (void)pd; (void)a; dev_init();
+    // A VkPhysicalDeviceExtendedDynamicStateFeaturesEXT in the chain is written back true, the way a driver that has it would answer. Any other feature struct is
+    // ignored, as before
+    for (const VkBaseInStructure *x = ci->pNext; x; x = x->pNext)
+        if (x->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT) feats_eds((VkBaseOutStructure *)(uintptr_t)x);
     char ext[512]; join_names(ext, sizeof ext, ci->ppEnabledExtensionNames, ci->enabledExtensionCount);
     uint32_t nq = 0; for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) nq += ci->pQueueCreateInfos[i].queueCount;
     VLOG("CreateDevice: %u queues; extensions %s", nq, ext);
@@ -1195,9 +1215,34 @@ static void pipe_layout_hold(VkPipeline p, VkPipelineLayout layout) {
     p->pc_size = layout->pc_size; p->nset = layout->nset;
     for (uint32_t i = 0; i < p->nset; i++) if ((p->set[i] = layout->set[i])) atomic_fetch_add(&p->set[i]->refs, 1);
 }
+// VK_EXT_extended_dynamic_state is one extension string and one feature boolean, but fifteen dynamic states (Vulkan 1.3's core values are the same ones). The host
+// applies three: the vertex input binding stride, and the viewport and scissor counts with their with-count setters. The reason the extension is listed at all is
+// its entry points: a title loads vkCmdBindVertexBuffers2EXT only when it finds the extension, and STAR WARS Battlefront Classic Collection's REI renderer calls
+// that pointer unconditionally (docs/reference/rendering.md, "Dynamic vertex strides and with-count viewports").
+// The other twelve are not applied, and nothing here pretends otherwise: eds_applied() answers yes for exactly the three, pipe_make reports a pipeline that
+// declares one of the twelve and draws it with its static value (as it did before the extension was listed), and each of the twelve setters, exported so that a
+// title which found the extension cannot call a null pointer, reports the state it was asked to set and sets nothing.
+static int eds_applied(VkDynamicState s) {
+    return s == VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE || s == VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT || s == VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT;
+}
+static int eds_state(VkDynamicState s) {   // a dynamic state of the extension, applied or not
+    switch (s) {
+        case VK_DYNAMIC_STATE_CULL_MODE: case VK_DYNAMIC_STATE_FRONT_FACE: case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY:
+        case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT: case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT: case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE:
+        case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE: case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE: case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP:
+        case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE: case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE: case VK_DYNAMIC_STATE_STENCIL_OP:
+        case VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE: case VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE: case VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE:
+            return 1;
+        default: return 0;
+    }
+}
 static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
     VkPipeline p = zalloc(sizeof *p);
     pipe_layout_hold(p, ci->layout);
+    // VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE: the binding strides come from vkCmdBindVertexBuffers2EXT instead of the pipeline's
+    // VkVertexInputBindingDescription; pre-scan, because the vertex layouts below are built before the dynamic-state loop runs
+    for (uint32_t i = 0; ci->pDynamicState && i < ci->pDynamicState->dynamicStateCount; i++)
+        if (ci->pDynamicState->pDynamicStates[i] == VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE) p->dyn_stride = 1;
     @autoreleasepool {
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         char keys[64] = ""; int dual = dual_source(ci->pColorBlendState), lacking = 0;   // lacking: the pipeline requests a fragment stage whose Metal function is missing from the library
@@ -1257,8 +1302,14 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             int slot = 30; while (slot >= 0 && (buffer_used >> slot & 1)) slot--;
             if (slot < 0) { LOG("[vk] [RED] pipeline %s has no free Metal buffer slot for vertex input %u", keys, b->binding); return p; }
             buffer_used |= 1u << slot; p->vb_slot[b->binding] = (uint8_t)slot;
+            p->vb_stride[b->binding] = b->stride;
             MTLVertexBufferLayoutDescriptor *l = vd.layouts[slot];
-            if (b->stride) { l.stride = b->stride; l.stepFunction = b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex; l.stepRate = 1; }
+            if (p->dyn_stride) {
+                // The stride is overridden per draw; the descriptor still needs a legal one to build the pipeline state, which pipe_variant rebuilds
+                l.stride = b->stride ? b->stride : 4; l.stepRate = 1;
+                l.stepFunction = b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex;
+            }
+            else if (b->stride) { l.stride = b->stride; l.stepFunction = b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex; l.stepRate = 1; }
             else { l.stride = 16; l.stepFunction = MTLVertexStepFunctionConstant; l.stepRate = 0; }
             p->vb_mask |= 1u << b->binding;
         }
@@ -1326,11 +1377,16 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         for (uint32_t i = 0; dy && i < dy->dynamicStateCount; i++) {
             VkDynamicState s = dy->pDynamicStates[i];
             if (s == VK_DYNAMIC_STATE_VIEWPORT) dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) dyn_sc = 1;
+            else if (s == VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT) dyn_vp = 1;   // vkCmdSetViewportWithCountEXT sets the rects and the count
+            else if (s == VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT) dyn_sc = 1;
+            else if (s == VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE) p->dyn_stride = 1;   // 1000267005: the strides come with vkCmdBindVertexBuffers2EXT
             else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
             else if (s == VK_DYNAMIC_STATE_LINE_WIDTH) continue;   // Metal draws lines one pixel wide whatever the width (Super Mario 64 sets 1)
             else if (s == VK_DYNAMIC_STATE_DEPTH_BIAS) p->dyn_bias = 1; else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
             else if (s == VK_DYNAMIC_STATE_DEPTH_BOUNDS) { p->dyn_db = 1; p->dbk = DBND_OFF; p->db[0] = 0; p->db[1] = 1; }   // Vulkan ignores static min/maxDepthBounds when dynamic
             else if (s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK || s == VK_DYNAMIC_STATE_STENCIL_WRITE_MASK) p->dyn_smask |= s == VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK ? 1 : 2;
+            else if (eds_state(s) && !eds_applied(s))   // one of the twelve states of VK_EXT_extended_dynamic_state the host does not apply: reported, never taken as applied
+                RED1("dynamic state %d of VK_EXT_extended_dynamic_state is not applied: the pipeline draws with its static value", s);
             else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
@@ -1353,6 +1409,7 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         else if (!ab_init(p, ST_VERT, pd.vertexFunction, p->vs) || !ab_init(p, ST_FRAG, pd.fragmentFunction, p->fs)) {
             p->pso = nil; ab_free(p); LOG("[vk] [RED] graphics pipeline %s refused: argument-buffer initialization failed", keys);
         } else {
+            if (p->dyn_stride) p->pd = pd;   // kept for this pipeline's dynamic-stride variants; every other pipeline releases its descriptor here
             g_n_pso++;
             if (geom_vp) OLOG("geometry viewport pipeline %s uses location %d and %u viewport(s)", keys, geom_vp - 1, p->nviewport);
         }
@@ -1400,7 +1457,9 @@ VKB(vkCreateComputePipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t 
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) {
     (void)d; (void)a;
     if (!p) return;
-    p->pso = nil; p->dss = nil; p->cpso = nil; p->dss_dyn = nil; ab_free(p);
+    p->pso = nil; p->dss = nil; p->cpso = nil; p->dss_dyn = nil; p->pd = nil;
+    for (uint32_t i = 0; i < p->nvar; i++) p->var[i].pso = nil;
+    free(p->var); p->var = NULL; p->nvar = p->varcap = 0; ab_free(p);
     for (uint32_t i = 0; i < p->nset; i++) dsl_put(p->set[i]);
     if (p->nviewport > 1) { free(p->vp); free(p->sc); }
     free(p);
@@ -1408,12 +1467,12 @@ VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbac
 
 // ---------- Command buffers: recording ----------
 enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_CLEARI, C_STENCIL,
-       C_DISPATCH, C_DYN, C_DRAWIND, C_FILL, C_UPDATE, C_RESOLVE, C_BLIT, C_EV, C_EXEC, C_QCOPY, C_CLEARA, C_BARRIER };
+       C_DISPATCH, C_DYN, C_DRAWIND, C_FILL, C_UPDATE, C_RESOLVE, C_BLIT, C_EV, C_EXEC, C_QCOPY, C_CLEARA, C_BARRIER, C_VPC, C_SCC };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; int compute; } c_pipe;
 typedef struct { uint32_t first, n, ndyn; int compute; VkDescriptorSet s[8]; uint32_t dyn[]; } c_sets;
-typedef struct { uint32_t first, n; VkBuffer b[14]; VkDeviceSize o[14]; } c_vb;
+typedef struct { uint32_t first, n; VkBuffer b[14]; VkDeviceSize o[14]; VkDeviceSize s[14]; uint32_t smask; } c_vb;   // s/smask: the strides vkCmdBindVertexBuffers2 gave, for VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE
 typedef struct { VkBuffer b; VkDeviceSize o; VkIndexType t; } c_ib;
 typedef struct { uint32_t first, n; VkViewport v[]; } c_vp;
 typedef struct { uint32_t first, n; VkRect2D r[]; } c_sc;
@@ -1494,8 +1553,23 @@ VK(vkCmdBindDescriptorSets, void, VkCommandBuffer cb, VkPipelineBindPoint bp, Vk
     c->first = first; c->n = umin(n, 8); c->ndyn = ndyn; c->compute = k; memcpy(c->s, s, c->n * sizeof *s); if (ndyn) memcpy(c->dyn, dyn, ndyn * sizeof *dyn);
 }
 VK(vkCmdBindVertexBuffers, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o) {
-    c_vb *c = rec(cb, C_VB, sizeof *c); c->first = first; c->n = first < 14 ? umin(n, 14 - first) : 0;
-    memcpy(c->b, b, c->n * sizeof *b); memcpy(c->o, o, c->n * sizeof *o);
+    if (!n || first >= 14) return;
+    c_vb *c = rec(cb, C_VB, sizeof *c); c->first = first; c->n = umin(n, 14 - first); c->smask = 0;   // no dynamic strides: the pipeline's own
+    memcpy(c->b, b, c->n * sizeof *b); memcpy(c->o, o, c->n * sizeof *o); memset(c->s, 0, sizeof c->s);
+}
+// VK_EXT_extended_dynamic_state: the same bind with an optional per-binding size and stride. Metal has no length on setVertexBuffer, so sizes are ignored; a
+// stride is applied at draw time, and one that differs from the pipeline's static stride builds a pipeline state of its own (pipe_variant)
+static void bind_vb2(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o, const VkDeviceSize *strides) {
+    if (!n || first >= 14) return;
+    c_vb *c = rec(cb, C_VB, sizeof *c); c->first = first; c->n = umin(n, 14 - first); c->smask = 0;
+    memcpy(c->b, b, c->n * sizeof *b); memcpy(c->o, o, c->n * sizeof *o); memset(c->s, 0, sizeof c->s);
+    for (uint32_t i = 0; strides && i < c->n; i++) { c->s[i] = strides[i]; c->smask |= 1u << i; }
+}
+VK(vkCmdBindVertexBuffers2, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o, const VkDeviceSize *sizes, const VkDeviceSize *strides) {
+    (void)sizes; bind_vb2(cb, first, n, b, o, strides);
+}
+VK(vkCmdBindVertexBuffers2EXT, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *b, const VkDeviceSize *o, const VkDeviceSize *sizes, const VkDeviceSize *strides) {
+    (void)sizes; bind_vb2(cb, first, n, b, o, strides);
 }
 VK(vkCmdBindIndexBuffer, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexType t) { c_ib *c = rec(cb, C_IB, sizeof *c); c->b = b; c->o = o; c->t = t; }
 VK(vkCmdSetViewport, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) {
@@ -1508,6 +1582,42 @@ VK(vkCmdSetScissor, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const 
     c_sc *c = rec(cb, C_SC, sizeof *c + n * sizeof *r);
     c->first = first; c->n = n; memcpy(c->r, r, n * sizeof *r);
 }
+// VK_EXT_extended_dynamic_state: the with-count forms set the count as well as the rects, so a pipeline whose viewportCount was 0 (legal when the count is
+// dynamic) draws with the count the game set. The rects go through the same state the vkCmdSet{Viewport,Scissor} path uses; the count is kept apart from
+// them, because a partial vkCmdSetViewport must not change it
+static void set_vp_count(VkCommandBuffer cb, uint32_t n, const VkViewport *v) {
+    if (!n || !v) return;
+    n = umin(n, MAX_VIEWPORTS);
+    c_vp *c = rec(cb, C_VPC, sizeof *c + n * sizeof *v);
+    c->first = 0; c->n = n; memcpy(c->v, v, n * sizeof *v);
+}
+static void set_sc_count(VkCommandBuffer cb, uint32_t n, const VkRect2D *r) {
+    if (!n || !r) return;
+    n = umin(n, MAX_VIEWPORTS);
+    c_sc *c = rec(cb, C_SCC, sizeof *c + n * sizeof *r);
+    c->first = 0; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
+VK(vkCmdSetViewportWithCount, void, VkCommandBuffer cb, uint32_t n, const VkViewport *v) { set_vp_count(cb, n, v); }
+VK(vkCmdSetViewportWithCountEXT, void, VkCommandBuffer cb, uint32_t n, const VkViewport *v) { set_vp_count(cb, n, v); }
+VK(vkCmdSetScissorWithCount, void, VkCommandBuffer cb, uint32_t n, const VkRect2D *r) { set_sc_count(cb, n, r); }
+VK(vkCmdSetScissorWithCountEXT, void, VkCommandBuffer cb, uint32_t n, const VkRect2D *r) { set_sc_count(cb, n, r); }
+// The twelve states of VK_EXT_extended_dynamic_state this host does not apply. Their setters exist because a title that found the extension in the list may look
+// any of them up, and a null pointer there is a jump to address 0; each reports once that the state is not applied and records nothing, so the pipeline draws with
+// its static value, which is what it got before the extension was listed. eds_applied() answers the same for the pipeline that declares one (pipe_make).
+VK(vkCmdSetCullModeEXT, void, VkCommandBuffer cb, VkCullModeFlags m) { (void)cb; (void)m; RED1("vkCmdSetCullModeEXT: not applied, the pipeline's static cull mode stands"); }
+VK(vkCmdSetFrontFaceEXT, void, VkCommandBuffer cb, VkFrontFace f) { (void)cb; (void)f; RED1("vkCmdSetFrontFaceEXT: not applied, the pipeline's static front face stands"); }
+VK(vkCmdSetPrimitiveTopologyEXT, void, VkCommandBuffer cb, VkPrimitiveTopology t) { (void)cb; (void)t; RED1("vkCmdSetPrimitiveTopologyEXT: not applied, the pipeline's static topology stands"); }
+VK(vkCmdSetDepthTestEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetDepthTestEnableEXT: not applied, the pipeline's static depth test stands"); }
+VK(vkCmdSetDepthWriteEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetDepthWriteEnableEXT: not applied, the pipeline's static depth write stands"); }
+VK(vkCmdSetDepthCompareOpEXT, void, VkCommandBuffer cb, VkCompareOp o) { (void)cb; (void)o; RED1("vkCmdSetDepthCompareOpEXT: not applied, the pipeline's static compare op stands"); }
+VK(vkCmdSetDepthBoundsTestEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetDepthBoundsTestEnableEXT: not applied, the pipeline's static depth bounds test stands"); }
+VK(vkCmdSetStencilTestEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetStencilTestEnableEXT: not applied, the pipeline's static stencil test stands"); }
+VK(vkCmdSetStencilOpEXT, void, VkCommandBuffer cb, VkStencilFaceFlags f, VkStencilOp fail, VkStencilOp pass, VkStencilOp dfail, VkCompareOp c) {
+    (void)cb; (void)f; (void)fail; (void)pass; (void)dfail; (void)c; RED1("vkCmdSetStencilOpEXT: not applied, the pipeline's static stencil ops stand");
+}
+VK(vkCmdSetRasterizerDiscardEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetRasterizerDiscardEnableEXT: not applied, the pipeline's static rasterizer discard stands"); }
+VK(vkCmdSetDepthBiasEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetDepthBiasEnableEXT: not applied, the pipeline's static depth bias enable stands"); }
+VK(vkCmdSetPrimitiveRestartEnableEXT, void, VkCommandBuffer cb, VkBool32 e) { (void)cb; (void)e; RED1("vkCmdSetPrimitiveRestartEnableEXT: not applied, the pipeline's static primitive restart stands"); }
 VK(vkCmdDrawIndexed, void, VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t voff, uint32_t first_inst) {
     *(c_drawi *)rec(cb, C_DRAWI, sizeof(c_drawi)) = (c_drawi){count, inst, first, voff, first_inst};
 }
@@ -1647,10 +1757,12 @@ typedef struct {
     const chdr *cmd; const uint8_t *cmd_end;   // the command being replayed and the end of its command buffer (fan_prepare scans ahead)
     id<MTLBuffer> fan_out; fan_job *fj; uint32_t nfj, fjcap, fji; const void *fan_from, *fan_to;   // the indexed fans of the current stretch of the pass, and the commands its scan covered
     VkPipeline pipe, applied, cpipe; uint32_t rt_w, rt_h, rt_layers;   // cpipe: the compute pipeline bound
+    __strong id<MTLRenderPipelineState> cur_pso;   // the pipeline state the encoder has: the dynamic-vertex-stride variant when a draw's strides need one (pipe_variant)
     struct { VkDescriptorSet s; uint32_t dyn[16]; } set[8], cset[8];   // graphics and compute bind points have separate sets
-    VkBuffer vb[14]; VkDeviceSize vbo[14];
+    VkBuffer vb[14]; VkDeviceSize vbo[14]; VkDeviceSize vbs[14]; uint32_t vb_smask;
     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
     VkViewport vp[MAX_VIEWPORTS]; VkRect2D sc[MAX_VIEWPORTS]; uint32_t have_vp, have_sc; int vp_dirty, sc_dirty;
+    uint32_t vp_n, sc_n;   // the counts vkCmdSetViewportWithCount / vkCmdSetScissorWithCount set (0: the pipeline's own count)
     uint8_t pc[3][256];   // push writes can address the same bytes independently by shader stage
     subq_t *sq;
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
@@ -1758,7 +1870,7 @@ static void load_rp(rs_t *s) {
 static void reopen_rp(rs_t *s) {
     fan_prepare(s, s->cmd);
     s->re = [s->cb renderCommandEncoderWithDescriptor:s->rpd]; s->cut = 0; g_n_resume++; s->enc_id = ++g_enc_id;
-    s->applied = NULL; s->vp_dirty = s->sc_dirty = 1; s->db_live = 0;
+    s->applied = NULL; s->cur_pso = nil; s->vp_dirty = s->sc_dirty = 1; s->db_live = 0;
     occ_start(s);
 }
 static void resume_rp(rs_t *s) { load_rp(s); reopen_rp(s); }
@@ -1843,7 +1955,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     }
     fan_prepare(s, (const chdr *)((const uint8_t *)s->cmd + s->cmd->size));
     s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->enc_id = ++g_enc_id;
-    s->applied = NULL; s->db_live = 0;
+    s->applied = NULL; s->cur_pso = nil; s->db_live = 0;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
     s->vp_dirty = s->sc_dirty = 1;
@@ -1992,7 +2104,8 @@ static MTLScissorRect metal_scissor(VkRect2D r, uint32_t w, uint32_t h) {
     return (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
 }
 static void apply_viewports(rs_t *s, VkPipeline p) {
-    uint32_t n = p->nviewport;
+    uint32_t n = s->vp_n ? s->vp_n : s->sc_n ? s->sc_n : p->nviewport;   // a with-count setter replaced the pipeline's count
+    if ((p->vp || p->sc) && n > p->nviewport) n = p->nviewport;   // the with-count setters are only legal with the dynamic state; a pipeline with static arrays keeps its count
     if (s->vp_dirty) {
         MTLViewport v[MAX_VIEWPORTS];
         const MTLViewport *vp = p->vp;
@@ -2015,6 +2128,38 @@ static void apply_viewports(rs_t *s, VkPipeline p) {
         s->sc_dirty = 0;
     }
 }
+// VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE: when the strides bound with vkCmdBindVertexBuffers2 differ from the strides the pipeline was built with, Metal
+// needs a pipeline state whose vertex-descriptor layouts carry them. Built once per distinct stride set and cached on the pipeline (p->var); nil when the
+// pipeline's own descriptor already matches, which is the common case
+static id<MTLRenderPipelineState> pipe_variant(rs_t *s, VkPipeline p) {
+    if (!p->dyn_stride || !p->pd) return nil;
+    uint64_t key = 1469598103934665603ull; int diff = 0;
+    for (uint32_t b = 0; b < 14; b++) if (p->vb_mask >> b & 1) {
+        uint32_t st = (s->vb_smask >> b & 1) ? (uint32_t)s->vbs[b] : p->vb_stride[b];
+        key = (key ^ (st + 1)) * 1099511628211ull;
+        if (st != p->vb_stride[b]) diff = 1;
+    }
+    if (!diff) return nil;
+    for (uint32_t i = 0; i < p->nvar; i++) if (p->var[i].key == key) return p->var[i].pso;
+    @autoreleasepool {
+        MTLRenderPipelineDescriptor *d = [p->pd copy];
+        MTLVertexDescriptor *vd = [d.vertexDescriptor copy];
+        for (uint32_t b = 0; b < 14; b++) if ((p->vb_mask >> b & 1) && (s->vb_smask >> b & 1))
+            vd.layouts[p->vb_slot[b]].stride = s->vbs[b] ? (NSUInteger)s->vbs[b] : 4;
+        d.vertexDescriptor = vd;
+        NSError *err = nil;
+        id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
+        if (!ps) { RED1("dynamic vertex stride: Metal refused the variant of pipeline %s: %s", p->keys, err ? err.localizedDescription.UTF8String : "no state built"); return nil; }
+        if (p->nvar == p->varcap) {
+            uint32_t cap = p->varcap ? p->varcap * 2 : 4;
+            void *q = realloc(p->var, cap * sizeof *p->var);
+            if (!q) return ps;
+            p->var = q; p->varcap = cap;
+        }
+        p->var[p->nvar].key = key; p->var[p->nvar].pso = ps; p->nvar++;
+        return ps;
+    }
+}
 static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
@@ -2032,8 +2177,11 @@ static int pre_draw(rs_t *s) {
         else { dbk = p->dbk; dbb[0] = p->db[0]; dbb[1] = p->db[1]; }
     }
     if (dbk == DBND_EMPTY && mtl_depth_bounds_hw()) return 0;   // bounds no stored depth meets: nothing passes, and Metal refuses them (nvn_dbnd.h); drawn where the GPU has no test, as before
-    if (s->applied != p) {
-        [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
+    id<MTLRenderPipelineState> pso_use = pipe_variant(s, p);   // a draw whose dynamic strides differ from the pipeline's own
+    if (!pso_use) pso_use = p->pso;
+    if (s->applied != p || s->cur_pso != pso_use) {
+        [re setRenderPipelineState:pso_use]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
+        s->cur_pso = pso_use;
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
         [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
@@ -2657,7 +2805,21 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
             case C_EV: { const c_ev *x = c; atomic_store(&x->e->val, x->set ? s->sq->v : FENCE_NONE); break; }
             case C_EXEC: { const c_exec *x = c; for (uint32_t i = 0; i < x->n; i++) if (x->cb[i]) replay_ops(s, x->cb[i]); break; }   // inside the primary's render pass, if it is in one
             case C_QCOPY: copy_queries(s, c); break;
-            case C_VB: { const c_vb *x = c; for (uint32_t i = 0; i < x->n; i++) { s->vb[x->first + i] = x->b[i]; s->vbo[x->first + i] = x->o[i]; } break; }
+            case C_VB: {
+                const c_vb *x = c;
+                for (uint32_t i = 0; i < x->n; i++) { s->vb[x->first + i] = x->b[i]; s->vbo[x->first + i] = x->o[i]; s->vbs[x->first + i] = x->s[i]; }
+                uint32_t bits = ((1u << x->n) - 1) << x->first;   // the bindings this bind names take its strides (or the pipeline's own, for vkCmdBindVertexBuffers); the others keep theirs
+                s->vb_smask = (s->vb_smask & ~bits) | (x->smask << x->first);
+                break;
+            }
+            case C_VPC: {
+                const c_vp *x = c; memcpy(s->vp + x->first, x->v, x->n * sizeof *x->v);
+                s->have_vp |= ((1u << x->n) - 1) << x->first; s->vp_n = x->n; s->vp_dirty = 1; break;
+            }
+            case C_SCC: {
+                const c_sc *x = c; memcpy(s->sc + x->first, x->r, x->n * sizeof *x->r);
+                s->have_sc |= ((1u << x->n) - 1) << x->first; s->sc_n = x->n; s->sc_dirty = 1; break;
+            }
             case C_IB: { const c_ib *x = c; s->ib = x->b; s->ibo = x->o; s->it = x->t == VK_INDEX_TYPE_UINT32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16; s->isz = x->t == VK_INDEX_TYPE_UINT32 ? 4 : 2; break; }
             case C_VP: {
                 const c_vp *x = c; memcpy(s->vp + x->first, x->v, x->n * sizeof *x->v);

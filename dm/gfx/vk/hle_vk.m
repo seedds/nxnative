@@ -67,9 +67,9 @@ typedef struct { VkFormat vk; MTLPixelFormat pf; MTLVertexFormat vf; uint8_t byt
 #define FD(v, p, b, k) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, k}
 #define FB(v, p, b, w, h) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, w, h, K_BLOCK}
 #define FV(v, x, b) {VK_FORMAT_##v, MTLPixelFormatInvalid, MTLVertexFormat##x, b, 1, 1, K_COLOR}
-// Packed formats Metal does not have: the texture has a wider format and the host unpacks the texels into it (conv_unpack). Only for linear images the CPU writes (conv_sync):
-// Super Mario 3D All-Stars' Super Mario 64 keeps its N64 textures so, R4G4 among them
-enum { CV_NONE, CV_R4G4, CV_B4G4R4A4, CV_B5G6R5, CV_B5G5R5A1 };
+// Packed formats Metal has no texture for: the texture is the wider format and the host unpacks the texels into it (conv_unpack for linear images the CPU fills
+// through their memory, GPU compute conv_b2i / conv_i2b for buffer <-> image copies). Super Mario 3D All-Stars' Super Mario 64 keeps its N64 textures so, R4G4 among them
+enum { CV_NONE, CV_R4G4, CV_B4G4R4A4, CV_B5G6R5, CV_B5G5R5A1, CV_A4R4G4B4, CV_A4B4G4R4 };
 #define FX(v, p, b, c) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, K_COLOR, c}
 static const fmt_t g_fmts[] = {
     FC(R8_UNORM, R8Unorm, UCharNormalized, 1), FC(R8_SNORM, R8Snorm, CharNormalized, 1), FI(R8_UINT, R8Uint, UChar, 1), FI(R8_SINT, R8Sint, Char, 1),
@@ -116,10 +116,20 @@ static const fmt_t g_fmts[] = {
     FV(R16G16B16A16_USCALED, UShort4, 8), FV(R16G16B16A16_SSCALED, Short4, 8),
 };
 static const fmt_t *g_fmt_by[VK_FORMAT_ASTC_12x12_SRGB_BLOCK + 1];
+// VK_EXT_4444_formats: enum values are 1000340000 and up, past the dense table above indexed by VkFormat.
+// Metal names packed components from the low bits and Vulkan from the high bits (MTLPixelFormatABGR4Unorm reads 0x4321 as R 4, G 3, B 2, A 1), so
+// R4G4B4A4 matches ABGR4Unorm while A4R4G4B4 and A4B4G4R4 (alpha high) have no Metal equivalent. Both map to RGBA8Unorm over 2-byte guest texels,
+// keeping Vulkan's RGBA channel order so sampling, blending, clears and color-attachment writes all agree.
+static const fmt_t g_fmts_ext[] = {
+    FX(A4R4G4B4_UNORM_PACK16, RGBA8Unorm, 2, CV_A4R4G4B4),   // A 15:12, R 11:8, G 7:4, B 3:0
+    FX(A4B4G4R4_UNORM_PACK16, RGBA8Unorm, 2, CV_A4B4G4R4),   // A 15:12, B 11:8, G 7:4, R 3:0
+};
 static void fmt_init(void) { for (size_t i = 0; i < sizeof g_fmts / sizeof *g_fmts; i++) g_fmt_by[g_fmts[i].vk] = &g_fmts[i]; }
 static const fmt_t *fmt_of(VkFormat f) {
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, fmt_init);
-    return (unsigned)f < sizeof g_fmt_by / sizeof *g_fmt_by ? g_fmt_by[f] : NULL;
+    if ((unsigned)f < sizeof g_fmt_by / sizeof *g_fmt_by) return g_fmt_by[f];
+    for (size_t i = 0; i < sizeof g_fmts_ext / sizeof *g_fmts_ext; i++) if (g_fmts_ext[i].vk == f) return &g_fmts_ext[i];
+    return NULL;
 }
 static int fmt_has_depth(const fmt_t *f) { return f && (f->kind == K_DEPTH || f->kind == K_DS); }
 static int fmt_has_stencil(const fmt_t *f) { return f && (f->kind == K_STENCIL || f->kind == K_DS); }
@@ -430,7 +440,7 @@ static VkResult fill_names(const char *const *names, uint32_t n, uint32_t *count
 }
 static const char *const g_inst_ext[] = {"VK_KHR_surface", "VK_NN_vi_surface", "VK_KHR_get_physical_device_properties2", "VK_KHR_get_surface_capabilities2"};
 static const char *const g_dev_ext[] = {"VK_KHR_swapchain", "VK_KHR_descriptor_update_template", "VK_KHR_maintenance1", "VK_KHR_get_memory_requirements2",
-                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2", "VK_EXT_extended_dynamic_state"};
+                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2", "VK_EXT_extended_dynamic_state", "VK_EXT_4444_formats"};
 static void join_names(char *out, size_t n, const char *const *names, uint32_t count) {
     out[0] = 0; size_t o = 0;
     for (uint32_t i = 0; i < count && o + 2 < n; i++) o += snprintf(out + o, n - o, "%s%s", i ? " " : "", names[i]);
@@ -520,12 +530,16 @@ static void dedicated_req(void *pn) {
 VK(vkGetPhysicalDeviceProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties *p) { (void)pd; pdev_props(p); }
 VK(vkGetPhysicalDeviceProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p) { (void)pd; pdev_props(&p->properties); }
 VK(vkGetPhysicalDeviceFeatures, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures *f) { (void)pd; pdev_feats(f); }
-static void feats_eds(void *pn) {
-    for (VkBaseOutStructure *s = pn; s; s = s->pNext)
+static void pdev_feats_ext(void *pn) {
+    for (VkBaseOutStructure *s = pn; s; s = s->pNext) {
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT)
             ((VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *)(void *)s)->extendedDynamicState = VK_TRUE;
+        else if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT) {
+            VkPhysicalDevice4444FormatsFeaturesEXT *x = (void *)s; x->formatA4R4G4B4 = x->formatA4B4G4R4 = VK_TRUE;
+        }
+    }
 }
-VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); feats_eds(f->pNext); }
+VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); pdev_feats_ext(f->pNext); }
 VK(vkGetPhysicalDeviceMemoryProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m) { (void)pd; pdev_mem(m); }
 VK(vkGetPhysicalDeviceMemoryProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2 *m) { (void)pd; pdev_mem(&m->memoryProperties); }
 VK(vkGetPhysicalDeviceQueueFamilyProperties, void, VkPhysicalDevice pd, uint32_t *n, VkQueueFamilyProperties *p) {
@@ -564,7 +578,7 @@ VK(vkGetPhysicalDeviceFormatProperties, void, VkPhysicalDevice pd, VkFormat form
     if (f->kind == K_COLOR || f->kind == K_INT) {
         t |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
         if (f->kind == K_COLOR) t |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
-        p->bufferFeatures |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
+        if (!f->conv) p->bufferFeatures |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
     }
     if (f->kind == K_DEPTH || f->kind == K_DS || f->kind == K_STENCIL) t |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     p->optimalTilingFeatures = t;
@@ -711,12 +725,12 @@ VKB(vkBindBufferMemory2, VkResult, VkDevice d, uint32_t n, const VkBindBufferMem
 }
 VK(vkCreateBufferView, VkResult, VkDevice d, const VkBufferViewCreateInfo *ci, const VkAllocationCallbacks *a, VkBufferView *out) {
     (void)d; (void)a; VkBufferView v = zalloc(sizeof *v); v->buf = ci->buffer; v->f = fmt_of(ci->format); v->off = ci->offset; v->range = ci->range;
-    if (!v->f || v->f->pf == MTLPixelFormatInvalid) RED1("buffer view format %d not mapped", ci->format);
+    if (!v->f || v->f->pf == MTLPixelFormatInvalid || v->f->conv) RED1("buffer view format %d not mapped", ci->format);
     *out = v; return VK_SUCCESS;
 }
 VK(vkDestroyBufferView, void, VkDevice d, VkBufferView v, const VkAllocationCallbacks *a) { (void)d; (void)a; if (v) { v->tex = nil; free(v); } }
 static id<MTLTexture> bview_tex(VkBufferView v) {   // texel buffer as a linear texture over the buffer's storage, made at first use
-    if (v->tex || !v->f || v->f->pf == MTLPixelFormatInvalid || !v->buf->mem) return v->tex;
+    if (v->tex || !v->f || v->f->pf == MTLPixelFormatInvalid || v->f->conv || !v->buf->mem) return v->tex;
     VkDeviceSize range = v->range == VK_WHOLE_SIZE ? v->buf->size - v->off : v->range, n = range / v->f->bytes;
     MTLTextureDescriptor *td = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:v->f->pf width:n resourceOptions:MTLResourceStorageModeShared usage:MTLTextureUsageShaderRead];
     v->tex = [mem_buf(v->buf->mem) newTextureWithDescriptor:td offset:v->buf->off + v->off bytesPerRow:n * v->f->bytes];
@@ -750,20 +764,24 @@ static void conv_remove(VkImage im) {
     pthread_mutex_unlock(&g_convmu);
 }
 static uint32_t x4(uint32_t v) { return v * 17; } static uint32_t x5(uint32_t v) { return (v << 3) | (v >> 2); } static uint32_t x6(uint32_t v) { return (v << 2) | (v >> 4); }
-static void conv_unpack(VkImage im, const uint8_t *src, uint8_t *dst) {   // one row after another; dst rows are tightly packed
-    uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4;
-    for (uint32_t y = 0; y < im->h; y++) {
-        const uint8_t *r = src + (size_t)y * im->pitch; uint8_t *o = dst + (size_t)y * im->w * ob;
-        for (uint32_t x = 0; x < im->w; x++, o += ob) {
-            if (im->f->conv == CV_R4G4) { o[0] = (uint8_t)x4(r[x] >> 4); o[1] = (uint8_t)x4(r[x] & 15); continue; }
-            uint32_t v = r[2 * x] | (uint32_t)r[2 * x + 1] << 8;
-            switch (im->f->conv) {
-                case CV_B4G4R4A4: o[0] = (uint8_t)x4(v >> 4 & 15); o[1] = (uint8_t)x4(v >> 8 & 15); o[2] = (uint8_t)x4(v >> 12); o[3] = (uint8_t)x4(v & 15); break;
-                case CV_B5G6R5: o[0] = (uint8_t)x5(v & 31); o[1] = (uint8_t)x6(v >> 5 & 63); o[2] = (uint8_t)x5(v >> 11); o[3] = 255; break;
-                case CV_B5G5R5A1: o[0] = (uint8_t)x5(v >> 1 & 31); o[1] = (uint8_t)x5(v >> 6 & 31); o[2] = (uint8_t)x5(v >> 11); o[3] = v & 1 ? 255 : 0; break;
-            }
+static uint32_t conv_ob(int conv) { return conv == CV_R4G4 ? 2 : 4; }   // expanded texture bytes per texel
+static void conv_row(int conv, const uint8_t *r, uint8_t *o, uint32_t n) {
+    uint32_t ob = conv_ob(conv);
+    for (uint32_t x = 0; x < n; x++, o += ob) {
+        if (conv == CV_R4G4) { o[0] = (uint8_t)x4(r[x] >> 4); o[1] = (uint8_t)x4(r[x] & 15); continue; }
+        uint32_t v = r[2 * x] | (uint32_t)r[2 * x + 1] << 8;
+        switch (conv) {
+            case CV_B4G4R4A4: o[0] = (uint8_t)x4(v >> 4 & 15); o[1] = (uint8_t)x4(v >> 8 & 15); o[2] = (uint8_t)x4(v >> 12); o[3] = (uint8_t)x4(v & 15); break;
+            case CV_A4R4G4B4: o[0] = (uint8_t)x4(v >> 8 & 15); o[1] = (uint8_t)x4(v >> 4 & 15); o[2] = (uint8_t)x4(v & 15); o[3] = (uint8_t)x4(v >> 12); break;
+            case CV_A4B4G4R4: o[0] = (uint8_t)x4(v & 15); o[1] = (uint8_t)x4(v >> 4 & 15); o[2] = (uint8_t)x4(v >> 8 & 15); o[3] = (uint8_t)x4(v >> 12); break;
+            case CV_B5G6R5: o[0] = (uint8_t)x5(v & 31); o[1] = (uint8_t)x6(v >> 5 & 63); o[2] = (uint8_t)x5(v >> 11); o[3] = 255; break;
+            case CV_B5G5R5A1: o[0] = (uint8_t)x5(v >> 1 & 31); o[1] = (uint8_t)x5(v >> 6 & 31); o[2] = (uint8_t)x5(v >> 11); o[3] = v & 1 ? 255 : 0; break;
         }
     }
+}
+static void conv_unpack(VkImage im, const uint8_t *src, uint8_t *dst) {   // one row after another; dst rows are tightly packed
+    uint32_t ob = conv_ob(im->f->conv);
+    for (uint32_t y = 0; y < im->h; y++) conv_row(im->f->conv, src + (size_t)y * im->pitch, dst + (size_t)y * im->w * ob, im->w);
 }
 // Before a submit: every converted linear image whose memory changed since it was last unpacked is unpacked again (the textures are small: N64 textures)
 static void conv_sync(void) {
@@ -773,7 +791,7 @@ static void conv_sync(void) {
         VkImage im = g_conv[i]; id<MTLBuffer> b = mem_buf(im->cmem); if (!b || !im->tex) continue;
         const uint8_t *src = (const uint8_t *)b.contents + im->coff;
         if (im->conv_synced && !memcmp(src, im->shadow, im->size)) continue;
-        uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4; size_t need = (size_t)im->w * im->h * ob;
+        uint32_t ob = conv_ob(im->f->conv); size_t need = (size_t)im->w * im->h * ob;
         if (!need) continue;
         memcpy(im->shadow, src, im->size);
         if (need > tcap) { uint8_t *n = realloc(tmp, need); if (!n) die("[vk] out of memory %zu", need); tmp = n; tcap = need; }
@@ -797,7 +815,8 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         OLOG("CreateImage %p %ux%u format %d linear (pitch %u) usage %#x", (void *)im, im->w, im->h, ci->format, im->pitch, ci->usage);
         *out = im; return VK_SUCCESS;
     }
-    if (f->conv) { LOG("[vk] [RED] image format %d is converted only for linear images (this one is optimal)", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+    // Optimal-tiled converted images keep the wider Metal texture (f->pf) while image memory requirements and subresource layouts follow f->bytes;
+    // buffer <-> image copies unpack/pack on the GPU (conv_b2i / conv_i2b).
     if (ci->tiling == VK_IMAGE_TILING_LINEAR) RED1("linear image %ux%u format %d levels %u layers %u: content does not follow the bound memory", ci->extent.width, ci->extent.height, ci->format, ci->mipLevels, ci->arrayLayers);
     @autoreleasepool {
         uint32_t layers = umax(1, ci->arrayLayers), samples = umax(1, ci->samples);
@@ -2732,6 +2751,156 @@ static void clear_attachments(rs_t *s, const c_cleara *x) {
     }
     reopen_rp(s);
 }
+// GPU compute unpack/pack for converted formats (fmt_t.conv) in buffer <-> image copies: executes on the command buffer's serial Metal queue so
+// GPU-written staging buffers and render-target readbacks observe exact submission order with no pipeline stall.
+_Static_assert(CV_R4G4 == 1 && CV_B4G4R4A4 == 2 && CV_B5G6R5 == 3 && CV_B5G5R5A1 == 4 && CV_A4R4G4B4 == 5 && CV_A4B4G4R4 == 6,
+               "conv_msl expects CV_* enum values 1..6");
+typedef struct {
+    uint64_t pack_off, pack_bpr, pack_bpi, exp_bpr, exp_bpi;
+    uint32_t conv, w, h, d, ob, pad;
+} conv_copy_params_t;
+static const char conv_msl[] =
+    "#include <metal_stdlib>\nusing namespace metal;\n"
+    "struct ConvParams {\n"
+    "    ulong pack_off, pack_bpr, pack_bpi, exp_bpr, exp_bpi;\n"
+    "    uint conv, w, h, d, ob, pad;\n"
+    "};\n"
+    "static inline uint cx4(uint v) { return v * 17u; }\n"
+    "static inline uint cx5(uint v) { return (v << 3) | (v >> 2); }\n"
+    "static inline uint cx6(uint v) { return (v << 2) | (v >> 4); }\n"
+    "static inline uint cp4(uint c) { return (c * 15u + 127u) / 255u; }\n"
+    "static inline uint cp5(uint c) { return (c * 31u + 127u) / 255u; }\n"
+    "static inline uint cp6(uint c) { return (c * 63u + 127u) / 255u; }\n"
+    "kernel void conv_unpack_buf(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]],\n"
+    "                            constant ConvParams &p [[buffer(2)]], uint3 gid [[thread_position_in_grid]]) {\n"
+    "    if (gid.x >= p.w || gid.y >= p.h || gid.z >= p.d) return;\n"
+    "    ulong so = p.pack_off + ulong(gid.z) * p.pack_bpi + ulong(gid.y) * p.pack_bpr;\n"
+    "    ulong eo = ulong(gid.z) * p.exp_bpi + ulong(gid.y) * p.exp_bpr + ulong(gid.x) * p.ob;\n"
+    "    if (p.conv == 1u) { uchar b = src[so + gid.x]; dst[eo] = uchar(cx4(b >> 4)); dst[eo + 1] = uchar(cx4(b & 15u)); return; }\n"
+    "    ulong sp = so + ulong(gid.x) * 2u;\n"
+    "    uint v = uint(src[sp]) | (uint(src[sp + 1]) << 8);\n"
+    "    uint r = 0, g = 0, b = 0, a = 255;\n"
+    "    if (p.conv == 2u) { r = cx4((v >> 4) & 15u); g = cx4((v >> 8) & 15u); b = cx4(v >> 12); a = cx4(v & 15u); }\n"
+    "    else if (p.conv == 3u) { r = cx5(v & 31u); g = cx6((v >> 5) & 63u); b = cx5(v >> 11); a = 255u; }\n"
+    "    else if (p.conv == 4u) { r = cx5((v >> 1) & 31u); g = cx5((v >> 6) & 31u); b = cx5(v >> 11); a = (v & 1u) ? 255u : 0u; }\n"
+    "    else if (p.conv == 5u) { r = cx4((v >> 8) & 15u); g = cx4((v >> 4) & 15u); b = cx4(v & 15u); a = cx4(v >> 12); }\n"
+    "    else if (p.conv == 6u) { r = cx4(v & 15u); g = cx4((v >> 4) & 15u); b = cx4((v >> 8) & 15u); a = cx4(v >> 12); }\n"
+    "    dst[eo] = uchar(r); dst[eo + 1] = uchar(g); dst[eo + 2] = uchar(b); dst[eo + 3] = uchar(a);\n"
+    "}\n"
+    "kernel void conv_pack_buf(device const uchar *src [[buffer(0)]], device uchar *dst [[buffer(1)]],\n"
+    "                          constant ConvParams &p [[buffer(2)]], uint3 gid [[thread_position_in_grid]]) {\n"
+    "    if (gid.x >= p.w || gid.y >= p.h || gid.z >= p.d) return;\n"
+    "    ulong eo = ulong(gid.z) * p.exp_bpi + ulong(gid.y) * p.exp_bpr + ulong(gid.x) * p.ob;\n"
+    "    ulong so = p.pack_off + ulong(gid.z) * p.pack_bpi + ulong(gid.y) * p.pack_bpr;\n"
+    "    if (p.conv == 1u) { dst[so + gid.x] = uchar((cp4(src[eo]) << 4) | cp4(src[eo + 1])); return; }\n"
+    "    uint r = src[eo], g = src[eo + 1], b = src[eo + 2], a = src[eo + 3], v = 0;\n"
+    "    if (p.conv == 2u) v = (cp4(b) << 12) | (cp4(g) << 8) | (cp4(r) << 4) | cp4(a);\n"
+    "    else if (p.conv == 3u) v = (cp5(b) << 11) | (cp6(g) << 5) | cp5(r);\n"
+    "    else if (p.conv == 4u) v = (cp5(b) << 11) | (cp5(g) << 6) | (cp5(r) << 1) | (a >= 128u ? 1u : 0u);\n"
+    "    else if (p.conv == 5u) v = (cp4(a) << 12) | (cp4(r) << 8) | (cp4(g) << 4) | cp4(b);\n"
+    "    else if (p.conv == 6u) v = (cp4(a) << 12) | (cp4(b) << 8) | (cp4(g) << 4) | cp4(r);\n"
+    "    ulong dp = so + ulong(gid.x) * 2u;\n"
+    "    dst[dp] = uchar(v); dst[dp + 1] = uchar(v >> 8);\n"
+    "}\n";
+static id<MTLComputePipelineState> conv_copy_pso(int pack) {
+    static id<MTLLibrary> lib;
+    static id<MTLComputePipelineState> psos[2];
+    static int failed;
+    if (psos[pack] || failed) return psos[pack];
+    NSError *err = nil;
+    if (!lib) lib = [g_dev newLibraryWithSource:@(conv_msl) options:nil error:&err];
+    if (lib) {
+        id<MTLFunction> fn = [lib newFunctionWithName:pack ? @"conv_pack_buf" : @"conv_unpack_buf"];
+        if (fn) psos[pack] = [g_dev newComputePipelineStateWithFunction:fn error:&err];
+    }
+    if (!psos[pack]) { failed = 1; LOG("[vk] [RED] converted format copy kernel (%s): %s", pack ? "pack" : "unpack", err ? err.localizedDescription.UTF8String : "missing function"); }
+    return psos[pack];
+}
+static int conv_copy_setup(VkImage im, id<MTLBuffer> buf, uint64_t buf_off, const VkBufferImageCopy *r, NSUInteger pitch, NSUInteger bpi, conv_copy_params_t *out, uint64_t *total_out) {
+    const fmt_t *f = im->f; int is3d = im->type == VK_IMAGE_TYPE_3D;
+    uint32_t ew = r->imageExtent.width, eh = r->imageExtent.height, ed = is3d ? r->imageExtent.depth : 1;
+    uint32_t nslices = is3d ? ed : r->imageSubresource.layerCount;
+    if (!ew || !eh || !ed || !nslices) return 0;
+    if (!transfer_layers(im, r->imageSubresource) || r->imageOffset.x < 0 || r->imageOffset.y < 0 || (is3d && r->imageOffset.z < 0)) {
+        RED1("converted format copy out of image bounds (format %d)", (int)im->fmt); return 0;
+    }
+    uint32_t mw = mip_dim(im->w, r->imageSubresource.mipLevel), mh = mip_dim(im->h, r->imageSubresource.mipLevel), md = is3d ? mip_dim(im->d, r->imageSubresource.mipLevel) : 1;
+    if ((uint64_t)r->imageOffset.x + ew > mw || (uint64_t)r->imageOffset.y + eh > mh || (is3d && (uint64_t)r->imageOffset.z + ed > md)) {
+        RED1("converted format copy region exceeds mip extent (format %d)", (int)im->fmt); return 0;
+    }
+    uint32_t ob = conv_ob(f->conv);
+    uint64_t exp_bpr = (uint64_t)ew * ob, exp_bpi = exp_bpr * eh;
+    if (eh && exp_bpi / eh != exp_bpr) { RED1("converted format copy size overflow (format %d)", (int)im->fmt); return 0; }
+    uint64_t total_exp = exp_bpi * nslices;
+    if (total_exp / nslices != exp_bpi || total_exp > g_dev.maxBufferLength) { RED1("converted format copy buffer too large (format %d)", (int)im->fmt); return 0; }
+    uint64_t need_pack = (uint64_t)(nslices - 1) * bpi + (uint64_t)(eh - 1) * pitch + (uint64_t)ew * f->bytes;
+    if (buf_off > buf.length || need_pack > buf.length - buf_off) {
+        RED1("converted format copy exceeds buffer bounds (format %d, off %llu need %llu len %llu)", (int)im->fmt,
+             (unsigned long long)buf_off, (unsigned long long)need_pack, (unsigned long long)buf.length);
+        return 0;
+    }
+    *out = (conv_copy_params_t){buf_off, pitch, bpi, exp_bpr, exp_bpi, (uint32_t)f->conv, ew, eh, nslices, ob, 0};
+    *total_out = total_exp;
+    return 1;
+}
+static void conv_copy_dispatch(rs_t *s, id<MTLComputePipelineState> pso, id<MTLBuffer> src, id<MTLBuffer> dst, const conv_copy_params_t *p) {
+    split_for_transfer(s);
+    id<MTLComputeCommandEncoder> ce = [s->cb computeCommandEncoder];
+    if (!ce) { RED1("cannot create compute encoder for converted format copy"); return; }
+    [ce setComputePipelineState:pso];
+    [ce setBuffer:src offset:0 atIndex:0];
+    [ce setBuffer:dst offset:0 atIndex:1];
+    [ce setBytes:p length:sizeof *p atIndex:2];
+    [ce dispatchThreadgroups:MTLSizeMake((p->w + 15) / 16, (p->h + 15) / 16, p->d) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
+    [ce endEncoding];
+}
+static void conv_b2i(rs_t *s, id<MTLBuffer> sb, uint64_t src_off, VkImage im, const VkBufferImageCopy *r, NSUInteger pitch, NSUInteger bpi) {
+    conv_copy_params_t p; uint64_t total_exp = 0;
+    if (!conv_copy_setup(im, sb, src_off, r, pitch, bpi, &p, &total_exp)) return;
+    id<MTLComputePipelineState> pso = conv_copy_pso(0);
+    if (!pso) return;
+    id<MTLBuffer> tb = [g_dev newBufferWithLength:(NSUInteger)total_exp options:MTLResourceStorageModePrivate];
+    if (!tb) { RED1("cannot allocate %llu-byte staging buffer for converted upload (format %d)", (unsigned long long)total_exp, (int)im->fmt); return; }
+    conv_copy_dispatch(s, pso, sb, tb, &p);
+    id<MTLBlitCommandEncoder> be = blit(s, C_COPYB2I);
+    int is3d = im->type == VK_IMAGE_TYPE_3D;
+    if (is3d) {
+        [be copyFromBuffer:tb sourceOffset:0 sourceBytesPerRow:(NSUInteger)p.exp_bpr sourceBytesPerImage:(NSUInteger)p.exp_bpi
+                sourceSize:MTLSizeMake(p.w, p.h, p.d) toTexture:im->tex
+          destinationSlice:0 destinationLevel:r->imageSubresource.mipLevel
+         destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, r->imageOffset.z)];
+    } else {
+        for (uint32_t l = 0; l < p.d; l++)
+            [be copyFromBuffer:tb sourceOffset:(NSUInteger)(l * p.exp_bpi) sourceBytesPerRow:(NSUInteger)p.exp_bpr
+           sourceBytesPerImage:im->layers > 1 ? (NSUInteger)p.exp_bpi : 0
+                    sourceSize:MTLSizeMake(p.w, p.h, 1) toTexture:im->tex
+              destinationSlice:r->imageSubresource.baseArrayLayer + l destinationLevel:r->imageSubresource.mipLevel
+             destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, 0)];
+    }
+}
+static void conv_i2b(rs_t *s, VkImage im, id<MTLBuffer> db, uint64_t dst_off, const VkBufferImageCopy *r, NSUInteger pitch, NSUInteger bpi) {
+    conv_copy_params_t p; uint64_t total_exp = 0;
+    if (!conv_copy_setup(im, db, dst_off, r, pitch, bpi, &p, &total_exp)) return;
+    id<MTLComputePipelineState> pso = conv_copy_pso(1);
+    if (!pso) return;
+    id<MTLBuffer> tb = [g_dev newBufferWithLength:(NSUInteger)total_exp options:MTLResourceStorageModePrivate];
+    if (!tb) { RED1("cannot allocate %llu-byte staging buffer for converted readback (format %d)", (unsigned long long)total_exp, (int)im->fmt); return; }
+    id<MTLBlitCommandEncoder> be = blit(s, C_COPYI2B);
+    int is3d = im->type == VK_IMAGE_TYPE_3D;
+    if (is3d) {
+        [be copyFromTexture:im->tex sourceSlice:0 sourceLevel:r->imageSubresource.mipLevel
+               sourceOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, r->imageOffset.z)
+                 sourceSize:MTLSizeMake(p.w, p.h, p.d)
+                   toBuffer:tb destinationOffset:0 destinationBytesPerRow:(NSUInteger)p.exp_bpr destinationBytesPerImage:(NSUInteger)p.exp_bpi];
+    } else {
+        for (uint32_t l = 0; l < p.d; l++)
+            [be copyFromTexture:im->tex sourceSlice:r->imageSubresource.baseArrayLayer + l sourceLevel:r->imageSubresource.mipLevel
+                   sourceOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, 0)
+                     sourceSize:MTLSizeMake(p.w, p.h, 1)
+                       toBuffer:tb destinationOffset:(NSUInteger)(l * p.exp_bpi) destinationBytesPerRow:(NSUInteger)p.exp_bpr destinationBytesPerImage:(NSUInteger)p.exp_bpi];
+    }
+    conv_copy_dispatch(s, pso, tb, db, &p);
+}
 static void replay_ops(rs_t *s, VkCommandBuffer cb) {
     const chdr *prev_cmd = s->cmd; const uint8_t *prev_end = s->cmd_end;
     s->cmd_end = cb->buf + cb->n;
@@ -2896,11 +3065,13 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
             case C_COPYB2I: {
                 const c_copyb2i *x = c; VkImage im = x->dst; const fmt_t *f = im->f;
                 if (!x->src->mem || !im->tex) { RED1("the upload buffer has no bound memory or the image was not created"); break; }
-                id<MTLBlitCommandEncoder> be = blit(s, h->op); id<MTLBuffer> sb = mem_buf(x->src->mem);
+                id<MTLBuffer> sb = mem_buf(x->src->mem);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i];
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
                     NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes, bpi = bpr * ((ih + f->bh - 1) / f->bh);
+                    if (f->conv) { conv_b2i(s, sb, x->src->off + r->bufferOffset, im, r, bpr, bpi); continue; }
+                    id<MTLBlitCommandEncoder> be = blit(s, h->op);
                     int is3d = im->type == VK_IMAGE_TYPE_3D;
                     MTLBlitOption opt = f->kind == K_DS ? (r->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil) : MTLBlitOptionNone;
                     for (uint32_t l = 0; l < (is3d ? 1 : r->imageSubresource.layerCount); l++)
@@ -2948,7 +3119,7 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
             case C_COPYI2B: {   // read-back into a buffer (shared storage: the CPU sees it once the submit's fence has signalled)
                 const c_copyi2b *x = c; VkImage im = x->src; const fmt_t *f = im->f;
                 if (!x->dst->mem || !im->tex) { RED1("the readback buffer has no bound memory or the image was not created"); break; }
-                id<MTLBlitCommandEncoder> be = blit(s, h->op); id<MTLBuffer> db = mem_buf(x->dst->mem);
+                id<MTLBuffer> db = mem_buf(x->dst->mem);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i]; int is3d = im->type == VK_IMAGE_TYPE_3D;
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
@@ -2958,6 +3129,8 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
                         opt = st ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil; tb = st ? 1 : 4;
                     }
                     NSUInteger bpr = f->kind == K_BLOCK ? (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes : rl * tb, bpi = bpr * ((ih + f->bh - 1) / f->bh);
+                    if (f->conv) { conv_i2b(s, im, db, x->dst->off + r->bufferOffset, r, bpr, bpi); continue; }
+                    id<MTLBlitCommandEncoder> be = blit(s, h->op);
                     for (uint32_t l = 0; l < (is3d ? 1 : r->imageSubresource.layerCount); l++)
                         [be copyFromTexture:im->tex sourceSlice:is3d ? 0 : r->imageSubresource.baseArrayLayer + l sourceLevel:r->imageSubresource.mipLevel
                                sourceOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, is3d ? r->imageOffset.z : 0)

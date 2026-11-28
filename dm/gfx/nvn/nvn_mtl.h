@@ -85,3 +85,7 @@ void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that pr
 int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check (copy == 0 checks ticket only)
 int mtl_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);   // bounded ticket wait: 1 ready, 0 timed out
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait
+
+uint64_t mtl_sync_trace_begin(uint64_t fence, uint64_t timeout, int fenced);
+uint64_t mtl_sync_trace_remaining(uint64_t id, uint64_t timeout);
+void mtl_sync_trace_end(uint64_t id, uint64_t fence, int result);

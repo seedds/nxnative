@@ -4,13 +4,16 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
 
 // Redirect only this translation unit, and only while the CPU budget cases run.
 static int test_budget_active;
 static void (*test_event_completion)(void);
+static _Atomic uint64_t *test_done;
 static struct {
     uint64_t now, event_elapsed, event_ms, event_fence;
-    int event_calls, event_success, cond_calls;
+    int event_calls, event_success, cond_calls, cond_complete;
     int64_t cond_remaining, cond_first;   // the last and the first condition wait's deadline, from the virtual now
 } test_budget;
 static uint64_t test_clock_gettime_nsec_np(clockid_t clock) {
@@ -28,7 +31,14 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
     test_budget.cond_remaining = (int64_t)deadline->tv_sec * 1000000000ll + deadline->tv_nsec
         - (int64_t)(test_budget.now + 1000000000000ull);
     if (test_budget.cond_calls == 1) test_budget.cond_first = test_budget.cond_remaining;
+    if (test_budget.cond_complete && test_budget.cond_remaining > 0) { *test_done = 1; return 0; }
     return ETIMEDOUT;
+}
+static pthread_mutex_t *test_trace_lock;
+static uint64_t test_trace_delay;
+static int test_pthread_mutex_lock(pthread_mutex_t *mutex) {
+    if (test_budget_active && mutex == test_trace_lock) test_budget.now += test_trace_delay;
+    return pthread_mutex_lock(mutex);
 }
 @interface WaitBudgetEvent : NSObject { uint64_t _signaledValue; }
 @property (nonatomic) uint64_t signaledValue;
@@ -51,10 +61,12 @@ static int test_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mu
 @end
 #define clock_gettime_nsec_np test_clock_gettime_nsec_np
 #define clock_gettime test_clock_gettime
+#define pthread_mutex_lock test_pthread_mutex_lock
 #define pthread_cond_timedwait test_pthread_cond_timedwait
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
+#undef pthread_mutex_lock
 #undef pthread_cond_timedwait
 #undef clock_gettime
 #undef clock_gettime_nsec_np
@@ -533,7 +545,9 @@ static void wait_budgets(void) {
             uint64_t ws_before = g_ws_n[sites[si]];
             test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = c->elapsed};
             printf("budget: %s, site=%d, fast=%d, ledger=%d\n", c->name, sites[si], fast, ws_on());
+            uint64_t trace = mtl_sync_trace_begin(1, c->timeout, sites[si] == WS_ACQ ? 2 : 1);
             CHECK("incomplete fence returns false", !mtl_wait_at(1, c->timeout, sites[si]));
+            mtl_sync_trace_end(trace, 1, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
             CHECK("wait ledger counts the call once", !ws_on() || g_ws_n[sites[si]] - ws_before == 1);
             CHECK("event receives truncated and clamped milliseconds", test_budget.event_calls == fast
                 && (!fast || (test_budget.event_ms == c->event_ms && test_budget.event_fence == 1)));
@@ -620,8 +634,132 @@ static void posts(void) {
     post_complete(f+1,0,0); post_complete(f+2,0,0);
     CHECK("callbacks never repeat an event",event==15);
 }
+static dispatch_semaphore_t boundary_start, boundary_recorded, boundary_finish;
+static uint64_t boundary_identity;
+static void *trace_boundary_writer(void *unused) {
+    (void)unused;
+    dispatch_semaphore_wait(boundary_start, DISPATCH_TIME_FOREVER);
+    boundary_identity = mtl_sync_trace_begin(777, 10000000, 1);
+    dispatch_semaphore_signal(boundary_recorded);
+    dispatch_semaphore_wait(boundary_finish, DISPATCH_TIME_FOREVER);
+    mtl_sync_trace_end(boundary_identity, 777, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+    return NULL;
+}
+static void trace_boundary_test(void) {
+    char directory[] = "/tmp/nxnative-fence-boundary-XXXXXX";
+    if (!mkdtemp(directory)) { CHECK("temporary capture directory", 0); return; }
+    char setting[1200]; snprintf(setting, sizeof setting, "10-20:%s/events.tsv", directory);
+    setenv("DM_NVN_FENCE_TRACE", setting, 1);
+    mtl_set_frame(9);
+    CHECK("preceding frame is not selected", !ft_selected());
+    boundary_start = dispatch_semaphore_create(0); boundary_recorded = dispatch_semaphore_create(0); boundary_finish = dispatch_semaphore_create(0);
+    pthread_t thread; if (pthread_create(&thread, NULL, trace_boundary_writer, NULL)) { CHECK("boundary producer starts", 0); return; }
+    mtl_set_frame(10); dispatch_semaphore_signal(boundary_start);
+    dispatch_semaphore_wait(boundary_recorded, DISPATCH_TIME_FOREVER);
+    CHECK("producer selects first published frame", boundary_identity != 0);
+    mtl_set_frame(21); size_t count = g_fence_trace_buffer.used;
+    dispatch_semaphore_signal(boundary_finish); pthread_join(thread, NULL);
+    CHECK("delayed completion cannot append after cutoff", g_fence_trace_buffer.used == count && !ft_selected());
+    unsigned begins = 0, ends = 0; int frames = 1;
+    for (size_t i = 0; i < count; i++) {
+        ft_event e = g_fence_trace_buffer.events[i]; frames &= e.frame == 10;
+        begins += e.kind == FT_SYNC_BEGIN; ends += e.kind == FT_SYNC_END;
+    }
+    CHECK("cutoff retains missing joins instead of fabricating completion", begins == 1 && !ends && frames);
+    NSData *bytes = nil;
+    for (int i = 0; i < 5000 && !bytes; i++) { bytes = [NSData dataWithContentsOfFile:@(g_ft_path)]; if (!bytes) usleep(1000); }
+    NSString *text = bytes ? [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding] : @"";
+    CHECK("incomplete trace exports intact rows and explicit cutoff", bytes && [text containsString:@"missing joins remain unknown"]
+        && [text componentsSeparatedByString:@"\n"].count == count + 3);
+    printf("boundary fixture export: %s\n", g_ft_path);
+}
+static void trace_guest_wrapper(void) {
+    // Use the actual linked HLE implementation registered in the executable.
+    struct entry { const char *name; void *fn; };
+    unsigned long size = 0;
+    const struct entry *entries = (const void *)getsectiondata(&_mh_execute_header, "__DATA", "swnvn", &size);
+    typedef NVNsyncWaitResult (*guest_wait_fn)(const NVNsync *, uint64_t);
+    guest_wait_fn wait = NULL;
+    for (size_t i = 0; entries && i < size / sizeof *entries; i++)
+        if (!strcmp(entries[i].name, "nvnSyncWait")) wait = (guest_wait_fn)entries[i].fn;
+    CHECK("real guest SyncWait implementation found", wait != NULL);
+    if (!wait) return;
+    id<MTLSharedEvent> saved_event = g_ev;
+    uint64_t saved_done = g_done, saved_fence = g_fence;
+    g_ev = (id<MTLSharedEvent>)[WaitBudgetEvent new]; g_done = 0; g_fence = 1;
+    test_budget_active = 1; test_trace_lock = &g_fence_trace_buffer.lock; test_trace_delay = 2000000;
+    NVNsync sync = {0}; sync_t *obj = (sync_t *)&sync;
+    test_budget = (typeof(test_budget)){.now = 1999750000};
+    CHECK("unfenced guest sync is signalled without waiting", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
+        && !test_budget.event_calls && !test_budget.cond_calls && !g_ft_sync);
+    obj->fenced = 1; obj->fence = 1; g_done = 1;
+    CHECK("completed guest sync reports already signaled", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED && !g_ft_sync);
+    g_done = 0; test_budget = (typeof(test_budget)){.now = 1999750000};
+    CHECK("incomplete guest sync preserves timeout result", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED && !g_ft_sync);
+    CHECK("guest poll trace is charged before timed event", !fast_wake() || test_budget.event_ms == 10);
+    CHECK("guest fallback excludes all prior trace delays", test_budget.cond_remaining == (fast_wake() ? 6000000 : 8000000));
+    test_budget = (typeof(test_budget)){.now = 1999750000};
+    CHECK("zero guest timeout remains a poll", wait(&sync, 0) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED
+        && !test_budget.event_calls && test_budget.cond_remaining <= 0);
+    test_budget = (typeof(test_budget)){.now = 1999750000};
+    CHECK("infinite guest timeout retains sentinel", wait(&sync, UINT64_MAX) == NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED
+        && (!fast_wake() || test_budget.event_ms == 3600000) && test_budget.cond_remaining == 3600000000000ll - 2000000);
+    test_done = &g_done;
+    test_budget = (typeof(test_budget)){.now = 1999750000, .cond_complete = 1};
+    CHECK("guest timed completion reports condition satisfied", wait(&sync, 20000000) == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED && !g_ft_sync);
+    test_done = NULL;
+    test_trace_delay = 0; test_trace_lock = NULL; test_budget_active = 0;
+    g_ev = saved_event; g_done = saved_done; g_fence = saved_fence;
+}
+static void trace_delayed_budget(void) {
+    id<MTLSharedEvent> saved_event = g_ev;
+    uint64_t saved_done = g_done, saved_fence = g_fence;
+    g_ev = (id<MTLSharedEvent>)[WaitBudgetEvent new]; g_done = 0; g_fence = 1;
+    test_budget_active = 1;
+    test_budget = (typeof(test_budget)){.now = 1999750000, .event_elapsed = 5000000};
+    test_trace_lock = &g_fence_trace_buffer.lock; test_trace_delay = 2000000;
+    uint64_t trace = mtl_sync_trace_begin(1, 20000000, 1);
+    CHECK("delayed trace retains incomplete result", !mtl_wait_at(1, 20000000, WS_SYNC));
+    CHECK("trace delay is charged to event budget", !fast_wake() || test_budget.event_ms == 18);
+    CHECK("fallback deadline excludes trace delay", test_budget.cond_calls == 1
+        && test_budget.cond_remaining == (fast_wake() ? 9000000 : 16000000));
+    mtl_sync_trace_end(trace, 1, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+    test_trace_delay = 0; test_trace_lock = NULL; test_budget_active = 0;
+    g_ev = saved_event; g_done = saved_done; g_fence = saved_fence;
+}
+static void trace_poll_pair(void) {
+    uint64_t saved_done = g_done, saved_fence = g_fence;
+    g_done = 0; g_fence = 1; test_budget_active = 1;
+    test_budget = (typeof(test_budget)){.now = 1999750000};
+    size_t start = g_fence_trace_buffer.used;
+    uint64_t trace = mtl_sync_trace_begin(1, 20000000, 1);
+    CHECK("selected guest wait has an identity", trace != 0);
+    CHECK("initial poll remains incomplete", !mtl_wait(1, 0));
+    // Cross a presentation boundary between the poll and timed call.
+    mtl_set_frame(11); g_done = 1;
+    CHECK("timed call observes completed fence", mtl_wait(1, 20000000));
+    mtl_sync_trace_end(trace, 1, NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    unsigned begins = 0, ends = 0, waits = 0, returns = 0;
+    int identity = 1, frame10 = 0, frame11 = 0;
+    for (size_t i = start; i < g_fence_trace_buffer.used; i++) {
+        ft_event e = g_fence_trace_buffer.events[i];
+        identity &= e.sync == trace && e.fence == 1;
+        begins += e.kind == FT_SYNC_BEGIN; ends += e.kind == FT_SYNC_END;
+        waits += e.kind == FT_WAIT_BEGIN; returns += e.kind == FT_WAIT_END;
+        frame10 |= e.frame == 10; frame11 |= e.frame == 11;
+    }
+    CHECK("poll and timed call share one guest identity", identity && begins == 1 && ends == 1 && waits == 2 && returns == 2);
+    CHECK("cross-frame wait preserves observed frames", frame10 && frame11);
+    CHECK("guest scope clears after return", g_ft_sync == 0);
+    test_budget_active = 0; g_done = saved_done; g_fence = saved_fence;
+}
 int main(int argc, char **argv) { @autoreleasepool {
-    if(argc==2 && !strcmp(argv[1],"--cpu")) {
+    if (argc == 2 && !strcmp(argv[1], "--trace-boundary")) {
+        alarm(10); trace_boundary_test(); printf("boundary: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if(argc==2 && (!strcmp(argv[1],"--cpu") || !strcmp(argv[1],"--trace-cpu"))) {
+        int traced = !strcmp(argv[1],"--trace-cpu");
+        if (traced) { setenv("DM_NVN_FENCE_TRACE", "10-20:/tmp/nxnative-fence-test.tsv", 1); mtl_set_frame(10); trace_poll_pair(); trace_delayed_budget(); trace_guest_wrapper(); }
         alarm(10); setbuf(stdout,NULL); wait_budgets(); posts();
         printf("CPU completion: %d checks, %d failed\n",checks,failed); return failed!=0;
     }

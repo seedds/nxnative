@@ -226,6 +226,16 @@ check_t_perf_order: t_perf_order
 	DM_NVN_FAST_WAKE=0 DM_NVN_SLICE_MERGE=0 DM_NVN_CS_HOIST=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_SLICE_MRT=0 DM_NVN_LEVEL_GROUP=0 MTL_DEBUG_LAYER=1 ./t_perf_order
 	DM_NVN_FACE_MERGE=0 MTL_DEBUG_LAYER=1 ./t_perf_order
+# Bounded timeline storage is CPU-only.
+t_fence_trace: t_fence_trace.c ../nvn/nvn_fence_trace.h
+	clang -std=c11 -O1 -Wall -Wextra -Werror -pthread -o $@ t_fence_trace.c
+
+.PHONY: check_fence_trace_cpu
+check_fence_trace_cpu: t_fence_trace t_perf_order
+	./t_fence_trace
+	DM_NVN_FAST_WAKE=0 ./t_perf_order --trace-cpu
+	DM_NVN_FAST_WAKE=1 ./t_perf_order --trace-cpu
+	./t_perf_order --trace-boundary
 t_link_ticks: t_link_ticks.m t_link_ticks_screen.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_link_ticks.m t_link_ticks_screen.c $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 t_cpu_tex: t_cpu_tex.m $(MTL_T_DEP)

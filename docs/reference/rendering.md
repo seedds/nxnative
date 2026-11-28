@@ -3009,3 +3009,30 @@ Digimon Story Cyber Sleuth: Complete Edition (Media.Vision's MVGL engine, SDK 6.
 - **Cost:** measured on [Hades](../../dm/games/0100535012974000/README.md) (`0100535012974000`, Vulkan, title screen) in native fullscreen (`3456x2168`, built-in ProMotion display switched to fixed 60 Hz, 60 Hz display link at frame latency 1, `DM_PRESENT_LATCH` and `DM_PRESENT_DRAIN` on) on an Apple M4 Pro (`Mac16,7`, macOS 27.2.1), settled ticks 900–1800: `DM_MAC_COMPOSITED=0` (`opaque=YES`) held 32.6 ms p50 (32.8–32.9 ms p95) game-enqueue-to-screen latency and 0.115 ms p50 (0.323 ms p95) present command buffer GPU time; `DM_MAC_COMPOSITED=1` (`opaque=NO`) rose to 49.4–49.6 ms p50 (49.9–50.0 ms p95) (+16.9 ms / one 60 Hz frame, matching WindowServer compositing) and 0.324 ms p50 (1.097 ms p95) present GPU time, both holding 60.0 fps with zero merged drops. Scoping to mirrored fullscreen avoids this latency and GPU overhead on unmirrored displays.
 - **Check:** `make -C dm/host/tests build/t_front_present && dm/host/tests/build/t_front_present` (24 checks across env parsing, auto/forced modes, and fullscreen/mirror transitions), `t_present_crop` (166 checks on M4 Pro Metal GPU including zero-alpha swapchain inputs on classic and Metal 4 bilinear/minified paths), and `regress.py check` (full) on Hades (`0100535012974000`: PASS, 59.8 → 60.0 fps, bit-exact screenshots, 0 new RED). Open: physical mirrored-HDMI retest of automatic `CGDisplayIsInMirrorSet` detection on an affected M4 Pro / M5 Pro TV setup, confirmation of whether the original reporter's setup was mirrored or extended-primary, and whether `framebufferOnly = NO` alone avoids the artifact without leaving Direct-to-Display.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) ([issue #1821](https://github.com/seedds/nxnative/issues/1821); causal live-toggle diagnosis by C3SB, confirmed by MPE02).
+
+### Bounded SyncWait timeline (experimental)
+
+`DM_NVN_FENCE_TRACE=first-last:path` selects an inclusive presentation-frame
+range and exports a TSV after that range closes. It records one guest `SyncWait`
+identity across the initial poll and timed wait: begin and end, each wait entry
+and return, the shared-event return, the CPU completion work that follows it
+(`post_early`), the fallback condition wait, and the result. Only the wait side is
+traced. The commit path (`rx_commit` and `cb_commit` submissions, which can merge
+several guest submissions into one command buffer) and Metal feedback are not
+hooked, so the trace says where a wait spent its time, not which submission or GPU
+span it was waiting on.
+
+Storage is append-only and capped at 262,144 records. Overflow is counted. The
+export runs after the capture closes, without file writes inside the wait path.
+Closing a capture does not wait for the GPU: missing end records remain unknown.
+A wait can span frames; each event carries its observed frame and the latest and
+completed fence values at that moment. Timestamps are CPU raw-uptime nanoseconds.
+Locking and timestamp collection add diagnostic overhead, which the wait budget
+absorbs so a traced wait does not outlast the guest's timeout; this trace alone
+cannot establish a performance improvement.
+
+`make -C dm/gfx/tests GAME=040074A01BF12000 check_fence_trace_cpu` checks bounded
+storage, the cutoff boundary and wait budgets with tracing enabled. These
+synthetic checks do not establish physical iPhone or game behavior.
+
+Analyze an exported capture with `python3 dm/tools/analyze_fence_timeline.py fence-events.tsv --output analysis.json`. The report retains raw wait events, flags contradictory endpoints and reports each complete wait's CPU duration. A complete endpoint pair does not prove that intermediate events were retained.

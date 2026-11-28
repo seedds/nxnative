@@ -430,6 +430,7 @@ static void q4_commit_slow(uint64_t dt, const char *site) {
     char th[64]; commit_thread_name(th, sizeof th);
     MLOG("[RED] slow queue commit: %.1f ms at %s on thread %s%s (#%llu)", dt / 1e6, site, th, on_feedback_q() ? ", on the feedback queue" : "", (unsigned long long)k);
 }
+#include "nvn_fence_trace.h"
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 // Ends a Metal 4 command buffer, naming the residency sets first (see res_name). A recorded one (DM_NVN_ENC_THREAD) records its end, and the encode thread names them at RO_CB_END.
 // Nothing else calls endCommandBuffer (dm/tools/tests/test_residency_naming.py)
@@ -3249,7 +3250,8 @@ static void gpu_capture_frame(uint64_t f) {
         else MLOG("[RED] DM_GPU_CAPTURE: the capture did not start: %s", err.localizedDescription.UTF8String);
     } else if (g_cap_on && f >= (uint64_t)g_cap_f0 + (uint64_t)g_cap_n) { [m stopCapture]; g_cap_on = 0; g_cap_f0 = -1; gpu_thr = 0; MLOG("DM_GPU_CAPTURE: capture stopped at frame %llu (the trace is written in the background)", (unsigned long long)f); }
 }
-void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); gpu_capture_frame(f); }
+#include "nvn_fence_trace_impl.h"
+void mtl_set_frame(uint64_t f) { atomic_store(&g_cur_frame, f); ft_frame(f); if (g_ub_n) ub_frame(f); if (ab_len()) ab_frame(f); gpu_capture_frame(f); }
 // GPU timing registration: gpu_tag_begin(frame) before commit, gpu_tag_done(frame, GPU start, GPU end) on completion (seconds on the CACurrentMediaTime base).
 // g_gpu[k].frame stores frame + 1 (0 = empty slot, distinct from frame 0). When a new frame claims slot k, frame is cleared to 0 while fields reset and published with pending = 1
 // last (release), so readers never observe a newly claimed slot with pending = 0.
@@ -3528,15 +3530,25 @@ static void post_early(uint64_t fence) {
     post_complete(fence, 0, 0);
 }
 static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
-    if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); return 1; }
+    uint64_t trace_start = g_ft_sync ? ws_t0() : 0;
+    ft_wait_event(FT_WAIT_BEGIN, fence, site, timeout_ns);
+    if (g_done >= fence) { if (ws_on()) ws_put(site, 0, 0); ft_wait_event(FT_WAIT_END, fence, site, 1); return 1; }
     if (timeout_ns > 0 && fence <= g_fence) rec_wake_for_fence(fence);
-    uint64_t w0 = ws_t0();
+    uint64_t w0 = trace_start ? trace_start : ws_t0();
     if ((site == WS_SYNC || site == WS_SYNC_NEWEST || site == WS_ACQ) && fast_wake() && g_ev && fence <= g_fence) {   // the game's own wait: wake on the GPU's signal (rec_signal(g_ev, fence) after each submission)
-        uint64_t ms = timeout_ns / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
-        if ([g_ev waitUntilSignaledValue:fence timeoutMS:ms]) post_early(fence);
+        uint64_t event_budget = timeout_ns;
+        if (trace_start && timeout_ns != UINT64_MAX) {
+            uint64_t used = ws_t0() - trace_start;
+            event_budget = used < timeout_ns ? timeout_ns - used : 0;
+        }
+        uint64_t ms = event_budget / 1000000ull; if (ms > 3600000ull) ms = 3600000ull;
+        int signaled = [g_ev waitUntilSignaledValue:fence timeoutMS:ms];
+        ft_wait_event(FT_EVENT_RETURN, fence, site, signaled);
+        if (signaled) { post_early(fence); ft_wait_event(FT_POST_DONE, fence, site, 1); }
         int ok = g_done >= fence;
         if (ok || timeout_ns < 1000000ull) {
             if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
+            ft_wait_event(FT_WAIT_END, fence, site, ok);
             return ok;
         }
         // The event and feedback waits share a finite budget; a timeout must not buy another full wait.
@@ -3544,14 +3556,20 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
             uint64_t used = ws_t0() - w0;
             if (used >= timeout_ns) {
                 if (ws_on()) { ws_put(site, w0, 1); ws_wake(fence); }
+                ft_wait_event(FT_WAIT_END, fence, site, 0);
                 return 0;
             }
             timeout_ns -= used;
         }
+    } else if (trace_start && timeout_ns != UINT64_MAX) {
+        uint64_t used = ws_t0() - trace_start;
+        timeout_ns = used < timeout_ns ? timeout_ns - used : 0;
     }
     struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl);
     uint64_t ns = (uint64_t)dl.tv_nsec + (timeout_ns > 3600000000000ull ? 3600000000000ull : timeout_ns);
     dl.tv_sec += ns / 1000000000ull; dl.tv_nsec = ns % 1000000000ull;
+    // Establish the deadline before tracing can contend on its buffer lock.
+    ft_wait_event(FT_FALLBACK, fence, site, timeout_ns);
     pthread_mutex_lock(&g_mu);
     int r = 0;
     // An unbounded wait still waiting after 10 s is a hang: said once, with what it waits for (PRAGMATA's queue worker stopped here at its first 3D scene, no GPU error)
@@ -3571,6 +3589,7 @@ static int mtl_wait_at(uint64_t fence, uint64_t timeout_ns, int site) {
     int ok = g_done >= fence;
     pthread_mutex_unlock(&g_mu);
     if (ws_on()) { ws_put(site, w0, 1); if (site == WS_SYNC_NEWEST || site == WS_SYNC || site == WS_ACQ) ws_wake(fence); }
+    ft_wait_event(FT_WAIT_END, fence, site, ok);
     return ok;
 }
 // The game's SyncWait (hle_nvn.c), with what it waits for in the wait ledger

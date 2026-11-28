@@ -739,18 +739,17 @@ class Compression(Base):
 
     def test_remote_corrupt_zstd_falls_back_to_parent_recovery(self):
         import multiprocessing
-        global SERVED
         payload = b'worker shader ' * 500
         self.store.put('metallib/mac/bad.metallib', payload)
         self.store.db.execute('UPDATE blob SET payload=?', (b'bad zstd',))
-        SERVED = shader_cache.Served(self.store, 1)
+        served = shader_cache.Served(self.store, 1)
         def check_worker():
-            remote = SERVED.worker()
+            remote = served.worker()
             assert remote.get('metallib/mac/bad.metallib') is None
             remote.put('metallib/mac/ok.metallib', payload)
             assert remote.get('metallib/mac/ok.metallib') == payload
         p = multiprocessing.get_context('fork').Process(target=check_worker)
-        p.start(); SERVED.start(); p.join(20)
+        p.start(); served.start(); p.join(20)
         self.assertEqual(p.exitcode, 0)
         self.assertEqual(self.store.get('metallib/mac/ok.metallib'), payload)
         self.assertTrue(any('[RED]' in m for m in self.said))

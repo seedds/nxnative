@@ -76,6 +76,31 @@ int main(void) { @autoreleasepool {
     EXPECT_EQ("the prewarm starts once", 1, g_warm_started);
     EXPECT_EQ("later calls do not freeze again", 1, g_freeze_on[3] == 1 && g_freeze_on[4] == 1);
 
+    // _bgv compute-path geometry reader parsing in warm_parse (no Metal toolchain needed)
+    g_shmap[@"0123456789abcdef"] = @"geometry";
+    g_shmap[@"1111111111111111"] = @"vertex";
+    g_shmap[@"2222222222222222"] = @"pixel";
+    pso_key pk = {0}; pk.cfmt[0] = MTLPixelFormatRGBA8Unorm; pk.samples = 1; pk.chmask = 15;
+    NvShader *vs = [NvShader new], *fs = [NvShader new];
+    strlcpy(vs->key, "0123456789abcdef_bgv", sizeof vs->key); vs->stage = 0;
+    strlcpy(fs->key, "2222222222222222_b", sizeof fs->key); fs->stage = 1;
+    pso_skey sk; char hex[sizeof sk * 2 + 1];
+    pso_skey_from(&pk, vs, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    NSString *valid = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 2; pso_skey_hex(&sk, hex);
+    NSString *bad_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 0; strlcpy(sk.vs, "1111111111111111_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *wrong_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "fedcba9876543210_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *missing = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "1111111111111111_b", sizeof sk.vs); strlcpy(sk.fs, "0123456789abcdef_bgv", sizeof sk.fs); pso_skey_hex(&sk, hex);
+    NSString *bgv_fs = [NSString stringWithFormat:@"R\t%s\n", hex];
+    put(dir, @"bgv.tsv", [NSString stringWithFormat:@"%@%@%@%@%@", bad_stage, wrong_stage, missing, bgv_fs, valid]);
+    uint64_t stale0 = g_warm_skip_stale; long lines = 0;
+    NSArray<WarmTask *> *tasks = warm_parse(@[[dir stringByAppendingPathComponent:@"bgv.tsv"]], &lines);
+    EXPECT_EQ("warm_parse accepts only the valid _bgv R row", 1, lines == 1 && tasks.count == 1 && [tasks[0]->vkey isEqualToString:@"0123456789abcdef_bgv"]);
+    EXPECT_EQ("warm_parse counts missing _bgv and fragment _bgv as stale", 2, g_warm_skip_stale - stale0);
+
     [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed != 0;

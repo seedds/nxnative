@@ -27,6 +27,7 @@ void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NU
 void *guest_sym(const char *name) { (void)name; return NULL; }
 int dm_sdk_ounce(void) { return 1; }
 void crash_watch_frame(void) {}
+void dm_thread_native_wait(int entering) { (void)entering; }   // no guest scheduler in this test
 uint64_t guest_ns(void);
 uint64_t dm_guest_frame(void);
 // The test's clock starts at 0 and moves 1 µs a call when auto-stepping, or holds g_clock_ns when controlled explicitly

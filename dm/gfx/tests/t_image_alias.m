@@ -213,8 +213,8 @@ static void cross_size_read(void) {
         mtl_reg_tex(101, &a[1], NULL); mtl_reg_tex(102, &a[0], NULL);
         int g0=0, l0=0, lr0=0, tr0=0, d0=0;
         os_unfair_lock_lock(&g_rmu);
-        uint64_t rid_s=pool_entry(0, MTLTextureType2D, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
-        uint64_t rid_b=pool_entry(0, MTLTextureType2D, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_s=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
         os_unfair_lock_unlock(&g_rmu);
         CHECK(rid_s!=0 && rid_b==0,"bindless pool exposes the valid family size and masks other sizes as dummy");
         // 3. Cross-size render-pass Load (ASTRAL CHAIN #1935): load big with no full clear, write only a 16x16 scissor corner.
@@ -231,8 +231,8 @@ static void cross_size_read(void) {
         CHECK(fam_is_valid(big) && !fam_is_valid(small),"stored cross-size render pass transfers compressed family ownership to big");
         CHECK(atomic_load(&g_ser_gen)>sg_before,"size switch bumps serial generation for pool-tracked family members");
         os_unfair_lock_lock(&g_rmu);
-        uint64_t rid_s2=pool_entry(0, MTLTextureType2D, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
-        uint64_t rid_b2=pool_entry(0, MTLTextureType2D, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_s2=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 101, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
+        uint64_t rid_b2=pool_entry(0, MTLTextureType2D, MTLPixelFormatInvalid, 102, UINT64_MAX, &g0, &l0, &lr0, &tr0, &d0, NULL);
         os_unfair_lock_unlock(&g_rmu);
         CHECK(rid_s2==0 && rid_b2!=0,"bindless pool updates to expose big and mask small after size switch");
         NSUInteger row=big.width*8;
@@ -294,7 +294,7 @@ static void pool_serials(void) {
         CHECK(no && no==o,"each texture over the storage joins that family");
         mtl_reg_tex(ID,n,NULL); live=n->serial;
         int g=0,l=0,lr=0,tr=0,d=0;
-        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
         if (i) mtl_tex_release(&t[!cur]);   // the texture it replaced ends
         cur=!cur;
     } }
@@ -314,7 +314,7 @@ static void pool_serials(void) {
             CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"burst texture joins the compressed family");
             mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
             int g=0,l=0,lr=0,tr=0,d=0;
-            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
         }
         os_unfair_lock_lock(&o->pool_lk); uint32_t nb=o->npool_sers, capb=o->cappool_sers; os_unfair_lock_unlock(&o->pool_lk);
         CHECK(nb==1+BURST && capb>=1+BURST,"live burst serials grow the family list while registered");
@@ -331,14 +331,14 @@ static void pool_serials(void) {
             CHECK(fam_owner(tex_mtl(&burst[i]),NULL)==o,"second burst texture joins the compressed family");
             mtl_reg_tex(BURST_ID+i,&burst[i],NULL);
             int g=0,l=0,lr=0,tr=0,d=0;
-            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+            os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,BURST_ID+i,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
         }
         for (int i=0;i<BURST;i++) { mtl_reg_tex(BURST_ID+i,NULL,NULL); mtl_tex_release(&burst[i]); }
         tex_t *after=&t[cur]; *after=image(&pool,999000,1440,810); after->d.format=NVN_FORMAT_RGBA16F; after->d.flags=NVN_TEXTURE_FLAGS_COMPRESSIBLE; nvn_tex_layout(&after->d,&after->L); mtl_tex_init(after);
         CHECK(fam_owner(tex_mtl(after),NULL)==o,"post-burst texture joins the compressed family");
         mtl_reg_tex(ID,after,NULL); live=after->serial;
         int g=0,l=0,lr=0,tr=0,d=0;
-        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
+        os_unfair_lock_lock(&g_rmu); (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL); os_unfair_lock_unlock(&g_rmu);
         mtl_tex_release(&t[!cur]); cur=!cur;
         os_unfair_lock_lock(&o->pool_lk); uint32_t n2=o->npool_sers; int has2=n2==1 && o->pool_sers[0].serial==live; os_unfair_lock_unlock(&o->pool_lk);
         CHECK(n2==1 && has2,"a new serial after a transient burst prunes all unregistered burst serials immediately");
@@ -378,9 +378,9 @@ static void reentrant_pool_upgrade(void) {
     mtl_reg_tex(ID_SMALL,&fam_s,NULL); mtl_reg_tex(ID_BIG,&fam_b,NULL); mtl_reg_tex(ID_DEAD,&fam_d,NULL);
     int g=0,l=0,lr=0,tr=0,d=0;
     os_unfair_lock_lock(&g_rmu);
-    uint64_t r_s0=pool_entry(0,MTLTextureType2D,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
-    uint64_t r_b0=pool_entry(0,MTLTextureType2D,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
-    (void)pool_entry(0,MTLTextureType2D,ID_DEAD,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_s0=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b0=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    (void)pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_DEAD,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(r_s0!=0 && r_b0==0,"pool_entry tracks family serials before the reentrant transition");
     mtl_reg_tex(ID_DEAD,NULL,NULL); mtl_tex_release(&fam_d);
@@ -398,7 +398,7 @@ static void reentrant_pool_upgrade(void) {
     CHECK(fam_is_valid(ms) && !fam_is_valid(mb),"family size has not transitioned while render pass is still open");
     uint64_t upg_before=g_pfv_upgrades, sg_before=atomic_load(&g_ser_gen);
     os_unfair_lock_lock(&g_rmu);
-    uint64_t r_u=pool_entry(0,MTLTextureType2D,ID_UPG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_u=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_UPG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(r_u!=0 && g_pfv_upgrades==upg_before+1 && g_enc==nil,"pool_entry upgraded the view texture and ended the open render pass under g_rmu");
     CHECK(fam_is_valid(mb) && !fam_is_valid(ms),"family size transitioned to big during the reentrant pool lookup");
@@ -412,8 +412,8 @@ static void reentrant_pool_upgrade(void) {
     CHECK(k1 && k2 && ((s1==fam_s.serial && s2==fam_b.serial) || (s1==fam_b.serial && s2==fam_s.serial)),
           "reentrant fam_set_valid still emitted exact live-serial own_note invalidations");
     os_unfair_lock_lock(&g_rmu);
-    uint64_t r_s1=pool_entry(0,MTLTextureType2D,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
-    uint64_t r_b1=pool_entry(0,MTLTextureType2D,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_s1=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_SMALL,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
+    uint64_t r_b1=pool_entry(0,MTLTextureType2D,MTLPixelFormatInvalid,ID_BIG,UINT64_MAX,&g,&l,&lr,&tr,&d,NULL);
     os_unfair_lock_unlock(&g_rmu);
     CHECK(r_s1==0 && r_b1!=0,"bindless pool reflects the transitioned size after the reentrant upgrade");
     mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); memset(&R,0,sizeof R);

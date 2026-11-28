@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import struct
 from pathlib import Path
 import tempfile
 import unittest
@@ -45,6 +46,62 @@ class LauncherSettingsTests(unittest.TestCase):
                 s = build(gid, api)['DM_PRESENT_UPSCALE']
                 self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', 'off'))
                 self.assertEqual(s['options'], [['off', 'Standard'], ['metalfx', 'MetalFX']])
+
+    def test_hdr_is_opt_in_on_both_platforms(self):   # the host reads DM_HDR 1 and 2 (nvn_mtl.m hdr_mode, hle_vi.c); every graphics API presents through the same path
+        for platform in ('ios', 'mac'):
+            for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000')]:
+                with self.subTest(platform=platform, api=api):
+                    s = build(gid, api, platform)['DM_HDR']   # no modules: no HDR query, so no Game's HDR
+                    self.assertEqual((s['kind'], s['section'], s['default']), ('choice', 'Game', '0'))
+                    self.assertEqual(s['options'], [['0', 'Off'], ['1', 'BT.2446']])
+
+    def test_games_hdr_is_listed_only_when_main_or_an_nro_imports_the_hdr_query(self):
+        """vi-hdr: main or an NRO nro.tsv lists imports nn::vi::QueryDisplayHdrStatus, as the host's dm_game_imports reads them (nvn_mtl.m mtl_hdr_game_native)"""
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        sdr, hdr = [['0', 'Off'], ['1', 'BT.2446']], [['0', 'Off'], ['1', 'BT.2446'], ['2', "Game's HDR"]]
+        nro_rows = '# name\tsha256\tsize\tnrr\twhere\nrefused\t' + '0' * 64 + '\t0\nloop\t' + '1' * 64 + '\t4096\n'
+        for case, files, options in [
+                ('no modules', {}, sdr),
+                ('main imports it', {'main.patched.bin': module(HDR_QUERY)}, hdr),
+                ('main imports another vi call', {'main.patched.bin': module('_ZN2nn2vi11OpenDisplayEPPNS0_7DisplayEPKc')}, sdr),
+                ('main defines it', {'main.patched.bin': module(HDR_QUERY, defined=True)}, sdr),
+                ('an NRO imports it', {'main.patched.bin': module('x'), 'nro.tsv': nro_rows, 'loop.patched.bin': module(HDR_QUERY)}, hdr),
+                ('an unlisted module imports it', {'main.patched.bin': module('x'), 'subsdk0.patched.bin': module(HDR_QUERY)}, sdr)]:
+            for platform in ('ios', 'mac'):
+                with self.subTest(case=case, platform=platform), tempfile.TemporaryDirectory() as tmp, \
+                        patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+                    for name, data in files.items(): (Path(tmp) / name).write_bytes(data.encode() if isinstance(data, str) else data)
+                    listed = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
+                    s = {r['env']: r for r in listed['settings']}['DM_HDR']
+                    self.assertEqual(s['options'], options)
+                    self.assertEqual(conforms(listed, schema, schema), [])
+
+    def test_games_hdr_counts_the_other_programs_modules(self):   # build_ipa.sh and the NSP script's Mac app pass every program's rewritten modules
+        hdr = [['0', 'Off'], ['1', 'BT.2446'], ['2', "Game's HDR"]]
+        for case, other, options in [('its main imports it', 'main.patched.bin', hdr), ('an unlisted module of it imports it', 'subsdk0.patched.bin', hdr[:2])]:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+                first, second = Path(tmp) / 'p0', Path(tmp) / 'p1'
+                first.mkdir(); second.mkdir()
+                (first / 'main.patched.bin').write_bytes(module('x')); (second / other).write_bytes(module(HDR_QUERY))
+                listed = settings.build(BOTW, first, first / 'control.nacp', other_programs=[second])
+                self.assertEqual({r['env']: r for r in listed['settings']}['DM_HDR']['options'], options)
+
+    def test_launcher_and_host_ask_for_the_same_hdr_query(self):   # settings.py's vi-hdr and nvn_mtl.m mtl_hdr_game_native
+        prefix = '_ZN2nn2vi21QueryDisplayHdrStatus'
+        self.assertTrue(HDR_QUERY.startswith(prefix))
+        for path in ('dm/games/settings.py', 'dm/gfx/nvn/nvn_mtl.m'):
+            with self.subTest(path=path):
+                names = set(re.findall(r"""['"](_ZN2nn2vi\d+QueryDisplayHdr\w*)['"]""", (ROOT / path).read_text(encoding='utf-8')))
+                self.assertEqual(names, {prefix})
+
+    def test_a_hidden_default_falls_back_to_the_first_value_offered(self):
+        rows = 'DM_X\tchoice\ta=A?vi-hdr,b=B,c=C?vi-hdr\ta\talways\tGame\tX\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'settings.tsv').write_text(rows, encoding='utf-8')
+            with patch.object(settings, 'HERE', Path(tmp)), patch.object(settings.nacp, 'languages', return_value=['en-US']):
+                s = settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings'][0]
+        self.assertEqual((s['default'], s['options']), ('b', [['b', 'B']]))
 
     def test_frame_buffering_by_graphics_api(self):
         for api, gid in [('nvn', BOTW), ('vulkan', '0100535012974000'), ('gl', '010014E00DB56000'), ('', BOTW)]:
@@ -190,6 +247,7 @@ class LauncherSettingsTests(unittest.TestCase):
                          ('DM_X\ttoggle\t-\t0\talways\tGame\tX\t\tneeds=DM_NOPE=1\n', 'no row sets'),
                          ('DM_Y\ttoggle\t-\t0\talways\tGame\tY\t\tneeds=DM_X=on\n', 'never takes'),
                          ('DM_X\ttoggle\t-\t0\talways\tX\n', 'columns'), ('DM_X\ttoggle\t-\t0\talways\tsecret\tX\n', 'section'),
+                         ('DM_Y\tchoice\ta=A?nope,b=B\tb\talways\tGame\tY\n', 'unknown condition'),
                          ('DM_X\ttoggle\ton\t0\talways\tGame\tX\n', 'toggle values'), ('DM_X\ttoggle\t-\t2\talways\tGame\tX\n', 'defaults to 0 or 1')]:
             with self.subTest(why=why), tempfile.TemporaryDirectory() as tmp:
                 (Path(tmp) / 'settings.tsv').write_text('# header\n' + good + bad, encoding='utf-8')
@@ -197,6 +255,21 @@ class LauncherSettingsTests(unittest.TestCase):
                         patch.object(settings.nacp, 'languages', return_value=['en-US']), self.assertRaises(SystemExit) as e:
                     settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
                 self.assertIn(why, str(e.exception))
+
+
+HDR_QUERY = '_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE'
+
+
+def module(symbol, defined=False):
+    """A rewritten module's image as nso_syms.dynsyms reads it: the MOD0 offset at +4, MOD0 with the dynamic table's offset, DT_STRTAB and DT_SYMTAB,
+    the null symbol and one symbol, undefined (an import) unless defined"""
+    img = bytearray(0x200)
+    struct.pack_into('<I', img, 4, 0x10)
+    img[0x10:0x14] = b'MOD0'; struct.pack_into('<i', img, 0x14, 0x40 - 0x10)
+    struct.pack_into('<qQqQqQ', img, 0x40, 5, 0x130, 6, 0x100, 0, 0)
+    struct.pack_into('<IBBHQQ', img, 0x118, 1, 0x12, 0, 1 if defined else 0, 0, 0)
+    name = symbol.encode() + b'\0'
+    return bytes(img[:0x131]) + name
 
 
 def conforms(value, node, root, at='$'):

@@ -47,7 +47,7 @@ class Update:
     path: Path
     original: bytes | None
     content: bytes
-    subject: str
+    name: str
     message: str
 
 
@@ -99,19 +99,24 @@ def check_stages(row: str, parsed: dict[str, list[str]], shaders: dict[str, str]
     kind, key, *rest = row.split('\t')
     if kind in ('R', 'M'):
         vertex, vs_stage, fragment, fs_stage, _ = parsed[row]
-        refs = [(vertex, 'mesh' if kind == 'M' else 'vertex', vs_stage)]
+        if kind == 'R' and vertex.endswith('_bgv'):
+            # Compute-path geometry readers (<key>_bgv) run in the vertex slot (stage 0).
+            refs = [(vertex[:-4] + '_b', 'geometry', vs_stage, '0')]
+        else:
+            stage = 'mesh' if kind == 'M' else 'vertex'
+            refs = [(vertex, stage, vs_stage, STAGES[stage])]
         if fragment:
-            refs.append((fragment, 'pixel', fs_stage))
+            refs.append((fragment, 'pixel', fs_stage, STAGES['pixel']))
         if kind == 'M' and key != '-':
-            refs.append((key, 'task', ''))
+            refs.append((key, 'task', '', ''))
     elif kind == 'G':
-        refs = [(key + '_b', 'vertex', ''), (rest[0] + '_b', 'geometry', '')]
+        refs = [(key + '_b', 'vertex', '', ''), (rest[0] + '_b', 'geometry', '', '')]
     else:
-        refs = [(key, 'compute', '')]
-    if any(key not in shaders for key, _, _ in refs):
+        refs = [(key, 'compute', '', '')]
+    if any(shader not in shaders for shader, _, _, _ in refs):
         return 'missing shader'
-    if any((stage and shaders[key] != stage) or (number and number not in STAGES.get(shaders[key], ''))
-           for key, stage, number in refs):
+    if any(shaders[shader] != stage or (number and number not in allowed)
+           for shader, stage, number, allowed in refs):
         return 'stage mismatch'
     return ''
 
@@ -229,11 +234,8 @@ def plan_profile(parser: Path, profile: Game, captures: list[Capture], result: I
         if row.startswith('G\t'):
             _, vertex, geometry = row.rstrip('\n').split('\t')
             print(f'  Next shader build: mesh pair {vertex} {geometry}')
-    subject = f'game: {name} adds prewarm seeds'
-    if len(subject) > 72:
-        subject = f'game/{profile.id}: add prewarm seeds'
     message = f'Import {len(additions):,} rows ({breakdown}) from inbox recordings of {", ".join(versions)}.'
-    result.updates.append(Update(path, original, content.encode('utf-8'), subject, message))
+    result.updates.append(Update(path, original, content.encode('utf-8'), name, message))
 
 
 def plan(folder: Path) -> ImportPlan:
@@ -311,15 +313,22 @@ def prepare_main() -> str:
 
 
 def push(plan: ImportPlan, base: str) -> None:
-    paths = []
+    paths = [update.path.relative_to(REPO).as_posix() for update in plan.updates]
     for update in plan.updates:
-        path = update.path.relative_to(REPO).as_posix()
-        paths.append(path)
         if update.path.read_bytes() != update.content:
-            raise ValueError(f'{path}: changed after the import')
-        git('add', '--', path)
-        git('diff', '--cached', '--check', '--', path)
-        git(*IDENTITY, 'commit', '--only', '-m', update.subject, '-m', update.message, '--', path)
+            raise ValueError(f'{update.path.relative_to(REPO)}: changed after the import')
+    if len(plan.updates) == 1:
+        update = plan.updates[0]
+        subject = f'game: {update.name} adds prewarm seeds'
+        if len(subject) > 72:
+            subject = f'game/{update.path.parent.name}: add prewarm seeds'
+        message = update.message
+    else:
+        subject = 'tools/prewarm: import inbox seed lists'
+        message = '\n\n'.join(f'{update.name} ({update.path.parent.name})\n{update.message}' for update in plan.updates)
+    git('add', '--', *paths)
+    git('diff', '--cached', '--check', '--', *paths)
+    git(*IDENTITY, 'commit', '--only', '-m', subject, '-m', message, '--', *paths)
     git('fetch', 'origin', 'main')
     inputs = ['dm/gfx/nvn/nvn_pso_skey.h', 'dm/gfx/nvn/nvn_pso_ds.h', 'dm/gfx/nvn/nvn_obj.h',
               str(PARSER_SOURCE.relative_to(REPO)), str((SHADER_TOOLS / 'dmsh_chain.py').relative_to(REPO))]
@@ -329,14 +338,14 @@ def push(plan: ImportPlan, base: str) -> None:
         directory = GAMES.relative_to(REPO) / title
         inputs.extend(str(directory / name) for name in ('game.tsv', 'shader_map.tsv', 'pso_manifest.tsv', *GEOMETRY_TABLES))
     if git('diff', '--name-only', base, 'origin/main', '--', *inputs, capture=True):
-        raise ValueError('origin/main changed import inputs during the run. The local commits need a fresh audit before pushing')
+        raise ValueError('origin/main changed import inputs during the run. The local commit needs a fresh audit before pushing')
     git(*IDENTITY, 'rebase', '--no-autostash', 'origin/main')
     change = 'origin/main..HEAD'
     changed = git('diff', '--name-only', change, capture=True).splitlines()
     commits = git('rev-list', '--count', change, capture=True).strip()
-    if (sorted(changed) != sorted(paths) or int(commits) != len(plan.updates)
+    if (sorted(changed) != sorted(paths) or commits != '1'
             or any(update.path.read_bytes() != update.content for update in plan.updates)):
-        raise ValueError('the commits to push differ from this import')
+        raise ValueError('the commit to push differs from this import')
     git('diff', '--check', change)
     git('push', 'origin', 'HEAD:main')
 
@@ -346,7 +355,7 @@ def main() -> int:
     parser.add_argument('folder', type=Path, help='folder containing downloaded inbox TSVs')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--apply', action='store_true', help='update local manifests and clean up the inbox')
-    modes.add_argument('--push', action='store_true', help='update, commit and push to GitHub main, then clean up the inbox')
+    modes.add_argument('--push', action='store_true', help='push all manifest updates to GitHub main in one commit, then clean up the inbox')
     args = parser.parse_args()
     folder = args.folder.resolve()
     if not folder.is_dir():

@@ -271,6 +271,62 @@ The PR author compiled 160 mesh prewarm descriptors per target on `g13s`, `g13d`
 
 A matched Mac rebuild on the same toolchain compiled all 500 native mesh keys and the 1,000 companion keys selected by the builder on both chains (`26e1a5f38264` and `5468682c3cdf`). The only MSL differences were the expected changes to 44 mesh shaders. Reflection matched after excluding the chain stamp.
 
+## HDR
+
+Current: with `DM_HDR=2` (the launcher's HDR: Game's HDR) on an EDR screen the game renders HDR and the host shows it ([HDR output](../../../docs/reference/rendering.md#hdr-output), [vi HDR status](../../../docs/reference/services.md#vi-hdr-status)); `DM_HDR=1` (BT.2446) gives it the BT.2446 inverse tone map of its SDR picture instead.
+
+- The game's path (v131072, static): `nn::vi::QueryDisplayHdrStatus` every frame from `main+0x346c6e4` while the framework byte `+0x234` is 1 (1 from boot). Extended max = min(reported peak, its preset cap 710); standard max = paper white x the preset scale at `+0x240`. Before each present it sets the standard and extended content luminance ranges, content gamut 0 and HDR-to-SDR tone mapping 0 (`main+0x570410`), no Bezier curve. With HDR on it recreates its window as `0x3D` (RGB10A2, 2560x1440), and back to `0x25` when vi reports SDR, both live. The final pass's fragment shader `a4200b53be47212c` (agl_common) converts BT.709 to BT.2020 times 203 (`c3[18..20]`) and writes PQ. It reads the upscaler's 2560x1440 R11G11B10F output, which in HDR mode already holds values above paper white (the game's tone map, below).
+- Measured with vi reporting HDR at a fixed peak while the present stayed SDR (a test build; M5 Max): 15,600 queries by frame 15,598; standard range 0..203, extended 0..min(peak, 710), following a new peak on the same frame; UI white is PQ code 592 (about 199 nits); with a peak of 150, below paper white, the UI stays at 592 and only highlights compress. 60 fps, frame p50 16.66 ms in both modes.
+- With an earlier HDR present (M5 Max, built-in XDR screen, potential headroom 16, a Dodongo's Cavern save, 2560x1440 window, one process through the three modes, 1,801 frames each):
+
+  | Mode | fps | frame p99 | game GPU p50 | present GPU p50 |
+  |---|---|---|---|---|
+  | Off (`DM_HDR=0`) | 60.00 | 17.03 ms | 6.43 ms | 0.032 ms |
+  | BT.2446 (`DM_HDR=1`, L_HDR held at 1000, the value for a headroom of 4.93) | 60.00 | 17.08 ms | 6.36 ms | 0.097-0.103 ms |
+  | Game's HDR (`DM_HDR=2`, PQ window) | 59.97 | 17.11 ms | 6.43 ms | 0.040 ms |
+
+  The live headroom went from 1.2 to about 15.4 within two seconds of the layer wanting EDR; vi's peak followed in 5 % steps, 235 to 3,120 nits, and the game kept its extended max at 710. A `DM_CTL` `shot` of the PQ window is converted to SDR and matches the SDR picture's colours. With `DM_HDR` off the HDR host's shots through the present pass equalled main's (`7493ce8c`) pixel for pixel at the same frames of the Load menu. The present GPU time of BT.2446 holds for a larger L_HDR too ([HDR output](../../../docs/reference/rendering.md#hdr-output), Cost).
+- Colours: the PQ window holds BT.2020 values; decoded as BT.2020 the Load menu's static UI matches the SDR window's bytes within 0.3 codes (as BT.709, 4 to 11 codes off), and no pixel of a menu or a gameplay frame lies outside BT.709. Shown colour-managed in BT.2020, Game's HDR looks desaturated on an XDR panel next to Off and BT.2446, which show sRGB values in the panel's primaries, so the present shows it in the panel's primaries too ([HDR output](../../../docs/reference/rendering.md#hdr-output)).
+- The HDR grade is the game's own tone map (`AglShader.sharcb` in `ApplicationPackage`): one full-screen draw of the scene and its bloom into a 1920x1080 R11G11B10F target, before the NDSR upscaler.
+  - SDR: fragment `99d1ecbf2947464b`, ACES fitted `x(2.51x+0.03)/(x(2.43x+0.59)+0.14)`, clamped to 0..1.
+  - HDR: fragment `774f2663242dbfcf`, the same curve, then the luminance `l` (weights 0.2989, 0.5866, 0.1144) above `t` stretched toward `M`. With `k = 1 - t`, `x = (l - t) / k`, `a = (M - t) / k`: `l' = t + k·a·x / (1 + (a - 1)(1 - x)^p)`, a saturation blend by `s`, clamped to `M`.
+  - `c3[4] = (M, t, p, s)`: `M` is the extended max / 203; `t` 0.65, `p` 0.75 and `s` 0.1 are the parameter defaults at `main+0x3f269e0`.
+  - agl's display mapping (`hdr_color_mapping_compute_color_lut`, `_apply_color_lut`, `_compose` in agl_technique_pfx; program table entries at `main+0x4c04af8`, `+0x4c04b08`, `+0x4c04b18`) never runs, in either mode.
+- The 710 cap is the game's preset (`main+0x6502e0`): the preset index `+0x547` is the byte at `+0x546` or `+0x548`, picked by bit 3 of the word at `+0xc`; the extended max `+0x544` = min(preset cap, preset scale x `fw+0x23e`), stored to `fw+0x238`. The game imports no HDR or TV query besides `QueryDisplayHdrStatus` and `QueryDisplayHdrPaperWhite`, and the host answers both.
+- Highlights stay near paper white because ACES reaches 1.0 only at about 7.24 x paper white, so only very bright scene values approach `M`. A grey input with `M` = 710 / 203:
+
+  | Scene value (x 203 nits) | SDR nits | HDR nits |
+  |---|---|---|
+  | 1.0 | 163 | 177 |
+  | 2.0 | 186 | 258 |
+  | 2.28 | 189 | 278 |
+  | 4.0 | 198 | 395 |
+  | 7.24 and above | 203 | 709 |
+
+  In a cavern frame of this save the tone map's scene input (bloom not counted) peaks at 2.28 x paper white and its output at 270 nits (278 predicted).
+- Measured (M5 Max, Game's HDR, the same view in Dodongo's Cavern 2F; nits from the PQ window with BT.2020 weights; Navi moves between the two frames, so the maxima compare loosely):
+
+  | Extended max | `c3[4].x` | Tone map max | Window max | 99.9 % | 99 % | 95 % | 50 % | Above 203 nits |
+  |---|---|---|---|---|---|---|---|---|
+  | 710 | 3.4975 | 698 (Navi's core) | 535 | 158 | 55 | 24 | 3.0 | 0.001 % |
+  | 400 (vi's peak fixed at 400 nits in a test build) | 1.9704 | 221 | 226 | 158 | 55 | 25 | 3.0 | 0.001 % |
+
+- Measured from macOS HDR window captures (a window capture, not a panel measurement; M5 Max, built-in XDR screen, a host from before the per-frame vi answer and the dropped drawable), linear luminance relative to SDR white, in a canyon scene:
+
+  | Mode | Peak | 99.9 % | 99 % | Capture headroom |
+  |---|---|---|---|---|
+  | Game's HDR | 1.85 | 1.13 | 1.06 | |
+  | BT.2446 | 8.22 | | 5.56 | 8.22 |
+
+- iPhone (iPhone 17 Pro Max, iPhone18,2, A19 Pro, iOS 27.2.1 24B156; an Xcode build of the final host, per-frame vi answer and dropped drawable included, with the bundled `applegpu_g18p` pipeline archive and Metal 4 pipelines), one run in each mode; by eye all three looked right (Off as before, BT.2446 brighter and never darker, Game's HDR close to Off with brighter highlights) at about the same frame rate. From the logs:
+  - The screen's EDR headroom is 8.00 at most, 1.20 at the start. BT.2446 took L_HDR 235 nits at the start (headroom taken as 1.16), then 1,120 to 1,296 nits at a taken headroom of 5.52 to 6.39.
+  - Game's HDR: the first window (format 70) takes the inverse tone map until the game, told HDR, recreates its swap chain as `0x3D`; that window (format 90) takes the PQ route. vi's peak follows the headroom: 331 to 1,576 nits outside Low Power Mode, 203 during it.
+  - In the Game's HDR run, Low Power Mode on: the screen goes from 120 to 60 Hz, the headroom is taken as 1.00 and vi reports HDR with a peak of 203 nits; the picture looked like the SDR one. Off again, the headroom and the peak come back. The same run went to the background five times and came back four times (graphics suspended and resumed); its log ends in the background.
+  - One `a drawable of format 80 after the layer changed to 115: not presented` line at the layer switch in each HDR run. The only `[RED]` lines are `slow residency commit`, in all three runs including Off. The Off run has no HDR line.
+  - Not measured there: frame times, GPU time, power.
+- Current: no host input is missing; Game's HDR shows the game's HDR as the game grades it.
+- Open: brighter outdoor scenes, where more of the picture should pass paper white, are not measured; an iPad, a TV attached to the phone, and an external HDR screen on the Mac; measured frame time and GPU and panel power (`powermetrics` needs root).
+
 ## Open
 
 - Root cause confirmed on M4 Pro (2026-11-08): [ignored event waits](../../../docs/reference/nvn-objects.md#gpu-event-waits-order-work-across-queues) let lighting consumers run before their producers. The game issues about 25 waits and 19 signals per frame. All 297 complete traced frames submit queue 5's ambient-cache consumer `9e6b00b050e30801` before queue 1's SH producer `21d9f83e6027c565`, despite the explicit dependency. Queue 1 also waits for the CPU frame-ready event after the CPU clears the lighting buffer. At frame 3872 the consumer ran at 0.686 ms, the clear at 0.966–0.968 ms, and the producer at 1.282 ms; its release followed at 4.467 ms. Exposure writer `1bba09ec4bc8ff67` has another event dependency. The native SDK's flush/invalidate functions are no-ops for these coherent pools.
@@ -340,6 +396,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25 
 - [Inlining mesh helpers with subgroup inputs can crash the Metal compiler](../../../docs/reference/shaders.md#inlining-mesh-helpers-with-subgroup-inputs-can-crash-the-metal-compiler). The subgroup helper workaround clears the isolated foliage pipeline and the 164-row offline matrix at the supported deployment minimums.
 - [Missing required functions at the render pipeline API](../../../docs/reference/rendering.md#missing-required-functions-at-the-render-pipeline-api). The device API now returns an error for missing functions. The abort inside a bundled archive lookup remains open.
 - [Draw passes without fragment order read unfinished attachments, and the damage persists](../../../docs/reference/rendering.md#draw-passes-without-fragment-order-read-unfinished-attachments-and-the-damage-persists). A diagnostic build showed a growing patch in Castle Town and Zora's Domain. The corruption carried into the baseline phases of an in-run A/B.
+- [HDR output](../../../docs/reference/rendering.md#hdr-output) and [vi HDR status](../../../docs/reference/services.md#vi-hdr-status): the first game that renders HDR when vi reports it; its PQ window, paper white and per-frame peak query set the present's routes and the EDR anchor at 203 nits ([HDR](#hdr)).
 
 - [Masked color targets store back during depth-only draws](../../../docs/reference/rendering.md#masked-color-targets-store-back-during-depth-only-draws). The depth prepass loaded a 1440×810 RG11B10F color target in eight passes per frame with all channels masked off. The author reported 35.5 MB/frame less attachment-store volume in the first A/B and 29.5 MB/frame less in the follow-up on an M2 MacBook Air. GPU and frame-time results were inconclusive. [PR #2771](https://github.com/seedds/nxnative/pull/2771)
 

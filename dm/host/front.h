@@ -35,6 +35,14 @@ int front_window_covered(void);
 // lays the picture out in that shape instead of 16:9, so a profile with screen_aspect under DM_SCREEN_ASPECT (1920x1344) fills a 1.43:1 screen and touches map onto the picture
 // as drawn. Before the first call the picture is 16:9. Called from the present thread; the front end switches to its main thread and does not block
 void front_picture_shape(int w, int h);
+// HDR output (DM_HDR=1 or 2; nvn_mtl.m, HDR output). front_layer_hdr: the layer the present wants, 0 SDR (BGRA8Unorm, no colour space, as without DM_HDR), 1 HDR for both
+// HDR routes (RGBA16Float, extended range content, extended linear: on the Mac the screen's own colour space, Display P3 when the screen is not known; on iOS sRGB on an
+// sRGB screen (a TV), else Display P3); never an RGBA16Float layer without a colour space; no EDR metadata. front_edr_poll: read the screen's EDR headroom and hand it to
+// mtl_present_edr (nvn_mtl.h). Both are called from the present thread; the front end switches to its main thread and does not block. The present takes its route from the
+// drawable's actual format and, as its last step before presenting, drops a drawable whose format the layer no longer has; a change that lands after that check can still
+// show one frame at the wrong brightness
+void front_layer_hdr(int mode);
+void front_edr_poll(void);
 // Progress screen of the first-start prepare step (nvn_mtl.m warm_prepare: "Preparing shaders" while the pipelines of the prewarm lists are built before the game's first frame):
 // title and done of total shown over the game's view (a dark screen, the title, a bar and a count), updated on each call; title NULL hides it. Any thread; the front end switches to its main
 // thread and does not block. Nothing is shown without a window

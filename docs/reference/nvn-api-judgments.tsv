@@ -1,0 +1,92 @@
+name	class	anchor	note
+nvnBufferFlushMappedRange	stub-ok	unified memory: nothing to flush	the code's comment on the handler
+nvnBufferInvalidateMappedRange	stub-ok	memory pools use the real memory given by the game, also built as zero-copy MTLBuffer	no comment of its own; the file header says pools are the game's own memory, built as a zero-copy MTLBuffer
+nvnBufferSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnCommandBufferBindShadingRateImage	stub-ok	so these change no result but its sharpness: nothing is recorded	variable-rate shading is not applied: the code says shading every pixel is the most a rate can ask, so only sharpness differs
+nvnCommandBufferClearTexture	partial	texture clear case not implemented	a clear that does not cover the whole level or all channels of its format, or whose texture is not render-target capable, is drawn as a triangle only for a colour texture that is render-target capable; otherwise it logs '[RED] texture clear case not implemented' once and clears nothing
+nvnCommandBufferClearTextureui	partial	texture clear case not implemented	a clear that does not cover the whole level or all channels of its format, or whose texture is not render-target capable, is drawn as a triangle only for a colour texture that is render-target capable; otherwise it logs '[RED] texture clear case not implemented' once and clears nothing
+nvnCommandBufferCopyTextureToTexture	partial	texture→texture copy case not implemented	a copy whose source and destination differ in size or depth, in format, or in 3D-ness, or that has copy flags other than ENGINE_2D and LINEAR_FILTER, and that no earlier path of the replay takes, logs '[RED] texture→texture copy case not implemented' once and returns without copying
+nvnCommandBufferDiscardColor	stub-ok	they are undefined afterwards, so keeping them is correct	a discarded target's contents are undefined, so the host keeps them (the code's comment)
+nvnCommandBufferDiscardDepthStencil	stub-ok	they are undefined afterwards, so keeping them is correct	as nvnCommandBufferDiscardColor (no comment of its own)
+nvnCommandBufferDownsample	partial	Downsample case not implemented	after the paths before it, a downsample whose source is not multisampled, whose destination is not single-sample, or whose format or size differs logs '[RED] Downsample case not implemented' once and returns without resolving
+nvnCommandBufferDownsampleTextureView	partial	Downsample case not implemented	as nvnCommandBufferDownsample
+nvnCommandBufferDrawArrays	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawArraysIndirect	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawArraysInstanced	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElements	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsBaseVertex	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsIndirect	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsInstanced	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawTransformFeedback	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferInsertDebugMarker	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferInsertDebugMarkerDynamic	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferInsertDebugMarkerStatic	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferMultiDrawArraysIndirectCount	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferMultiDrawElementsIndirectCount	partial	primitive type %d not implemented	the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferPopDebugGroup	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPopDebugGroupId	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPushDebugGroup	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPushDebugGroupDynamic	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPushDebugGroupStatic	stub-ok	which only the debug groups take (empty implementations here)	a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferRestoreZCullData	stub-ok	the host does no ZCull, so there is nothing to save / restore	the code's comment
+nvnCommandBufferSaveZCullData	stub-ok	the host does no ZCull, so there is nothing to save / restore	the code's comment
+nvnCommandBufferSetColorReductionEnable	stub-ok	color compression hints	the code's comment
+nvnCommandBufferSetColorReductionThresholds	stub-ok	color compression hints	no comment of its own; the comment on SetColorReductionEnable calls them hints
+nvnCommandBufferSetCommandMemoryCallbackEnabled	stub-ok	the host records more than the driver, so when the game's memory runs out it still calls the callback the game set	the flag is ignored on purpose: the host calls the callback the game set when the game's memory runs out, even if the game turned the callback off (the code's comment)
+nvnCommandBufferSetComputeOverlapMode	stub-ok	the host runs compute in submission order	the code's log text
+nvnCommandBufferSetComputeWorkloadPriority	stub-ok	Metal runs compute in submission order, with no priority	the code's log text
+nvnCommandBufferSetConservativeRasterEnable	stub-risky	SetConservativeRasterEnable on: ignored by the host for now	conservative rasterization is not applied; enabling it logs this line once; docs/reference/rendering.md has an entry 'Conservative rasterization remains unimplemented'
+nvnCommandBufferSetControlMemoryCallbackEnabled	stub-ok	the host records more than the driver, so when the game's memory runs out it still calls the callback the game set	as SetCommandMemoryCallbackEnabled (the comment covers command and control memory)
+nvnCommandBufferSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnCommandBufferSetDepthBounds	stub-risky		empty implementation (g_nops): the depth bounds test is not applied; no comment says why that is safe: not verified
+nvnCommandBufferSetFloatBlendClamp	partial	Metal stores infinity	mode 0 (overflow becomes infinity) only: mode 1 (the largest finite value) logs '[RED] ...: Metal stores infinity' once; the code's comment: no frame has been seen to differ
+nvnCommandBufferSetGeometryProcessingMode	stub-ok	no effect on Metal	the code's log text
+nvnCommandBufferSetPointSize	stub-ok	the point size comes from the shader	the code's log text
+nvnCommandBufferSetProvokingVertexMode	partial	LAST has no Metal setting	FIRST (mode 0) only: any other mode logs '[RED] ... (the last vertex): Metal's flat values come from the first vertex' once and the first vertex stays the provoking one
+nvnCommandBufferSetRecordingMode	stub-ok	the host records every command buffer alike	the code's log text
+nvnCommandBufferSetRepresentativeFragmentTest	stub-ok	which is a valid result of either setting	the code's comment: skipping fragments is allowed, never required, so running every fragment is valid for either setting
+nvnCommandBufferSetSampleMask	stub-risky	SetSampleMask %#x: ignored by the host for now	the sample mask is not applied; a mask whose low 16 bits are not all set logs this line once
+nvnCommandBufferSetShaderScratchMemory	stub-risky		empty implementation (g_nops): the scratch memory the game gives is not used; no comment says why that is safe: not verified
+nvnCommandBufferSetShadingRatePaletteMode	stub-ok	so these change no result but its sharpness: nothing is recorded	as nvnCommandBufferBindShadingRateImage
+nvnCommandBufferSetStencilCullCriteria	stub-ok	only a hint for culling ahead of the real stencil test	a ZCull hint; the draws' depth-stencil state still does the stencil test (the code's comment)
+nvnCommandBufferSetTiledCacheAction	stub-ok	Tegra tiled cache hint, no Metal equivalent	the code's comment
+nvnCommandBufferSetTiledCacheTileSize	stub-ok	Tegra tiled cache hint, no Metal equivalent	no comment of its own; same tiled-cache family as SetTiledCacheAction
+nvnCommandBufferSetViewportSwizzles	partial	not implemented (drawn unswizzled)	only the y swizzle NEGATIVE_Y is applied (as a flipped viewport); any other swizzle logs '[RED] viewport swizzle ... not implemented (drawn unswizzled)' once and the draw is unswizzled
+nvnCommandBufferSetZCullZF32CompressionEnable	stub-ok	Metal's depth buffers keep their own compression, so there is nothing to set	the code's comment
+nvnCommandBufferShadingRateImagePalette	stub-ok	so these change no result but its sharpness: nothing is recorded	as nvnCommandBufferBindShadingRateImage
+nvnDeviceFinalizeCommandHandle	stub-risky		empty body; a handle is the first entry of the recording's control list (comment at nvnCommandBufferEndRecording) and this does not release it; the code does not say that something else does: not verified
+nvnDeviceGetInteger	partial	NVN2 reads it from the GPU at run time, not known here	items of the Tegra X1 table and the SDK's NVN2 constants are answered; an item past the X1 table that NVN2 reads from the GPU at run time, or an unknown item, logs '[RED] nvnDeviceGetInteger item ...' and returns 0
+nvnDeviceRegisterFastClearColor	stub-ok	a fast clear value is only a hint to the Tegra hardware	returns 1; the code's comment on the depth variant says a fast clear value is only a hint
+nvnDeviceRegisterFastClearDepth	stub-ok	a fast clear value is only a hint to the Tegra hardware	returns 1; the code's comment
+nvnDeviceSetIntermediateShaderCache	stub-ok	the host compiles nothing at run time	the code's comment
+nvnDlssNetworkBuilderGetStorageSize	stub-ok	the scaler keeps its memory on the Mac's side	returns 0x1000, a page, for a game that allocates what it is told (the code's comment)
+nvnDlssNetworkBuilderSetDevice	stub-risky		empty body and no comment of its own: not verified
+nvnDlssNetworkBuilderSetMaxEvaluationEntries	stub-risky		empty body and no comment of its own: not verified
+nvnDlssNetworkBuilderSetStorage	stub-ok	so they are taken and dropped	the network's storage is the driver's own need, which MetalFX's scaler does not have (the code's comment)
+nvnDlssNetworkBuilderSetTextureIDs	stub-ok	so they are taken and dropped	the network's texture ids are the driver's own need, which MetalFX's scaler does not have (the code's comment)
+nvnDlssNetworkFinalize	stub-ok	Its scaler is not released here	the replay's cache takes the scaler's slot when another network needs one (the code's comment)
+nvnDlssParametersSetEvaluationIndex	stub-ok	the replay runs them in order	the index names which of the network's frames in flight; the replay runs them in order (the code's comment)
+nvnMemoryPoolInvalidateMappedRange	stub-ok	memory pools use the real memory given by the game, also built as zero-copy MTLBuffer	no comment of its own; the file header says pools are the game's own memory, built as a zero-copy MTLBuffer
+nvnMemoryPoolSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnMultisampleStateSetSampleLocations	stub-risky		the programmable sample positions are not applied; empty body and no comment says why that is safe: not verified
+nvnProgramSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnQueueBuilderSetPrimaryQueue	stub-ok	the tie needs no work	the host executes every queue's submits in order on its one Metal queue (the code's comment)
+nvnQueueBuilderSetQueuePriority	stub-ok	Queue priority: the host has one Metal queue	the code's comment
+nvnQueueFlush	stub-risky		empty body and no comment says why; nvnQueueFinish does wait (nvn_queue_finish): not verified that no game relies on flush alone
+nvnQueueSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnSamplerBuilderSetLodSnap	stub-risky	No Metal equivalent, ignored	the LOD snap is not applied (the code's comment)
+nvnSamplerPoolFinalize	stub-risky		empty body; SamplerPoolInitialize registers the pool's ids in the host's descriptor tables (dpool_add) and this does not remove them; no comment says why that is safe: not verified
+nvnSamplerPoolSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnSamplerSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnSetExternalDebuggerEnabledNVX	stub-ok	the host has no debugger to attach	the code's comment
+nvnSyncSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnTextureBuilderGetRawStorageClass	stub-risky	which the host's virtual pools do not distinguish	always 1, so that it agrees with the texture's; the code says the class names the page kind a virtual pool maps, which the host does not distinguish
+nvnTextureBuilderGetStorageClass	stub-risky	the host has none, 0 as for the builder	always 0; the code says the host has no storage classes
+nvnTextureFlushTexels	stub-ok	unified memory + dirty page tracking: nothing to flush	the code's comment on the handler
+nvnTextureGetRawStorageClass	stub-risky	Meaning unverified; return 1 for now	always 1; the code says the meaning of the value is unverified
+nvnTextureGetStorageClass	stub-risky	the host has none, 0 as for the builder	always 0; the code says the host has no storage classes
+nvnTextureInvalidateTexels	stub-risky		empty body and no comment says why nothing is invalidated: not verified
+nvnTexturePoolFinalize	stub-risky		empty body; TexturePoolInitialize registers the pool's ids in the host's descriptor tables (dpool_add) and this does not remove them; no comment says why that is safe: not verified
+nvnTexturePoolSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnTextureSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnWindowSetDebugLabel	stub-ok	Debug labels: only for NVN debugging tools, unused by the host	a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)

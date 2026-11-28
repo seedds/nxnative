@@ -13,6 +13,7 @@ How the host meets each part of a Switch game, and every failure met so far, one
 | [audio.md](audio.md) | The audio renderer and its command lists by SDK, AudioOut and devices, codecs, timing |
 | [frame-rate.md](frame-rate.md) | The host's frame step, engine frame limiters, present intervals and display rates, CPU cost |
 | [nvn-objects.md](nvn-objects.md) | NVN object sizes, memory pools, command memory, queues and syncs, CPU-written textures, NVN entry points |
+| [nvn-api.md](nvn-api.md) | The NVN / NVN2 coverage table (`nvn-api.tsv`, generated and checked in CI): how the host handles each entry point, the class vocabulary, a game's list of gaps |
 | [rendering.md](rendering.md) | The replay on Metal: textures, passes and clears, blend / depth / stencil, vertex input, uniforms and ordering, conditional rendering; the Vulkan and OpenGL layers |
 | [shaders.md](shaders.md) | Shader containers by engine, control sections and code, translation, bindings and handles, shaders compiled at run time, pipelines and caches |
 | [cheats.md](cheats.md) | How cheats work on a Switch with Atmosphère (dmnt, the file, the VM, its behaviour on failure) and where this host differs |

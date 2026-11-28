@@ -1,0 +1,744 @@
+name	category	class	op	handler	replay	notes
+nvnDeviceBuilderSetDefaults	device	immediate		h_nvnDeviceBuilderSetDefaults		
+nvnDeviceBuilderSetFlags	device	immediate		h_nvnDeviceBuilderSetFlags		
+nvnDeviceBuilderGetFlags	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceInitialize	device	immediate		h_nvnDeviceInitialize		
+nvnDeviceFinalize	device	immediate		h_nvnDeviceFinalize		
+nvnDeviceSetDebugLabel	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetProcAddress	device	immediate		h_nvnDeviceGetProcAddress		
+nvnDeviceGetInteger	device	partial		h_nvnDeviceGetInteger		code reports [RED] nvnDeviceGetInteger item #x: s; returning 0; judged: items of the Tegra X1 table and the SDK's NVN2 constants are answered; an item past the X1 table that NVN2 reads from the GPU at run time, or an unknown item, logs '[RED] nvnDeviceGetInteger item ...' and returns 0
+nvnDeviceGetCurrentTimestampInNanoseconds	device	immediate		h_nvnDeviceGetCurrentTimestampInNanoseconds		
+nvnDeviceSetIntermediateShaderCache	device	stub-ok		h_nvnDeviceSetIntermediateShaderCache		code: empty body; judged: the code's comment
+nvnDeviceGetTextureHandle	device	immediate		h_nvnDeviceGetTextureHandle		
+nvnDeviceGetTexelFetchHandle	device	immediate		h_nvnDeviceGetTexelFetchHandle		
+nvnDeviceGetImageHandle	device	immediate		h_nvnDeviceGetImageHandle		
+nvnDeviceInstallDebugCallback	device	immediate		h_nvnDeviceInstallDebugCallback		
+nvnDeviceGenerateDebugDomainId	device	immediate		h_nvnDeviceGenerateDebugDomainId		
+nvnDeviceSetWindowOriginMode	device	immediate		h_nvnDeviceSetWindowOriginMode		
+nvnDeviceSetDepthMode	device	immediate		h_nvnDeviceSetDepthMode		
+nvnDeviceRegisterFastClearColor	device	stub-ok		h_nvnDeviceRegisterFastClearColor		code: returns a constant; judged: returns 1; the code's comment on the depth variant says a fast clear value is only a hint
+nvnDeviceRegisterFastClearColori	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearColorui	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearDepth	device	stub-ok		h_nvnDeviceRegisterFastClearDepth		code: returns a constant; judged: returns 1; the code's comment
+nvnDeviceGetWindowOriginMode	device	immediate		h_nvnDeviceGetWindowOriginMode		
+nvnDeviceGetDepthMode	device	immediate		h_nvnDeviceGetDepthMode		
+nvnDeviceGetTimestampInNanoseconds	device	immediate		h_nvnDeviceGetTimestampInNanoseconds		
+nvnDeviceApplyDeferredFinalizes	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceFinalizeCommandHandle	device	stub-risky		h_nvnDeviceFinalizeCommandHandle		code: empty body; judged: empty body; a handle is the first entry of the recording's control list (comment at nvnCommandBufferEndRecording) and this does not release it; the code does not say that something else does: not verified
+nvnDeviceWalkDebugDatabase	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetSeparateTextureHandle	device	immediate		h_nvnDeviceGetSeparateTextureHandle		
+nvnDeviceGetSeparateSamplerHandle	device	immediate		h_nvnDeviceGetSeparateSamplerHandle		
+nvnDeviceIsExternalDebuggerAttached	debug and vendor (NVX etc.)	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueGetError	queue	immediate		h_nvnQueueGetError		
+nvnQueueGetTotalCommandMemoryUsed	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueGetTotalControlMemoryUsed	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueGetTotalComputeMemoryUsed	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueResetMemoryUsageCounts	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderSetDevice	queue	immediate		h_nvnQueueBuilderSetDevice		
+nvnQueueBuilderSetDefaults	queue	immediate		h_nvnQueueBuilderSetDefaults		
+nvnQueueBuilderSetFlags	queue	immediate		h_nvnQueueBuilderSetFlags		
+nvnQueueBuilderSetCommandMemorySize	queue	immediate		h_nvnQueueBuilderSetCommandMemorySize		
+nvnQueueBuilderSetComputeMemorySize	queue	immediate		h_nvnQueueBuilderSetComputeMemorySize		
+nvnQueueBuilderSetControlMemorySize	queue	immediate		h_nvnQueueBuilderSetControlMemorySize		
+nvnQueueBuilderGetQueueMemorySize	queue	immediate		h_nvnQueueBuilderGetQueueMemorySize		
+nvnQueueBuilderSetQueueMemory	queue	immediate		h_nvnQueueBuilderSetQueueMemory		
+nvnQueueBuilderSetCommandFlushThreshold	queue	immediate		h_nvnQueueBuilderSetCommandFlushThreshold		
+nvnQueueBuilderSetQueuePriority	queue	stub-ok		h_nvnQueueBuilderSetQueuePriority		no prototype in nvn.h (no signature check); code: empty body; judged: the code's comment
+nvnQueueBuilderGetQueuePriority	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetDevice	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetFlags	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetCommandMemorySize	queue	immediate		h_nvnQueueBuilderGetCommandMemorySize		no prototype in nvn.h (no signature check)
+nvnQueueBuilderGetComputeMemorySize	queue	immediate		h_nvnQueueBuilderGetComputeMemorySize		no prototype in nvn.h (no signature check)
+nvnQueueBuilderGetControlMemorySize	queue	immediate		h_nvnQueueBuilderGetControlMemorySize		no prototype in nvn.h (no signature check)
+nvnQueueBuilderGetCommandFlushThreshold	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetMemorySize	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetMemory	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueInitialize	queue	immediate		h_nvnQueueInitialize		
+nvnQueueFinalize	queue	immediate		h_nvnQueueFinalize		
+nvnQueueSetDebugLabel	queue	stub-ok		h_nvnQueueSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnQueueSubmitCommands	queue	immediate		h_nvnQueueSubmitCommands		
+nvnQueueFlush	queue	stub-risky		h_nvnQueueFlush		code: empty body; judged: empty body and no comment says why; nvnQueueFinish does wait (nvn_queue_finish): not verified that no game relies on flush alone
+nvnQueueFinish	queue	immediate		h_nvnQueueFinish		
+nvnQueuePresentTexture	queue	immediate		h_nvnQueuePresentTexture		
+nvnQueueAcquireTexture	queue	immediate		h_nvnQueueAcquireTexture		
+nvnWindowBuilderSetDevice	window/present	immediate		h_nvnWindowBuilderSetDevice		
+nvnWindowBuilderSetDefaults	window/present	immediate		h_nvnWindowBuilderSetDefaults		
+nvnWindowBuilderSetNativeWindow	window/present	immediate		h_nvnWindowBuilderSetNativeWindow		
+nvnWindowBuilderSetTextures	window/present	immediate		h_nvnWindowBuilderSetTextures		code reports [RED] WindowBuilderSetTextures count d
+nvnWindowBuilderSetPresentInterval	window/present	immediate		h_nvnWindowBuilderSetPresentInterval		
+nvnWindowBuilderSetNumActiveTextures	window/present	immediate		h_nvnWindowBuilderSetNumActiveTextures		no prototype in nvn.h (no signature check)
+nvnWindowBuilderGetDevice	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetNumTextures	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetTexture	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetNativeWindow	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetPresentInterval	window/present	immediate		h_nvnWindowBuilderGetPresentInterval		
+nvnWindowBuilderGetNumActiveTextures	window/present	immediate		h_nvnWindowBuilderGetNumActiveTextures		no prototype in nvn.h (no signature check)
+nvnWindowInitialize	window/present	immediate		h_nvnWindowInitialize		
+nvnWindowFinalize	window/present	immediate		h_nvnWindowFinalize		
+nvnWindowSetDebugLabel	window/present	stub-ok		h_nvnWindowSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnWindowAcquireTexture	window/present	immediate		h_nvnWindowAcquireTexture		
+nvnWindowGetNativeWindow	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowGetPresentInterval	window/present	immediate		h_nvnWindowGetPresentInterval		
+nvnWindowSetPresentInterval	window/present	immediate		h_nvnWindowSetPresentInterval		
+nvnWindowSetCrop	window/present	immediate		h_nvnWindowSetCrop		
+nvnWindowGetCrop	window/present	immediate		h_nvnWindowGetCrop		
+nvnWindowSetNumActiveTextures	window/present	immediate		h_nvnWindowSetNumActiveTextures		no prototype in nvn.h (no signature check)
+nvnWindowGetNumActiveTextures	window/present	immediate		h_nvnWindowGetNumActiveTextures		no prototype in nvn.h (no signature check)
+nvnWindowGetNumTextures	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramInitialize	program/shader	immediate		h_nvnProgramInitialize		
+nvnProgramFinalize	program/shader	immediate		h_nvnProgramFinalize		
+nvnProgramSetDebugLabel	program/shader	stub-ok		h_nvnProgramSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnProgramSetShaders	program/shader	immediate		h_nvnProgramSetShaders		code reports [RED] ProgramSetShaders stage count d
+nvnProgramSetShadersExt	program/shader	immediate		h_nvnProgramSetShadersExt		no prototype in nvn.h (no signature check); code reports [RED] ProgramSetShadersExt stage count d
+nvnProgramSetSampleShading	program/shader	immediate		h_nvnProgramSetSampleShading		no prototype in nvn.h (no signature check)
+nvnMemoryPoolBuilderSetDevice	buffers/memory pools	immediate		h_nvnMemoryPoolBuilderSetDevice		
+nvnMemoryPoolBuilderSetDefaults	buffers/memory pools	immediate		h_nvnMemoryPoolBuilderSetDefaults		
+nvnMemoryPoolBuilderSetStorage	buffers/memory pools	immediate		h_nvnMemoryPoolBuilderSetStorage		
+nvnMemoryPoolBuilderSetFlags	buffers/memory pools	immediate		h_nvnMemoryPoolBuilderSetFlags		
+nvnMemoryPoolBuilderGetDevice	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMemoryPoolBuilderGetMemory	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMemoryPoolBuilderGetSize	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMemoryPoolBuilderGetFlags	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMemoryPoolInitialize	buffers/memory pools	immediate		h_nvnMemoryPoolInitialize		code reports [RED] MemoryPoolInitialize: non-virtual pool has no storage flags=#x size=#llx
+nvnMemoryPoolSetDebugLabel	buffers/memory pools	stub-ok		h_nvnMemoryPoolSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnMemoryPoolFinalize	buffers/memory pools	immediate		h_nvnMemoryPoolFinalize		
+nvnMemoryPoolMap	buffers/memory pools	immediate		h_nvnMemoryPoolMap		
+nvnMemoryPoolFlushMappedRange	buffers/memory pools	immediate		h_nvnMemoryPoolFlushMappedRange		
+nvnMemoryPoolInvalidateMappedRange	buffers/memory pools	stub-ok		h_nvnMemoryPoolInvalidateMappedRange		code: empty body; judged: no comment of its own; the file header says pools are the game's own memory, built as a zero-copy MTLBuffer
+nvnMemoryPoolGetBufferAddress	buffers/memory pools	immediate		h_nvnMemoryPoolGetBufferAddress		
+nvnMemoryPoolMapVirtual	buffers/memory pools	immediate		h_nvnMemoryPoolMapVirtual		code reports [RED] MapVirtual: physical pool p has no storage
+nvnMemoryPoolGetSize	buffers/memory pools	immediate		h_nvnMemoryPoolGetSize		
+nvnMemoryPoolGetFlags	buffers/memory pools	immediate		h_nvnMemoryPoolGetFlags		
+nvnTexturePoolInitialize	textures/samplers/pools	immediate		h_nvnTexturePoolInitialize		
+nvnTexturePoolSetDebugLabel	textures/samplers/pools	stub-ok		h_nvnTexturePoolSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnTexturePoolFinalize	textures/samplers/pools	stub-risky		h_nvnTexturePoolFinalize		code: empty body; judged: empty body; TexturePoolInitialize registers the pool's ids in the host's descriptor tables (dpool_add) and this does not remove them; no comment says why that is safe: not verified
+nvnTexturePoolRegisterTexture	textures/samplers/pools	immediate		h_nvnTexturePoolRegisterTexture		
+nvnTexturePoolRegisterImage	textures/samplers/pools	immediate		h_nvnTexturePoolRegisterImage		
+nvnTexturePoolGetMemoryPool	textures/samplers/pools	immediate		h_nvnTexturePoolGetMemoryPool		
+nvnTexturePoolGetMemoryOffset	textures/samplers/pools	immediate		h_nvnTexturePoolGetMemoryOffset		
+nvnTexturePoolGetSize	textures/samplers/pools	immediate		h_nvnTexturePoolGetSize		
+nvnSamplerPoolInitialize	textures/samplers/pools	immediate		h_nvnSamplerPoolInitialize		
+nvnSamplerPoolSetDebugLabel	textures/samplers/pools	stub-ok		h_nvnSamplerPoolSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnSamplerPoolFinalize	textures/samplers/pools	stub-risky		h_nvnSamplerPoolFinalize		code: empty body; judged: empty body; SamplerPoolInitialize registers the pool's ids in the host's descriptor tables (dpool_add) and this does not remove them; no comment says why that is safe: not verified
+nvnSamplerPoolRegisterSampler	textures/samplers/pools	immediate		h_nvnSamplerPoolRegisterSampler		
+nvnSamplerPoolRegisterSamplerBuilder	textures/samplers/pools	immediate		h_nvnSamplerPoolRegisterSamplerBuilder		
+nvnSamplerPoolGetMemoryPool	textures/samplers/pools	immediate		h_nvnSamplerPoolGetMemoryPool		
+nvnSamplerPoolGetMemoryOffset	textures/samplers/pools	immediate		h_nvnSamplerPoolGetMemoryOffset		
+nvnSamplerPoolGetSize	textures/samplers/pools	immediate		h_nvnSamplerPoolGetSize		
+nvnBufferBuilderSetDevice	buffers/memory pools	immediate		h_nvnBufferBuilderSetDevice		
+nvnBufferBuilderSetDefaults	buffers/memory pools	immediate		h_nvnBufferBuilderSetDefaults		
+nvnBufferBuilderSetStorage	buffers/memory pools	immediate		h_nvnBufferBuilderSetStorage		
+nvnBufferBuilderGetDevice	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnBufferBuilderGetMemoryPool	buffers/memory pools	immediate		h_nvnBufferBuilderGetMemoryPool		no prototype in nvn.h (no signature check)
+nvnBufferBuilderGetMemoryOffset	buffers/memory pools	immediate		h_nvnBufferBuilderGetMemoryOffset		
+nvnBufferBuilderGetSize	buffers/memory pools	immediate		h_nvnBufferBuilderGetSize		
+nvnBufferInitialize	buffers/memory pools	immediate		h_nvnBufferInitialize		code reports [RED] BufferInitialize: pool has no storage (pool p flags #x offset #llx size #llx)
+nvnBufferSetDebugLabel	buffers/memory pools	stub-ok		h_nvnBufferSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnBufferFinalize	buffers/memory pools	immediate		h_nvnBufferFinalize		
+nvnBufferMap	buffers/memory pools	immediate		h_nvnBufferMap		
+nvnBufferGetAddress	buffers/memory pools	immediate		h_nvnBufferGetAddress		
+nvnBufferFlushMappedRange	buffers/memory pools	stub-ok		h_nvnBufferFlushMappedRange		code: empty body; judged: the code's comment on the handler
+nvnBufferInvalidateMappedRange	buffers/memory pools	stub-ok		h_nvnBufferInvalidateMappedRange		code: empty body; judged: no comment of its own; the file header says pools are the game's own memory, built as a zero-copy MTLBuffer
+nvnBufferGetMemoryPool	buffers/memory pools	immediate		h_nvnBufferGetMemoryPool		
+nvnBufferGetMemoryOffset	buffers/memory pools	immediate		h_nvnBufferGetMemoryOffset		
+nvnBufferGetSize	buffers/memory pools	immediate		h_nvnBufferGetSize		
+nvnBufferGetDebugID	buffers/memory pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderSetDevice	textures/samplers/pools	immediate		h_nvnTextureBuilderSetDevice		
+nvnTextureBuilderSetDefaults	textures/samplers/pools	immediate		h_nvnTextureBuilderSetDefaults		
+nvnTextureBuilderSetFlags	textures/samplers/pools	immediate		h_nvnTextureBuilderSetFlags		
+nvnTextureBuilderSetTarget	textures/samplers/pools	immediate		h_nvnTextureBuilderSetTarget		
+nvnTextureBuilderSetWidth	textures/samplers/pools	immediate		h_nvnTextureBuilderSetWidth		
+nvnTextureBuilderSetHeight	textures/samplers/pools	immediate		h_nvnTextureBuilderSetHeight		
+nvnTextureBuilderSetDepth	textures/samplers/pools	immediate		h_nvnTextureBuilderSetDepth		
+nvnTextureBuilderSetSize1D	textures/samplers/pools	immediate		h_nvnTextureBuilderSetSize1D		
+nvnTextureBuilderSetSize2D	textures/samplers/pools	immediate		h_nvnTextureBuilderSetSize2D		
+nvnTextureBuilderSetSize3D	textures/samplers/pools	immediate		h_nvnTextureBuilderSetSize3D		
+nvnTextureBuilderSetLevels	textures/samplers/pools	immediate		h_nvnTextureBuilderSetLevels		
+nvnTextureBuilderSetFormat	textures/samplers/pools	immediate		h_nvnTextureBuilderSetFormat		
+nvnTextureBuilderSetSamples	textures/samplers/pools	immediate		h_nvnTextureBuilderSetSamples		
+nvnTextureBuilderSetSwizzle	textures/samplers/pools	immediate		h_nvnTextureBuilderSetSwizzle		
+nvnTextureBuilderSetDepthStencilMode	textures/samplers/pools	immediate		h_nvnTextureBuilderSetDepthStencilMode		
+nvnTextureBuilderGetStorageSize	textures/samplers/pools	immediate		h_nvnTextureBuilderGetStorageSize		code reports [RED] TextureBuilderGetStorageSize unknown format #x
+nvnTextureBuilderGetStorageAlignment	textures/samplers/pools	immediate		h_nvnTextureBuilderGetStorageAlignment		
+nvnTextureBuilderSetStorage	textures/samplers/pools	immediate		h_nvnTextureBuilderSetStorage		
+nvnTextureBuilderSetPackagedTextureData	textures/samplers/pools	immediate		h_nvnTextureBuilderSetPackagedTextureData		
+nvnTextureBuilderSetPackagedTextureLayout	textures/samplers/pools	immediate		h_nvnTextureBuilderSetPackagedTextureLayout		
+nvnTextureBuilderSetStride	textures/samplers/pools	immediate		h_nvnTextureBuilderSetStride		
+nvnTextureBuilderSetGLTextureName	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetStorageClass	textures/samplers/pools	stub-risky		h_nvnTextureBuilderGetStorageClass		code: returns a constant; judged: always 0; the code says the host has no storage classes
+nvnTextureBuilderGetDevice	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetFlags	textures/samplers/pools	immediate		h_nvnTextureBuilderGetFlags		
+nvnTextureBuilderGetTarget	textures/samplers/pools	immediate		h_nvnTextureBuilderGetTarget		
+nvnTextureBuilderGetWidth	textures/samplers/pools	immediate		h_nvnTextureBuilderGetWidth		
+nvnTextureBuilderGetHeight	textures/samplers/pools	immediate		h_nvnTextureBuilderGetHeight		
+nvnTextureBuilderGetDepth	textures/samplers/pools	immediate		h_nvnTextureBuilderGetDepth		
+nvnTextureBuilderGetLevels	textures/samplers/pools	immediate		h_nvnTextureBuilderGetLevels		
+nvnTextureBuilderGetFormat	textures/samplers/pools	immediate		h_nvnTextureBuilderGetFormat		
+nvnTextureBuilderGetSamples	textures/samplers/pools	immediate		h_nvnTextureBuilderGetSamples		
+nvnTextureBuilderGetSwizzle	textures/samplers/pools	immediate		h_nvnTextureBuilderGetSwizzle		
+nvnTextureBuilderGetDepthStencilMode	textures/samplers/pools	immediate		h_nvnTextureBuilderGetDepthStencilMode		
+nvnTextureBuilderGetPackagedTextureData	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetPackagedTextureLayout	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetStride	textures/samplers/pools	immediate		h_nvnTextureBuilderGetStride		
+nvnTextureBuilderGetSparseTileLayout	textures/samplers/pools	immediate		h_nvnTextureBuilderGetSparseTileLayout		
+nvnTextureBuilderGetGLTextureName	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetZCullStorageSize	textures/samplers/pools	immediate		h_nvnTextureBuilderGetZCullStorageSize		
+nvnTextureBuilderGetMemoryPool	textures/samplers/pools	immediate		h_nvnTextureBuilderGetMemoryPool		no prototype in nvn.h (no signature check)
+nvnTextureBuilderGetMemoryOffset	textures/samplers/pools	immediate		h_nvnTextureBuilderGetMemoryOffset		
+nvnTextureBuilderGetRawStorageClass	textures/samplers/pools	stub-risky		h_nvnTextureBuilderGetRawStorageClass		no prototype in nvn.h (no signature check); code: returns a constant; judged: always 1, so that it agrees with the texture's; the code says the class names the page kind a virtual pool maps, which the host does not distinguish
+nvnTextureViewSetDefaults	textures/samplers/pools	immediate		h_nvnTextureViewSetDefaults		
+nvnTextureViewSetLevels	textures/samplers/pools	immediate		h_nvnTextureViewSetLevels		
+nvnTextureViewSetLayers	textures/samplers/pools	immediate		h_nvnTextureViewSetLayers		
+nvnTextureViewSetFormat	textures/samplers/pools	immediate		h_nvnTextureViewSetFormat		
+nvnTextureViewSetSwizzle	textures/samplers/pools	immediate		h_nvnTextureViewSetSwizzle		
+nvnTextureViewSetDepthStencilMode	textures/samplers/pools	immediate		h_nvnTextureViewSetDepthStencilMode		
+nvnTextureViewSetTarget	textures/samplers/pools	immediate		h_nvnTextureViewSetTarget		
+nvnTextureViewGetLevels	textures/samplers/pools	immediate		h_nvnTextureViewGetLevels		
+nvnTextureViewGetLayers	textures/samplers/pools	immediate		h_nvnTextureViewGetLayers		
+nvnTextureViewGetFormat	textures/samplers/pools	immediate		h_nvnTextureViewGetFormat		
+nvnTextureViewGetSwizzle	textures/samplers/pools	immediate		h_nvnTextureViewGetSwizzle		
+nvnTextureViewGetDepthStencilMode	textures/samplers/pools	immediate		h_nvnTextureViewGetDepthStencilMode		
+nvnTextureViewGetTarget	textures/samplers/pools	immediate		h_nvnTextureViewGetTarget		
+nvnTextureViewCompare	textures/samplers/pools	immediate		h_nvnTextureViewCompare		
+nvnTextureInitialize	textures/samplers/pools	immediate		h_nvnTextureInitialize		
+nvnTextureGetZCullStorageSize	textures/samplers/pools	immediate		h_nvnTextureGetZCullStorageSize		
+nvnTextureFinalize	textures/samplers/pools	immediate		h_nvnTextureFinalize		
+nvnTextureSetDebugLabel	textures/samplers/pools	stub-ok		h_nvnTextureSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnTextureGetStorageClass	textures/samplers/pools	stub-risky		h_nvnTextureGetStorageClass		code: returns a constant; judged: always 0; the code says the host has no storage classes
+nvnTextureGetViewOffset	textures/samplers/pools	immediate		h_nvnTextureGetViewOffset		
+nvnTextureGetFlags	textures/samplers/pools	immediate		h_nvnTextureGetFlags		
+nvnTextureGetTarget	textures/samplers/pools	immediate		h_nvnTextureGetTarget		
+nvnTextureGetWidth	textures/samplers/pools	immediate		h_nvnTextureGetWidth		
+nvnTextureGetHeight	textures/samplers/pools	immediate		h_nvnTextureGetHeight		
+nvnTextureGetDepth	textures/samplers/pools	immediate		h_nvnTextureGetDepth		
+nvnTextureGetLevels	textures/samplers/pools	immediate		h_nvnTextureGetLevels		
+nvnTextureGetFormat	textures/samplers/pools	immediate		h_nvnTextureGetFormat		
+nvnTextureGetSamples	textures/samplers/pools	immediate		h_nvnTextureGetSamples		
+nvnTextureGetSwizzle	textures/samplers/pools	immediate		h_nvnTextureGetSwizzle		
+nvnTextureGetDepthStencilMode	textures/samplers/pools	immediate		h_nvnTextureGetDepthStencilMode		
+nvnTextureGetStride	textures/samplers/pools	immediate		h_nvnTextureGetStride		
+nvnTextureGetTextureAddress	textures/samplers/pools	immediate		h_nvnTextureGetTextureAddress		
+nvnTextureGetSparseTileLayout	textures/samplers/pools	immediate		h_nvnTextureGetSparseTileLayout		
+nvnTextureWriteTexels	textures/samplers/pools	immediate		h_nvnTextureWriteTexels		
+nvnTextureWriteTexelsStrided	textures/samplers/pools	immediate		h_nvnTextureWriteTexelsStrided		
+nvnTextureReadTexels	textures/samplers/pools	immediate		h_nvnTextureReadTexels		
+nvnTextureReadTexelsStrided	textures/samplers/pools	immediate		h_nvnTextureReadTexelsStrided		
+nvnTextureFlushTexels	textures/samplers/pools	stub-ok		h_nvnTextureFlushTexels		code: empty body; judged: the code's comment on the handler
+nvnTextureInvalidateTexels	textures/samplers/pools	stub-risky		h_nvnTextureInvalidateTexels		code: empty body; judged: empty body and no comment says why nothing is invalidated: not verified
+nvnTextureGetMemoryPool	textures/samplers/pools	immediate		h_nvnTextureGetMemoryPool		
+nvnTextureGetMemoryOffset	textures/samplers/pools	immediate		h_nvnTextureGetMemoryOffset		
+nvnTextureGetStorageSize	textures/samplers/pools	immediate		h_nvnTextureGetStorageSize		
+nvnTextureCompare	textures/samplers/pools	immediate		h_nvnTextureCompare		
+nvnTextureGetDebugID	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureGetRawStorageClass	textures/samplers/pools	stub-risky		h_nvnTextureGetRawStorageClass		no prototype in nvn.h (no signature check); code: returns a constant; judged: always 1; the code says the meaning of the value is unverified
+nvnSamplerBuilderSetDevice	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetDevice		
+nvnSamplerBuilderSetDefaults	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetDefaults		
+nvnSamplerBuilderSetMinMagFilter	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetMinMagFilter		
+nvnSamplerBuilderSetWrapMode	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetWrapMode		
+nvnSamplerBuilderSetLodClamp	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetLodClamp		
+nvnSamplerBuilderSetLodBias	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetLodBias		
+nvnSamplerBuilderSetCompare	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetCompare		
+nvnSamplerBuilderSetBorderColor	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetBorderColor		
+nvnSamplerBuilderSetBorderColori	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetBorderColori		
+nvnSamplerBuilderSetBorderColorui	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetBorderColorui		
+nvnSamplerBuilderSetMaxAnisotropy	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetMaxAnisotropy		
+nvnSamplerBuilderSetReductionFilter	textures/samplers/pools	immediate		h_nvnSamplerBuilderSetReductionFilter		
+nvnSamplerBuilderSetLodSnap	textures/samplers/pools	stub-risky		h_nvnSamplerBuilderSetLodSnap		code: empty body; judged: the LOD snap is not applied (the code's comment)
+nvnSamplerBuilderGetDevice	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetMinMagFilter	textures/samplers/pools	immediate		h_nvnSamplerBuilderGetMinMagFilter		
+nvnSamplerBuilderGetWrapMode	textures/samplers/pools	immediate		h_nvnSamplerBuilderGetWrapMode		
+nvnSamplerBuilderGetLodClamp	textures/samplers/pools	immediate		h_nvnSamplerBuilderGetLodClamp		
+nvnSamplerBuilderGetLodBias	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetCompare	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetBorderColor	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetBorderColori	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetBorderColorui	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetMaxAnisotropy	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetReductionFilter	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerBuilderGetLodSnap	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerInitialize	textures/samplers/pools	immediate		h_nvnSamplerInitialize		
+nvnSamplerFinalize	textures/samplers/pools	immediate		h_nvnSamplerFinalize		
+nvnSamplerSetDebugLabel	textures/samplers/pools	stub-ok		h_nvnSamplerSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnSamplerGetMinMagFilter	textures/samplers/pools	immediate		h_nvnSamplerGetMinMagFilter		
+nvnSamplerGetWrapMode	textures/samplers/pools	immediate		h_nvnSamplerGetWrapMode		
+nvnSamplerGetLodClamp	textures/samplers/pools	immediate		h_nvnSamplerGetLodClamp		
+nvnSamplerGetLodBias	textures/samplers/pools	immediate		h_nvnSamplerGetLodBias		
+nvnSamplerGetCompare	textures/samplers/pools	immediate		h_nvnSamplerGetCompare		
+nvnSamplerGetBorderColor	textures/samplers/pools	immediate		h_nvnSamplerGetBorderColor		
+nvnSamplerGetBorderColori	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerGetBorderColorui	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerGetMaxAnisotropy	textures/samplers/pools	immediate		h_nvnSamplerGetMaxAnisotropy		
+nvnSamplerGetReductionFilter	textures/samplers/pools	immediate		h_nvnSamplerGetReductionFilter		
+nvnSamplerCompare	textures/samplers/pools	immediate		h_nvnSamplerCompare		
+nvnSamplerGetDebugID	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnBlendStateSetDefaults	pipeline state blocks	immediate		h_nvnBlendStateSetDefaults		
+nvnBlendStateSetBlendTarget	pipeline state blocks	immediate		h_nvnBlendStateSetBlendTarget		
+nvnBlendStateSetBlendFunc	pipeline state blocks	immediate		h_nvnBlendStateSetBlendFunc		
+nvnBlendStateSetBlendEquation	pipeline state blocks	immediate		h_nvnBlendStateSetBlendEquation		
+nvnBlendStateSetAdvancedMode	pipeline state blocks	immediate		h_nvnBlendStateSetAdvancedMode		
+nvnBlendStateSetAdvancedOverlap	pipeline state blocks	immediate		h_nvnBlendStateSetAdvancedOverlap		
+nvnBlendStateSetAdvancedPremultipliedSrc	pipeline state blocks	immediate		h_nvnBlendStateSetAdvancedPremultipliedSrc		
+nvnBlendStateSetAdvancedNormalizedDst	pipeline state blocks	immediate		h_nvnBlendStateSetAdvancedNormalizedDst		
+nvnBlendStateGetBlendTarget	pipeline state blocks	immediate		h_nvnBlendStateGetBlendTarget		
+nvnBlendStateGetBlendFunc	pipeline state blocks	immediate		h_nvnBlendStateGetBlendFunc		
+nvnBlendStateGetBlendEquation	pipeline state blocks	immediate		h_nvnBlendStateGetBlendEquation		
+nvnBlendStateGetAdvancedMode	pipeline state blocks	immediate		h_nvnBlendStateGetAdvancedMode		
+nvnBlendStateGetAdvancedOverlap	pipeline state blocks	immediate		h_nvnBlendStateGetAdvancedOverlap		
+nvnBlendStateGetAdvancedPremultipliedSrc	pipeline state blocks	immediate		h_nvnBlendStateGetAdvancedPremultipliedSrc		
+nvnBlendStateGetAdvancedNormalizedDst	pipeline state blocks	immediate		h_nvnBlendStateGetAdvancedNormalizedDst		
+nvnColorStateSetDefaults	pipeline state blocks	immediate		h_nvnColorStateSetDefaults		
+nvnColorStateSetBlendEnable	pipeline state blocks	immediate		h_nvnColorStateSetBlendEnable		
+nvnColorStateSetLogicOp	pipeline state blocks	immediate		h_nvnColorStateSetLogicOp		
+nvnColorStateSetAlphaTest	pipeline state blocks	immediate		h_nvnColorStateSetAlphaTest		
+nvnColorStateGetBlendEnable	pipeline state blocks	immediate		h_nvnColorStateGetBlendEnable		
+nvnColorStateGetLogicOp	pipeline state blocks	immediate		h_nvnColorStateGetLogicOp		
+nvnColorStateGetAlphaTest	pipeline state blocks	immediate		h_nvnColorStateGetAlphaTest		
+nvnChannelMaskStateSetDefaults	pipeline state blocks	immediate		h_nvnChannelMaskStateSetDefaults		
+nvnChannelMaskStateSetChannelMask	pipeline state blocks	immediate		h_nvnChannelMaskStateSetChannelMask		
+nvnChannelMaskStateGetChannelMask	pipeline state blocks	immediate		h_nvnChannelMaskStateGetChannelMask		
+nvnMultisampleStateSetDefaults	pipeline state blocks	immediate		h_nvnMultisampleStateSetDefaults		
+nvnMultisampleStateSetMultisampleEnable	pipeline state blocks	immediate		h_nvnMultisampleStateSetMultisampleEnable		
+nvnMultisampleStateSetSamples	pipeline state blocks	immediate		h_nvnMultisampleStateSetSamples		
+nvnMultisampleStateSetAlphaToCoverageEnable	pipeline state blocks	immediate		h_nvnMultisampleStateSetAlphaToCoverageEnable		
+nvnMultisampleStateSetAlphaToCoverageDither	pipeline state blocks	immediate		h_nvnMultisampleStateSetAlphaToCoverageDither		
+nvnMultisampleStateGetMultisampleEnable	pipeline state blocks	immediate		h_nvnMultisampleStateGetMultisampleEnable		
+nvnMultisampleStateGetSamples	pipeline state blocks	immediate		h_nvnMultisampleStateGetSamples		
+nvnMultisampleStateGetAlphaToCoverageEnable	pipeline state blocks	immediate		h_nvnMultisampleStateGetAlphaToCoverageEnable		
+nvnMultisampleStateGetAlphaToCoverageDither	pipeline state blocks	immediate		h_nvnMultisampleStateGetAlphaToCoverageDither		
+nvnMultisampleStateSetRasterSamples	pipeline state blocks	immediate		h_nvnMultisampleStateSetRasterSamples		
+nvnMultisampleStateGetRasterSamples	pipeline state blocks	immediate		h_nvnMultisampleStateGetRasterSamples		
+nvnMultisampleStateSetCoverageModulationMode	pipeline state blocks	immediate		h_nvnMultisampleStateSetCoverageModulationMode		
+nvnMultisampleStateGetCoverageModulationMode	pipeline state blocks	immediate		h_nvnMultisampleStateGetCoverageModulationMode		
+nvnMultisampleStateSetCoverageToColorEnable	pipeline state blocks	immediate		h_nvnMultisampleStateSetCoverageToColorEnable		
+nvnMultisampleStateGetCoverageToColorEnable	pipeline state blocks	immediate		h_nvnMultisampleStateGetCoverageToColorEnable		
+nvnMultisampleStateSetCoverageToColorOutput	pipeline state blocks	immediate		h_nvnMultisampleStateSetCoverageToColorOutput		
+nvnMultisampleStateGetCoverageToColorOutput	pipeline state blocks	immediate		h_nvnMultisampleStateGetCoverageToColorOutput		
+nvnMultisampleStateSetSampleLocationsEnable	pipeline state blocks	immediate		h_nvnMultisampleStateSetSampleLocationsEnable		
+nvnMultisampleStateGetSampleLocationsEnable	pipeline state blocks	immediate		h_nvnMultisampleStateGetSampleLocationsEnable		
+nvnMultisampleStateGetSampleLocationsGrid	pipeline state blocks	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMultisampleStateSetSampleLocationsGridEnable	pipeline state blocks	immediate		h_nvnMultisampleStateSetSampleLocationsGridEnable		
+nvnMultisampleStateGetSampleLocationsGridEnable	pipeline state blocks	immediate		h_nvnMultisampleStateGetSampleLocationsGridEnable		
+nvnMultisampleStateSetSampleLocations	pipeline state blocks	stub-risky		h_nvnMultisampleStateSetSampleLocations		code: empty body; judged: the programmable sample positions are not applied; empty body and no comment says why that is safe: not verified
+nvnPolygonStateSetDefaults	pipeline state blocks	immediate		h_nvnPolygonStateSetDefaults		
+nvnPolygonStateSetCullFace	pipeline state blocks	immediate		h_nvnPolygonStateSetCullFace		
+nvnPolygonStateSetFrontFace	pipeline state blocks	immediate		h_nvnPolygonStateSetFrontFace		
+nvnPolygonStateSetPolygonMode	pipeline state blocks	immediate		h_nvnPolygonStateSetPolygonMode		
+nvnPolygonStateSetPolygonOffsetEnables	pipeline state blocks	immediate		h_nvnPolygonStateSetPolygonOffsetEnables		
+nvnPolygonStateGetCullFace	pipeline state blocks	immediate		h_nvnPolygonStateGetCullFace		
+nvnPolygonStateGetFrontFace	pipeline state blocks	immediate		h_nvnPolygonStateGetFrontFace		
+nvnPolygonStateGetPolygonMode	pipeline state blocks	immediate		h_nvnPolygonStateGetPolygonMode		
+nvnPolygonStateGetPolygonOffsetEnables	pipeline state blocks	immediate		h_nvnPolygonStateGetPolygonOffsetEnables		
+nvnDepthStencilStateSetDefaults	pipeline state blocks	immediate		h_nvnDepthStencilStateSetDefaults		
+nvnDepthStencilStateSetDepthTestEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateSetDepthTestEnable		
+nvnDepthStencilStateSetDepthWriteEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateSetDepthWriteEnable		
+nvnDepthStencilStateSetDepthFunc	pipeline state blocks	immediate		h_nvnDepthStencilStateSetDepthFunc		
+nvnDepthStencilStateSetStencilTestEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateSetStencilTestEnable		
+nvnDepthStencilStateSetStencilFunc	pipeline state blocks	immediate		h_nvnDepthStencilStateSetStencilFunc		
+nvnDepthStencilStateSetStencilOp	pipeline state blocks	immediate		h_nvnDepthStencilStateSetStencilOp		
+nvnDepthStencilStateGetDepthTestEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateGetDepthTestEnable		
+nvnDepthStencilStateGetDepthWriteEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateGetDepthWriteEnable		
+nvnDepthStencilStateGetDepthFunc	pipeline state blocks	immediate		h_nvnDepthStencilStateGetDepthFunc		
+nvnDepthStencilStateGetStencilTestEnable	pipeline state blocks	immediate		h_nvnDepthStencilStateGetStencilTestEnable		
+nvnDepthStencilStateGetStencilFunc	pipeline state blocks	immediate		h_nvnDepthStencilStateGetStencilFunc		
+nvnDepthStencilStateGetStencilOp	pipeline state blocks	immediate		h_nvnDepthStencilStateGetStencilOp		
+nvnVertexAttribStateSetDefaults	pipeline state blocks	immediate		h_nvnVertexAttribStateSetDefaults		
+nvnVertexAttribStateSetFormat	pipeline state blocks	immediate		h_nvnVertexAttribStateSetFormat		code reports [RED] vertex attribute offset td exceeds the packed range
+nvnVertexAttribStateSetStreamIndex	pipeline state blocks	immediate		h_nvnVertexAttribStateSetStreamIndex		
+nvnVertexAttribStateGetFormat	pipeline state blocks	immediate		h_nvnVertexAttribStateGetFormat		
+nvnVertexAttribStateGetStreamIndex	pipeline state blocks	immediate		h_nvnVertexAttribStateGetStreamIndex		
+nvnVertexStreamStateSetDefaults	pipeline state blocks	immediate		h_nvnVertexStreamStateSetDefaults		
+nvnVertexStreamStateSetStride	pipeline state blocks	immediate		h_nvnVertexStreamStateSetStride		
+nvnVertexStreamStateSetDivisor	pipeline state blocks	immediate		h_nvnVertexStreamStateSetDivisor		
+nvnVertexStreamStateGetStride	pipeline state blocks	immediate		h_nvnVertexStreamStateGetStride		
+nvnVertexStreamStateGetDivisor	pipeline state blocks	immediate		h_nvnVertexStreamStateGetDivisor		
+nvnCommandBufferInitialize	command buffer: lifecycle, memory, debug	immediate		h_nvnCommandBufferInitialize		
+nvnCommandBufferFinalize	command buffer: lifecycle, memory, debug	immediate		h_nvnCommandBufferFinalize		
+nvnCommandBufferSetDebugLabel	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnCommandBufferSetMemoryCallback	command buffer: fixed-function state	immediate		h_nvnCommandBufferSetMemoryCallback		
+nvnCommandBufferSetMemoryCallbackData	command buffer: fixed-function state	immediate		h_nvnCommandBufferSetMemoryCallbackData		
+nvnCommandBufferSetCommandMemoryCallbackEnabled	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetCommandMemoryCallbackEnabled		no prototype in nvn.h (no signature check); code: empty body; judged: the flag is ignored on purpose: the host calls the callback the game set when the game's memory runs out, even if the game turned the callback off (the code's comment)
+nvnCommandBufferAddCommandMemory	command buffer: other	immediate		h_nvnCommandBufferAddCommandMemory		code reports [RED] AddCommandMemory: pool has no CPU storage
+nvnCommandBufferAddControlMemory	command buffer: other	immediate		h_nvnCommandBufferAddControlMemory		
+nvnCommandBufferGetCommandMemorySize	command buffer: other	immediate		h_nvnCommandBufferGetCommandMemorySize		
+nvnCommandBufferGetCommandMemoryUsed	command buffer: other	immediate		h_nvnCommandBufferGetCommandMemoryUsed		
+nvnCommandBufferGetCommandMemoryFree	command buffer: other	immediate		h_nvnCommandBufferGetCommandMemoryFree		
+nvnCommandBufferGetControlMemorySize	command buffer: other	immediate		h_nvnCommandBufferGetControlMemorySize		
+nvnCommandBufferGetControlMemoryUsed	command buffer: other	immediate		h_nvnCommandBufferGetControlMemoryUsed		
+nvnCommandBufferGetControlMemoryFree	command buffer: other	immediate		h_nvnCommandBufferGetControlMemoryFree		
+nvnCommandBufferBeginRecording	command buffer: lifecycle, memory, debug	immediate		h_nvnCommandBufferBeginRecording		code reports [RED] BeginRecording re-entered
+nvnCommandBufferEndRecording	command buffer: lifecycle, memory, debug	immediate		h_nvnCommandBufferEndRecording		
+nvnCommandBufferCallCommands	command buffer: lifecycle, memory, debug	immediate		h_nvnCommandBufferCallCommands		code reports [RED] CallCommands outside a recording
+nvnCommandBufferCopyCommands	command buffer: clears and copies	immediate		h_nvnCommandBufferCopyCommands		code reports [RED] CopyCommands outside a recording
+nvnCommandBufferBindBlendState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindBlendState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindChannelMaskState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindChannelMaskState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindColorState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindColorState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindMultisampleState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindMultisampleState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindPolygonState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindPolygonState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindDepthStencilState	command buffer: bindings	recorded	OP_BIND_STATE	h_nvnCommandBufferBindDepthStencilState	OP_BIND_STATE	compact form OPC_STATE/OPC_STATE8, expanded before the replay
+nvnCommandBufferBindVertexAttribState	command buffer: bindings	recorded	OP_BIND_VATTR	h_nvnCommandBufferBindVertexAttribState	OP_BIND_VATTR	compact form OPC_VATTR, expanded before the replay; code reports [RED] BindVertexAttribState n=d
+nvnCommandBufferBindVertexStreamState	command buffer: bindings	recorded	OP_BIND_VSTREAM	h_nvnCommandBufferBindVertexStreamState	OP_BIND_VSTREAM	compact form OPC_VSTREAM, expanded before the replay; code reports [RED] BindVertexStreamState n=d
+nvnCommandBufferBindProgram	command buffer: bindings	recorded	OP_BIND_PROGRAM	h_nvnCommandBufferBindProgram	OP_BIND_PROGRAM	
+nvnCommandBufferBindVertexBuffer	command buffer: bindings	recorded	OP_BIND_VBUF,OP_BIND_VBUF1	h_nvnCommandBufferBindVertexBuffer	OP_BIND_VBUF,OP_BIND_VBUF1	compact form OPC_VBUFS, expanded before the replay
+nvnCommandBufferBindVertexBuffers	command buffer: bindings	recorded	OP_BIND_VBUF,OP_BIND_VBUF1	h_nvnCommandBufferBindVertexBuffers	OP_BIND_VBUF,OP_BIND_VBUF1	compact form OPC_VBUFS, expanded before the replay; code reports [RED] BindVertexBuffers first=d n=d
+nvnCommandBufferBindUniformBuffer	command buffer: bindings	recorded	OP_BIND_UBO,OP_BIND_UBO_SMALL	h_nvnCommandBufferBindUniformBuffer	OP_BIND_UBO,OP_BIND_UBO_SMALL	
+nvnCommandBufferBindUniformBuffers	command buffer: bindings	recorded	OP_BIND_UBO_SMALL	h_nvnCommandBufferBindUniformBuffers	OP_BIND_UBO_SMALL	
+nvnCommandBufferBindTransformFeedbackBuffer	command buffer: bindings	recorded	OP_TF_BIND	h_nvnCommandBufferBindTransformFeedbackBuffer	OP_TF_BIND	
+nvnCommandBufferBindTransformFeedbackBuffers	command buffer: bindings	recorded	OP_TF_BIND	h_nvnCommandBufferBindTransformFeedbackBuffers	OP_TF_BIND	
+nvnCommandBufferBindStorageBuffer	command buffer: bindings	recorded	OP_BIND_SSBO	h_nvnCommandBufferBindStorageBuffer	OP_BIND_SSBO	
+nvnCommandBufferBindStorageBuffers	command buffer: bindings	recorded	OP_BIND_SSBO	h_nvnCommandBufferBindStorageBuffers	OP_BIND_SSBO	
+nvnCommandBufferBindTexture	command buffer: bindings	recorded	OP_BIND_TEX1	h_nvnCommandBufferBindTexture	OP_BIND_TEX1	
+nvnCommandBufferBindTextures	command buffer: bindings	recorded	OP_BIND_TEX	h_nvnCommandBufferBindTextures	OP_BIND_TEX	
+nvnCommandBufferBindImage	command buffer: bindings	recorded	OP_BIND_IMG	h_nvnCommandBufferBindImage	OP_BIND_IMG	
+nvnCommandBufferBindImages	command buffer: bindings	recorded	OP_BIND_IMG	h_nvnCommandBufferBindImages	OP_BIND_IMG	
+nvnCommandBufferSetPatchSize	command buffer: fixed-function state	recorded	OP_PATCH_SIZE	h_nvnCommandBufferSetPatchSize	OP_PATCH_SIZE	
+nvnCommandBufferSetInnerTessellationLevels	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetOuterTessellationLevels	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetPrimitiveRestart	command buffer: fixed-function state	recorded	OP_PRIM_RESTART	h_nvnCommandBufferSetPrimitiveRestart	OP_PRIM_RESTART	compact form OPC_PRIM_RESTART, expanded before the replay
+nvnCommandBufferBeginTransformFeedback	command buffer: lifecycle, memory, debug	recorded	OP_TF_STATE	h_nvnCommandBufferBeginTransformFeedback	OP_TF_STATE	
+nvnCommandBufferEndTransformFeedback	command buffer: lifecycle, memory, debug	recorded	OP_TF_STATE	h_nvnCommandBufferEndTransformFeedback	OP_TF_STATE	
+nvnCommandBufferPauseTransformFeedback	command buffer: other	recorded	OP_TF_STATE	h_nvnCommandBufferPauseTransformFeedback	OP_TF_STATE	
+nvnCommandBufferResumeTransformFeedback	command buffer: other	recorded	OP_TF_STATE	h_nvnCommandBufferResumeTransformFeedback	OP_TF_STATE	
+nvnCommandBufferDrawTransformFeedback	command buffer: draw	partial	OP_DRAW	h_nvnCommandBufferDrawTransformFeedback	OP_DRAW	judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawArrays	command buffer: draw	partial	OP_DRAW	h_nvnCommandBufferDrawArrays	OP_DRAW	compact form OPC_DRAW/OPC_DRAW_IND/OPC_DRAW_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElements	command buffer: draw	partial	OP_DRAW_IDX	h_nvnCommandBufferDrawElements	OP_DRAW_IDX	compact form OPC_DRAW_IDX/OPC_DRAW_IDX_IND/OPC_DRAW_IDX_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsBaseVertex	command buffer: draw	partial	OP_DRAW_IDX	h_nvnCommandBufferDrawElementsBaseVertex	OP_DRAW_IDX	compact form OPC_DRAW_IDX/OPC_DRAW_IDX_IND/OPC_DRAW_IDX_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawArraysInstanced	command buffer: draw	partial	OP_DRAW	h_nvnCommandBufferDrawArraysInstanced	OP_DRAW	compact form OPC_DRAW/OPC_DRAW_IND/OPC_DRAW_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsInstanced	command buffer: draw	partial	OP_DRAW_IDX	h_nvnCommandBufferDrawElementsInstanced	OP_DRAW_IDX	compact form OPC_DRAW_IDX/OPC_DRAW_IDX_IND/OPC_DRAW_IDX_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawArraysIndirect	command buffer: draw	partial	OP_DRAW	h_nvnCommandBufferDrawArraysIndirect	OP_DRAW	compact form OPC_DRAW/OPC_DRAW_IND/OPC_DRAW_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferDrawElementsIndirect	command buffer: draw	partial	OP_DRAW_IDX	h_nvnCommandBufferDrawElementsIndirect	OP_DRAW_IDX	compact form OPC_DRAW_IDX/OPC_DRAW_IDX_IND/OPC_DRAW_IDX_INST, expanded before the replay; judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferMultiDrawArraysIndirectCount	command buffer: draw	partial	OP_MULTI_DRAW	h_nvnCommandBufferMultiDrawArraysIndirectCount	OP_MULTI_DRAW	judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferMultiDrawElementsIndirectCount	command buffer: draw	partial	OP_MULTI_DRAW	h_nvnCommandBufferMultiDrawElementsIndirectCount	OP_MULTI_DRAW	judged: the replay encodes primitive types 0 (point), 1 (line), 3 (line strip), 4 (triangles), 5 (triangle strip), 6 (fan) and 7 (quads) only; any other type logs '[RED] primitive type %d not implemented' (the first 8 times) and the draw is skipped
+nvnCommandBufferClearColor	command buffer: clears and copies	recorded	OP_CLEAR_COLOR	h_nvnCommandBufferClearColor	OP_CLEAR_COLOR	
+nvnCommandBufferClearColori	command buffer: clears and copies	recorded	OP_CLEAR_COLOR	h_nvnCommandBufferClearColori	OP_CLEAR_COLOR	
+nvnCommandBufferClearColorui	command buffer: clears and copies	recorded	OP_CLEAR_COLOR	h_nvnCommandBufferClearColorui	OP_CLEAR_COLOR	
+nvnCommandBufferClearDepthStencil	command buffer: clears and copies	recorded	OP_CLEAR_DS	h_nvnCommandBufferClearDepthStencil	OP_CLEAR_DS	
+nvnCommandBufferDispatchCompute	command buffer: compute	recorded	OP_DISPATCH	h_nvnCommandBufferDispatchCompute	OP_DISPATCH	
+nvnCommandBufferDispatchComputeIndirect	command buffer: compute	recorded	OP_DISPATCH	h_nvnCommandBufferDispatchComputeIndirect	OP_DISPATCH	
+nvnCommandBufferSetViewport	command buffer: fixed-function state	recorded	OP_VIEWPORTS	h_nvnCommandBufferSetViewport	OP_VIEWPORTS	compact form OPC_VIEWPORTS, expanded before the replay
+nvnCommandBufferSetViewports	command buffer: fixed-function state	recorded	OP_VIEWPORTS	h_nvnCommandBufferSetViewports	OP_VIEWPORTS	compact form OPC_VIEWPORTS, expanded before the replay; code reports [RED] SetViewports first=d n=d
+nvnCommandBufferSetViewportSwizzles	command buffer: fixed-function state	partial	OP_VP_SWIZZLE	h_nvnCommandBufferSetViewportSwizzles	OP_VP_SWIZZLE	code reports [RED] SetViewportSwizzles first=d n=d; judged: only the y swizzle NEGATIVE_Y is applied (as a flipped viewport); any other swizzle logs '[RED] viewport swizzle ... not implemented (drawn unswizzled)' once and the draw is unswizzled
+nvnCommandBufferSetScissor	command buffer: fixed-function state	recorded	OP_SCISSOR	h_nvnCommandBufferSetScissor	OP_SCISSOR	compact form OPC_SCISSOR, expanded before the replay
+nvnCommandBufferSetScissors	command buffer: fixed-function state	recorded	OP_SCISSOR	h_nvnCommandBufferSetScissors	OP_SCISSOR	compact form OPC_SCISSOR, expanded before the replay
+nvnCommandBufferSetDepthRange	command buffer: fixed-function state	recorded	OP_DEPTH_RANGE	h_nvnCommandBufferSetDepthRange	OP_DEPTH_RANGE	
+nvnCommandBufferSetDepthBounds	command buffer: fixed-function state	stub-risky		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: empty implementation (g_nops): the depth bounds test is not applied; no comment says why that is safe: not verified
+nvnCommandBufferSetDepthRanges	command buffer: fixed-function state	recorded	OP_DEPTH_RANGE	h_nvnCommandBufferSetDepthRanges	OP_DEPTH_RANGE	
+nvnCommandBufferSetTiledCacheAction	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetTiledCacheAction		code: empty body; judged: the code's comment
+nvnCommandBufferSetTiledCacheTileSize	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetTiledCacheTileSize		code: empty body; judged: no comment of its own; same tiled-cache family as SetTiledCacheAction
+nvnCommandBufferBindSeparateTexture	command buffer: bindings	recorded	OP_BIND_TEX	h_nvnCommandBufferBindSeparateTexture	OP_BIND_TEX	
+nvnCommandBufferBindSeparateSampler	command buffer: bindings	recorded	OP_BIND_SAMP	h_nvnCommandBufferBindSeparateSampler	OP_BIND_SAMP	
+nvnCommandBufferBindSeparateTextures	command buffer: bindings	recorded	OP_BIND_TEX	h_nvnCommandBufferBindSeparateTextures	OP_BIND_TEX	
+nvnCommandBufferBindSeparateSamplers	command buffer: bindings	recorded	OP_BIND_SAMP	h_nvnCommandBufferBindSeparateSamplers	OP_BIND_SAMP	
+nvnCommandBufferSetStencilValueMask	command buffer: fixed-function state	recorded	OP_STENCIL	h_nvnCommandBufferSetStencilValueMask	OP_STENCIL	compact form OPC_STENCIL, expanded before the replay
+nvnCommandBufferSetStencilMask	command buffer: fixed-function state	recorded	OP_STENCIL	h_nvnCommandBufferSetStencilMask	OP_STENCIL	compact form OPC_STENCIL, expanded before the replay
+nvnCommandBufferSetStencilRef	command buffer: fixed-function state	recorded	OP_STENCIL	h_nvnCommandBufferSetStencilRef	OP_STENCIL	compact form OPC_STENCIL, expanded before the replay
+nvnCommandBufferSetBlendColor	command buffer: fixed-function state	recorded	OP_BLEND_COLOR	h_nvnCommandBufferSetBlendColor	OP_BLEND_COLOR	
+nvnCommandBufferSetPointSize	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetPointSize		code: only logs; judged: the code's log text
+nvnCommandBufferSetLineWidth	command buffer: fixed-function state	recorded	OP_LINE_WIDTH	h_nvnCommandBufferSetLineWidth	OP_LINE_WIDTH	
+nvnCommandBufferSetPolygonOffsetClamp	command buffer: fixed-function state	recorded	OP_POLY_OFFSET	h_nvnCommandBufferSetPolygonOffsetClamp	OP_POLY_OFFSET	
+nvnCommandBufferSetAlphaRef	command buffer: fixed-function state	recorded	OP_ALPHA_REF	h_nvnCommandBufferSetAlphaRef	OP_ALPHA_REF	
+nvnCommandBufferSetSampleMask	command buffer: fixed-function state	stub-risky		h_nvnCommandBufferSetSampleMask		code: only logs; judged: the sample mask is not applied; a mask whose low 16 bits are not all set logs this line once
+nvnCommandBufferSetRasterizerDiscard	command buffer: fixed-function state	recorded	OP_RAST_DISCARD	h_nvnCommandBufferSetRasterizerDiscard	OP_RAST_DISCARD	
+nvnCommandBufferSetDepthClamp	command buffer: fixed-function state	recorded	OP_DEPTH_CLAMP	h_nvnCommandBufferSetDepthClamp	OP_DEPTH_CLAMP	
+nvnCommandBufferSetConservativeRasterEnable	command buffer: fixed-function state	stub-risky		h_nvnCommandBufferSetConservativeRasterEnable		code: only logs; judged: conservative rasterization is not applied; enabling it logs this line once; docs/reference/rendering.md has an entry 'Conservative rasterization remains unimplemented'
+nvnCommandBufferSetConservativeRasterDilate	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetSubpixelPrecisionBias	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferCopyBufferToTexture	command buffer: clears and copies	recorded	OP_COPY_B2T	h_nvnCommandBufferCopyBufferToTexture	OP_COPY_B2T	
+nvnCommandBufferCopyTextureToBuffer	command buffer: clears and copies	recorded	OP_COPY_T2B	h_nvnCommandBufferCopyTextureToBuffer	OP_COPY_T2B	
+nvnCommandBufferCopyTextureToTexture	command buffer: clears and copies	partial	OP_COPY_T2T	h_nvnCommandBufferCopyTextureToTexture	OP_COPY_T2T	judged: a copy whose source and destination differ in size or depth, in format, or in 3D-ness, or that has copy flags other than ENGINE_2D and LINEAR_FILTER, and that no earlier path of the replay takes, logs '[RED] texture→texture copy case not implemented' once and returns without copying
+nvnCommandBufferCopyBufferToBuffer	command buffer: clears and copies	recorded	OP_COPY_B2B	h_nvnCommandBufferCopyBufferToBuffer	OP_COPY_B2B	
+nvnCommandBufferClearBuffer	command buffer: clears and copies	recorded	OP_CLEAR_BUF	h_nvnCommandBufferClearBuffer	OP_CLEAR_BUF	
+nvnCommandBufferClearTexture	command buffer: clears and copies	partial	OP_CLEAR_TEX	h_nvnCommandBufferClearTexture	OP_CLEAR_TEX	judged: a clear that does not cover the whole level or all channels of its format, or whose texture is not render-target capable, is drawn as a triangle only for a colour texture that is render-target capable; otherwise it logs '[RED] texture clear case not implemented' once and clears nothing
+nvnCommandBufferClearTexturei	command buffer: clears and copies	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferClearTextureui	command buffer: clears and copies	partial	OP_CLEAR_TEX	h_nvnCommandBufferClearTextureui	OP_CLEAR_TEX	judged: a clear that does not cover the whole level or all channels of its format, or whose texture is not render-target capable, is drawn as a triangle only for a colour texture that is render-target capable; otherwise it logs '[RED] texture clear case not implemented' once and clears nothing
+nvnCommandBufferUpdateUniformBuffer	command buffer: clears and copies	recorded	OP_UPDATE_UB	h_nvnCommandBufferUpdateUniformBuffer	OP_UPDATE_UB	
+nvnCommandBufferReportCounter	command buffer: sync and queries	recorded	OP_REPORT_COUNTER	h_nvnCommandBufferReportCounter	OP_REPORT_COUNTER	
+nvnCommandBufferResetCounter	command buffer: sync and queries	recorded	OP_RESET_COUNTER	h_nvnCommandBufferResetCounter	OP_RESET_COUNTER	
+nvnCommandBufferReportValue	command buffer: sync and queries	recorded	OP_SIGNAL_EVENT	h_nvnCommandBufferReportValue	OP_SIGNAL_EVENT	
+nvnCommandBufferSetRenderEnable	command buffer: fixed-function state	recorded	OP_RENDER_COND	h_nvnCommandBufferSetRenderEnable	OP_RENDER_COND	
+nvnCommandBufferSetRenderEnableConditional	command buffer: fixed-function state	recorded	OP_RENDER_COND	h_nvnCommandBufferSetRenderEnableConditional	OP_RENDER_COND	
+nvnCommandBufferSetRenderTargets	command buffer: fixed-function state	recorded	OP_SET_RT	h_nvnCommandBufferSetRenderTargets	OP_SET_RT	code reports [RED] SetRenderTargets count d
+nvnCommandBufferDiscardColor	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferDiscardColor		code: empty body; judged: a discarded target's contents are undefined, so the host keeps them (the code's comment)
+nvnCommandBufferDiscardDepthStencil	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferDiscardDepthStencil		code: empty body; judged: as nvnCommandBufferDiscardColor (no comment of its own)
+nvnCommandBufferDownsample	command buffer: clears and copies	partial	OP_COPY_T2T	h_nvnCommandBufferDownsample	OP_COPY_T2T	judged: after the paths before it, a downsample whose source is not multisampled, whose destination is not single-sample, or whose format or size differs logs '[RED] Downsample case not implemented' once and returns without resolving
+nvnCommandBufferTiledDownsample	command buffer: clears and copies	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDownsampleTextureView	command buffer: clears and copies	partial	OP_COPY_T2T	h_nvnCommandBufferDownsampleTextureView	OP_COPY_T2T	judged: as nvnCommandBufferDownsample
+nvnCommandBufferTiledDownsampleTextureView	command buffer: clears and copies	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBarrier	command buffer: sync and queries	recorded	OP_BARRIER	h_nvnCommandBufferBarrier	OP_BARRIER	compact form OPC_BARRIER, expanded before the replay
+nvnCommandBufferWaitSync	command buffer: sync and queries	recorded	OP_WAIT_SYNC	h_nvnCommandBufferWaitSync		
+nvnCommandBufferFenceSync	command buffer: sync and queries	recorded	OP_FENCE_SYNC	h_nvnCommandBufferFenceSync	OP_FENCE_SYNC	
+nvnCommandBufferSetTexturePool	command buffer: fixed-function state	recorded	OP_SET_TEX_POOL	h_nvnCommandBufferSetTexturePool	OP_SET_TEX_POOL	
+nvnCommandBufferSetSamplerPool	command buffer: fixed-function state	recorded	OP_SET_SAMP_POOL	h_nvnCommandBufferSetSamplerPool	OP_SET_SAMP_POOL	
+nvnCommandBufferSetShaderScratchMemory	command buffer: fixed-function state	stub-risky		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: empty implementation (g_nops): the scratch memory the game gives is not used; no comment says why that is safe: not verified
+nvnCommandBufferSaveZCullData	command buffer: other	stub-ok		h_nvnCommandBufferSaveZCullData		code: empty body; judged: the code's comment
+nvnCommandBufferRestoreZCullData	command buffer: other	stub-ok		h_nvnCommandBufferRestoreZCullData		code: empty body; judged: the code's comment
+nvnCommandBufferSetCopyRowStride	command buffer: fixed-function state	immediate		h_nvnCommandBufferSetCopyRowStride		
+nvnCommandBufferSetCopyImageStride	command buffer: fixed-function state	immediate		h_nvnCommandBufferSetCopyImageStride		
+nvnCommandBufferGetCopyRowStride	command buffer: other	immediate		h_nvnCommandBufferGetCopyRowStride		
+nvnCommandBufferGetCopyImageStride	command buffer: other	immediate		h_nvnCommandBufferGetCopyImageStride		
+nvnCommandBufferDrawTexture	command buffer: draw	recorded	OP_DRAW_TEX	h_nvnCommandBufferDrawTexture	OP_DRAW_TEX	
+nvnProgramSetSubroutineLinkage	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetProgramSubroutines	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindCoverageModulationTable	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferResolveDepthBuffer	command buffer: clears and copies	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetColorReductionEnable	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetColorReductionEnable		no prototype in nvn.h (no signature check); code: empty body; judged: the code's comment
+nvnCommandBufferSetColorReductionThresholds	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetColorReductionThresholds		no prototype in nvn.h (no signature check); code: empty body; judged: no comment of its own; the comment on SetColorReductionEnable calls them hints
+nvnCommandBufferPushDebugGroupStatic	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPushDebugGroupDynamic	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPushDebugGroup	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPopDebugGroup	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferPopDebugGroupId	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferInsertDebugMarkerStatic	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferInsertDebugMarkerDynamic	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferInsertDebugMarker	command buffer: lifecycle, memory, debug	stub-ok		nvn_nop (g_nops)		code: empty implementation (g_nops); judged: a debug group or marker; the code calls the debug group handlers 'empty implementations here' (g_nops)
+nvnCommandBufferGetMemoryCallback	command buffer: other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferGetMemoryCallbackData	command buffer: other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferIsRecording	command buffer: other	immediate		h_nvnCommandBufferIsRecording		
+nvnSyncInitialize	sync/fences	immediate		h_nvnSyncInitialize		
+nvnSyncFinalize	sync/fences	immediate		h_nvnSyncFinalize		
+nvnSyncSetDebugLabel	sync/fences	stub-ok		h_nvnSyncSetDebugLabel		code: empty body; judged: a debug label; the reason is the code's comment on the group of SetDebugLabel handlers (this one has no comment of its own)
+nvnQueueFenceSync	queue	immediate		h_nvnQueueFenceSync		
+nvnSyncWait	sync/fences	immediate		h_nvnSyncWait		
+nvnQueueWaitSync	queue	immediate		h_nvnQueueWaitSync		
+nvnSyncInitializeFromFencedGLSync	sync/fences	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSyncCreateGLSync	sync/fences	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnEventBuilderSetDefaults	sync/fences	immediate		h_nvnEventBuilderSetDefaults		
+nvnEventBuilderSetStorage	sync/fences	immediate		h_nvnEventBuilderSetStorage		
+nvnEventBuilderGetStorage	sync/fences	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnEventBuilderGetMemoryPool	sync/fences	immediate		h_nvnEventBuilderGetMemoryPool		no prototype in nvn.h (no signature check)
+nvnEventBuilderGetMemoryOffset	sync/fences	immediate		h_nvnEventBuilderGetMemoryOffset		no prototype in nvn.h (no signature check)
+nvnEventInitialize	sync/fences	immediate		h_nvnEventInitialize		code reports [RED] EventInitialize has no storage
+nvnEventFinalize	sync/fences	immediate		h_nvnEventFinalize		
+nvnEventGetValue	sync/fences	immediate		h_nvnEventGetValue		
+nvnEventSignal	sync/fences	immediate		h_nvnEventSignal		
+nvnEventGetMemoryPool	sync/fences	immediate		h_nvnEventGetMemoryPool		no prototype in nvn.h (no signature check)
+nvnEventGetMemoryOffset	sync/fences	immediate		h_nvnEventGetMemoryOffset		no prototype in nvn.h (no signature check)
+nvnCommandBufferWaitEvent	command buffer: sync and queries	recorded	OP_WAIT_EVENT	h_nvnCommandBufferWaitEvent		
+nvnCommandBufferSignalEvent	command buffer: sync and queries	recorded	OP_SIGNAL_EVENT	h_nvnCommandBufferSignalEvent	OP_SIGNAL_EVENT	
+nvnCommandBufferSetStencilCullCriteria	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetStencilCullCriteria		no prototype in nvn.h (no signature check); code: empty body; judged: a ZCull hint; the draws' depth-stencil state still does the stencil test (the code's comment)
+nvnCommandBufferInsertCheckpointStatic	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferInsertCheckpointDynamic	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceSetAutomaticCheckpointsEnable	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceSetAutomaticCheckpointsSamplingInterval	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceSetAutomaticCheckpointsByDebugGroup	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceSetCheckpointCallStacksEnable	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceSetCheckpointMaxCallStacksDepth	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindImagesDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindSeparateSamplersDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindSeparateTexturesDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindStorageBuffersDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindTexturesDeferred	command buffer: bindings	recorded	OP_BIND_TEX	h_nvnCommandBufferBindTexturesDeferred	OP_BIND_TEX	no prototype in nvn.h (no signature check); code reports [RED] deferred-bound handles are read only at replay: the numbering base of this command buffer's bound d
+nvnCommandBufferBindUniformBuffersDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferOverrideSubtileSize	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetControlMemoryCallbackEnabled	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetControlMemoryCallbackEnabled		no prototype in nvn.h (no signature check); code: empty body; judged: as SetCommandMemoryCallbackEnabled (the comment covers command and control memory)
+nvnCommandBufferSetProvokingVertexMode	command buffer: fixed-function state	partial		h_nvnCommandBufferSetProvokingVertexMode		no prototype in nvn.h (no signature check); code: only logs; judged: FIRST (mode 0) only: any other mode logs '[RED] ... (the last vertex): Metal's flat values come from the first vertex' once and the first vertex stays the provoking one
+nvnCommandBufferSetZCullZF32CompressionEnable	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetZCullZF32CompressionEnable		no prototype in nvn.h (no signature check); code: empty body; judged: the code's comment
+nvnDeviceSetAutomaticCheckpointsMask	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramGetSubtileSize	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTextureBuilderGetViewOffset	textures/samplers/pools	immediate		h_nvnTextureBuilderGetViewOffset		no prototype in nvn.h (no signature check)
+nvnSetExternalDebuggerEnabledNVX	debug and vendor (NVX etc.)	stub-ok		h_nvnSetExternalDebuggerEnabledNVX		no prototype in nvn.h (no signature check); code: empty body; judged: the code's comment
+nvnCommandBufferBeginDeviceCommands	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindAccelerationStructures	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindAccelerationStructuresDeferred	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindDeviceMessageBuffer	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindDeviceMessageBufferDeferred	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferBindShadingRateImage	command buffer: bindings	stub-ok		h_nvnCommandBufferBindShadingRateImage		no prototype in nvn.h (no signature check); code: empty body; judged: variable-rate shading is not applied: the code says shading every pixel is the most a rate can ask, so only sharpness differs
+nvnCommandBufferBuildAccelerationStructures	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferCompactAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferComputeDirtyTileMap	command buffer: compute	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferComputeDirtyTileMapEx	command buffer: compute	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferCopyAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDispatchRays	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDispatchRaysIndirect	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDrawMeshTasks	command buffer: draw	recorded	OP_DRAW	h_nvnCommandBufferDrawMeshTasks	OP_DRAW	no prototype in nvn.h (no signature check); compact form OPC_DRAW/OPC_DRAW_IND/OPC_DRAW_INST, expanded before the replay
+nvnCommandBufferDrawMeshTasks3D	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDrawMeshTasks3DIndirect	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferDrawMeshTasksIndirect	command buffer: draw	recorded	OP_DRAW	h_nvnCommandBufferDrawMeshTasksIndirect	OP_DRAW	no prototype in nvn.h (no signature check); compact form OPC_DRAW/OPC_DRAW_IND/OPC_DRAW_INST, expanded before the replay
+nvnCommandBufferEnableExclusiveScissor	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferEndDeviceCommands	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferEvaluateDlss	NVN2: DLSS, ray tracing, cooperative vectors	recorded	OP_DLSS	h_nvnCommandBufferEvaluateDlss	OP_DLSS	no prototype in nvn.h (no signature check)
+nvnCommandBufferGetAccelerationStructureVisualizationData	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferInsertDebugMarkerCompute	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferInsertDebugMarkerGraphics	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferMultiDrawMeshTasks3DIndirect	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferMultiDrawMeshTasks3DIndirectCount	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferMultiDrawMeshTasksIndirect	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferMultiDrawMeshTasksIndirectCount	command buffer: draw	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPopDebugGroupCompute	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPopDebugGroupGraphics	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPushComputeConstants	command buffer: bindings	recorded	OP_PUSH_CONST	h_nvnCommandBufferPushComputeConstants	OP_PUSH_CONST	no prototype in nvn.h (no signature check)
+nvnCommandBufferPushComputeConstantsDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPushDebugGroupCompute	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPushDebugGroupGraphics	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferPushGraphicsConstants	command buffer: bindings	recorded	OP_PUSH_CONST	h_nvnCommandBufferPushGraphicsConstants	OP_PUSH_CONST	no prototype in nvn.h (no signature check)
+nvnCommandBufferPushGraphicsConstantsDeferred	command buffer: bindings	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferRelocateAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferResetDeviceMessageBuffer	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferResetDeviceMessageBufferDeferred	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetComputeEnable	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetComputeEnableConditional	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetComputeOverlapMode	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetComputeOverlapMode		no prototype in nvn.h (no signature check); code: only logs; judged: the code's log text
+nvnCommandBufferSetComputeWorkloadPriority	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetComputeWorkloadPriority		no prototype in nvn.h (no signature check); code: only logs; judged: the code's log text
+nvnCommandBufferSetConservativeRasterMode	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetCopyEnable	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetCopyEnableConditional	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetExclusiveScissor	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetExclusiveScissors	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetFloatBlendClamp	command buffer: fixed-function state	partial		h_nvnCommandBufferSetFloatBlendClamp		no prototype in nvn.h (no signature check); code: only logs; judged: mode 0 (overflow becomes infinity) only: mode 1 (the largest finite value) logs '[RED] ...: Metal stores infinity' once; the code's comment: no frame has been seen to differ
+nvnCommandBufferSetGeometryProcessingMode	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetGeometryProcessingMode		no prototype in nvn.h (no signature check); code: only logs; judged: the code's log text
+nvnCommandBufferSetGraphicsWorkloadPriority	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetRecordingMode	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetRecordingMode		no prototype in nvn.h (no signature check); code: only logs; judged: the code's log text
+nvnCommandBufferSetRepresentativeFragmentTest	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetRepresentativeFragmentTest		no prototype in nvn.h (no signature check); code: only logs; judged: the code's comment: skipping fragments is allowed, never required, so running every fragment is valid for either setting
+nvnCommandBufferSetResourceOccupancy	command buffer: fixed-function state	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferSetShadingRatePaletteMode	command buffer: fixed-function state	stub-ok		h_nvnCommandBufferSetShadingRatePaletteMode		no prototype in nvn.h (no signature check); code: empty body; judged: as nvnCommandBufferBindShadingRateImage
+nvnCommandBufferShadingRateImagePalette	command buffer: other	stub-ok		h_nvnCommandBufferShadingRateImagePalette		no prototype in nvn.h (no signature check); code: empty body; judged: as nvnCommandBufferBindShadingRateImage
+nvnCommandBufferSubmitDeviceCommands	command buffer: lifecycle, memory, debug	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCalculateAccelerationStructureMemoryRequirements	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferGetHandle	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferSetCommandMemorySize	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferSetComputeMemorySize	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferSetDefaults	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferSetDevice	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCommandBufferSetStorage	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCompactAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceCopyAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetCommandHandleMemorySize	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetFlags	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetUniformBufferHandle	device	immediate		h_nvnDeviceGetUniformBufferHandle		no prototype in nvn.h (no signature check)
+nvnDeviceMessageBufferBeginMessages	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferEndMessages	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferGetNextMessage	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferReset	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferSetDefaults	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferSetDevice	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceMessageBufferSetStorage	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearColoriIndex	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearColorIndex	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearColoruiIndex	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearDepthIndex	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearStencil	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRegisterFastClearStencilIndex	device	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceRelocateAccelerationStructure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetConstantColorTable	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetDepthStencilMask	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetExpandFootprint	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetInputs	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetOutputs	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersGetTexture	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetConstantColorTable	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetDefaults	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetDepthStencilMask	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetExpandFootprint	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetInputs	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetOutputs	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDirtyTileMapParametersSetTexture	other	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetDevice	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetFlags	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetMaxEvaluationEntries	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetMemory	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetMemorySize	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetMethod	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetOptimalSettings	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderGetOptimalSettings		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderGetOutputResolution	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetPreset	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetStorageSize	NVN2: DLSS, ray tracing, cooperative vectors	stub-ok		h_nvnDlssNetworkBuilderGetStorageSize		no prototype in nvn.h (no signature check); code: returns a constant; judged: returns 0x1000, a page, for a game that allocates what it is told (the code's comment)
+nvnDlssNetworkBuilderGetTextureIDs	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderGetTexturePool	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssNetworkBuilderSetDefaults	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderSetDefaults		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderSetDevice	NVN2: DLSS, ray tracing, cooperative vectors	stub-risky		h_nvnDlssNetworkBuilderSetDevice		no prototype in nvn.h (no signature check); code: empty body; judged: empty body and no comment of its own: not verified
+nvnDlssNetworkBuilderSetFlags	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderSetFlags		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderSetMaxEvaluationEntries	NVN2: DLSS, ray tracing, cooperative vectors	stub-risky		h_nvnDlssNetworkBuilderSetMaxEvaluationEntries		no prototype in nvn.h (no signature check); code: empty body; judged: empty body and no comment of its own: not verified
+nvnDlssNetworkBuilderSetMethod	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderSetMethod		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderSetOutputResolution	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderSetOutputResolution		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderSetPreset	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkBuilderSetPreset		no prototype in nvn.h (no signature check)
+nvnDlssNetworkBuilderSetStorage	NVN2: DLSS, ray tracing, cooperative vectors	stub-ok		h_nvnDlssNetworkBuilderSetStorage		no prototype in nvn.h (no signature check); code: empty body; judged: the network's storage is the driver's own need, which MetalFX's scaler does not have (the code's comment)
+nvnDlssNetworkBuilderSetTextureIDs	NVN2: DLSS, ray tracing, cooperative vectors	stub-ok		h_nvnDlssNetworkBuilderSetTextureIDs		no prototype in nvn.h (no signature check); code: empty body; judged: the network's texture ids are the driver's own need, which MetalFX's scaler does not have (the code's comment)
+nvnDlssNetworkFinalize	NVN2: DLSS, ray tracing, cooperative vectors	stub-ok		h_nvnDlssNetworkFinalize		no prototype in nvn.h (no signature check); code: empty body; judged: the replay's cache takes the scaler's slot when another network needs one (the code's comment)
+nvnDlssNetworkInitialize	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkInitialize		no prototype in nvn.h (no signature check)
+nvnDlssNetworkResize	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssNetworkResize		no prototype in nvn.h (no signature check)
+nvnDlssParametersGetBiasCurrentColorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetDepthSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetEvaluationIndex	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetHistoryReset	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetInputColorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetInputSubrectangleSize	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetJitterOffset	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetMotionVectorScale	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetMotionVectorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetOutputSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersGetPreExposure	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersSetBiasCurrentColorMask	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetBiasCurrentColorMask		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetBiasCurrentColorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetBiasCurrentColorSubrectangleBase		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetDefaults	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetDefaults		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetDepth	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetDepth		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetDepthSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetDepthSubrectangleBase		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetEvaluationIndex	NVN2: DLSS, ray tracing, cooperative vectors	stub-ok		h_nvnDlssParametersSetEvaluationIndex		no prototype in nvn.h (no signature check); code: empty body; judged: the index names which of the network's frames in flight; the replay runs them in order (the code's comment)
+nvnDlssParametersSetExposureTexture	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetExposureTexture		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetHistoryReset	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetHistoryReset		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetInputColor	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetInputColor		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetInputColorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetInputColorSubrectangleBase		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetInputSubrectangleSize	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetInputSubrectangleSize		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetJitterOffset	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetJitterOffset		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetMotionVectors	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetMotionVectors		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetMotionVectorScale	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetMotionVectorScale		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetMotionVectorSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetMotionVectorSubrectangleBase		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetOutputColor	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetOutputColor		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetOutputSubrectangleBase	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetOutputSubrectangleBase		no prototype in nvn.h (no signature check)
+nvnDlssParametersSetOverlayDebugLayer	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersSetOverlayFullScreen	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersSetOverlayJitterDebug	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersSetOverlayShowNans	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDlssParametersSetPreExposure	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnDlssParametersSetPreExposure		no prototype in nvn.h (no signature check)
+nvnMultisampleStateGetCoverageTruncationEnable	pipeline state blocks	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMultisampleStateGetSampleLocations	pipeline state blocks	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnMultisampleStateSetCoverageTruncationEnable	pipeline state blocks	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetDebugDataHashes	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetDevice	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetMaxCallableRecursionDepth	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetMaxTraceRecursionDepth	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetProgramRayTracingFlags	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetRayTracingModuleCount	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetRayTracingModuleData	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetSampleShading	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetShaderCount	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetShaders	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetSubroutineLinkage	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderGetSubroutineLinkageCount	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetDebugDataHashes	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetDefaults	program/shader	immediate		h_nvnProgramBuilderSetDefaults		no prototype in nvn.h (no signature check)
+nvnProgramBuilderSetDevice	program/shader	immediate		h_nvnProgramBuilderSetDevice		no prototype in nvn.h (no signature check)
+nvnProgramBuilderSetMaxCallableRecursionDepth	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetMaxTraceRecursionDepth	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetProgramRayTracingFlags	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetRayTracingModules	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetSampleShading	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramBuilderSetShaders	program/shader	immediate		h_nvnProgramBuilderSetShaders		no prototype in nvn.h (no signature check)
+nvnProgramBuilderSetSubroutineLinkage	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramGetDeviceComputeMemorySize	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramGetScratchBytesPerWarp	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramGetShaderGroupHandle	program/shader	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnProgramInitializeFromBuilder	program/shader	immediate		h_nvnProgramInitializeFromBuilder		no prototype in nvn.h (no signature check)
+nvnQueueBuilderGetPrimaryQueue	queue	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnQueueBuilderGetRayTracingMemorySize	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnQueueBuilderGetRayTracingMemorySize		no prototype in nvn.h (no signature check)
+nvnQueueBuilderSetPrimaryQueue	queue	stub-ok		h_nvnQueueBuilderSetPrimaryQueue		no prototype in nvn.h (no signature check); code: empty body; judged: the host executes every queue's submits in order on its one Metal queue (the code's comment)
+nvnQueueBuilderSetRayTracingMemorySize	NVN2: DLSS, ray tracing, cooperative vectors	immediate		h_nvnQueueBuilderSetRayTracingMemorySize		no prototype in nvn.h (no signature check)
+nvnQueueGetTotalRayTracingMemoryUsed	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetColorSpace	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetHdrContentMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetHdrDisplayMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderSetColorSpace	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderSetHdrContentMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderSetHdrDisplayMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowGetHdrContentMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowGetHdrDisplayMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowSetHdrContentMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowSetHdrDisplayMetadata	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnTexturePoolWriteDescriptorTableData	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnSamplerPoolWriteDescriptorTableData	textures/samplers/pools	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnCommandBufferConvertCooperativeVectorMatrix	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceGetCooperativeVectorMatrixSize	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnDeviceConvertCooperativeVectorMatrix	NVN2: DLSS, ray tracing, cooperative vectors	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderSetAcquireTimeout	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowBuilderGetAcquireTimeout	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowSetAcquireTimeout	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0
+nvnWindowGetAcquireTimeout	window/present	missing				no handler: nvn_unimpl_c logs "[RED] NVN unimplemented function called" once and returns 0

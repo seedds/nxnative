@@ -414,6 +414,18 @@ class HmmaRewrite(unittest.TestCase):
         src = HEAD + KERNEL.replace('dmsh_hmma16816_f16(l, blk, a0, a1, a2, a3, b0, b1, c0, c1, z, z, z, z, z, z, z, d1, scr)', 'a0')
         self.assertEqual(hmma_msl(src), src)
 
+    def test_malformed_parameter_names_refused(self):
+        for old in ('thread const int& _10', 'threadgroup spvUnsafeArray<uint, 1024>& _34'):
+            with self.subTest(parameter=old):
+                self.assertIn(old, HELPER, 'the malformed input must change the current helper')
+                with self.assertRaisesRegex(ValueError, 'unexpected parameter'):
+                    hmma_msl(HEAD + HELPER.replace(old, old + '!'))
+
+    def test_malformed_output_type_refused(self):
+        self.assertIn('thread int& _27', HELPER, 'the malformed output must change the current helper')
+        with self.assertRaisesRegex(ValueError, 'unexpected parameter'):
+            hmma_msl(HEAD + HELPER.replace('thread int& _27', 'thread int _27'))
+
     def test_unexpected_signature_refused(self):
         with self.assertRaises(ValueError):
             hmma_msl(HEAD + HELPER.replace('thread const int& _26, ', ''))

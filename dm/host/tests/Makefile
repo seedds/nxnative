@@ -54,6 +54,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_pctl
 	$(B)/t_net_eventfd
 	$(B)/t_net_loopback
+	$(B)/t_net
 	$(B)/t_sf
 	$(B)/t_audren_sv
 	$(B)/t_time
@@ -288,11 +289,16 @@ $(B)/t_crash_diag: t_crash_diag.m t_altstack_stub.c ../crash.c ../memstat.m ../d
 	$(CLANG) -O1 -fobjc-arc -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_crash_diag.m t_altstack_stub.c ../crash.c ../memstat.m -framework Foundation -framework Metal
 $(B)/t_memstat: t_memstat.m ../memstat.m ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -fobjc-arc -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_memstat.m ../memstat.m -framework Foundation -framework Metal
-$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_eventfd.c
+NET_SRC = ../hle_net.c ../hle_net.h ../hle_net_backend.c ../net_socket.h ../hle.h ../dm.h $(GAME_H)
+$(B)/t_net_eventfd: t_net_eventfd.c t_net_host_stub.c $(NET_SRC) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_eventfd.c ../hle_net_backend.c t_net_host_stub.c
 run: $(B)/t_net_loopback
-$(B)/t_net_loopback: t_net_loopback.c ../hle_net.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_loopback.c
+$(B)/t_net_loopback: t_net_loopback.c t_net_host_stub.c $(NET_SRC) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_loopback.c ../hle_net_backend.c t_net_host_stub.c
+# Network mode (DM_NETWORK=lan): the guest's sockets on real loopback host sockets
+run: $(B)/t_net
+$(B)/t_net: t_net.c $(NET_SRC) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net.c ../hle_net_backend.c
 
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
@@ -531,7 +537,7 @@ asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
 TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait t_ue_heap_span
-TSAN_T += t_net_eventfd t_net_loopback t_account
+TSAN_T += t_net_eventfd t_net_loopback t_net t_account
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
@@ -539,6 +545,7 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	$(B)/t_account
 	$(B)/t_net_eventfd
 	$(B)/t_net_loopback
+	$(B)/t_net
 	$(B)/t_audio
 	$(B)/t_audio_stats
 	$(B)/t_audio_device

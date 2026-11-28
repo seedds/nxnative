@@ -3,6 +3,7 @@
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
 #include "hle.h"
 #include "hle_net.h"
+#include "net_socket.h"
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
@@ -93,7 +94,7 @@ HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "pairs with GetAddrInfo (cut
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 // SDK 11's overloads with plain sockaddr / int arguments (Big Brain Academy: Brain vs. Brain, through Pia)
 HLE_FORCE("_ZN2nn6socket7ConnectEiPK8sockaddrj", "local UDP (offline BSD service)", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut)", int, h_sk_Accept2, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return -1; }
+HLE_FORCE("_ZN2nn6socket6AcceptEiP8sockaddrPj", "offline (cut); network mode: the host's TCP accept", int, h_sk_Accept2, int s, void *a, unsigned *n) { return dm_net_enabled() ? dm_sk_accept(s, a, n) : -1; }
 HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "local UDP (offline BSD service)", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }
 HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "local UDP (offline BSD service)", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_sk_getopt(s, l, o, v, n); }
 HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "local UDP (offline BSD service)", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_sk_setopt(s, l, o, v, n); }
@@ -224,8 +225,8 @@ HLE_FORCE("_ZN2nn3web11ShowWebPageEPNS0_18WebPageReturnValueERKNS0_14ShowWebPage
 // Octopath Traveler 0 imports the offline HTML page applet too (pages shipped in the game's HTML document NCA, which the host does not extract)
 
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
-HLE_FORCE("nnsocketAccept", "offline (cut)", int, h_c_sk_Accept, void) { return -1; }
-HLE_FORCE("nnsocketListen", "offline (cut)", int, h_c_sk_Listen, void) { return -1; }
+HLE_FORCE("nnsocketAccept", "offline (cut); network mode: the host's TCP accept", int, h_c_sk_Accept, int s, void *a, unsigned *n) { return dm_net_enabled() ? dm_sk_accept(s, a, n) : -1; }
+HLE_FORCE("nnsocketListen", "offline (cut); network mode: the host's TCP listen", int, h_c_sk_Listen, int s, int n) { return dm_net_enabled() ? dm_sk_listen(s, n) : -1; }
 HLE_FORCE("nnsocketRecvMsg", "offline (cut)", int, h_c_sk_RecvMsg, void) { return -1; }
 HLE_FORCE("nnsocketSendMsg", "offline (cut)", int, h_c_sk_SendMsg, void) { return -1; }
 HLE_FORCE("nnsocketShutdown", "local UDP (offline BSD service)", int, h_c_sk_Shutdown, int s, int h) { return dm_sk_shutdown(s, h); }

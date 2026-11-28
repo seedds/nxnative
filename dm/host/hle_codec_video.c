@@ -50,6 +50,7 @@ static const char *const k_cv_name[] = {"VP8", "VP9", "H.264", "AV1"};
 typedef struct {
     uint32_t magic, id; pthread_mutex_t mu; vpx_codec_ctx_t vpx; int vpx_ok; void *event; uint64_t submits, pictures;
     int codec; uint16_t w, h; mavc *avc; uint8_t *csd; size_t csd_n;   // H.264: VideoToolbox and the parameter sets Initialize gave
+    uint8_t *nv12; size_t nv12_n;   // H.264: VideoToolbox's picture as NV12, reused for every packet (the decoder's thread only; it only grows; nv12_to_i420 copies out of it, so nothing keeps a pointer to it)
     mav1 *av1;   // AV1: VideoToolbox, or dav1d where the chip has no AV1 decoder (hle_movie_av1.c)
     movie_vt_control vt;
     struct { cv_pool *pool; uint32_t pidx; int reg, filled; uint32_t gen, filled_gen; uint16_t w, h; int64_t ts; uint8_t eos; } buf[CV_BUFS];
@@ -321,6 +322,7 @@ static Result cv_dec_fin(void *t) {
     if (d->all.n) cv_stat_line(d, &d->all, "");
     if (d->codec != CV_H264 && d->codec != CV_AV1 && d->vpx_ok) vpx_codec_destroy(&d->vpx);
     if (d->avc) mavc_free(d->avc);
+    free(d->nv12);
     if (d->av1) mav1_free(d->av1);
     for (int i = 0; i < d->nheld; i++) vpx_img_free(d->held[i]);
     for (uint32_t k = 0; k < d->qcount; k++) free(d->q[(d->qhead + k) % CV_HOLD].data);
@@ -441,9 +443,10 @@ static void cv_decode(cv_dec *d, const uint8_t *data, uint64_t size, int64_t ts,
             if (n++ < 4) LOG("[RED] nn::codec H.264: VideoToolbox could not decode a packet (%llu bytes: %02x %02x %02x %02x %02x %02x %02x %02x)", (unsigned long long)size,
                              b[0], size > 1 ? b[1] : 0, size > 2 ? b[2] : 0, size > 3 ? b[3] : 0, size > 4 ? b[4] : 0, size > 5 ? b[5] : 0, size > 6 ? b[6] : 0, size > 7 ? b[7] : 0);
         }
-        uint8_t *nv12 = malloc((size_t)d->w * d->h * 3 / 2); int64_t pts = 0;
+        size_t need = (size_t)d->w * d->h * 3 / 2; int64_t pts = 0;   // one whole picture (3 MB at 1080p): kept from the first packet on, not allocated for each
+        if (need > d->nv12_n) { uint8_t *b = realloc(d->nv12, need); if (b) { d->nv12 = b; d->nv12_n = need; } }
+        uint8_t *nv12 = d->nv12_n >= need ? d->nv12 : NULL;
         while (nv12 && !o->stop && mavc_take(d->avc, eos, nv12, d->w, d->h, &pts) == 1) cv_put(o, nv12_to_i420(nv12, d->w, d->h), pts * 1000);
-        free(nv12);
     } else if (d->codec == CV_AV1) {
         // dav1d decodes several frames at once, so a picture comes out some packets after its own went in. With a packet waiting behind this one that is what makes the decoder
         // fast, and it goes on to that packet. With none (a client that sends a packet and waits for its picture, or one the decoder is ahead of) the pictures still inside are

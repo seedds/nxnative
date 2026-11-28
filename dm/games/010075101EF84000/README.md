@@ -15,8 +15,13 @@ The packaged Mac app opened with its bundled Metal pipeline archive on Apple M6.
 - Near-zero NVN depth, as observed at boot. The profile selects the corresponding Metal vertex entry point for pipeline prebuilds.
 - The full touch pad layout. `Hk_project/Config/DefaultInput.ini` maps the D-pad to menus and game actions and the right stick to camera movement.
 - The shared Unreal rules locate FMallocBinned3 by its implementation and give its allocations a host malloc zone. The engine asks for a 62 GiB address reservation. On the iPhone layout the shared rule gives it 4.06 GiB, and the C library fits its startup heap in the remaining profile layout. The existing SDK rules match the node area and large-region alignment by function.
-- The stock Switch device profile sets `rhi.SyncInterval=2` (30 fps).
 - The [prewarm seed](pso_manifest.tsv) covers 133 render and 21 compute pipelines observed from boot to the end of the opening cutscene.
+
+## Frame rate
+
+The default target is 60 fps. The Switch config enables Unreal's fixed simulation rate at 30 fps and sets `rhi.SyncInterval=2`. The rewriter finds the engine's fixed-rate field through Unreal's reflection data and the sync interval by its console variable name. The shared limiter writes 60 to the fixed rate and 1 to the interval. Choose 30 fps in the launcher or set `DM_FPS_TARGET=30` to use the stock rate.
+
+On Apple M6 with the iPhone address layout, the stock opening measured 29.8–30.0 fps (33.3–33.5 ms median frame time). At 60 fps the same part measured 59.4–59.5 fps (16.8 ms median). The opening camera passed the same landmarks at the same pace after accounting for the later load in the stock run. The shared matcher finds both controls in the 1.0.0 and 1.6.0 executables. Gameplay checks used 1.6.0.
 
 ## Files and shaders
 

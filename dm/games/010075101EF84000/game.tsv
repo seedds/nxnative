@@ -33,6 +33,8 @@ app_pool	0xCD500000
 # ---- Graphics ----
 # The game sets near-zero NVN depth. The pipeline bases use the main0_z entry point.
 depth_mode	zero
+# The shared Unreal limiter sets the engine's fixed rate and its NVN present interval.
+fps_target	60
 
 # ---- Input ----
 # The D-pad drives menus and game actions, and the right stick controls the camera.

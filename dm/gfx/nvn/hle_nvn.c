@@ -2393,7 +2393,7 @@ static int acq_pace_do(win_t *o, uint64_t at, uint64_t timeout_ns, uint64_t dead
         if (sa) *waited = 1;
         pace_ns += sa;
     }
-    atomic_fetch_add(&g_acq_wait_ns, wait);
+    atomic_fetch_add(&g_acq_wait_ns, pace_ns);
     uint64_t woke = wait ? now_ns() : at;
     trow(g_frame, "@late_ms", woke > at ? (woke - at) / 1e6 : 0);   // a display-link tick can wake the acquire before the slot
     pthread_mutex_lock(&acq_mu);

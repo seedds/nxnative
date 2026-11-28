@@ -1152,3 +1152,9 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Measured:** M1 iPad Pro (Ocarina of Time, Deku Tree, 30 fps cap, Dynamic resolution on, 9,000 frames of camera turns): 66.7 ms gaps cut from 22.8 → 0.2 per 300 frames, on-screen p99 66.7 → 50.0 ms (27.9 → 27.7 fps, game time 1.000). iPhone 17 (Kokiri Forest, thermal state 1): ~30/300 → 1/2,096 gaps over 50 ms, p99 45.8–50.0 ms ([PR #1971](https://github.com/seedds/nxnative/pull/1971)). Open: the power cost of 60 callbacks a second while `fine` is active is not measured.
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game).
 
+### Acquire-wait telemetry measures elapsed pacing time
+
+- **Symptom:** `DM_NVN_TSV` reports zero `@wait_ms` when acquire blocks on a display-link tick, or reports the planned fallback delay instead of the elapsed wait.
+- **Cause:** `nvnWindowAcquireTexture` accumulated `wait`, computed from the texture's fallback availability deadline, even when display-link pacing took a different path.
+- **Fix:** accumulate the already measured `pace_ns`, including snapshot-capacity waiting. Present-queue waiting remains separate in `@pq_wait_ms`. This changes diagnostics only; it does not change the wait, frame rate or presentation policy. The controlled-clock `t_link_ticks` case has a zero fallback deadline and a nonzero display-link wait.
+- **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md), while analyzing a 350-second physical iPhone 17 Pro Max trace from a combined experimental build. Older `@wait_ms` values must not be treated as measured blocked time. This correction does not establish the cause of its pacing dips or improve performance.

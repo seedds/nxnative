@@ -173,6 +173,13 @@ int main(int argc, char **argv) { @autoreleasepool {
     CHECK(a == 2, "a 60 Hz vsync is two ticks of a 120 Hz link");
     CHECK(b == 1, "one own tick per frame: 120 frames a second");
     CHECK(c == 2, "two own ticks");
+    {   // A display-link wait can block even when the fallback deadline is zero.
+        nvn_present_config(120, 1); win_t win = {.interval = 2}; int idx;
+        uint64_t start = test_now, wait0 = g_acq_wait_ns;
+        h_nvnWindowAcquireTexture((NVNwindow *)&win, NULL, &idx);
+        CHECK(test_now > start && g_acq_wait_ns - wait0 == test_now - start,
+              "acquire telemetry records elapsed display-link waiting without a fallback deadline");
+    }
     acquire_ticks(120, 1, 2, 1, "display 120 Hz ignores the game's interval");
     acquire_ticks(90, 1, 1, 4. / 3, "display 90 Hz preserves fractional ticks");
     acquire_ticks(75, 1, 1, 1.6, "display 75 Hz preserves fractional ticks");

@@ -8,6 +8,7 @@ Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as
 |---|---|---|
 | Node area cut 1 GB → 62 MB, and regions of 4 MB and more aligned to 2 MB as SDK 20 | `dm/tools/sdk_patches.py`, the SDK-wide rules (`MATCH_CUTS`) on `sdk` build `6075151627016eef…` (shared with Galaxy; its row, the node area cut alone, was removed on 2026-10-30 after a run on Monster Train 2, the same build) | the movie player's 384 MB allocator aborted the game at boot; see [Memory](#memory) |
 | 1.25 GB block: `mem_reserve 0x50000000`, `mem_alias 0x20000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | a 512 MB alias region for that allocator; the guessed 256 MB held nothing after the node area |
+| `core_preempt on` | `game.tsv` | stopgap for the crash entering Puzzle Plank Galaxy (World 2-1); see [Threads](#threads) |
 | `op_mode handheld` | `game.tsv` | the pointer (star bits, menus, the file select) is the touch screen in handheld mode; docked it is the Joy-Con gyro, which the host does not have |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout |
 | `modules main subsdk0 sdk` | `game.tsv` | `subsdk1`–`subsdk4` are replaced by the host's Vulkan layer |
@@ -40,6 +41,14 @@ Update 1.4.0 (v393216) over the base game, SDK 18.3.5. NERD's Hagi Wii layer, as
 
 - Hagi's sleep poll (`main+0x11ec`) is one of the polls that keep x19–x28 between yields (the yield-progress rule, `thr_yield`).
 
+## Threads
+
+- **Open, worked around with `core_preempt on`: a crash entering Puzzle Plank Galaxy (World 2-1).** About 45 s after launch, as the galaxy loads, guest thread `0x102c` (`Thread_0x…1E50`, core 0, mask `0x1`) takes a SIGSEGV at address `0x10` (`main+0x5a374c` from `main+0xaebe0`, or `main+0x5a3d04` from `main+0x5a4210` → `main+0xaebd4`), once a SIGBUS with pc = lr in `main`'s data (`main+0x9acd53c1`, called from `main+0x588c34` → `main+0xaee08`). Seen on build `4C4513D9…` (1.4.0) and on build `A071148F…`, on shader chains `108c5f92c3c4`, `df1800562702` and `d24f05cf9d78` (an NX2Apple build with no fork patches).
+  - Every dump shows the same state: the thread's last SVC is `0xD` (`SetThreadPriority`), its priority 28 (once 46) against its idle 30; `x0=0x1051 x1=3 x4=0x43 x5..x7=0x3c`; x8 or x21 points `0x6e0` past the object the DVD Async Thread (priority 29, core 0) waits on; `AnimBlendQuad.bcsv` is left on the stack. In the SIGBUS the structure in x0 starts with `0x102c`, the crashing thread's own number in the dump, as a lock owner's would. The shared stack runs `main+0xaee1c ← 0xdce04 ← 0xdc99c ← 0x162dc0 ← 0x15da30 ← 0xf3fe8 ← 0x134fdc ← … ← 0x5a1e94`.
+  - Likely cause, not confirmed: the Wii is single-core, and its game code may keep the DVD thread out of shared state by raising its own priority above it, which a single core makes exclusive. Without `core_preempt` the host runs both core-0 threads side by side once neither has just woken the other (same-core handoffs are wake-triggered), so the exclusion does not hold. The objects and the code at `main+0x5a374c` have not been decompiled.
+  - Measured on an M4 Max (NX2Apple v1.5.1-rc2, chain `108c5f92c3c4`, build `4C4513D9…`): without preemption the stage load crashed 6 times in 6, and stage loads elsewhere crashed occasionally; with `DM_PREEMPT=1` it loaded 2 times in 2 (MetalFX upscaling on and off), and a World 1 stage whose load had crashed before loaded too, with no change in frame pacing (game enqueue to screen p50 about 14 ms) and no audio underruns. Load times with and without it were not compared (Super Mario Bros. Wonder's first frame moved from 0.6 to 2.9 s with it).
+  - Super Mario Galaxy ([010099C022B96000](../010099C022B96000/README.md)) runs on the same Hagi layer and may need the same; not checked.
+
 ## Background
 
 Mac repro of both: `DM_OE_SCRIPT=bg=1@20,bg=0@25`. The game froze after switching apps and back, picture still, sound on, for two causes:
@@ -69,5 +78,6 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- The crash entering Puzzle Plank Galaxy is worked around, not fixed: `core_preempt on` ([Threads](#threads)). The fix is at its cause, once found: what the code at `main+0x5a374c` expects of thread `0x102c`'s priority.
 - GX points and lines (the geometry shaders) are not translated; the player README lists one-pixel point and line effects as a known issue.
 - `game.tsv` says values marked "Galaxy's" are not measured for this game; none of its rows is marked so.

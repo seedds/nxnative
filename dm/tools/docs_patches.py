@@ -95,6 +95,8 @@ SHADER_BINDING = [
 DEFAULT_SOON = 'a default for every game after `regress.py check` on the games'
 SWITCH_BINDING = [
     ('draw_barriers', '', {'what': 'draw passes ordered by the game\'s own barriers', 'now': 'game', 'goal': 'host', 'purpose': 'frame rate', 'why': f'what NVN specifies: {DEFAULT_SOON}'}),
+    ('core_preempt', '', {'what': 'already-runnable higher-priority peers of the caller\'s core checked after every thread SVC', 'now': 'game', 'goal': 'host', 'purpose': 'runtime',
+     'why': "a stopgap: Horizon runs one thread per core, which this approximates where the wake-triggered handoffs do not reach; the fix is at the crash's cause, or a scheduler that holds a core's lower-priority threads for every game"}),
     ('mem_map_limit', '', {'what': 'MapPhysicalMemory limited to the application pool', 'now': 'game', 'goal': 'host', 'purpose': 'memory',
      'why': "Horizon's limit; off by default because Ace Attorney Investigations Collection maps a little more than its profile's 1 GB pool, which is the thing to fix"}),
     ('alloc_big_align', '', {'what': "StandardAllocator blocks of 64 KB and more aligned to 64 KB", 'now': 'game', 'goal': 'host', 'purpose': 'memory',

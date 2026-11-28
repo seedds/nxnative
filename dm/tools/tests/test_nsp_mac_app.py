@@ -139,8 +139,8 @@ class PackReuse(unittest.TestCase):
             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
             'pso/gpu-prewarm-00.mtl4a': b'bases', 'pso/gpu-prewarm-00.keys': b'DMPSOIX1', 'pso/prewarm.tsv': b'stamp',   # --prebake's files and their index
             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/save_sync_apple.m': b'apple sync', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
-            'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
+            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'host/save_sync_apple.m': b'apple sync', 'host/save_archive.h': b'archive header', 'host/save_archive.c': b'archive', 'tools/romfs.py': b'reader', 'tools/nso_syms.py': b'symbols',
+            'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveData.swift': b'save data', 'ios/Sources/SaveSyncReport.swift': b'report',
             'ios/Sources/PrewarmUpload.swift': b'upload',
         }
         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
@@ -239,8 +239,9 @@ class PackReuse(unittest.TestCase):
         names = ['dmhost', 'patched/main.patched.bin', 'patched/main.fixups.tsv', 'patched/main.gates.tsv', 'patched/main.cuts.tsv',
                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'pso/gpu-prewarm-00.mtl4a', 'pso/gpu-prewarm-00.keys', 'pso/prewarm.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
-                 'tools/nso_syms.py', 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
-                 'host/save_sync.c', 'host/save_sync.h', 'host/save_sync_apple.m']   # the cloud-save code the launcher links (its send after the host exits)
+                 'tools/nso_syms.py', 'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift', 'ios/Sources/SaveData.swift',   # the settings window's sources
+                 'host/save_sync.c', 'host/save_sync.h', 'host/save_sync_apple.m',   # the cloud-save code the launcher links (its send after the host exits)
+                 'host/save_archive.c', 'host/save_archive.h']   # the save archive the window calls
         names += ['profile/' + n for n in pack_app.TABLES]
         for name in names:
             with self.subTest(name=name):
@@ -304,8 +305,10 @@ class PackReuse(unittest.TestCase):
         self.assertIn('-fobjc-arc', sync_apple)
         self.assertIn(sync_apple[sync_apple.index('-o') + 1], s)   # save_sync_apple.m's object: NSFileCoordinator wrapper shared with host/iOS
         self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], [
-            'Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift', 'PrewarmUpload.swift',
+            'Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveData.swift', 'SaveSyncReport.swift', 'PrewarmUpload.swift',
         ])
+        self.assertIn('save_archive.o', [Path(x).name for x in s if x.endswith('.o')])   # the save archive the window calls
+        self.assertIn('-import-objc-header', s)
 
     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
         self.pack()
@@ -570,7 +573,7 @@ class PackReuse(unittest.TestCase):
     def test_missing_selected_inputs_fail_before_reuse_or_partial_creation(self):
         self.pack()
         for name in ('dmhost', 'patched/main.fixups.tsv', 'msl/k.metallib', 'romfs/marker', 'pso/prebuilt.tsv', 'env.txt', 'icon.jpg',
-                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift'):
+                     'font', 'aoc', 'profile', 'bin/clang', 'bin/swiftc', 'sdk', 'bin/codesign', 'source/launcher.c', 'source/Launcher.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift', 'ios/Sources/SaveData.swift', 'host/save_archive.c', 'host/save_archive.h'):
             with self.subTest(name=name):
                 p = self.tmp / name; hidden = p.with_name(p.name + '.hidden'); p.rename(hidden)
                 try:

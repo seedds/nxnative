@@ -20,6 +20,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_oe $(QUIET)
 	$(B)/t_friends
 	$(B)/t_fs $(QUIET)
+	$(B)/t_save_archive
 	$(B)/t_fs_mutation $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
@@ -215,6 +216,12 @@ save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata $(B)/t_save_sync_apple
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_apple $(QUIET)
+run: $(B)/t_save_archive
+$(B)/t_save_archive: t_save_archive.c ../save_archive.c ../save_archive.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. -o $@ t_save_archive.c ../save_archive.c
+.PHONY: save-archive
+save-archive: $(B)/t_save_archive
+	$(B)/t_save_archive
 AUDIO_INPUT_STUB = ../audio_input.c audio_input_platform_stub.c
 AUDIO_INPUT_DEPS = $(AUDIO_INPUT_STUB) ../audio_input.h
 $(B)/t_audio: t_audio.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)

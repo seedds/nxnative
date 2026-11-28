@@ -16,6 +16,8 @@ int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void
 int nvn_deswizzle_pick(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage, uint32_t step, void *dst_linear, uint32_t nx, uint32_t ny);
 // One 64 KB tile (tx, ty) of a sparse texture's tiled level, given as its own 64 KB, into dst (block rows of dst_pitch bytes): *wb bytes of *rows block rows, the part inside the level
 int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, const void *tile, void *dst_linear, size_t dst_pitch, uint32_t *wb, uint32_t *rows);
+// One 64 KB tile (tx, ty, tz) of a sparse 3D texture's tiled level, given as its own 64 KB, into dst (block rows of dst_pitch bytes, slices dst_image bytes apart): *wb bytes of *rows block rows and *slices slices
+int nvn_deswizzle_tile_3d(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, uint32_t tz, const void *tile, void *dst_linear, size_t dst_pitch, size_t dst_image, uint32_t *wb, uint32_t *rows, uint32_t *slices);
 // nvn_deswizzle from storage given from byte src_at of the whole texture's on (src points at that byte); the level and layer must lie at or after it
 int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_at, void *dst_linear, size_t dst_pitch);
 // Single-point address: within this level and layer, linear (x byte, y block row, z slice) → block-linear byte offset relative to the start of this level and layer (unit tests verify against hand calculation).

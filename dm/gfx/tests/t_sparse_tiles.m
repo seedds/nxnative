@@ -101,6 +101,130 @@ static void buffer_upload(uint8_t *phys) {
     CHECK("mapping another tile preserves the copied mip tail's dirty baseline", same(m, 6, 0, 0, 64, 64, tail_want, 64));
     h_nvnTextureFinalize(&tx); map_at(vo, 3 * n, 0, 0); map_at(vo + tail, tail_n, 0, 0); mtl_pool_del(src); mtl_drain(); munmap(src, n);
 }
+// Read back a 3D region [x,y,z, w,h,d] of a level from a 3D Metal texture and compare every byte with expected (or all zeros when want == NULL)
+static int same_3d(id<MTLTexture> m, unsigned level, unsigned x, unsigned y, unsigned z, unsigned w, unsigned h, unsigned d, unsigned bw, unsigned bh, unsigned bpb, const void *want) {
+    size_t row = (size_t)((w + bw - 1) / bw) * bpb, rows = (h + bh - 1) / bh, img = row * rows, bytes = img * d;
+    id<MTLBuffer> rb = [g_dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (!rb) { fprintf(stderr, "3D readback buffer did not allocate\n"); return 0; }
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> ce = [cb blitCommandEncoder];
+    [ce copyFromTexture:m sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(x, y, z) sourceSize:MTLSizeMake(w, h, d) toBuffer:rb destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:img];
+    [ce endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint8_t *got = rb.contents;
+    if (!want) { for (size_t i = 0; i < bytes; i++) if (got[i]) return 0; return 1; }
+    return memcmp(got, want, bytes) == 0;
+}
+// 3D placement sparse textures (MTLSparsePageSize16, slab-column refcounting, sibling-quadrant zeroing, partial unmap zeroing, full unmap reclamation, in-place rewrite, and BC1/BC6H volumes)
+static void test_sparse_3d(uint8_t *phys) {
+    const uint64_t TILE = 0x10000;
+    // 1. 256x256x256 RGBA8 (64 MB made whole): NVN tile 32x32x16, Metal 16 KB tile 64x64x1 (2x2 NVN tiles per Metal slab-column)
+    const uint64_t vo0 = 4ull << 30;
+    NVNtextureBuilder tb; NVNtexture tx3;
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_3D);
+    h_nvnTextureBuilderSetWidth(&tb, 256); h_nvnTextureBuilderSetHeight(&tb, 256); h_nvnTextureBuilderSetDepth(&tb, 256);
+    h_nvnTextureBuilderSetLevels(&tb, 1);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8);
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+    h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&g_sparse, vo0);
+    CHECK("3D RGBA8 sparse texture", h_nvnTextureInitialize(&tx3, &tb));
+    const tex_t *T3 = (const tex_t *)&tx3;
+    id<MTLTexture> m3 = resolve(&tx3);
+    CHECK("3D RGBA8 uses placement sparse", m3.isSparse);
+    CHECK("3D RGBA8 page table is small", m3.allocatedSize < (16u << 20));
+    CHECK("3D unmapped reads zero", same_3d(m3, 0, 0, 0, 16, 32, 32, 16, 1, 1, 4, NULL));
+    // Build two distinct 32x32x16 RGBA8 NVN tiles by swizzling a 32x32x16 sparse descriptor
+    uint32_t *linA = malloc(TILE), *linB = malloc(TILE), *linB2 = malloc(TILE);
+    uint8_t *swzA = malloc(TILE), *swzB = malloc(TILE), *swzB2 = malloc(TILE);
+    for (uint32_t i = 0; i < TILE / 4; i++) { linA[i] = (i + 1) * 2654435761u | 0xff000000u; linB[i] = (i + 777) * 2246822519u | 0xff000000u; linB2[i] = (i + 9999) * 3266489917u | 0xff000000u; }
+    nvn_texdesc tile1 = { .target = 2, .format = NVN_FORMAT_RGBA8, .flags = NVN_TEXTURE_FLAGS_SPARSE, .width = 32, .height = 32, .depth = 16, .levels = 1 };
+    CHECK("swizzle 3D tile A", !nvn_swizzle(&tile1, 0, 0, linA, 32 * 4, swzA));
+    CHECK("swizzle 3D tile B", !nvn_swizzle(&tile1, 0, 0, linB, 32 * 4, swzB));
+    CHECK("swizzle 3D tile B2", !nvn_swizzle(&tile1, 0, 0, linB2, 32 * 4, swzB2));
+    uint64_t live3_0 = g_sp16_live;
+    // Tile (tx=0, ty=0, tz=1) and sibling (tx=1, ty=0, tz=1) share Metal slab-column (mtx=0, mty=0, tz=1): plane = 8*8 = 64 tiles
+    uint64_t idxA = 1 * 64 + 0, idxB = 1 * 64 + 1;
+    dm_guest_write_prepare(phys + 40 * TILE, 2 * TILE);
+    memcpy(phys + 40 * TILE, swzA, TILE); memcpy(phys + 41 * TILE, swzB, TILE);
+    map_at(vo0 + idxA * TILE, TILE, 40 * TILE, 1);
+    CHECK("3D same texture after map", resolve(&tx3) == m3);
+    CHECK("3D mapping first tile allocates 1 slab-column", g_sp16_live == live3_0 + 1);
+    CHECK("3D mapped tile A holds its texels", same_3d(m3, 0, 0, 0, 16, 32, 32, 16, 1, 1, 4, linA));
+    CHECK("3D unmapped sibling quadrant B reads zero", same_3d(m3, 0, 32, 0, 16, 32, 32, 16, 1, 1, 4, NULL));
+    CHECK("3D unmapped next slab reads zero", same_3d(m3, 0, 0, 0, 32, 32, 32, 16, 1, 1, 4, NULL));
+    // Map sibling tile B into the same Metal slab-column
+    map_at(vo0 + idxB * TILE, TILE, 41 * TILE, 1);
+    (void)resolve(&tx3);
+    CHECK("3D mapping sibling reuses the same slab-column", g_sp16_live == live3_0 + 1);
+    CHECK("3D tile A intact after sibling map", same_3d(m3, 0, 0, 0, 16, 32, 32, 16, 1, 1, 4, linA));
+    CHECK("3D sibling tile B holds its texels", same_3d(m3, 0, 32, 0, 16, 32, 32, 16, 1, 1, 4, linB));
+    // Unmap tile A while sibling B stays mapped: quadrant A must be zeroed while B stays intact
+    map_at(vo0 + idxA * TILE, TILE, 0, 0);
+    (void)resolve(&tx3);
+    CHECK("3D partial unmap keeps slab-column live", g_sp16_live == live3_0 + 1);
+    CHECK("3D partially unmapped quadrant A reads zero", same_3d(m3, 0, 0, 0, 16, 32, 32, 16, 1, 1, 4, NULL));
+    CHECK("3D remaining sibling B intact after partial unmap", same_3d(m3, 0, 32, 0, 16, 32, 32, 16, 1, 1, 4, linB));
+    // Rewrite tile B in place while mapped
+    dm_guest_write_prepare(phys + 41 * TILE, TILE); memcpy(phys + 41 * TILE, swzB2, TILE);
+    atomic_fetch_add(&g_cur_frame, 60);
+    (void)resolve(&tx3);
+    CHECK("3D rewritten tile B updates on GPU", same_3d(m3, 0, 32, 0, 16, 32, 32, 16, 1, 1, 4, linB2));
+    // Unmap sibling B: whole slab-column unmaps and returns its heap unit
+    map_at(vo0 + idxB * TILE, TILE, 0, 0);
+    (void)resolve(&tx3);
+    CHECK("3D full unmap releases slab-column", g_sp16_live == live3_0);
+    CHECK("3D fully unmapped tile B reads zero", same_3d(m3, 0, 32, 0, 16, 32, 32, 16, 1, 1, 4, NULL));
+    h_nvnTextureFinalize(&tx3);
+    free(linA); free(linB); free(linB2); free(swzA); free(swzB); free(swzB2);
+
+    // 2. Metroid Prime 4 volume shapes: 1664x448x1344 BC1 (0x42, 588 MB whole) and BC6H_U (0x50, 1092 MB whole)
+    static const struct { int fmt; uint32_t tw, th, td, bpb; uint64_t vo; } vols[2] = {
+        {0x42, 128, 64, 16, 8,  5ull << 30},
+        {0x50, 64,  64, 16, 16, 6ull << 30},
+    };
+    for (int v = 0; v < 2; v++) {
+        uint8_t *lin = malloc(TILE), *swz = malloc(TILE);
+        uint32_t tiles_x = 1664 / vols[v].tw, tiles_y = 448 / vols[v].th;
+        uint64_t tidx = (uint64_t)(2 * tiles_y + 1) * tiles_x + 3;   // tx=3, ty=1, tz=2 (inside Metal tile mtx=1, mty=0, tz=2)
+        @autoreleasepool {
+            NVNtexture vx;
+            h_nvnTextureBuilderSetDefaults(&tb);
+            h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_3D);
+            h_nvnTextureBuilderSetWidth(&tb, 1664); h_nvnTextureBuilderSetHeight(&tb, 448); h_nvnTextureBuilderSetDepth(&tb, 1344);
+            h_nvnTextureBuilderSetLevels(&tb, 1);
+            h_nvnTextureBuilderSetFormat(&tb, vols[v].fmt);
+            h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE);
+            h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&g_sparse, vols[v].vo);
+            CHECK("3D BC volume initialize", h_nvnTextureInitialize(&vx, &tb));
+            id<MTLTexture> mv = resolve(&vx);
+            CHECK("3D BC volume uses placement sparse", mv.isSparse);
+            CHECK("3D BC volume page table is small", mv.allocatedSize < (16u << 20));
+            for (size_t i = 0; i < TILE; i++) lin[i] = (uint8_t)((i * 73 + 17 + v * 31) & 0xff);
+            nvn_texdesc td1 = { .target = 2, .format = vols[v].fmt, .flags = NVN_TEXTURE_FLAGS_SPARSE, .width = vols[v].tw, .height = vols[v].th, .depth = vols[v].td, .levels = 1 };
+            size_t pitch = (size_t)(vols[v].tw / 4) * vols[v].bpb;
+            CHECK("swizzle 3D BC tile", !nvn_swizzle(&td1, 0, 0, lin, pitch, swz));
+            dm_guest_write_prepare(phys + 44 * TILE, TILE); memcpy(phys + 44 * TILE, swz, TILE);
+            map_at(vols[v].vo + tidx * TILE, TILE, 44 * TILE, 1);
+            (void)resolve(&vx);
+            CHECK("3D BC volume maps 1 slab-column", g_sp16_live == live3_0 + 1);
+            CHECK("3D BC mapped tile holds exact blocks", same_3d(mv, 0, 3 * vols[v].tw, vols[v].th, 2 * vols[v].td, vols[v].tw, vols[v].th, vols[v].td, 4, 4, vols[v].bpb, lin));
+            CHECK("3D BC unmapped sibling quadrant reads zero", same_3d(mv, 0, 2 * vols[v].tw, vols[v].th, 2 * vols[v].td, vols[v].tw, vols[v].th, vols[v].td, 4, 4, vols[v].bpb, NULL));
+            if (v == 0) {   // unmap path
+                map_at(vols[v].vo + tidx * TILE, TILE, 0, 0);
+                (void)resolve(&vx);
+                CHECK("3D BC unmap releases slab-column", g_sp16_live == live3_0);
+            }
+            h_nvnTextureFinalize(&vx);
+        }
+        if (v == 1) {   // Finalize path (deferred release drops NvPkg -> NvSparse dealloc once the next submission completes)
+            mtl_sub_begin(); finish();
+            defer_drain();
+            CHECK("3D BC Finalize releases slab-column", g_sp16_live == live3_0);
+            map_at(vols[v].vo + tidx * TILE, TILE, 0, 0);
+        }
+        free(lin); free(swz);
+    }
+    (void)T3;
+}
 int main(void) { @autoreleasepool {
     mtl_init();
     enum { W = 4096, LEVELS = 13, TILE = 0x10000, TW = 128 };
@@ -108,9 +232,10 @@ int main(void) { @autoreleasepool {
     uint8_t *phys = mmap(NULL, plen, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (phys == MAP_FAILED) abort();
     pool_builder_t pb = {.mem = phys, .size = plen, .flags = 0x24};
     CHECK("physical pool", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_phys, (const NVNmemoryPoolBuilder *)&pb));
-    pb = (pool_builder_t){.size = DM_GAME_APP_POOL + (1ull << 32), .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL};
+    pb = (pool_builder_t){.size = DM_GAME_APP_POOL + (8ull << 30), .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL};
     CHECK("sparse pool", h_nvnMemoryPoolInitialize((NVNmemoryPool *)&g_sparse, (const NVNmemoryPoolBuilder *)&pb));
     buffer_upload(phys);
+    test_sparse_3d(phys);
     NVNtextureBuilder tb; NVNtexture tx; h_nvnTextureBuilderSetDefaults(&tb); h_nvnTextureBuilderSetTarget(&tb, NVN_TEXTURE_TARGET_2D); h_nvnTextureBuilderSetWidth(&tb, W); h_nvnTextureBuilderSetHeight(&tb, W);
     h_nvnTextureBuilderSetLevels(&tb, LEVELS); h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_RGBA8); h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_SPARSE); h_nvnTextureBuilderSetStorage(&tb, (const NVNmemoryPool *)&g_sparse, 0);
     CHECK("sparse texture", h_nvnTextureInitialize(&tx, &tb));

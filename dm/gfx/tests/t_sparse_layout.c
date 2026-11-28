@@ -103,6 +103,38 @@ int main(void) {
         g_n++; if (!ok) g_fail++;
         printf("16x16x16 RGBA8 sparse keeps the automatic block %u/%u %s\n", L.tileH, L.tileD, ok ? "\xe2\x9c\x93" : "\xe2\x9c\x97");
     }
+    // 3D tiles decoded one by one (nvn_deswizzle_tile_3d, 3D placement sparse textures) read what the whole level reads, including cut edges in X, Y and Z and td = 32 (R8), in both GOB orders
+    static const struct { int format; uint32_t w, h, d; } tc3[] = {
+        {0x42, 512, 256, 32}, {0x42, 500, 244, 20}, {0x50, 256, 128, 32}, {0x25, 128, 128, 32}, {0x01, 130, 66, 34},
+    };
+    for (int g2 = 0; g2 < 2; g2++) for (unsigned c = 0; c < sizeof tc3 / sizeof *tc3; c++) {
+        nvn_texdesc d = { .target = 2, .format = tc3[c].format, .flags = 0x20, .width = tc3[c].w, .height = tc3[c].h, .depth = tc3[c].d, .levels = 1, .gob_order = (uint16_t)g2 };
+        nvn_texlayout L; nvn_tex_layout(&d, &L);
+        uint32_t tw, th, td; int nt = nvn_tex_sparse_tiles(&d, &tw, &th, &td);
+        int bw, bh, bpb = nvn_fmt_bpb(d.format, &bw, &bh), ok = nt == 1;
+        uint8_t *st = malloc(L.size); for (uint64_t i = 0; i < L.size; i++) st[i] = (uint8_t)(i * 2654435761u >> 13);
+        size_t pitch = (size_t)((d.width + bw - 1) / bw) * bpb, rows = (d.height + bh - 1) / bh, img = pitch * rows;
+        uint8_t *whole = malloc(img * d.depth), *part = calloc(1, img * d.depth);
+        ok = ok && !nvn_deswizzle(&d, 0, 0, st, whole, pitch);
+        uint32_t tx_n = (d.width + tw - 1) / tw, ty_n = (d.height + th - 1) / th, tz_n = (d.depth + td - 1) / td;
+        size_t tp = (size_t)(tw / bw) * bpb, tr = th / bh, timg = tp * tr;
+        uint8_t tile[0x10000], lin[0x10000];
+        for (uint32_t tz = 0; ok && tz < tz_n; tz++) for (uint32_t ty = 0; ok && ty < ty_n; ty++) for (uint32_t tx = 0; ok && tx < tx_n; tx++) {
+            uint64_t tidx = ((uint64_t)tz * ty_n + ty) * tx_n + tx;
+            memcpy(tile, st + tidx * 0x10000, 0x10000);
+            memset(lin, 0xa5, sizeof lin);
+            uint32_t wb, nr, nz;
+            ok = !nvn_deswizzle_tile_3d(&d, 0, tx, ty, tz, tile, lin, tp, timg, &wb, &nr, &nz) && wb && nr && nz;
+            for (uint32_t z = 0; ok && z < nz; z++) for (uint32_t r = 0; ok && r < nr; r++) {
+                for (size_t x = wb; ok && x < tp; x++) ok = lin[(size_t)z * timg + (size_t)r * tp + x] == 0xa5;
+                memcpy(part + (size_t)(tz * td + z) * img + (size_t)(ty * tr + r) * pitch + (size_t)tx * tp, lin + (size_t)z * timg + (size_t)r * tp, wb);
+            }
+        }
+        ok = ok && !memcmp(whole, part, img * d.depth);
+        free(whole); free(part); free(st);
+        g_n++; if (!ok) g_fail++;
+        printf("3D %ux%ux%u format %#x %s GOB order: tile %ux%ux%u, tiles decode as whole %s\n", d.width, d.height, d.depth, d.format, g2 ? "Switch 2" : "X1", tw, th, td, ok ? "\xe2\x9c\x93" : "\xe2\x9c\x97");
+    }
     printf("== %d checks, %d failed ==\n", g_n, g_fail);
     return g_fail != 0;
 }

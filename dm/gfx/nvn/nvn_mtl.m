@@ -5088,6 +5088,41 @@ static void sp_slot_free(uint32_t slot) {   // caller holds g_sp_mu; the GPU may
     if (g_sp_nlate == g_sp_latecap) { g_sp_latecap = g_sp_latecap ? 2 * g_sp_latecap : 1024; g_sp_late = realloc_or_die(g_sp_late, g_sp_latecap * sizeof *g_sp_late, "the sparse tile list"); }
     g_sp_late[g_sp_nlate++] = (struct sp_late){slot, atomic_load(&g_fence) + 1}; g_sp_live--;
 }
+// 16 KB placement heaps for 3D placement sparse textures: Metal's 3D sparse tiles have depth 1, and at 16 KB their XY extent is an exact multiple of NVN's 64 KB 3D tile (2x2 for 4/8/16-byte
+// blocks, 4x2 or 2x4 for 1/2-byte blocks), against 4x4 at 64 KB. Allocated in SP16_UNIT (16 x 16 KB = 256 KB) blocks so a 16-slice Z slab maps in one updateTextureMappings op.
+#define SP16_PAGE 0x4000u
+#define SP16_UNIT 16u
+#define SP16_HEAP_UNITS 256u           // 64 MB placement heaps (4096 x 16 KB pages)
+static NSMutableArray *g_sp16_heaps;   // id<MTLHeap>, SP16_HEAP_UNITS units each (MTLSparsePageSize16)
+static uint32_t *g_sp16_free; static size_t g_sp16_nfree, g_sp16_freecap;
+static struct sp_late *g_sp16_late; static size_t g_sp16_nlate, g_sp16_latecap;
+static uint64_t g_sp16_live, g_sp16_peak;   // live / peak 256 KB units
+static int sp16_slot(uint32_t *out) {   // caller holds g_sp_mu
+    uint64_t done = atomic_load(&g_done); size_t k = 0;
+    for (size_t i = 0; i < g_sp16_nlate; i++) {
+        if (g_sp16_late[i].fence > done) { g_sp16_late[k++] = g_sp16_late[i]; continue; }
+        if (g_sp16_nfree == g_sp16_freecap) { g_sp16_freecap = g_sp16_freecap ? 2 * g_sp16_freecap : 256; g_sp16_free = realloc_or_die(g_sp16_free, g_sp16_freecap * sizeof *g_sp16_free, "the 3D sparse tile list"); }
+        g_sp16_free[g_sp16_nfree++] = g_sp16_late[i].slot;
+    }
+    g_sp16_nlate = k;
+    if (!g_sp16_nfree) {
+        MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+        hd.type = MTLHeapTypePlacement; hd.storageMode = MTLStorageModePrivate; hd.size = (NSUInteger)SP16_HEAP_UNITS * SP16_UNIT * SP16_PAGE; hd.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize16;
+        id<MTLHeap> h = [g_dev newHeapWithDescriptor:hd];
+        if (!h) { RED_ONCE(144, "cannot make a 64 MB 16 KB placement heap for 3D sparse tiles (%llu MB mapped)", (unsigned long long)(g_sp16_live * SP16_UNIT * SP16_PAGE >> 20)); return 0; }
+        if (!g_sp16_heaps) g_sp16_heaps = [NSMutableArray array];
+        uint32_t base = (uint32_t)g_sp16_heaps.count * SP16_HEAP_UNITS; [g_sp16_heaps addObject:h]; res_add(h);
+        if (g_sp16_freecap < g_sp16_nfree + SP16_HEAP_UNITS) { g_sp16_freecap = g_sp16_nfree + SP16_HEAP_UNITS; g_sp16_free = realloc_or_die(g_sp16_free, g_sp16_freecap * sizeof *g_sp16_free, "the 3D sparse tile list"); }
+        for (uint32_t i = SP16_HEAP_UNITS; i-- > 0;) g_sp16_free[g_sp16_nfree++] = base + i;
+        MLOG("sparse tiles (3D): placement heap %lu (64 MB), %llu MB mapped", (unsigned long)g_sp16_heaps.count, (unsigned long long)(g_sp16_live * SP16_UNIT * SP16_PAGE >> 20));
+    }
+    *out = g_sp16_free[--g_sp16_nfree]; if (++g_sp16_live > g_sp16_peak) g_sp16_peak = g_sp16_live;
+    return 1;
+}
+static void sp16_slot_free(uint32_t unit) {   // caller holds g_sp_mu
+    if (g_sp16_nlate == g_sp16_latecap) { g_sp16_latecap = g_sp16_latecap ? 2 * g_sp16_latecap : 256; g_sp16_late = realloc_or_die(g_sp16_late, g_sp16_latecap * sizeof *g_sp16_late, "the 3D sparse tile list"); }
+    g_sp16_late[g_sp16_nlate++] = (struct sp_late){unit, atomic_load(&g_fence) + 1}; g_sp16_live--;
+}
 // Shared tiles. On hardware a sparse texture's content is the physical memory the game maps, and a game may map one physical page at several places at once: Mario Kart World maps each page of
 // its sparse pools at about three (976 MB of memory behind 2,959 MB of mappings in a race), always in textures of one format: its RGBA8 SNORM 3072² and 6144² arrays (which the GPU draws into)
 // with each other, its BC6H and ASTC 8x8 terrain arrays within themselves. A tile whose 16 pages are consecutive physical memory takes the heap tile of that memory and format, so every place
@@ -5148,60 +5183,101 @@ void mtl_sp_phys_gone(const void *mem, uint64_t size) {
 }
 
 @interface NvSparse : NSObject { @public
-    __weak id<MTLTexture> tex; uint32_t tw, th, ntiled, levels, layers, per_layer, tail_at;   // tiles of each layer: those of the tiled levels from loff_t[l], then its tail (at tail_at)
-    uint32_t tiles_x[16], tiles_y[16], loff_t[16]; uint64_t loff[16], tail_off, layer_size;
-    uint32_t *slot;                    // per tile: heap slot + 1, 0 = not mapped
-    uint64_t *nmap;                    // mapped tiles per level (the tail at ntiled)
+    __weak id<MTLTexture> tex; uint32_t tw, th, td, ntiled, levels, layers, per_layer, tail_at;   // tiles of each layer: those of the tiled levels from loff_t[l], then its tail (at tail_at)
+    uint32_t tiles_x[16], tiles_y[16], tiles_z[16], loff_t[16]; uint64_t loff[16], tail_off, layer_size;
+    uint32_t *slot;                    // 2D per tile: heap slot + 1, 0 = not mapped
+    uint32_t mtw, mth, rx, ry, mtiles_x[16], mtiles_y[16], mloff[16], ncols, col_units;   // 3D: Metal 16 KB tile geometry and slab-column mapping
+    uint8_t *mapped3d;                 // 3D per NVN tile: 1 = mapped
+    uint32_t *col_slot;                // 3D per Metal slab-column (ncols * col_units): 16 KB heap unit + 1, 0 = unmapped
+    uint16_t *col_rc;                  // 3D per Metal slab-column: count of mapped NVN tiles sharing this column (0 .. rx * ry)
+    uint64_t *nmap;                    // mapped NVN tiles per level (the tail at ntiled)
     uint64_t gen, stamp;               // the page table's generation and the dirty-page stamp at the last look
     int gpu;                           // the GPU writes it (a render target or image): tiles are mapped and unmapped, nothing is uploaded
     uint64_t seq;                      // the pool's change log up to here has been handled (nvn_sparse_log_read)
     uint64_t wseen, wframe, wown;      // sparse writes, frame and replay-ordered writes at the last tile sync
-    uint8_t undrawn;                   // a tile was mapped since the GPU last wrote through this texture (sparse_gpu_wrote)
+    uint8_t undrawn, is3d;             // undrawn: a 2D tile was mapped since the GPU last wrote through this texture; is3d: 3D placement sparse (MTLSparsePageSize16)
 } @end   // tex is weak: the NvPkg of a packaged texture owns it, a GPU texture owns its NvSparse (sparse_gpu_look)
 @implementation NvSparse
-- (void)dealloc { pthread_mutex_lock(&g_sp_mu); for (uint32_t i = 0; slot && i < layers * per_layer; i++) if (slot[i]) sp_release(slot[i] - 1); pthread_mutex_unlock(&g_sp_mu); free(slot); free(nmap); }
+- (void)dealloc {
+    pthread_mutex_lock(&g_sp_mu);
+    if (is3d) { for (size_t i = 0, n = (size_t)ncols * col_units; col_slot && i < n; i++) if (col_slot[i]) sp16_slot_free(col_slot[i] - 1); }
+    else { for (uint32_t i = 0; slot && i < layers * per_layer; i++) if (slot[i]) sp_release(slot[i] - 1); }
+    pthread_mutex_unlock(&g_sp_mu);
+    free(slot); free(mapped3d); free(col_slot); free(col_rc); free(nmap);
+}
 @end
 
-// A placement sparse texture for t, or nil when it does not qualify: a 2D texture or 2D array in a sparse pool, laid out in tiles whose shape is Metal's, each tiled level whole tiles,
-// its tail one Metal tile, and at least SP_MIN made whole. gpu: one the GPU writes (tex_mtl_'s GPU texture path, tex_desc(t, 0)), whose tiles get no upload
+static id<MTLBuffer> zero_buf(size_t need);
+// A placement sparse texture for t, or nil when it does not qualify: a 2D texture, 2D array or 3D texture in a sparse pool, laid out in tiles compatible with Metal's, each tiled level
+// whole tiles, its tail fitting Metal's tail, and at least SP_MIN made whole. gpu: one the GPU writes (tex_mtl_'s GPU texture path, tex_desc(t, 0)), whose tiles get no upload
 static NvSparse *sparse_make(const tex_t *t, int gpu, __strong id<MTLTexture> *made) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_SPARSE_TILES"); on = !e || atoi(e); }
-    if (!on || !t->pool || !nvn_sparse_pool(t->pool) || !t->mem || (t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != 4) || t->d.samples > 1 || rb_packed_shift(t->d.format)) return nil;
+    int is3d = t->d.target == NVN_TEXTURE_TARGET_3D;
+    if (!on || !t->pool || !nvn_sparse_pool(t->pool) || !t->mem || (!is3d && t->d.target != NVN_TEXTURE_TARGET_2D && t->d.target != 4) || t->d.samples > 1 || rb_packed_shift(t->d.format)) return nil;
     uint32_t tw, th, td; int n = nvn_tex_sparse_tiles(&t->d, &tw, &th, &td);
-    if (n <= 0 || n > 15 || td != 1 || t->d.levels > 16) return nil;
+    if (n <= 0 || n > 15 || t->d.levels > 16 || (is3d ? (td != 16 && td != 32) : td != 1)) return nil;
     MTLTextureDescriptor *d = tex_desc(t, !gpu); if (!d) return nil;
-    MTLSize ms = [g_dev sparseTileSizeWithTextureType:d.textureType pixelFormat:d.pixelFormat sampleCount:1 sparsePageSize:MTLSparsePageSize64];
-    if (ms.width != tw || ms.height != th || ms.depth != 1) { static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu format %#x: Metal's tile %lux%lu is not NVN's %ux%u, made whole", (unsigned long long)t->serial, t->d.format, (unsigned long)ms.width, (unsigned long)ms.height, tw, th); return nil; }
+    MTLSparsePageSize psz = is3d ? MTLSparsePageSize16 : MTLSparsePageSize64;
+    MTLSize ms = [g_dev sparseTileSizeWithTextureType:d.textureType pixelFormat:d.pixelFormat sampleCount:1 sparsePageSize:psz];
+    if (is3d) {
+        if (!ms.width || !ms.height || ms.depth != 1 || ms.width < tw || ms.height < th || (ms.width % tw) || (ms.height % th)) {
+            static int nl; if (nl++ < 4) MLOG("sparse 3D texture ser=%llu format %#x: Metal's 16 KB tile %lux%lux%lu is incompatible with NVN's %ux%ux%u, made whole",
+                                              (unsigned long long)t->serial, t->d.format, (unsigned long)ms.width, (unsigned long)ms.height, (unsigned long)ms.depth, tw, th, td);
+            return nil;
+        }
+    } else if (ms.width != tw || ms.height != th || ms.depth != 1) {
+        static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu format %#x: Metal's tile %lux%lu is not NVN's %ux%u, made whole", (unsigned long long)t->serial, t->d.format, (unsigned long)ms.width, (unsigned long)ms.height, tw, th);
+        return nil;
+    }
     MTLSizeAndAlign sa = [g_dev heapTextureSizeAndAlignWithDescriptor:d];
     if (sa.size < SP_MIN) return nil;
     NvSparse *s = [NvSparse new];
-    s->gpu = gpu; s->tw = tw; s->th = th; s->ntiled = (uint32_t)n; s->levels = (uint32_t)d.mipmapLevelCount; s->layers = (uint32_t)MAX(d.arrayLength, 1u); s->layer_size = t->L.layer_size;
-    uint32_t k = 0;
+    s->gpu = gpu; s->is3d = (uint8_t)is3d; s->tw = tw; s->th = th; s->td = td; s->ntiled = (uint32_t)n; s->levels = (uint32_t)d.mipmapLevelCount; s->layers = is3d ? 1u : (uint32_t)MAX(d.arrayLength, 1u); s->layer_size = t->L.layer_size;
+    if (is3d) { s->mtw = (uint32_t)ms.width; s->mth = (uint32_t)ms.height; s->rx = s->mtw / tw; s->ry = s->mth / th; s->col_units = td / SP16_UNIT; }
+    uint32_t k = 0, mk = 0;
     for (uint32_t l = 0; l < s->ntiled; l++) {
-        uint32_t w, h; tex_lsize(t, l, &w, &h, NULL);
-        s->tiles_x[l] = (w + tw - 1) / tw; s->tiles_y[l] = (h + th - 1) / th; s->loff_t[l] = k; k += s->tiles_x[l] * s->tiles_y[l];
+        uint32_t w, h, z; tex_lsize(t, l, &w, &h, &z);
+        s->tiles_x[l] = (w + tw - 1) / tw; s->tiles_y[l] = (h + th - 1) / th; s->tiles_z[l] = is3d ? (z + td - 1) / td : 1u;
+        s->loff_t[l] = k; uint64_t cnt = (uint64_t)s->tiles_x[l] * s->tiles_y[l] * s->tiles_z[l]; k += (uint32_t)cnt;
         s->loff[l] = nvn_tex_level_offset(&t->d, l);
         uint64_t next = l + 1 < s->levels ? nvn_tex_level_offset(&t->d, l + 1) : s->layer_size;
-        if (next - s->loff[l] != (uint64_t)s->tiles_x[l] * s->tiles_y[l] * SP_TILE) { static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu: level %u is not whole tiles (%#llx bytes), made whole", (unsigned long long)t->serial, l, (unsigned long long)(next - s->loff[l])); return nil; }
+        if (next - s->loff[l] != cnt * SP_TILE) { static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu: level %u is not whole tiles (%#llx bytes), made whole", (unsigned long long)t->serial, l, (unsigned long long)(next - s->loff[l])); return nil; }
+        if (is3d) {
+            s->mtiles_x[l] = (w + s->mtw - 1) / s->mtw; s->mtiles_y[l] = (h + s->mth - 1) / s->mth;
+            s->mloff[l] = mk; mk += s->mtiles_x[l] * s->mtiles_y[l] * s->tiles_z[l];
+        }
     }
     s->tail_at = k; s->per_layer = k + (s->ntiled < s->levels);
+    s->ncols = mk + (is3d && s->ntiled < s->levels);
     s->tail_off = s->ntiled < s->levels ? nvn_tex_level_offset(&t->d, s->ntiled) : s->layer_size;
     // Every usage a later view or clear would ask for from the start: an upgrade (tex_upgrade) would have to remake the texture whole. A sparse texture gets no lossless compression from them to lose,
     // and without optimized contents no metadata for the whole texture either (184 MB for an 8192x8192x68 RGBA8 array on an M6)
-    d.placementSparsePageSize = MTLSparsePageSize64; d.allowGPUOptimizedContents = NO;
+    d.placementSparsePageSize = psz; d.allowGPUOptimizedContents = NO;
     d.usage |= MTLTextureUsagePixelFormatView | (fmt_compressed(t->d.format) ? 0 : MTLTextureUsageRenderTarget);
     id<MTLTexture> mt = [g_dev newTextureWithDescriptor:d];
     if (!mt) { RED_ONCE(145, "cannot make a placement sparse texture %ux%ux%u format %#x", t->d.width, t->d.height, t->d.depth, t->d.format); return nil; }
-    if (s->ntiled < s->levels && (mt.firstMipmapInTail != s->ntiled || mt.tailSizeInBytes != SP_TILE)) {   // with no tail (every level tiled) Metal's tail lies past the last level
-        static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu: Metal's tail starts at level %lu (%lu bytes), NVN's at %u, made whole", (unsigned long long)t->serial, (unsigned long)mt.firstMipmapInTail, (unsigned long)mt.tailSizeInBytes, s->ntiled);
-        return nil;
+    if (s->ntiled < s->levels) {   // with no tail (every level tiled) Metal's tail lies past the last level
+        int tail_ok = is3d ? (mt.firstMipmapInTail == s->ntiled && mt.tailSizeInBytes && (mt.tailSizeInBytes % SP16_PAGE) == 0 && mt.tailSizeInBytes <= (NSUInteger)SP16_UNIT * SP16_PAGE)
+                           : (mt.firstMipmapInTail == s->ntiled && mt.tailSizeInBytes == SP_TILE);
+        if (!tail_ok) {
+            static int nl; if (nl++ < 4) MLOG("sparse texture ser=%llu: Metal's tail starts at level %lu (%lu bytes), NVN's at %u, made whole", (unsigned long long)t->serial, (unsigned long)mt.firstMipmapInTail, (unsigned long)mt.tailSizeInBytes, s->ntiled);
+            return nil;
+        }
     }
     s->tex = mt; *made = mt; tex_meta_set(mt, t, TEX_META_SPARSE_PLACED, gpu); res_add(mt);
-    s->slot = calloc((size_t)s->layers * s->per_layer, sizeof *s->slot); s->nmap = calloc(s->ntiled + 1, sizeof *s->nmap);
-    if (!s->slot || !s->nmap) MDIE("sparse texture tile table");
+    if (is3d) {
+        s->mapped3d = calloc(s->per_layer, sizeof *s->mapped3d);
+        s->col_slot = calloc((size_t)s->ncols * s->col_units, sizeof *s->col_slot);
+        s->col_rc = calloc(s->ncols, sizeof *s->col_rc);
+        s->nmap = calloc(s->ntiled + 1, sizeof *s->nmap);
+        if (!s->mapped3d || !s->col_slot || !s->col_rc || !s->nmap) MDIE("3D sparse texture tile table");
+    } else {
+        s->slot = calloc((size_t)s->layers * s->per_layer, sizeof *s->slot); s->nmap = calloc(s->ntiled + 1, sizeof *s->nmap);
+        if (!s->slot || !s->nmap) MDIE("sparse texture tile table");
+    }
     s->gen = 0; s->stamp = 0;
-    static int nl; if (nl++ < 20) MLOG("sparse texture ser=%llu %ux%ux%u format %#x levels %u: placement sparse%s, %u tiles a layer (%llu MB made whole)", (unsigned long long)t->serial, t->d.width, t->d.height, s->layers,
-                                        t->d.format, s->levels, gpu ? " (GPU-written)" : "", s->per_layer, (unsigned long long)(sa.size >> 20));
+    static int nl; if (nl++ < 20) MLOG("sparse texture ser=%llu %ux%ux%u format %#x levels %u: placement sparse%s%s, %u tiles%s (%llu MB made whole)", (unsigned long long)t->serial, t->d.width, t->d.height, is3d ? t->d.depth : s->layers,
+                                        t->d.format, s->levels, is3d ? " 3D (16 KB)" : "", gpu ? " (GPU-written)" : "", s->per_layer, is3d ? "" : " a layer", (unsigned long long)(sa.size >> 20));
     return s;
 }
 
@@ -5211,11 +5287,119 @@ static void sp_op(sp_ops *o, MTL4UpdateSparseTextureMappingOperation x) {
     o->op[o->n++] = x;
 }
 // One look at a texture's tiles: the mapping operations by heap (unmaps, with no heap, last) and the staging of what is uploaded
-typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg; size_t stg_off; uint64_t up, unmapped, stamp; int bw, bh, bpb, force; } sp_look;
+typedef struct { NvSparse *s; const tex_t *t; id<MTLTexture> tex; sp_ops *ops; uint32_t nheaps; uint8_t *tile, *tail; id<MTLBuffer> stg, zb; size_t stg_off; uint64_t up, unmapped, stamp; int bw, bh, bpb, force, blitted, need_bar; } sp_look;
 static void sp_stg(sp_look *c, size_t n) {
     if (c->stg && c->stg_off + n <= c->stg.length) return;
     c->stg = [g_dev newBufferWithLength:MAX((size_t)8 << 20, n) options:MTLResourceStorageModeShared]; if (!c->stg) MDIE("sparse upload staging");
     up_begin(); res_add(c->stg); [g_up_keep addObject:c->stg]; c->stg_off = 0;
+}
+static void sp_zero_3d(sp_look *c, uint32_t l, uint32_t ox, uint32_t oy, uint32_t oz, uint32_t cw, uint32_t ch, uint32_t cz) {
+    if (!cw || !ch || !cz || !c->zb) return;
+    size_t pitch = (size_t)((cw + c->bw - 1) / c->bw) * c->bpb, rows = (ch + c->bh - 1) / c->bh, img = pitch * rows;
+    if (img * cz > c->zb.length) return;
+    up_begin();
+    up_blit_add_at(c->zb, 0, pitch, img, MTLSizeMake(cw, ch, cz), c->tex, 0, l, MTLOriginMake(ox, oy, oz));
+    c->blitted = 1;
+}
+// Tile i of a 3D placement sparse texture (the tail at s->tail_at): up to rx x ry NVN tiles in one Z slab share a Metal 16 KB slab-column (col_rc), mapped in 16-slice units.
+// Newly mapped columns and partially unmapped quadrants are zeroed from zero_buf so unmapped NVN tiles always read 0. Caller holds g_sp_mu.
+static void sp_tile_3d(sp_look *c, uint32_t i) {
+    NvSparse *s = c->s; const tex_t *t = c->t;
+    int is_tail = i == s->tail_at;
+    if (is_tail) {
+        uint64_t a = (uint64_t)(uintptr_t)t->mem + s->tail_off, n = s->layer_size - s->tail_off;
+        uint32_t col = s->ncols - 1; uint32_t *cs = &s->col_slot[(size_t)col * s->col_units];
+        int st = nvn_sparse_tile_state(t->pool, a, n, s->gen, s->stamp); if (st < 0) st = 0;
+        if (!(st & 1)) {
+            if (s->mapped3d[i]) {
+                sp_op(&c->ops[c->nheaps], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeUnmap, MTLRegionMake3D(0, 0, 0, 1, 1, 1), s->ntiled, 0, 0});
+                sp16_slot_free(cs[0] - 1); cs[0] = 0; s->col_rc[col] = 0; s->mapped3d[i] = 0; s->nmap[s->ntiled]--; c->unmapped++;
+            }
+            return;
+        }
+        if (s->mapped3d[i]) {
+            if (s->gpu) return;
+            if (!c->force && !(st & 2)) return;
+        } else {
+            uint32_t unit; if (!sp16_slot(&unit)) return;
+            uint32_t hi = unit / SP16_HEAP_UNITS; if (hi >= c->nheaps) { RED_ONCE(146, "sparse tiles: more than 64 heaps made in one look"); sp16_slot_free(unit); return; }
+            c->ops[hi].heap = g_sp16_heaps[hi];
+            sp_op(&c->ops[hi], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, MTLRegionMake3D(0, 0, 0, 1, 1, 1), s->ntiled, 0, (unit % SP16_HEAP_UNITS) * SP16_UNIT});
+            cs[0] = unit + 1; s->col_rc[col] = 1; s->mapped3d[i] = 1; s->nmap[s->ntiled]++;
+            if (s->gpu) { c->up++; return; }
+        }
+        nvn_sparse_protect_tile(t->pool, a, n);
+        c->tail = realloc_or_die(c->tail, n, "the sparse tail copy");
+        nvn_sparse_copy(t->pool, c->tail, a, n);
+        for (uint32_t tl = s->ntiled; tl < s->levels; tl++) {
+            uint32_t w, h, z; tex_lsize(t, tl, &w, &h, &z); size_t pitch = (size_t)((w + c->bw - 1) / c->bw) * c->bpb, rows = (h + c->bh - 1) / c->bh, img = pitch * rows;
+            sp_stg(c, img * z);
+            if (nvn_deswizzle_from(&t->d, tl, 0, c->tail, s->tail_off, (uint8_t *)c->stg.contents + c->stg_off, pitch)) { RED_ONCE(147, "sparse tail level %u of format %#x not decoded", tl, t->d.format); break; }
+            up_blit_add_at(c->stg, c->stg_off, pitch, img, MTLSizeMake(w, h, z), c->tex, 0, tl, MTLOriginMake(0, 0, 0)); c->stg_off += (img * z + 255) & ~(size_t)255; c->blitted = 1;
+        }
+        c->up++; return;
+    }
+    uint32_t l = 0; while (l + 1 < s->ntiled && i >= s->loff_t[l + 1]) l++;
+    uint32_t j = i - s->loff_t[l], plane = s->tiles_x[l] * s->tiles_y[l], tz = j / plane, rem = j % plane, ty = rem / s->tiles_x[l], tx = rem % s->tiles_x[l];
+    uint32_t mtx = tx / s->rx, mty = ty / s->ry, col = s->mloff[l] + (tz * s->mtiles_y[l] + mty) * s->mtiles_x[l] + mtx;
+    uint32_t *cs = &s->col_slot[(size_t)col * s->col_units];
+    uint32_t lw, lh, ld; tex_lsize(t, l, &lw, &lh, &ld);
+    uint32_t x0 = tx * s->tw, y0 = ty * s->th, z0 = tz * s->td;
+    uint32_t cw = MIN(s->tw, lw - x0), ch = MIN(s->th, lh - y0), cz = MIN(s->td, ld - z0);
+    uint64_t a = (uint64_t)(uintptr_t)t->mem + s->loff[l] + (uint64_t)j * SP_TILE;
+    int st = nvn_sparse_tile_state(t->pool, a, SP_TILE, s->gen, s->stamp); if (st < 0) st = 0;
+    if (!(st & 1)) {
+        if (!s->mapped3d[i]) return;
+        s->mapped3d[i] = 0; s->nmap[l]--; c->unmapped++;
+        if (--s->col_rc[col] == 0) {
+            for (uint32_t u = 0; u < s->col_units; u++) if (cs[u]) {
+                uint32_t uz = z0 + u * SP16_UNIT, dz = MIN(SP16_UNIT, ld - uz);
+                sp_op(&c->ops[c->nheaps], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeUnmap, MTLRegionMake3D(mtx, mty, uz, 1, 1, dz), l, 0, 0});
+                sp16_slot_free(cs[u] - 1); cs[u] = 0;
+            }
+        } else if (!s->gpu) {
+            sp_zero_3d(c, l, x0, y0, z0, cw, ch, cz);
+        }
+        return;
+    }
+    if (s->mapped3d[i]) {
+        if (s->gpu) return;
+        if (!c->force && !(st & 2)) return;
+    } else {
+        if (s->col_rc[col] == 0) {
+            uint32_t got[2] = {0, 0}, ngot = 0;
+            for (uint32_t u = 0; u < s->col_units && z0 + u * SP16_UNIT < ld; u++) {
+                uint32_t unit; if (!sp16_slot(&unit)) { for (uint32_t q = 0; q < ngot; q++) sp16_slot_free(got[q]); return; }
+                uint32_t hi = unit / SP16_HEAP_UNITS;
+                if (hi >= c->nheaps) { RED_ONCE(146, "sparse tiles: more than 64 heaps made in one look"); sp16_slot_free(unit); for (uint32_t q = 0; q < ngot; q++) sp16_slot_free(got[q]); return; }
+                got[ngot++] = unit;
+            }
+            for (uint32_t u = 0; u < ngot; u++) {
+                uint32_t unit = got[u], hi = unit / SP16_HEAP_UNITS, uz = z0 + u * SP16_UNIT, dz = MIN(SP16_UNIT, ld - uz);
+                c->ops[hi].heap = g_sp16_heaps[hi];
+                sp_op(&c->ops[hi], (MTL4UpdateSparseTextureMappingOperation){MTLSparseTextureMappingModeMap, MTLRegionMake3D(mtx, mty, uz, 1, 1, dz), l, 0, (unit % SP16_HEAP_UNITS) * SP16_UNIT});
+                cs[u] = unit + 1;
+            }
+            uint32_t mx0 = mtx * s->mtw, my0 = mty * s->mth;
+            sp_zero_3d(c, l, mx0, my0, z0, MIN(s->mtw, lw - mx0), MIN(s->mth, lh - my0), cz);
+            c->need_bar = 1;
+        }
+        s->col_rc[col]++; s->mapped3d[i] = 1; s->nmap[l]++;
+        if (s->gpu) { c->up++; return; }
+    }
+    nvn_sparse_protect_tile(t->pool, a, SP_TILE);
+    nvn_sparse_copy(t->pool, c->tile, a, SP_TILE);
+    sp_stg(c, SP_TILE);
+    size_t tpitch = (size_t)(s->tw / c->bw) * c->bpb, trows = s->th / c->bh, timg = tpitch * trows;
+    uint32_t wb, rows, nz;
+    if (nvn_deswizzle_tile_3d(&t->d, l, tx, ty, tz, c->tile, (uint8_t *)c->stg.contents + c->stg_off, tpitch, timg, &wb, &rows, &nz)) { RED_ONCE(148, "sparse tile of format %#x not decoded", t->d.format); return; }
+    if (wb && rows && nz) {
+        up_blit_add_at(c->stg, c->stg_off, tpitch, timg, MTLSizeMake(cw, ch, cz), c->tex, 0, l, MTLOriginMake(x0, y0, z0));
+        if (c->need_bar) { g_up_blits[g_nup_blits - 1].bar = 1; c->need_bar = 0; }
+        c->blitted = 1;
+    }
+    c->stg_off += SP_TILE;
+    c->up++;
 }
 // Tile i of layer y (the tail at s->tail_at): the game has mapped all its pages or not, and the Metal tile follows; its content is uploaded when it is newly mapped or its pages were written. Caller holds g_sp_mu
 static void sp_tile(sp_look *c, uint32_t y, uint32_t i) {
@@ -5283,9 +5467,10 @@ static void sp_range(sp_look *c, uint64_t lo, uint64_t hi) {
     if (hi > end) hi = end;
     for (uint64_t o = (lo - base) & ~(uint64_t)(SP_TILE - 1); lo < hi && base + o < hi;) {
         uint32_t y = (uint32_t)(o / s->layer_size); uint64_t in = o % s->layer_size;
-        if (in >= s->tail_off) { sp_tile(c, y, s->tail_at); o += s->layer_size - in; continue; }   // the tail once, whatever part of it the range touches
+        if (in >= s->tail_off) { if (s->is3d) sp_tile_3d(c, s->tail_at); else sp_tile(c, y, s->tail_at); o += s->layer_size - in; continue; }   // the tail once, whatever part of it the range touches
         uint32_t l = 0; while (l + 1 < s->ntiled && in >= s->loff[l + 1]) l++;
-        sp_tile(c, y, s->loff_t[l] + (uint32_t)((in - s->loff[l]) / SP_TILE));
+        uint32_t ti = s->loff_t[l] + (uint32_t)((in - s->loff[l]) / SP_TILE);
+        if (s->is3d) sp_tile_3d(c, ti); else sp_tile(c, y, ti);
         o += SP_TILE;
     }
 }
@@ -5302,11 +5487,26 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
     if (whole == 1) s->seq = nvn_sparse_log_seq(t->pool);
     else if (whole >= 2) { s->wseen = nvn_dirty_sparse_writes(); s->wframe = atomic_load(&g_cur_frame); }
     else { if (!(ranges = malloc(RANGES * sizeof *ranges))) MDIE("sparse mapping ranges"); nr = nvn_sparse_log_read(t->pool, &s->seq, ranges, RANGES); if (!nr) { free(ranges); return; } }
-    sp_look c = {.s = s, .t = t, .tex = stex, .nheaps = (uint32_t)g_sp_heaps.count + 64, .force = whole == 3, .stamp = stamp}; c.bpb = nvn_fmt_bpb(t->d.format, &c.bw, &c.bh);
+    uint32_t nheaps = (uint32_t)(s->is3d ? g_sp16_heaps.count : g_sp_heaps.count) + 64;
+    sp_look c = {.s = s, .t = t, .tex = stex, .nheaps = nheaps, .zb = s->is3d ? zero_buf((size_t)SP16_UNIT * SP16_PAGE * 2) : nil, .force = whole == 3, .stamp = stamp}; c.bpb = nvn_fmt_bpb(t->d.format, &c.bw, &c.bh);
     if (!(c.ops = calloc(c.nheaps + 1, sizeof *c.ops)) || !(c.tile = malloc(SP_TILE))) MDIE("sparse mapping operations");
     pthread_mutex_lock(&g_sp_mu);
-    if (nr < 0) for (uint32_t y = 0; y < s->layers; y++) for (uint32_t i = 0; i < s->per_layer; i++) { if (whole < 2 || s->slot[(size_t)y * s->per_layer + i]) sp_tile(&c, y, i); }
-    else {
+    if (s->is3d && whole == 3) {   // dropped upload batch: re-zero every live 3D slab-column before re-uploading mapped tiles so unmapped sibling quadrants stay 0
+        for (uint32_t l = 0; l < s->ntiled; l++) {
+            uint32_t lw, lh, ld; tex_lsize(t, l, &lw, &lh, &ld);
+            for (uint32_t tz = 0; tz < s->tiles_z[l]; tz++) for (uint32_t mty = 0; mty < s->mtiles_y[l]; mty++) for (uint32_t mtx = 0; mtx < s->mtiles_x[l]; mtx++) {
+                uint32_t col = s->mloff[l] + (tz * s->mtiles_y[l] + mty) * s->mtiles_x[l] + mtx;
+                if (!s->col_rc[col]) continue;
+                uint32_t mx0 = mtx * s->mtw, my0 = mty * s->mth, z0 = tz * s->td;
+                sp_zero_3d(&c, l, mx0, my0, z0, MIN(s->mtw, lw - mx0), MIN(s->mth, lh - my0), MIN(s->td, ld - z0));
+                c.need_bar = 1;
+            }
+        }
+    }
+    if (nr < 0) {
+        if (s->is3d) { for (uint32_t i = 0; i < s->per_layer; i++) { if (whole < 2 || s->mapped3d[i]) sp_tile_3d(&c, i); } }
+        else { for (uint32_t y = 0; y < s->layers; y++) for (uint32_t i = 0; i < s->per_layer; i++) { if (whole < 2 || s->slot[(size_t)y * s->per_layer + i]) sp_tile(&c, y, i); } }
+    } else {
         qsort(ranges, (size_t)nr, sizeof ranges[0], sp_cmp);
         uint64_t lo = ranges[0][0], hi = ranges[0][1];
         for (int k = 1; k < nr; k++) { if (ranges[k][0] <= hi) { if (ranges[k][1] > hi) hi = ranges[k][1]; continue; } sp_range(&c, lo, hi); lo = ranges[k][0]; hi = ranges[k][1]; }
@@ -5322,9 +5522,14 @@ static void sparse_sync(NvSparse *s, const tex_t *t, int whole) {
         rec_queue_block(^{ [g_q4 updateTextureMappings:stex heap:heap operations:op count:n]; free(op); });
     }
     free(c.ops);
-    if (c.up && !s->gpu) { [g_up_texs addObject:stex]; if (!g_cb) up_flush(); }
-    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all (%llu of them shared by physical memory), peak %llu (%llu MB)", (unsigned long long)t->serial,
-                                                        (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_live, (unsigned long long)g_sp_shared, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20)); }
+    if (c.blitted || (c.up && !s->gpu)) { [g_up_texs addObject:stex]; if (!g_cb) up_flush(); }
+    static uint64_t looks; if (c.up || c.unmapped) { looks++; if (looks <= 20 || looks % 500 == 0) {
+        if (s->is3d) MLOG("sparse 3D texture ser=%llu: %llu tiles uploaded, %llu unmapped; 3D slab-columns live %llu (%llu MB), peak %llu (%llu MB)", (unsigned long long)t->serial,
+                          (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp16_live, (unsigned long long)(g_sp16_live * SP16_UNIT * SP16_PAGE >> 20),
+                          (unsigned long long)g_sp16_peak, (unsigned long long)(g_sp16_peak * SP16_UNIT * SP16_PAGE >> 20));
+        else MLOG("sparse texture ser=%llu: %llu tiles uploaded, %llu unmapped; %llu tiles mapped in all (%llu of them shared by physical memory), peak %llu (%llu MB)", (unsigned long long)t->serial,
+                  (unsigned long long)c.up, (unsigned long long)c.unmapped, (unsigned long long)g_sp_live, (unsigned long long)g_sp_shared, (unsigned long long)g_sp_peak, (unsigned long long)(g_sp_peak * SP_TILE >> 20));
+    } }
 }
 // A look when the texture is resolved: only a new mapping request in its pool costs anything, or a write to a page behind a tile, which no game seen does to a tile it keeps mapped (none of 42,072
 // in Mario Kart World's first race): at most once a second, as the look goes over every mapped tile, so a rewritten tile can show its old content for that long
@@ -5348,7 +5553,7 @@ static void sparse_gpu_wrote(const tex_t *t) {
     id have = tex_get(t->serial); NvSparse *s = nil;
     if ([have isKindOfClass:[NvPkg class]]) s = ((NvPkg *)have)->ps;
     else if (have && atomic_load_explicit(&g_sp_gpu_n, memory_order_relaxed)) s = objc_getAssociatedObject(have, &g_sp_key);
-    if (!s || !s->undrawn) return;
+    if (!s || !s->undrawn || s->is3d) return;
     s->undrawn = 0;
     pthread_mutex_lock(&g_sp_mu);
     for (size_t i = 0, n = (size_t)s->layers * s->per_layer; i < n; i++) if (s->slot[i]) { sp_tl *e = sp_tl_of(s->slot[i] - 1); if (e->p) e->drawn = 1; }
@@ -26013,9 +26218,11 @@ void mem_census(const char *why) { @autoreleasepool {
     census_rvec_sum(&zc_rng, 0, &zc_guest, NULL); free(zc_rng.v);
     uint64_t sp_heaps_n = 0, sp_heaps_b = 0, sp_live_b = 0, sp_shared_b = 0;
     pthread_mutex_lock(&g_sp_mu);
-    sp_heaps_n = g_sp_heaps ? (uint64_t)g_sp_heaps.count : 0;
-    sp_heaps_b = sp_heaps_n * (uint64_t)SP_HEAP_TILES * SP_TILE;
-    sp_live_b = g_sp_live * SP_TILE;
+    uint64_t sp64_n = g_sp_heaps ? (uint64_t)g_sp_heaps.count : 0;
+    uint64_t sp16_n = g_sp16_heaps ? (uint64_t)g_sp16_heaps.count : 0;
+    sp_heaps_n = sp64_n + sp16_n;
+    sp_heaps_b = sp64_n * (uint64_t)SP_HEAP_TILES * SP_TILE + sp16_n * (uint64_t)SP16_HEAP_UNITS * SP16_UNIT * SP16_PAGE;
+    sp_live_b = g_sp_live * SP_TILE + g_sp16_live * SP16_UNIT * SP16_PAGE;
     sp_shared_b = g_sp_shared * SP_TILE;
     pthread_mutex_unlock(&g_sp_mu);
     os_unfair_lock_lock(&g_rh_lk); unsigned rh_n = g_rh_n; uint64_t rh_b = g_rh_bytes; os_unfair_lock_unlock(&g_rh_lk);

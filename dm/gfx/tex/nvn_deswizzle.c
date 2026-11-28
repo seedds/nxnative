@@ -126,6 +126,30 @@ int nvn_deswizzle_tile(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32
     *wb = w; *nrows = h;
     return 0;
 }
+// One 64 KB tile (tx, ty, tz) of a sparse 3D texture's tiled level. The level's width is padded to whole tiles (nvn_tex.c level_walk), and a tile is one block row and one block slice of
+// 128 / (block height × block depth) GOB columns: 64 KB of its own, at the level's start + ((tz × tiles_y + ty) × tiles_x + tx) × 64 KB. Decodes the part inside the level into dst.
+int nvn_deswizzle_tile_3d(const nvn_texdesc *d, unsigned level, uint32_t tx, uint32_t ty, uint32_t tz, const void *tile, void *dst, size_t pitch, size_t image, uint32_t *wb, uint32_t *nrows, uint32_t *nslices) {
+    uint32_t row_bytes, rows, slices, bpb; uint64_t base; unsigned th, td;
+    *wb = *nrows = *nslices = 0;
+    if (nvn_deswizzle_geom(d, level, 0, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || d->target != 2 || th + td > 7) return -1;
+    uint32_t bh = 1u << th, bd = 1u << td;
+    uint32_t trb = (128u >> (th + td)) * 64, trows = 8u << th, x0 = tx * trb, y0 = ty * trows, z0 = tz * bd;
+    if (x0 >= row_bytes || y0 >= rows || z0 >= slices) return 0;
+    uint32_t w = row_bytes - x0 < trb ? row_bytes - x0 : trb, h = rows - y0 < trows ? rows - y0 : trows, nz = slices - z0 < bd ? slices - z0 : bd;
+    if (pitch < w || image < (size_t)h * pitch) return -1;
+    const gob_segments *gob = &g_segments[nvn_gob_order(d) != 0];
+    uint64_t block = 512ull << (th + td);
+    for (uint32_t z = 0; z < nz; z++) {
+        uint64_t zb = (uint64_t)z * bh * 512;
+        uint8_t *slice = (uint8_t *)dst + (size_t)z * image;
+        for (uint32_t y = 0; y < h; y++) {
+            uint64_t offset = zb + (uint64_t)(y >> 3) * 512 + gob->y[y & 7];
+            move_bl_row((uint8_t *)tile + offset, slice + (size_t)y * pitch, w, block, gob->x, 1);
+        }
+    }
+    *wb = w; *nrows = h; *nslices = nz;
+    return 0;
+}
 // nvn_deswizzle with the storage given from byte src_at on (a sparse texture's mip tail gathered on its own): the level must lie at or after it
 int nvn_deswizzle_from(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, uint64_t src_at, void *dst, size_t dst_pitch) {
     return move(d, level, layer, (uint8_t *)src, src_at, (uint8_t *)dst, dst_pitch, 1);

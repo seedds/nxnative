@@ -49,7 +49,7 @@ void dm_touch_script(const dm_touch *t, int n) { touch_apply(t, n); }
 static int32_t clampi(float v, int hi) { int32_t r = (int32_t)(v * (float)(hi + 1)); return r < 0 ? 0 : r > hi ? hi : r; }
 // Fill one TouchScreenState<max> (out is 0x10 + 0x28 · max bytes; max 1–16); now_ns is used for delta_time. Returns the number of touch points written.
 // Fingers beyond max are left for a later read (their Start / End is not used up). points 0 is a read in console mode, when the screen is out of reach: the state
-// has no touch points and the fingers are left as they are, but it takes the next sample number, so the numbers rise from read to read whatever the mode. Unity's
+// has no touch points and the fingers are left as they are, but it takes the next sample number, so the numbers rise from sample to sample whatever the mode. Unity's
 // touch reader (Aokana main+0xd2bde0) takes a state only if its number is above the last one it took, empty states included
 int touch_fill_n(void *out, int max, uint64_t now_ns, int points) {
     if (max < 1) max = 1; else if (max > 16) max = 16;
@@ -73,7 +73,7 @@ int touch_fill_n(void *out, int max, uint64_t now_ns, int points) {
     }
     pthread_mutex_unlock(&g_tl);
     int32_t cnt = k; memcpy(o + 0, &samp, 8); memcpy(o + 8, &cnt, 4);
-    // DM_TOUCH_LOG=1 (acceptance diagnostics): each read with non-zero touch points logs one line -- sample number, touch count, and for each point finger_id / panel x,y / attributes (1 Start, 2 End); capped at 500 lines
+    // DM_TOUCH_LOG=1 (acceptance diagnostics): each sample made with non-zero touch points logs one line -- sample number, touch count, and for each point finger_id / panel x,y / attributes (1 Start, 2 End); capped at 500 lines
     static int lg = -1, nl; if (lg < 0) lg = getenv("DM_TOUCH_LOG") != NULL;
     if (lg && k && nl < 500) {
         char b[256]; int m = snprintf(b, sizeof b, "touch read sample %lld points %d", (long long)samp, k);

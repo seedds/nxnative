@@ -1,0 +1,45 @@
+# Xenoblade Chronicles X: Definitive Edition 1.0.1 (SDK 19.3.2, Monolith, NVN).
+# See README.md for bring-up evidence and remaining validation.
+
+# ---- Identity ----
+title_id	0100453019AA8000
+program_id	0100453019AA8000
+
+# ---- App ----
+name	Xenoblade Chronicles X: Definitive Edition
+ipa	XenobladeChroniclesXDefinitiveEdition.ipa
+app_category	public.app-category.role-playing-games
+
+pad_layout	full
+
+# ---- Versions ----
+build	v65536	1.0.1	main=3f2425864cf226844511065f77aa3e36	subsdk0=99f9fc3860de320166ad07a6442a64f4	sdk=cff74470477c5fc65bb2538fd4a72441
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	sts.ard
+zip_store	.ard:.arh:.pck:.webm:.metallib
+
+# ---- Memory ----
+# A 5 GB reservation, with 4.375 GB alias memory for Monolith's page allocator.
+# patches.py adapts its outer region and first arena to this layout.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 32 MB of system resource
+sys_resource	0x2000000
+# The allocator probes physical capacity; stop at the Horizon application pool.
+mem_map_limit	on
+# Observed at boot: nvnDeviceSetDepthMode near=-w.
+depth_mode	gl
+
+# The engine's native interval controls its wait and elapsed-time simulation step.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	/movie/=movie /sound/=sound
+shader_note	Xenoblade Chronicles X: Definitive Edition shaders

@@ -32,7 +32,7 @@ static fix_t *make(int target, NVNformat format, unsigned w, unsigned h, unsigne
     nvn_tex_layout(&f->t.d, &f->t.L);
     f->bpb = (unsigned)nvn_fmt_bpb(format, &bw, &bh); f->bw = (unsigned)bw; f->bh = (unsigned)bh;
     f->d3 = target == NVN_TEXTURE_TARGET_3D; f->levels = levels;
-    f->layers = target == NVN_TEXTURE_TARGET_2D_ARRAY || target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY ? depth : target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : 1;
+    f->layers = target == NVN_TEXTURE_TARGET_2D_ARRAY || target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY ? depth : target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : target == NVN_TEXTURE_TARGET_1D_ARRAY ? h : 1;   // a 1D array's height counts its layers
     unsigned n = levels * f->layers; f->at = calloc(n, sizeof *f->at); f->len = calloc(n, sizeof *f->len); f->lo = calloc(n, 8); f->hi = calloc(n, 8); f->written = calloc(n, 1);
     for (unsigned l = 0; l < levels; l++) for (unsigned a = 0; a < f->layers; a++) {
         unsigned lw, lh, lz; size_t pitch, rows; geom(f, l, &lw, &lh, &lz, &pitch, &rows);
@@ -211,6 +211,9 @@ int main(void) { @autoreleasepool {
         run("RGBA8 cube array", NVN_TEXTURE_TARGET_CUBEMAP_ARRAY, NVN_FORMAT_RGBA8, 64, 64, 12, 3, 0, direct);
         run("RGBA8 3D with levels", NVN_TEXTURE_TARGET_3D, NVN_FORMAT_RGBA8, 64, 64, 32, 4, 0, direct);
         run("RGB565 array", NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGB565, 256, 128, 4, 1, 0, direct);
+        // PRAGMATA's light-profile LUT: a 1D array is one row a layer; uploaded as height rows a layer, it was refused by validation and wrote past each slice without it
+        run("R16F 1D array", NVN_TEXTURE_TARGET_1D_ARRAY, NVN_FORMAT_R16F, 512, 64, 1, 1, 0, direct);
+        run("RGBA8 1D array with levels", NVN_TEXTURE_TARGET_1D_ARRAY, NVN_FORMAT_RGBA8, 256, 8, 1, 4, 4096, direct);
     }
     cost();
     printf("t_partial_upload: %d checks, %d failed\n", checks, failed); return failed != 0;

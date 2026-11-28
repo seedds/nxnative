@@ -1,0 +1,40 @@
+# Pentiment (Switch, base game v0 + update 1.3.2 = v131072). Brought up on the Mac 2026-11-09.
+# Obsidian Entertainment's narrative adventure, Unity 2021.3.23f1 IL2CPP with FMOD, SDK 16.2.0, NVN.
+# Modules main + subsdk0 (NintendoSDK_movie) + sdk. The standard host and rewriter run this build with no game-specific cut or host change.
+# The values below are the NSP script's provisional profile after its heap and address-region checks, confirmed in play.
+
+# ---- Identity ----
+title_id	010036F01AE9E000
+program_id	010036F01AE9E000
+
+# ---- App ----
+name	Pentiment
+ipa	Pentiment.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.3.2	main=58171e8de687161814363b1283234d44	subsdk0=ff0149d0b5e882b87c2f06a981302b13	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/caaf1f1bf70dd28f63d306857b7f5c33.bundle
+zip_store	.bundle:.dat:.gamedatabundle:.ress:.stringtablebundle:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource, so the game's memory lives in the alias region.
+# The heap check found no SetHeapSize; the address-region check 15 s into nnMain reached alias +4.04 GB of this 4.375 GB region.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# The heap check saw nvnDeviceSetDepthMode with near = 0; pipeline bases made before it must use that mode.
+depth_mode	zero
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/Data/=data
+shader_note	Pentiment shaders

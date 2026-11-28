@@ -4,6 +4,7 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nso_asm import ADRP, ADDI, LDRX
@@ -85,6 +86,38 @@ class FindTest(unittest.TestCase):
         g, f, why = find(image(*[reader] * N, lambda a: store(a, 30), *[lambda a: reader(a, g=GLOBAL2)] * N, lambda a: store(a, 30, g=GLOBAL2)))
         self.assertIsNone(g)
         self.assertTrue(why.startswith('[RED] '), why)
+
+
+class REEngineTest(unittest.TestCase):
+    LOOP = 0x1000
+    ACCESSORS = 0x2000
+
+    def make_image(self, *, other_slot=False, other_fixed_rate=False):
+        img = image()
+        names = b'via.Application\0get_MaxFps\0set_MaxFps\0'
+        img[RO:RO + len(names)] = names
+        limit = FIELD + 4
+        loop = [ldr_s(13, 19, FIELD), ldr_s(1, 19, limit), fdiv(15, 13, 1),
+                0xbd041e60, 0x1e2021e0, ldr_s(0, 19, FIELD if other_fixed_rate else limit), 0xf9000bf9, fdiv(1, 13, 0)]
+        struct.pack_into('<8I', img, self.LOOP, *loop)
+        for j, field in enumerate((FIELD, FIELD, limit, limit)):
+            at = self.ACCESSORS + j * 20
+            load = ldr_s(0, 8, field)
+            code = obj(at, GLOBAL, got=True) + [load if j % 2 == 0 else load & ~0x00400000, RET]
+            if other_slot and j == 3:
+                code[1] = LDRX(8, 8, ((GOT + 8) & 0xfff) // 8)
+            struct.pack_into('<5I', img, at, *code)
+        return img
+
+    def test_re_engine_rate_and_global(self):
+        with patch('nso_code.fde_ranges', return_value=[(self.LOOP, self.LOOP + 32)]):
+            ptr, field, why = fps_target.find_re_engine(bytes(self.make_image()), TEXT, DATA)
+        self.assertEqual((ptr, field), (GLOBAL, FIELD + 4), why)
+
+    def test_rejects_disagreement_between_the_accessors_or_timing_paths(self):
+        with patch('nso_code.fde_ranges', return_value=[(self.LOOP, self.LOOP + 32)]):
+            for img in (self.make_image(other_slot=True), self.make_image(other_fixed_rate=True)):
+                self.assertIsNone(fps_target.find_re_engine(bytes(img), TEXT, DATA)[0])
 
 
 if __name__ == '__main__':

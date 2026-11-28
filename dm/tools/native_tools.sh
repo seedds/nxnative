@@ -15,23 +15,27 @@ WORK=${WORK:-$(mktemp -d -t native_tools)}
 mkdir -p "$WORK"
 command -v dotnet > /dev/null || { echo '[RED] building the native tools needs the .NET SDK 10 (brew install --cask dotnet-sdk); running them does not' >&2; exit 1; }
 
-build() {   # <name> <csproj> <output executable>
+build() {   # <name> <csproj> <output executable> [extra dotnet publish args...]
+    name=$1; csproj=$2; out=$3; shift 3
     for rid in osx-arm64 osx-x64; do   # NativeAOT compiles one architecture per publish; the SDK cross-compiles the other
-        dotnet publish "$2" -c Release -r "$rid" -nologo -v quiet --artifacts-path "$WORK/$1-artifacts" -o "$WORK/$1-$rid" > "$WORK/$1-$rid.log" 2>&1 \
-            || { tail -20 "$WORK/$1-$rid.log" >&2; echo "[RED] $1 did not build for $rid (log: $WORK/$1-$rid.log)" >&2; exit 1; }
+        dotnet publish "$csproj" -c Release -r "$rid" -nologo -v quiet --artifacts-path "$WORK/$name-artifacts" -o "$WORK/$name-$rid" "$@" > "$WORK/$name-$rid.log" 2>&1 \
+            || { tail -20 "$WORK/$name-$rid.log" >&2; echo "[RED] $name did not build for $rid (log: $WORK/$name-$rid.log)" >&2; exit 1; }
         # A weak import is a libSystem function newer than the executable's minimum macOS: it binds to 0 on a Mac without it, and the runtime calls it unchecked. A .NET whose native
         # libraries were configured against the current SDK (a source-built one, such as Homebrew's formula) gives these; Microsoft's SDK (the cask) does not (GitHub issue #2190: pipe2)
-        weak=$(nm -m -u "$WORK/$1-$rid/$1" | grep -w weak || true)
-        [ -z "$weak" ] || { echo "$weak" >&2; echo "[RED] $1 ($rid) imports functions its minimum macOS does not have, and would crash at address 0 there: build with Microsoft's .NET SDK (brew install --cask dotnet-sdk), not a source-built one" >&2; exit 1; }
+        weak=$(nm -m -u "$WORK/$name-$rid/$name" | grep -w weak || true)
+        [ -z "$weak" ] || { echo "$weak" >&2; echo "[RED] $name ($rid) imports functions its minimum macOS does not have, and would crash at address 0 there: build with Microsoft's .NET SDK (brew install --cask dotnet-sdk), not a source-built one" >&2; exit 1; }
     done
-    lipo -create "$WORK/$1-osx-arm64/$1" "$WORK/$1-osx-x64/$1" -output "$3"
-    for a in arm64 x86_64; do sha=$(arch -"$a" "$3" --source-sha); echo "$1 ($a): source $sha"; done
-    echo "$1: sha256 $(shasum -a 256 "$3" | cut -c1-64), $(wc -c < "$3" | tr -d ' ') bytes"
+    lipo -create "$WORK/$name-osx-arm64/$name" "$WORK/$name-osx-x64/$name" -output "$out"
+    for a in arm64 x86_64; do sha=$(arch -"$a" "$out" --source-sha); echo "$name ($a): source $sha"; done
+    echo "$name: sha256 $(shasum -a 256 "$out" | cut -c1-64), $(wc -c < "$out" | tr -d ' ') bytes"
 }
 
 for t in ${*:-dmsh_xlate nx_extract}; do
     case $t in
-        dmsh_xlate) build dmsh_xlate "$REPO/dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj" "$REPO/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate" ;;
+        dmsh_xlate)
+            xlate_sha=$(python3 "$REPO/dm/gfx/tools/dmsh_chain.py" --xlate-source-sha)
+            build dmsh_xlate "$REPO/dm/gfx/tools/dmsh_xlate/dmsh_xlate.csproj" "$REPO/dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate" "-p:XlateSourceSha=$xlate_sha"
+            ;;
         nx_extract) build nx_extract "$REPO/dm/tools/nx_extract/nx_extract.csproj" "$REPO/dm/tools/nx_extract_bin/nx_extract" ;;
         *) echo "usage: native_tools.sh [dmsh_xlate] [nx_extract]" >&2; exit 2 ;;
     esac

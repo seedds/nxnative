@@ -1,0 +1,36 @@
+# NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS, SDK 14.3.0
+
+# ---- Identity ----
+title_id	0100D2D0190A4000
+program_id	0100D2D0190A4000
+
+# ---- App ----
+name	NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS
+ipa	NarutoXBorutoUltimateNinjaStormConnections.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v720896	1.7.1	main=1db3976bc6f11c208b4957b837b0781a	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v720896
+shader_versions	v720896
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk1 (GLSLC), subsdk2 (NintendoSDK_OpenGL)
+modules	main subsdk0 sdk
+romfs_marker	data/launch/data1.cpk
+zip_store	.bmp:.cache:.cpk:.nsh:.zip:.metallib
+
+# ---- Memory ----
+# the NPDM declares 32 MB of system resource (virtual address memory) and main sets a heap: a 5 GB block with a large alias region; the heap check sizes the heap region from the heap the game asks for
+mem_reserve	0x140000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 32 MB of system resource
+sys_resource	0x2000000
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS shaders
+
+# The game requests a 3.14 GiB heap. Reserve 1.25 GiB for the alias region so the heap fits.
+mem_alias	0x50000000

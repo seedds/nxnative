@@ -33,7 +33,9 @@ sys_resource	0x400000
 mem_reserve	0x140000000
 mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0x40000000
+# Switch hardware pool with a 1 GB StandardAllocator cap (docs/reference/memory.md, The heap check's 1 GB pool picked a game's low graphics)
+app_pool	0xCD500000
+stdalloc_cap	0x40000000
 
 # ---- Graphics ----
 # The game calls nvnDeviceSetDepthMode(near = 0) (log: "depth mode near=0"), so its vertex shaders use the main0_z entries; the pipeline bases made before it runs are made for that mode

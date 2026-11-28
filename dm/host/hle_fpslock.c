@@ -3,6 +3,7 @@
 // (hle_nvn.c); the game sets the values after boot and may set them again, so each is written whenever it differs. Fixed addresses: each row runs only on the main build it was found in (AGENTS.md).
 // A target frame rate the game steps by needs no row either: the rewriter finds it by its readers in any build (dm/tools/fps_target.py, main's fixups FPS_TARGET_PTR / FPS_TARGET_FIELD).
 // Nor do Unity's Application.targetFrameRate and QualitySettings.vSyncCount: the rewriter finds them through the engine's internal-call table (dm/tools/unity_fps.py, main's fixups UNITY_*).
+// Monolith's native interval controls both the wait and simulation's elapsed-time step; monolith_fps.py recognizes reviewed engine implementations and derives its global.
 // Unreal Engine needs no row: the rewriter finds its console variables by their registered names in any build (dm/tools/ue_cvar.py, main's fixups UE_CVAR:<name>), and the host writes
 // the frame limit, the profile's ue_fps_cvar (t.MaxFPS, or a game's own variable its settings apply to t.MaxFPS: SHIN MEGAMI TENSEI V: Vengeance's Project.FrameRateLimit), and the
 // present interval, rhi.SyncInterval (nvn.SyncInterval in UE 4.18's Switch RHI: DRAGON QUEST XI S). Each is a TAutoConsoleVariable whose +0x10 points to its value, the game thread's
@@ -22,7 +23,7 @@
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
 // Also: a frame time in ticks as a uint32 (scale / frame rate: 19,200,000 for the Switch's 19.2 MHz system tick), a frame step in seconds as a float (1 / frame rate), and a mode
 // switch an engine reads before it takes those fields at all (written 1 at any target)
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64 };
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, TICKS_U32, SECS_F32, MODE_U32, FPS_F64, VSYNCS_DEFAULT2_I32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
 typedef struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t scale; uint32_t flag; } lock_t;   // flag: byte offset << 8 | bit mask the object must have set for the write (0: none)
@@ -45,14 +46,9 @@ static const lock_t k_locks[] = {
     { "799d1061182c1302e08e706b84ce76e5", "Criterion frame ticks / 10", 0xed96a8, 0x28, TICKS_U32, 1, 1920000 },
     { "799d1061182c1302e08e706b84ce76e5", "Criterion 2D game step", 0xeffc60, 0x30, SECS_F32, 1, 0 },
     { "799d1061182c1302e08e706b84ce76e5", "Criterion 3D game step", 0xeffc60, 0x50, SECS_F32, 1, 0 },
-    // EA SPORTS FC 27 1.8d.310c: the game's frame regulator, an object at [main+0xda20e38] (its constructor, main+0x99e80c8, sets 60.0). Its tick (main+0x99ea580) waits until
-    // 1 / [+0x8] seconds have passed since the last frame; [+0x10] is the rate it reports. main+0x5d501c0 sets both to 30.0 whenever GameRenderSettings.Enable is 1 (fmov v1.2d, #30.0;
-    // stur q1, [x9, #8]), a constant of the Switch build, so it is written here. The simulation's own rate is Frostbite's SimulationTimeSettings, set below by name: on a build without
-    // this row the game keeps 30 fps at the right speed (the simulation at 60 and the regulator at 30: match clock as at 30). The game asks for present interval 2
-    // (BaseDisplaySettings.PresentInterval), which the profile's present_interval display ignores
-    { "a48c0de3bc353efa0e4d359bde05ef24", "FIFA frame regulator", 0xda20e38, 0x8, FPS_F64, 2, 0 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
+#define MAX_LOCKS (NLOCKS + 8)   // target, Monolith, four Unreal rows, Unity targetFrameRate, Frostbite frame regulator
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
@@ -111,41 +107,95 @@ static void dynamic_resolution_tick(void) {
     }
 }
 
-// Frostbite's simulation rate, found by name (no fixed addresses, so it holds across a game's updates). Frostbite reflects its settings classes: a class record (its name, then at
-// +0x40 its field list) and per field a record of 0x20 bytes (name, hash, offset at +0x10, type). SimulationTimeSettings' ForceSimRate (int32) and MaxSimFps (float) cap the
-// simulation's ticks a second: 30 in EA SPORTS FC 27, whose frames then cannot go faster than 30 whatever paces them. A static constructor registers the class: it stores the record's
-// address into its type info (adrp / add of the record, then str into the type info just made by adrp / add), and the code that reads the settings asks the settings registry for the
-// instance with that type info in x1 and a cache word in x2 (adrp / add each, then bl), which keeps the instance's address. The instance holds its type info at +8, which checks the cache.
-// Both fields are written each frame they differ (the game may load its settings again), like the frame limits above
-static struct { int n; uint8_t *base; uint64_t ti, cache[8]; int ncache; uint32_t off_rate, off_max; } fb;
+// Frostbite's simulation rate and frame regulator, found by name (no fixed addresses, so both hold across a game's updates). Frostbite reflects its settings classes: a class
+// record (its name, then at +0x40 its field list) and per field a record of 0x20 bytes (name, hash, offset at +0x10, type). SimulationTimeSettings' ForceSimRate (int32) and
+// MaxSimFps (float) cap the simulation's ticks a second: 30 in EA SPORTS FC 27, whose frames then cannot go faster than 30 whatever paces them. A static constructor registers the
+// class: it stores the record's address into its type info (adrp / add of the record, then str into the type info just made by adrp / add), and the code that reads the settings
+// asks the settings registry for the instance with that type info in x1 and a cache word in x2 (adrp / add each, then bl), which keeps the instance's address. The instance holds
+// its type info at +8, which checks the cache. Both fields are written each frame they differ (the game may load its settings again), like the frame limits above.
+// EA SPORTS FC 27's Switch builds also hold a frame regulator object whose tick waits 1 / [+0x8] s (+0x10 is the rate it reports); under GameRenderSettings.Enable (offset from
+// reflection), one function stores {30.0, 30.0} into [+0x8] (fmov vD.2d, #30.0; adrp / ldr xR, [main+ptr]; stur qD, [xR, #8]). Finding that unique site yields the global pointer
+// for any build (verified on v0, 1.8d.310c and 1.8e.50bc); ambiguous matches fail closed with [RED].
+static struct { int n; uint8_t *base; uint64_t ti, cache[8], reg_ptr; int ncache; uint32_t off_rate, off_max; } fb;
 static int fb_name_at(uint8_t *base, uint64_t size, uint64_t p, const char *want) {   // p, a relocated pointer, points into the module at the string want
     uint64_t b = (uint64_t)(uintptr_t)base; size_t n = strlen(want);
     return p >= b && p - b + n + 1 <= size && !memcmp((const void *)(uintptr_t)p, want, n + 1);
 }
+static int64_t fb_adrp_page(uint32_t w, uint64_t pc) {
+    int64_t imm = (int64_t)(((w >> 29) & 3) | (((w >> 5) & 0x7FFFF) << 2)); if (imm & (1 << 20)) imm -= 1 << 21;
+    return (int64_t)(pc & ~0xfffull) + imm * 4096;
+}
 static int64_t fb_pair(const uint32_t *t, uint64_t i, int reg) {   // the target of adrp / add into reg at words i, i + 1, or -1 (module offsets: the text sits at offset 0)
     uint32_t w = t[i], x = t[i + 1];
     if ((w & 0x9F000000u) != 0x90000000u || (int)(w & 31) != reg || (x & 0xFFC00000u) != 0x91000000u || (x & 31) != (uint32_t)reg || ((x >> 5) & 31) != (uint32_t)reg) return -1;
-    int64_t imm = (int64_t)(((w >> 29) & 3) | (((w >> 5) & 0x7FFFF) << 2)); if (imm & (1 << 20)) imm -= 1 << 21;
-    return (int64_t)((i * 4) & ~0xfffull) + imm * 4096 + ((x >> 10) & 0xfff);
+    return fb_adrp_page(w, i * 4) + ((x >> 10) & 0xfff);
 }
-static void fb_find(void) {
-    module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
-    if (!m || !m->text_end || !m->ro_off || m->ro_off >= m->size) return;
-    static const char cls[] = "SimulationTimeSettings";
-    uint8_t *base = m->base, *ro = base + m->ro_off; uint64_t size = m->back_off ? m->back_off : m->size, b = (uint64_t)(uintptr_t)base;
-    const uint8_t *s = memmem(ro, (size_t)(size - m->ro_off), "\0SimulationTimeSettings\0", sizeof cls + 1); if (!s) return;   // not Frostbite
-    uint64_t name = (uint64_t)(uintptr_t)(s + 1), rec = 0;
-    for (uint64_t o = (m->ro_off + 7) & ~7ull; o + 0x48 <= size && !rec; o += 8) {
+static uint64_t fb_find_rec(uint8_t *base, uint64_t ro_off, uint64_t size, const char *cls, const char *f0, uint32_t *o0, const char *f1, uint32_t *o1) {
+    char pat[64]; size_t n = strlen(cls);
+    if (n + 2 > sizeof pat) return 0;
+    pat[0] = '\0'; memcpy(pat + 1, cls, n + 1);
+    const uint8_t *s = memmem(base + ro_off, (size_t)(size - ro_off), pat, n + 2);
+    if (!s) return 0;
+    uint64_t b = (uint64_t)(uintptr_t)base, name = (uint64_t)(uintptr_t)(s + 1);
+    for (uint64_t o = (ro_off + 7) & ~7ull; o + 0x48 <= size; o += 8) {
         if (*(uint64_t *)(base + o) != name) continue;
         uint64_t fl = *(uint64_t *)(base + o + 0x40); if (fl < b || fl - b + 0x20 > size) continue;
+        uint32_t a0 = 0, a1 = 0;
         for (uint64_t f = fl - b; f + 0x20 <= size; f += 0x20) {   // the field list ends where a name stops being one
             uint64_t fn = *(uint64_t *)(base + f); if (fn < b || fn - b >= size) break;
             uint32_t off = *(uint32_t *)(base + f + 0x10);
-            if (fb_name_at(base, size, fn, "ForceSimRate")) fb.off_rate = off;
-            else if (fb_name_at(base, size, fn, "MaxSimFps")) fb.off_max = off;
+            if (fb_name_at(base, size, fn, f0)) a0 = off;
+            else if (f1 && fb_name_at(base, size, fn, f1)) a1 = off;
         }
-        if (fb.off_rate && fb.off_max) rec = o;
+        if (a0 && (!f1 || a1)) { *o0 = a0; if (o1) *o1 = a1; return o; }
     }
+    return 0;
+}
+static void fb_find_reg(const uint32_t *t, uint64_t nw, uint64_t mod_size, uint32_t en_off) {
+    if (!en_off || en_off >= 0x1000) return;
+    uint64_t found_ptr = 0, found_site = 0; int nfound = 0;
+    for (uint64_t i = 0; i < nw; i++) {
+        uint32_t w = t[i];
+        if ((w & 0xFFFFFFE0u) != 0x6F01F7C0u) continue;   // fmov vD.2d, #30.0
+        uint32_t vd = w & 31, st_want = 0x3C808000u | vd;   // stur qD, [xR, #8]
+        int has_en = 0;
+        for (uint64_t k = i >= 12 ? i - 12 : 0; k < i; k++)
+            if ((t[k] & 0xFFC00000u) == 0x39400000u && ((t[k] >> 10) & 0xFFFu) == en_off) { has_en = 1; break; }   // ldrb wW, [xS, #en_off]
+        if (!has_en) continue;
+        for (uint64_t j = i + 1; j < nw && j <= i + 8; j++) {
+            if ((t[j] & 0xFFFFFC1Fu) != st_want) continue;
+            uint32_t xr = (t[j] >> 5) & 31; if (xr == 31) continue;
+            int64_t ptr = -1;
+            for (uint64_t k = j; k-- > (j >= 10 ? j - 10 : 0) && ptr < 0; ) {
+                if ((t[k] & 0xFFC0001Fu) != (0xF9400000u | xr)) continue;   // ldr xR, [xB, #lo]
+                uint32_t xb = (t[k] >> 5) & 31, lo = ((t[k] >> 10) & 0xFFFu) * 8;
+                for (uint64_t p = k; p-- > (k >= 10 ? k - 10 : 0); ) {
+                    if ((t[p] & 0x9F00001Fu) != (0x90000000u | xb)) continue;   // adrp xB, page
+                    ptr = fb_adrp_page(t[p], p * 4) + (int64_t)lo;
+                    break;
+                }
+                break;
+            }
+            if (ptr <= 0 || (uint64_t)ptr + 8 > mod_size) continue;
+            if (!nfound) { found_ptr = (uint64_t)ptr; found_site = i * 4; nfound = 1; }
+            else if ((uint64_t)ptr != found_ptr) nfound++;
+            break;
+        }
+    }
+    if (nfound == 1) {
+        fb.reg_ptr = found_ptr;
+        LOG("main: Frostbite frame regulator at [main+%#llx]+0x8 (set at main+%#llx)", (unsigned long long)fb.reg_ptr, (unsigned long long)found_site);
+    } else if (nfound > 1) {
+        LOG("[RED] main: Frostbite frame regulator: %d globals found; leaving the frame regulator", nfound);
+    }
+}
+static void fb_find(void) {
+    module_t *m = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+    if (!m || m->native_fps_blocked || !m->text_end || !m->ro_off || m->ro_off >= m->size) return;
+    static const char cls[] = "SimulationTimeSettings";
+    uint8_t *base = m->base, *ro = base + m->ro_off; uint64_t size = m->back_off ? m->back_off : m->size;
+    if (!memmem(ro, (size_t)(size - m->ro_off), "\0SimulationTimeSettings\0", sizeof cls + 1)) return;   // not Frostbite
+    uint64_t rec = fb_find_rec(base, m->ro_off, size, cls, "ForceSimRate", &fb.off_rate, "MaxSimFps", &fb.off_max);
     if (!rec) { LOG("[RED] main: Frostbite's %s found, but not its ForceSimRate and MaxSimFps fields; leaving the simulation rate", cls); return; }
     const uint32_t *t = (const uint32_t *)base; uint64_t nw = m->text_end / 4;
     for (uint64_t i = 0; i + 3 < nw && !fb.ti; i++) {   // the registration: adrp / add xR = record, str xR, [xT] with xT = the type info from an adrp / add just before
@@ -168,6 +218,9 @@ static void fb_find(void) {
     fb.base = base; fb.n = 1;
     LOG("main: Frostbite %s at main+%#llx (ForceSimRate +%#x, MaxSimFps +%#x), type info main+%#llx, %d instance caches", cls, (unsigned long long)rec, fb.off_rate, fb.off_max,
         (unsigned long long)fb.ti, fb.ncache);
+    uint32_t en_off = 0;
+    if (fb_find_rec(base, m->ro_off, size, "GameRenderSettings", "Enable", &en_off, NULL, NULL))
+        fb_find_reg(t, nw, m->size, en_off);
 }
 static void fb_tick(int target, const char *src) {
     static int nlog; uint64_t ti = (uint64_t)(uintptr_t)(fb.base + fb.ti);
@@ -182,12 +235,12 @@ static void fb_tick(int target, const char *src) {
     }
 }
 
-// The row of a target frame rate the game steps by, at the place the rewriter found (dm/tools/fps_target.py; main's fixups FPS_TARGET_PTR, FPS_TARGET_FIELD): an int32 frame rate in the
-// object a global points to, which the game's readers divide 60.0 by to step it, and which the game sets to 30 or 60 itself. Fire Emblem Fortune's Weave's gxc graphics object holds it
-// (+0x1dc; its present asks for interval 60 / target), so at 60 the game asks for interval 1 and steps by 1.0 a frame. 0 rows: not found in this main
+// The rewriter found either the integer rate the game steps by or RE Engine's
+// floating-point MaxFps. RE Engine keeps its separate base rate as a time unit.
 static int target_row(const module_t *m, lock_t *out) {
     if (!m->fps_target_ptr) return 0;
-    *out = (lock_t){ "", "target frame rate", m->fps_target_ptr, m->fps_target_field, FPS_I32, 1, 0 };
+    *out = (lock_t){ "", m->fps_target_f32 ? "RE Engine MaxFps" : "target frame rate", m->fps_target_ptr, m->fps_target_field,
+        m->fps_target_f32 ? FPS_F32 : FPS_I32, 1, 0 };
     return 1;
 }
 
@@ -223,13 +276,18 @@ static void unity_vsync_tick(int target, const char *src) {
     if (nlog < 8) { nlog++; LOG("main: Unity QualitySettings.vSyncCount (level %d) %u → %u vsyncs (%d fps; %s)", lvl, cur, want, target, src); }
 }
 // The running main's engine limiters, found once: by the first present (dm_fps_lock_tick) or by the graphics layer's present cap, which may ask first (dm_fps_lock_engine, from the acquire)
-static lock_t ue[4], target_lock, unity_tfr; static const lock_t *rows[NLOCKS + 6]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
+static lock_t ue[4], target_lock, monolith_lock, unity_tfr, fb_reg_lock; static const lock_t *rows[MAX_LOCKS]; static int nrow, nier, ue_missing; static uint8_t *base; static uint32_t display;
 static pthread_once_t g_found = PTHREAD_ONCE_INIT;
 static void lock_find(void) {
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) {
+        if (g_mod[i].native_fps_blocked) { LOG("[RED] main: native frame target disabled: a required timing correction did not match"); continue; }
         for (int k = 0; k < (int)(sizeof k_nier_dr / sizeof *k_nier_dr); k++) if (!strcmp(g_mod[i].build_id, k_nier_dr[k].build)) { base = g_mod[i].base; nier = 1; display = k_nier_dr[k].display; }
         for (int k = 0; k < NLOCKS; k++) if (!strcmp(g_mod[i].build_id, k_locks[k].build)) { rows[nrow++] = &k_locks[k]; base = g_mod[i].base; }
         if (target_row(&g_mod[i], &target_lock)) { rows[nrow++] = &target_lock; base = g_mod[i].base; }
+        if (g_mod[i].monolith_interval) {
+            monolith_lock = (lock_t){ "", "Monolith frame interval", 0, (uint32_t)g_mod[i].monolith_interval, VSYNCS_DEFAULT2_I32, 1, 0 };
+            rows[nrow++] = &monolith_lock; base = g_mod[i].base;
+        }
         int nue = ue_rows(&g_mod[i], ue, &ue_missing);
         for (int k = 0; k < nue; k++) { rows[nrow++] = &ue[k]; base = g_mod[i].base; }
         if (g_mod[i].unity_target_fps) {   // unless a build row writes the same field
@@ -243,6 +301,10 @@ static void lock_find(void) {
         }
     }
     fb_find();
+    if (fb.reg_ptr) {
+        fb_reg_lock = (lock_t){ "", "Frostbite frame regulator", fb.reg_ptr, 0x8, FPS_F64, 2, 0 };
+        rows[nrow++] = &fb_reg_lock; base = fb.base;
+    }
 }
 // Whether the host writes fps_target into an engine limiter of this main (a row for its build, NieR's frame interval, a target frame rate found by its readers, Unreal's variables or
 // Frostbite's simulation rate, found by name).
@@ -252,7 +314,7 @@ int dm_fps_lock_engine(void) { pthread_once(&g_found, lock_find); return nrow ||
 int nvn_fps_high_now(void);   // hle_nvn.c
 void dm_fps_lock_tick(void) {
     dynamic_resolution_tick();   // separate from the FPS cap
-    static int state = -2, nlog[NLOCKS + 5], target, high; static const char *src;
+    static int state = -2, nlog[MAX_LOCKS], target, high; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1; pthread_once(&g_found, lock_find);
@@ -329,7 +391,8 @@ void dm_fps_lock_tick(void) {
             } else {
                 int fps = L->kind == FPS_I32;
                 want = fps ? (uint32_t)target : target > 60 ? 1 : 60 / (uint32_t)target;   // above 60 the display link paces it: a vsync count stays 1
-                if (cur == want || cur < (fps ? 10u : 1u) || cur > (fps ? 120u : 4u)) continue;
+                uint32_t value = !cur && L->kind == VSYNCS_DEFAULT2_I32 ? 2 : cur;   // Monolith's zero means its native two-vsync default
+                if (value == want || value < (fps ? 10u : 1u) || value > (fps ? 120u : 4u)) continue;
                 snprintf(was, sizeof was, "%u", cur);
             }
             uint32_t *p = (uint32_t *)(uintptr_t)a;

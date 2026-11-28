@@ -1,0 +1,34 @@
+# Guacamelee! 2 (Switch), 1.0.4 (v262144). See dm/games/README.md for the profile format.
+
+# ---- Identity ----
+title_id	01007E100456C000
+program_id	01007E100456C000
+
+# ---- App ----
+name	Guacamelee! 2
+ipa	Guacamelee2.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.0.4	main=4515e4fb48b9723008e3c8c47ea98007	sdk=2871b9db62524ed042cb2018f618c715
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	resources.dat
+zip_store	.dat:.nx:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource. At boot the SDK asks for a 3.14 GB heap.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0; prebuild the same variant.
+depth_mode	zero
+shader_groups	/media/=media
+shader_note	Guacamelee! 2 shaders

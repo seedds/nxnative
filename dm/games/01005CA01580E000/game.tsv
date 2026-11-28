@@ -35,6 +35,9 @@ sys_resource	0x0
 shader_groups	/CPK/=cpk /app_config/=appconfig
 shader_note	Persona 5 Royal shaders
 
+# The game calls nvnDeviceSetDepthMode with near = 0. Use that mode for the offline archive and the Mac prebuild (README.md).
+depth_mode	zero
+
 # ---- After the rewrite ----
 # The rewritten modules require 76 MB, more than the default 64 MB deducted from the pool.
 mem_used	0x4c00000

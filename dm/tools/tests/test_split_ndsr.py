@@ -53,6 +53,16 @@ class NdsrRecords(unittest.TestCase):
                 self.assertEqual(ss.BAHS_VAR, {'/pair#NDSR@0x40': '/pair#NDSR#0x40',
                                               '/pair#NDSR@0x108': '/pair#NDSR#0x40'})
 
+    def test_pack_inside_a_monolith_xbc1_stream(self):
+        # Xenoblade Chronicles 2's Switch 2 Edition: /monolib/shader/ndsr.pck is an XBC1 member of bf2.ard, read through monolith_shaders
+        import zlib
+        data, shaders = pack(0x10, [0x0461, 0x1462])
+        packed = zlib.compress(data, level=0)
+        xbc = struct.pack('<4s4I28s', b'xbc1', 1, len(data), len(packed), 0, b'ndsr.pck') + packed
+        found = []; ss.monolith_shaders(xbc, '/bf2.ard/monolib/shader/ndsr.pck', found)
+        self.assertEqual([(st, ctl, code) for _, st, ctl, code in found],
+                         [(stage, ctl, code) for stage, (_, ctl, code) in zip(('vs', 'ps'), shaders)])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -20,7 +20,7 @@
 #        shader_lib.py cat <lib> <name>                one file's bytes on standard output
 #        shader_lib.py subset <lib> <out.img> [--skip-suffix S]...  a new image without .metal sources and build reports, as an app carries it
 # <lib> is the path b-<chain>, with or without .img.
-import argparse, builtins, os, shutil, sys
+import argparse, builtins, collections, concurrent.futures, contextlib, os, shutil, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import romfs
@@ -29,6 +29,7 @@ ALIGN = 16   # of each file's data: the file is mapped by pages, so its first by
 STAMP = 'inputs.tsv'   # dmsh_chain.py STAMP
 APP_SUFFIXES = ('.metallib', '.json', '.tsv')   # what the host reads (not the Mac build's .metal sources)
 APP_LEAVE_OUT = ('_b_build.json',)   # dmsh_build.py's report, for the tools
+READERS = 8   # threads that call ahead the sources write is given as functions (dmsh_build.py's outputs, read from the shader cache), a few entries before the writer takes them
 PULLING, PULLING_LEFT_OUT = '_bp.metallib', '_bp_left_out'   # dmsh_pull.py's libraries (build_ipa.sh decides who wants them), and the marker of an image without them
 
 
@@ -71,26 +72,65 @@ def _names(folder):
     return out
 
 
-def write(files, dst):
+def write(files, dst, on_progress=None, share=None):
     """files: {name: path to read (a romfs path may name a file inside an image), the bytes, or a function returning them (read only when its file is written: dmsh_build.py's outputs staged in the
-    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. A stopped write leaves only the .part, and an image is whole or absent"""
+    shader cache, so that no library is held in memory whole)} → the image dst, by way of dst.part. share: optional {name: key} where entries sharing a non-None key reuse the first sorted entry's
+    written (offset, size) range without calling their loader or writing duplicate bytes. A failed write removes its .part, so a full drive gets its space back; a killed one leaves
+    only the .part. An image is whole or absent. on_progress, when given, is called as (done_files, total_files, bytes_written) at start and after each entry"""
     part = dst + '.part'
+    try: _write_part(files, part, on_progress, share); os.replace(part, dst)
+    except BaseException:
+        try: os.unlink(part)
+        except OSError: pass
+        raise
+
+
+def _write_part(files, part, on_progress=None, share=None):   # write()'s image, at part
     names = sorted((n.encode() for n in files))
-    ents, off = [], romfs.HEAD.size
-    with builtins.open(part, 'wb') as out:
+    total = len(names)
+    share = share or {}
+    first, alias = set(), {}
+    for name in names:
+        key = share.get(name.decode())
+        if key is None: continue
+        if key in first: alias[name] = key
+        else: first.add(key)
+    ents, off, placed = [], romfs.HEAD.size, {}
+    if on_progress: on_progress(0, total, 0)
+    # The sources given as functions are called on a few threads, up to 4 * READERS entries ahead of the writer, which takes them in order: one after the other, the 300,000 outputs of
+    # Ocarina of Time's shader build came out of its cache file at 190 MB/s, a minute for its 10.7 GB image (shader_cache.py reads on a connection of each thread's own then)
+    readers = concurrent.futures.ThreadPoolExecutor(READERS) if any(name not in alias and callable(files[name.decode()]) for name in names) else None
+    ahead, todo = collections.deque(), iter(names)
+    def sources():   # (name, source) in order, each function among them already called, or being called
+        while True:
+            while len(ahead) < (4 * READERS if readers else 1) and (name := next(todo, None)) is not None:
+                if name in alias: ahead.append((name, None)); continue
+                source = files[name.decode()]
+                ahead.append((name, readers.submit(source) if readers and callable(source) else source))
+            if not ahead: return
+            name, source = ahead.popleft()
+            yield name, source.result() if isinstance(source, concurrent.futures.Future) else source
+    with builtins.open(part, 'wb') as out, contextlib.ExitStack() as done:
+        if readers: done.callback(readers.shutdown, cancel_futures=True)   # after an error, the functions not yet called are not
         out.write(b'\0' * off)
-        for name in names:
-            off += -off % ALIGN
-            out.seek(off)
-            n, source = 0, files[name.decode()]
-            if callable(source): source = source()
-            if source is None: raise OSError(f'{name.decode()}: no bytes to write')
-            if isinstance(source, bytes): out.write(source); n = len(source)
-            elif not isinstance(source, (str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
+        for i, (name, source) in enumerate(sources(), 1):
+            if name in alias:
+                at, n = placed[alias[name]]
+                ents.append((name, at, n))
             else:
-                with romfs.open(source, 'rb') as f:
-                    while b := f.read(8 << 20): out.write(b); n += len(b)
-            ents.append((name, off, n)); off += n
+                off += -off % ALIGN
+                out.seek(off)
+                n = 0
+                if source is None: raise OSError(f'{name.decode()}: no bytes to write')
+                if isinstance(source, bytes): out.write(source); n = len(source)
+                elif not isinstance(source, (str, os.PathLike)): raise TypeError(f'{name.decode()}: {type(source).__name__} is not a path, bytes or a function')
+                else:
+                    with romfs.open(source, 'rb') as f:
+                        while b := f.read(8 << 20): out.write(b); n += len(b)
+                ents.append((name, off, n))
+                if (key := share.get(name.decode())) is not None: placed[key] = (off, n)
+                off += n
+            if on_progress: on_progress(i, total, off)
         out.seek(off)
         pool, idx = bytearray(), bytearray(romfs.ENT.pack(1, len(names), 0, 0, 0, 0))   # entry 0, the root: its children are every other entry
         for name, a, b in ents:
@@ -98,35 +138,37 @@ def write(files, dst):
         out.write(idx); out.write(pool)
         out.seek(0); out.write(romfs.HEAD.pack(romfs.MAGIC, off, len(idx) + len(pool), len(names) + 1))
     romfs.Image(part)   # a read of it, as the host's check: nothing is published that a reader refuses
-    os.replace(part, dst)
 
 
-def pack(lib, say=print, leave_out=False):
+def pack(lib, say=print, leave_out=False, on_progress=None):
     """The folder into the image, and the folder removed. Returns whether an image now stands for the library. Without a folder there is nothing to do, unless leave_out finds pulling libraries in the
-    image to take out: leave_out is the iPhone build's when nothing will read them"""
+    image to take out: leave_out is the iPhone build's when nothing will read them. on_progress, when given, is forwarded to write only when an image is actually written"""
     folder, image = folder_of(lib), image_of(lib)
     try:
         before = _names(folder) if os.path.isdir(folder) else None
         if before is not None and not before: os.rmdir(folder); before = None
         if before is None and not os.path.isfile(image): return False
-        files = {n: os.path.join(folder, n) for n in before or ()}
+        if before is None and not leave_out: return True
+        files, share = {n: os.path.join(folder, n) for n in before or ()}, {}
         if os.path.isfile(image) and (before is None or STAMP not in before):   # a partial build over a packed library, or the image alone
-            with romfs.scandir(image) as it:
-                for e in it: files.setdefault(e.name, e.path)
+            old = romfs.Image(image)
+            for name, k in old.children(0):
+                if name not in files:
+                    files[name] = os.path.join(image, name)
+                    share[name] = old.entry(k)[:2]
         pulling = [n for n in files if n.endswith(PULLING)]
         if before is None and not (leave_out and pulling): return True
         if leave_out:
-            for n in pulling: del files[n]
+            for n in pulling: del files[n]; share.pop(n, None)
             files[PULLING_LEFT_OUT] = b'the pulling vertex libraries are left out: nothing in this build reads them (dm/tools/shader_lib.py)\n'
-        write(files, image)
+        kw = {k: v for k, v in (('on_progress', on_progress), ('share', share)) if v}
+        write(files, image, **kw)
         if before is None: return True
         if _names(folder) != before:   # a build wrote to it meanwhile: the folder is the newer one, and the next pack takes it
             say(f'{folder} changed while it was packed: it stays a folder'); return True
         shutil.rmtree(folder)
     except (OSError, ValueError) as e:
         say(f'[RED] could not pack {folder}, it stays a folder: {e}')
-        try: os.unlink(image + '.part')
-        except OSError: pass
         return False
     return True
 
@@ -159,7 +201,11 @@ def app_files(lib, skip_suffix=()):
 def subset(lib, dst, skip_suffix=()):   # → the number of files in the image dst
     files = app_files(lib, skip_suffix)
     if not any(n.endswith('.metallib') for n in files): raise ValueError(f'no shader libraries at {lib}')
-    write(files, os.fspath(dst))
+    src = view(lib)
+    share = {name: img.entry(k)[:2] for img in (romfs.Image(src),) for name, k in img.children(0) if name in files} if os.path.isfile(src) else {}
+    def whole(path):   # a file's bytes, read by one of write's threads: one after the other, the 130,000 files an app takes of Ocarina of Time's library were 25 s of each pack that made it
+        with romfs.open(path, 'rb') as f: return f.read()
+    write({n: (lambda p=p: whole(p)) for n, p in files.items()}, os.fspath(dst), share=share or None)
     return len(files)
 
 

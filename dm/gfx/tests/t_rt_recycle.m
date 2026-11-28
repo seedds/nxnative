@@ -1,7 +1,8 @@
-// Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger
-// than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
+// Recycled texture memory (nvn_mtl.m rh_texture, rh_place, GitHub issues #1831, #1823): a shared texture in a GPU-only pool is made in a placement heap of its own, an eighth larger (at most
+// RH_SLACK more) than the texture; once its texture is freed the heap stays resident, and the smallest waiting heap that fits, up to half as large again, takes the next texture, cleared as a new
 // allocation is: one a step of Metal's sizes larger included, COMPRESSIBLE or not. Same-pass feedback snapshots draw from the same heaps. Heaps that wait too long leave the
-// residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own.
+// residency set when a submission begins. CPU-visible pools, block-compressed textures and DM_NVN_RT_RECYCLE=0 keep allocations of their own. A pool finalized before its texture
+// object takes the texture and its memory with it. The memory census (mem_census, DM_CTL restop) reads textures held by each kind of holder and writes all its lines.
 #include "../nvn/nvn_mtl.m"
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -16,6 +17,30 @@ static tex_t target(pool_t *pool, uint64_t serial, uint64_t off, unsigned w, uns
     t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA16F, .flags = NVN_TEXTURE_FLAGS_COMPRESSIBLE, .width = w, .height = h, .depth = 1, .levels = 1, .samples = 1};
     nvn_tex_layout(&t.d, &t.L); return t;
 }
+// The census with stderr, where its lines go, captured: → how many lines it wrote, and in *named / *queued its counts of textures a table names and of textures the deferred-release
+// queue alone holds
+static char g_census_formats[256];   // the last census's formats line
+static int census_run(const char *why, unsigned long long *named, unsigned long long *queued) {
+    *named = *queued = ~0ull; g_census_formats[0] = 0;
+    if (fflush(stderr)) return -1;
+    int saved = dup(2); if (saved < 0) return -1;
+    FILE *tmp = tmpfile(); if (!tmp) { close(saved); return -1; }
+    if (dup2(fileno(tmp), 2) < 0) { fclose(tmp); close(saved); return -1; }
+    mem_census(why); int flushed = fflush(stderr), restored = dup2(saved, 2); close(saved);
+    if (flushed || restored < 0 || fseek(tmp, 0, SEEK_SET)) { fclose(tmp); return -1; }
+    char line[8192], tag[128]; snprintf(tag, sizeof tag, "] %s census: ", why); int n = 0;
+    while (fgets(line, sizeof line, tmp)) {
+        const char *at = strstr(line, tag); if (!at) continue; n++;
+        const char *v = strstr(at, "live descriptors' views "), *q = strstr(at, "only in the deferred-release queue ");
+        if (v) *named = strtoull(v + strlen("live descriptors' views "), NULL, 10);
+        if (q) *queued = strtoull(q + strlen("only in the deferred-release queue "), NULL, 10);
+        const char *fm = strstr(at, "by Metal format: "); if (fm) snprintf(g_census_formats, sizeof g_census_formats, "%s", fm + strlen("by Metal format: "));
+    }
+    if (ferror(tmp)) n = -1;
+    if (fclose(tmp)) n = -1;
+    return n;
+}
+static int is_ghost(uint64_t k) { __block int r = 0; pthread_mutex_lock(&g_smu); own_each_locked(^(uint64_t s, id o, int g) { (void)o; if (s == k && g) r = 1; }); pthread_mutex_unlock(&g_smu); return r; }
 static int resident(id o) { pthread_mutex_lock(&g_res_mu); int r = [g_res_objects containsObject:o]; pthread_mutex_unlock(&g_res_mu); return r; }
 static unsigned waiting(void) { os_unfair_lock_lock(&g_rh_lk); unsigned n = g_rh_n; os_unfair_lock_unlock(&g_rh_lk); return n; }
 static void settle(void) {   // the released textures' fences pass and the deferred releases run (as in t_image_alias)
@@ -41,6 +66,11 @@ int main(void) { @autoreleasepool {
     mtl_init(); void *mem = NULL; posix_memalign(&mem, 16384, 64 << 20); memset(mem, 0, 64 << 20);
     pool_t pool = {.magic = MAGIC('P','O','O','L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED | NVN_MEMORY_POOL_FLAGS_COMPRESSIBLE, .mem = mem, .size = 64 << 20};
     mtl_sub_begin();
+    {   // the census with no texture of its own in the residency set: its formats line says so (it printed the unwritten buffer)
+        unsigned long long named, queued; int n = census_run("t_rt_recycle", &named, &queued);
+        CHECK(n >= 4 && !strcmp(g_census_formats, "none\n"), "a census with no texture: every line, and the formats line says none");
+        if (strcmp(g_census_formats, "none\n")) fprintf(stderr, "  formats: %s\n", g_census_formats);
+    }
     if (!sw_on(rh_mode())) {   // DM_NVN_RT_RECYCLE=0
         tex_t a = target(&pool, 95001, 0, 640, 360); mtl_tex_init(&a);
         CHECK(tex_mtl(&a) && !tex_mtl(&a).heap && g_rh_made == 0, "with the switch off a target is its own allocation");
@@ -48,21 +78,23 @@ int main(void) { @autoreleasepool {
         printf("t_rt_recycle (off): %d checks, %d failed\n", checks, failed); return failed != 0;
     }
     __weak id<MTLHeap> first_heap;
+    __weak id<MTLTexture> first_tex;
     {
         tex_t a = target(&pool, 95001, 0, 640, 360); mtl_tex_init(&a);
         id<MTLTexture> ta = tex_mtl(&a);
         CHECK(ta && ta.heap && ta.width == 640 && ta.height == 360, "a GPU-only pool's target is placed in a heap of its own, at its own size");
-        CHECK(resident(ta.heap) && !resident(ta), "its heap is what the residency set holds");
+        CHECK(resident(ta.heap) && resident(ta), "both the placed texture and its heap are resident");
         CHECK(g_rh_made == 1 && g_rh_reused == 0, "a new heap is counted as made");
         MTLSizeAndAlign need = [g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&a, 0)];
         CHECK(ta.heap.size >= need.size + need.size / 8, "the heap is made an eighth larger than its first target");
         fill(ta, 0x5a);
-        first_heap = ta.heap;
+        first_heap = ta.heap; first_tex = ta;
         ta = nil; mtl_tex_release(&a); mtl_alias_drop_pool(&pool);   // the pool goes: the sharing table lets its texture go (deferred)
         settle();
     }
     CHECK(first_heap && waiting() == 1, "once its texture is freed the heap waits");
-    CHECK(first_heap && resident(first_heap), "and stays resident while it waits");
+    CHECK(!first_tex || !resident(first_tex), "the retired placed texture leaves the residency set");
+    CHECK(first_heap && resident(first_heap), "and its heap stays resident while it waits");
     {
         tex_t b = target(&pool, 95002, 8 << 20, 632, 356); mtl_tex_init(&b);   // another place, a slightly smaller size
         id<MTLTexture> tb = tex_mtl(&b);
@@ -92,11 +124,37 @@ int main(void) { @autoreleasepool {
         CHECK(tex_mtl(&g) && !tex_mtl(&g).heap, "a block-compressed texture (an asset, never rendered to) keeps its own allocation");
         mtl_tex_release(&e); mtl_tex_release(&f); mtl_tex_release(&g); mtl_alias_drop_pool(&cpu); mtl_alias_drop_pool(&pool); settle();
     }
-    unsigned before = waiting();
+    {   // memory pressure (mem_pressure_event, mem_trim): a warn does nothing on the Mac, a critical frees every waiting heap at the next submission's start, however fresh,
+        // and the idle upload slots' staging blocks
+        tex_t g = target(&pool, 95007, 0, 640, 360); mtl_tex_init(&g); id<MTLTexture> tg = tex_mtl(&g);
+        __weak id<MTLHeap> gh = tg.heap; tg = nil; mtl_tex_release(&g); mtl_alias_drop_pool(&pool); settle();
+        unsigned w0 = waiting(); uint64_t t0 = g_rh_trimmed;
+        CHECK(w0 == 3, "three heaps wait, one of them just freed (its target took a waiting heap and gave it back)");
+        size_t off; up_begin(); (void)up_alloc(1 << 20, &off); up_flush(); mtl_sub_commit(); mtl_drain(); dispatch_sync(g_feedback_q, ^{});   // a slot's staging block, its batch done
+        int slot_blocks = 0; for (int i = 0; i < 3; i++) slot_blocks += g_up_slot_blk[i] != nil;
+        CHECK(slot_blocks >= 1, "an upload slot keeps its staging block");
+        mem_pressure_event(1); mtl_sub_begin();
+        CHECK(TARGET_OS_IPHONE || waiting() == w0, "a warn leaves the Mac's waiting heaps alone");
+        mtl_sub_commit(); mtl_drain(); mem_pressure_event(2); mtl_sub_begin();
+        slot_blocks = 0; for (int i = 0; i < 3; i++) slot_blocks += g_up_slot_blk[i] != nil;
+        CHECK(waiting() == 0 && g_rh_trimmed == t0 + w0 && g_rh_bytes == 0, "a critical frees every waiting heap at the next submission's start");
+        CHECK(!gh || !resident(gh), "the fresh heap leaves the residency set too");
+        CHECK(slot_blocks == 0, "the idle upload slots give back their staging blocks");
+        CHECK(atomic_load(&g_mp_trims) == 1 && atomic_load(&g_mp_n[2]) == 1, "the trim is counted");
+        mtl_sub_commit(); mtl_drain(); mtl_sub_begin();
+    }
+    {   // the heaps of the checks below again
+        tex_t h[3]; unsigned hw[3] = {640, 1280, 160}, hh[3] = {360, 720, 90};
+        for (int i = 0; i < 3; i++) { h[i] = target(&pool, 95020 + i, (uint64_t)i << 23, hw[i], hh[i]); mtl_tex_init(&h[i]); (void)tex_mtl(&h[i]); }
+        for (int i = 0; i < 3; i++) mtl_tex_release(&h[i]);
+        mtl_alias_drop_pool(&pool); settle();
+        first_heap = nil;
+    }
+    unsigned before = waiting(); uint64_t trimmed0 = g_rh_trimmed;
     CHECK(before == 3, "three heaps wait");
     os_unfair_lock_lock(&g_rh_lk); for (unsigned i = 0; i < g_rh_n; i++) g_rh[i].t -= RH_IDLE_NS; os_unfair_lock_unlock(&g_rh_lk);
     mtl_sub_commit(); mtl_drain(); mtl_sub_begin();   // rh_trim
-    CHECK(waiting() == 0 && g_rh_trimmed == before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
+    CHECK(waiting() == 0 && g_rh_trimmed == trimmed0 + before && g_rh_bytes == 0, "heaps that waited too long are freed when a submission begins");
     CHECK(!first_heap || !resident(first_heap), "and leave the residency set");
     {   // a same-pass feedback snapshot is placed in recycled memory, and its heap waits once the snapshot goes
         int fresh = 0; uint64_t made = g_rh_made; fb_cache_t *e = fb_snap(95007, 0, 0, MTLPixelFormatRGBA16Float, 640, 360, 1, &fresh);
@@ -104,6 +162,43 @@ int main(void) { @autoreleasepool {
         if (e) { defer_obj_release(e->snap); e->snap = nil; e->ser = 0; }
         settle();
         CHECK(waiting() == 1, "its heap waits once the snapshot is freed");
+    }
+    {   // a pool finalized before its texture object (Ocarina of Time's shadow target: the pool at the load into the field, the object only after the target is made again at the
+        // load back): the texture leaves with the pool, as its memory does on NVN, and its heap waits for the next target; the object's own finalize later finds nothing to free
+        unsigned w0 = waiting(); __weak id<MTLTexture> wt; __weak id<MTLHeap> wh;
+        tex_t s = target(&pool, 95010, 0, 2048, 2048); mtl_tex_init(&s);
+        @autoreleasepool { id<MTLTexture> ts = tex_mtl(&s); wt = ts; wh = ts.heap; CHECK(ts && ts.heap, "the target is placed in a heap of its own"); }
+        mtl_alias_drop_pool(&pool); pool.magic = 0;   // nvnMemoryPoolFinalize: the replay forgets the pool, then its magic goes
+        settle();
+        CHECK(!wt, "the texture of a finalized pool is freed while the game's texture object is still live");
+        CHECK(wh && waiting() == w0 + 1, "its heap waits in the recycled list once the submission in flight has completed");
+        @autoreleasepool { CHECK(tex_mtl(&s) == nil, "a look at the texture after its pool is gone makes nothing"); }
+        pool.magic = MAGIC('P','O','O','L');
+        mtl_tex_release(&s); settle();
+        CHECK(waiting() == w0 + 1, "the object's later finalize frees nothing more");
+    }
+    {   // the census (mem_census, DM_CTL restop) reads the textures a live entry, a finalized serial's entry and the deferred-release queue alone hold, each retained while it reads it
+        // (its tables hold bare pointers, and a texture freed meanwhile crashed a census run during a load), and writes every line. Textures that are no render target: a recycled
+        // heap's placed textures are left out of these lines
+        pool_t cpu = {.magic = MAGIC('P','O','O','L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED, .mem = (uint8_t *)mem + (32 << 20), .size = 16 << 20},
+               other = cpu; other.mem = (uint8_t *)mem + (48 << 20);
+        tex_t l = target(&cpu, 95030, 0, 256, 256), f = target(&cpu, 95031, 1 << 20, 256, 256), d = target(&other, 95032, 0, 256, 256);
+        mtl_tex_init(&l); mtl_tex_init(&f); mtl_tex_init(&d);
+        CHECK(tex_mtl(&l) && !tex_mtl(&l).heap && tex_mtl(&f) && tex_mtl(&d), "three textures made, each its own allocation");
+        mtl_tex_release(&f); CHECK(tex_mtl(&f) != nil && is_ghost(f.serial), "a finalized texture resolved again: its entry is a ghost one");
+        mtl_tex_release(&d); mtl_alias_drop_pool(&other);   // only the deferred-release queue holds it until its submission completes
+        unsigned long long named, queued; int n = census_run("t_rt_recycle", &named, &queued);
+        CHECK(n >= 4 && named >= 2 && queued >= 1, "the census writes its lines, with the textures named by a live and a ghost entry, and the one only the queue holds");
+        if (!(n >= 4 && named >= 2 && queued >= 1)) fprintf(stderr, "  census: %d lines, named %llu, queued %llu\n", n, named, queued);
+        mtl_tex_release(&l); mtl_alias_drop_pool(&cpu); settle();
+        n = census_run("t_rt_recycle", &named, &queued);
+        CHECK(n >= 4 && queued == 0, "once their submissions complete, nothing is left for the queue");
+    }
+    {   // a large target: an eighth more would be 6 MB nothing uses
+        tex_t big = target(&pool, 95020, 0, 3072, 2048); mtl_tex_init(&big);
+        id<MTLTexture> tbig = tex_mtl(&big); MTLSizeAndAlign nb = [g_dev heapTextureSizeAndAlignWithDescriptor:tex_desc(&big, 0)];
+        CHECK(tbig && tbig.heap && tbig.heap.size >= nb.size && tbig.heap.size <= nb.size + RH_SLACK + 65536, "a large target's new heap is at most RH_SLACK larger than it");
+        tbig = nil; mtl_tex_release(&big); mtl_alias_drop_pool(&pool); settle();
     }
     mtl_sub_commit(); mtl_drain(); free(mem);
     printf("t_rt_recycle: %d checks, %d failed\n", checks, failed); return failed != 0;

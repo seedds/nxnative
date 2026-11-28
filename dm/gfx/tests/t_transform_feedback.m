@@ -22,7 +22,7 @@ static uint8_t *commands;static size_t used;
 static void emit(unsigned op,const void *p,size_t n) {size_t z=(8+n+7)&~7ull;op_hdr h={op,(uint32_t)z};memcpy(commands+used,&h,8);if(n)memcpy(commands+used+8,p,n);used+=z;}
 int main(int argc,char **argv) { @autoreleasepool {
     if(argc!=2){fprintf(stderr,"pass the fixture made by test_transform_feedback.py --fixture\n");return 2;}
-    setenv("DM_NVN_TBDR","0",1);mtl_init();state_reset();memset(&R,0,sizeof R);
+    mtl_init();state_reset();memset(&R,0,sizeof R);
     void *memory=NULL;if(posix_memalign(&memory,getpagesize(),65536))abort();memset(memory,0,65536);mtl_pool_add(memory,65536);
     float *output=(float *)memory;uint32_t *ctl=(uint32_t *)((uint8_t *)memory+4096),*ctl2=ctl+16,*ctl3=ctl+32;
     NvProg *pr=[NvProg new];pr->sh[0]=shader(@(argv[1]));

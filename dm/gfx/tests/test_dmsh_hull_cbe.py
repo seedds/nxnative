@@ -8,6 +8,7 @@ import json, os, re, struct, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[1] / 'tools'
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 PT, RZ = 7, 255
 SCHED = 0x001f8000fc0007e0     # the scheduling word before each three instructions
 NOP = 0x50b0000000070f00
@@ -70,7 +71,7 @@ class HullCircularBuffer(unittest.TestCase):
             notes = json.loads((work / 'k.res.json').read_text()).get('notes', [])
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout, notes
 

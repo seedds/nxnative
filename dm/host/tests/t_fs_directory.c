@@ -25,7 +25,11 @@ uint64_t now_ns(void) { return 0; }
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 
 static int fail_handle, failed_allocations, opened_fd = -1;
+static int calloc_calls;
+static size_t calloc_bytes;
 static void *directory_calloc(size_t count, size_t size) {
+    calloc_calls++;
+    calloc_bytes += count * size;
     if (fail_handle && count == 1 && size == sizeof(dirh_t)) {
         failed_allocations++;
         errno = ENOMEM;
@@ -175,6 +179,40 @@ int main(void) {
     CHECK(count == 5 && (!strcmp(ents[0].name, "ENTRY") || !strcmp(ents[0].name, "oa")) && (!strcmp(ents[1].name, "ENTRY") || !strcmp(ents[1].name, "oa")), "the last overlay folder's names come first");
     if (dh) h_fs_CloseDirectory(dh);
     snprintf(q, sizeof q, "%s/entry", ov); unlink(q); snprintf(q, sizeof q, "%s/ENTRY", ov2); unlink(q); snprintf(q, sizeof q, "%s/oa", ov2); unlink(q); rmdir(ov2);
+
+    // RomFS image directory: OpenDirectory allocates only dirh_t (no per-child DirectoryEntry snapshot) and fails cleanly on OOM
+    {   enum { NFILES = 64 };
+        char ip[1200]; snprintf(ip, sizeof ip, "%s.img", root);
+        char names[4 + NFILES * 5]; memcpy(names, "big", 3); size_t noff = 3;
+        img_ent ent[2 + NFILES];
+        ent[0] = (img_ent){1, 1, 0, 0, 0, 0};
+        ent[1] = (img_ent){2, NFILES, 0, 3, 0, 0};
+        for (int i = 0; i < NFILES; i++) {
+            char nm[8]; int len = snprintf(nm, sizeof nm, "f%03d", i);
+            memcpy(names + noff, nm, (size_t)len);
+            ent[2 + i] = (img_ent){32, (uint64_t)(i + 1), (uint32_t)noff, (uint16_t)len, 1, 0};
+            noff += (size_t)len;
+        }
+        uint64_t hd[3] = {32 + NFILES, (2 + NFILES) * sizeof(img_ent) + noff, 2 + NFILES};
+        uint8_t data[NFILES] = {0};
+        FILE *im = fopen(ip, "wb");
+        fwrite("DMROMFS1", 1, 8, im); fwrite(hd, 1, sizeof hd, im); fwrite(data, 1, sizeof data, im);
+        fwrite(ent, 1, sizeof ent, im); fwrite(names, 1, noff, im); fclose(im);
+        CHECK(mount("img", ip, 1) == RES_OK, "mount a synthetic RomFS image");
+        uint64_t ih = 0x5678; failed_allocations = 0; fail_handle = 1;
+        Result ir = h_fs_OpenDirectory(&ih, "img:/big", DIRMODE_FILE);
+        int ierr = errno; fail_handle = 0;
+        CHECK(failed_allocations == 1 && ir == RES_FAIL && ierr == ENOMEM && ih == 0x5678, "image directory allocation failure returns RES_FAIL with ENOMEM and leaves handle untouched");
+        calloc_calls = 0; calloc_bytes = 0; ih = 0;
+        CHECK(h_fs_OpenDirectory(&ih, "img:/big", DIRMODE_FILE) == RES_OK && ih != 0, "image directory opens");
+        CHECK(calloc_calls == 1 && calloc_bytes == sizeof(dirh_t), "image directory OpenDirectory allocates only dirh_t, not a per-child snapshot");
+        DirectoryEntry one[2]; int64_t icnt = -1;
+        CHECK(h_fs_ReadDirectory(&icnt, one, ih, 1) == RES_OK && icnt == 1 && !strcmp(one[0].name, "f000") && one[0].size == 1, "first 1-entry read returns f000");
+        CHECK(h_fs_DirCount(&icnt, ih) == RES_OK && icnt == NFILES, "DirCount returns all 64 files without moving the cursor");
+        CHECK(h_fs_ReadDirectory(&icnt, one, ih, 1) == RES_OK && icnt == 1 && !strcmp(one[0].name, "f001") && one[0].size == 2, "second 1-entry read returns f001");
+        h_fs_CloseDirectory(ih);
+        unlink(ip);
+    }
 
     fail_reading(sub, 1);
     CHECK(h_fs_CleanDirRec("w:/sub") != RES_OK, "a clean whose folder cannot be read fails");

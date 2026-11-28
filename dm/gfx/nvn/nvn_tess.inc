@@ -219,11 +219,11 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     if (ps < 1 || ps > 32 || count < ps) { tess_refuse(pr, dw, di, "patch size"); return; }
     uint32_t np1 = (uint32_t)(count / ps), ncp = np1 * (uint32_t)ps, ni = (uint32_t)instances, np = np1 * ni, K = hs->tess_out_cp;
     if (!g_tess_kpso && !g_tess_kfail) {
-        NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_tess_msl) options:nil error:&e];
+        NSError *e = nil; id<MTLLibrary> lib = dev_lib(@(k_tess_msl), &e);
         id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"dm_tess_expand"] : nil;
-        g_tess_kpso = fn ? [g_dev newComputePipelineStateWithFunction:fn error:&e] : nil;
+        g_tess_kpso = fn ? dev_cps(fn, &e) : nil;
         id<MTLFunction> gfn = lib ? [lib newFunctionWithName:@"dm_tess_geo"] : nil;
-        g_tess_gpso = gfn ? [g_dev newComputePipelineStateWithFunction:gfn error:&e] : nil;
+        g_tess_gpso = gfn ? dev_cps(gfn, &e) : nil;
         g_tess_stats = [g_dev newBufferWithLength:64 * 4 options:MTLResourceStorageModeShared];
         if (!g_tess_kpso || !g_tess_gpso || !g_tess_stats) { g_tess_kfail = 1; MLOG("[RED] tessellation expansion kernel: %s", e.localizedDescription.UTF8String); }
         else { memset(g_tess_stats.contents, 0, 64 * 4); res_add(g_tess_stats); }
@@ -242,8 +242,8 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         if (!lcap) { tess_refuse(pr, dw, di, "geometry shader after the domain: scratch"); return; }
     }
     uint32_t binst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
-    if (defer_has_active()) defer_fallback();
     lc_land(); rp_flush(); rp_end(); ubd_land();
+    if (ggs) geo_big_reset();   // enc_r_begin opens behind MTLStageAll -> MTLStageAll: earlier geometry draws are done
     uint32_t *cpi = malloc((size_t)ncp * 4); if (!cpi) { tess_refuse(pr, dw, di, "no memory"); return; }
     uint32_t lo = UINT32_MAX, hi = 0;
     if (dw) { lo = (uint32_t)dw->first; hi = lo + ncp - 1; for (uint32_t i = 0; i < ncp; i++) cpi[i] = i; }
@@ -282,13 +282,13 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     g_draw_binst = binst;
     MTL4RenderPassDescriptor *rd = [MTL4RenderPassDescriptor new]; rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
-    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re, &vs->rf);
+    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re, &vs->rf, &range, NULL);
     vconv_bind(re, vs, 1, &range, NULL); args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, g_cap);
     enc_r_draw_instanced(re, MTLPrimitiveTypePoint, lo, span, ni, binst); enc_r_end(re);
     if (tess_stages() < 2) { g_tess_draws++; return; }
     // 2. the hull shader, one threadgroup per patch
     if (!hs->geo_pso && !hs->geo_pso_failed) {
-        NSError *e = nil; hs->geo_pso = [g_dev newComputePipelineStateWithFunction:fn_dev(hs->fn) error:&e];   // fn_dev: a hull that samples has the border corrections' constant (as geometry kernels, nvn_geometry.inc)
+        NSError *e = nil; hs->geo_pso = dev_cps(fn_dev(hs->fn), &e);   // fn_dev: a hull that samples has the border corrections' constant (as geometry kernels, nvn_geometry.inc)
         if (!hs->geo_pso) { hs->geo_pso_failed = 1; MLOG("[RED] hull compute %s: %s", hs->key, e.localizedDescription.UTF8String); }
     }
     uint32_t threads = (uint32_t)(ps > (int)K ? ps : (int)K);
@@ -319,7 +319,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0) {
         g_draw_binst = binst; args_dirty_all(); encode_args(ge, ds, 4, 1);
         enc_r_vbuf(ge, 13, gj.capture_info); enc_r_vbuf(ge, 14, g_out); enc_r_vbuf(ge, 15, g_par + 16);
         enc_r_draw_indirect(ge, MTLPrimitiveTypePoint, g_ka); enc_r_end(ge);
-        id<MTL4ComputeCommandEncoder> gc2 = enc_c_begin(NULL); geo_gs_gpu(gc2, &gj, gpack); enc_c_end(gc2);
+        id<MTL4ComputeCommandEncoder> gc2 = enc_c_begin(); geo_gs_gpu(gc2, &gj, gpack); enc_c_end(gc2);
         args_dirty_all(); g_enc_pso = nil; g_enc_dss = nil; g_ed.ok = 0;
         geo_raster(&gj, 1);
         g_tess_draws++; g_tess_patches += np;

@@ -1,0 +1,40 @@
+# Game profile of BioShock 2 Remastered (Switch, update 1.0.2 = v65536). Plays on the Mac
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Blind Squirrel's Unreal Engine 3 port of 2K Marin's BioShock 2, SDK 9, NVN. Same module pair as BioShock Remastered: main and sdk, rtld replaced by the host.
+# The shaders are the RomFS's own caches, shadercache.nx and startupshadercache.nx, at container version 28 (shader_split.py shadercache_nx):
+# 20,367 keys out of the first and 9 out of the second. Nothing is captured: the whole set exists before the first frame.
+# The legal pages end with the browser's close(), which dm/host/web_apple.m answers as exit reason 4; the game then writes its own first-run save (FirstRun.nx).
+
+# ---- Identity ----
+title_id	01002620102C6000
+program_id	01002620102C6000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP
+name	BioShock 2 Remastered
+ipa	BioShock2Remastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.2	main=7d1714279435589c22555da0762f2be0	sdk=ad3fdfbd62a5f4b082d385ffe420d440
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	bulkcontent/bulkpatch2.blk
+zip_store	.bank:.bik:.blk:.bsm:.fsb:.ibf:.lbf:.nx:.swf:.u:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so main sets its own heap: at most the pool less 64 MB. The split below is the survey's, as on BioShock Remastered:
+# it boots, plays and saves, but was not measured against hardware (README.md, What is open)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/sounds_nx/=soundsnx /flashmovies/=flashmovies /binkmovies/=binkmovies /maps/=maps /system/=system /bulkcontent/=bulkcontent
+shader_note	BioShock 2 Remastered shaders (the RomFS caches shadercache.nx and startupshadercache.nx, container version 28)

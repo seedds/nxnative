@@ -7,7 +7,7 @@ Update 1.0.8 (v524288) over the base game, SDK 15.3.2, Unity 2021.3.20f1 IL2CPP 
 | Setting | Where | Why |
 |---|---|---|
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | The NPDM declares 16 MB of system resource, enabling virtual address memory |
-| 5 GB guest block, 4.375 GB alias region, 1 GB application pool | `game.tsv` | The initial Mac heap check sets no heap and reaches +4.26 GB of the alias region with the hardware pool. A 1 GB pool leaves room beside StandardAllocator for Unity's own address regions |
+| 5 GB guest block, 4.375 GB alias region, hardware pool (`app_pool 0xCD500000`), `stdalloc_cap 0x40000000` | `game.tsv` | The initial Mac heap check sets no heap and reaches +4.26 GB of the alias region with the hardware pool. A 1 GB pool leaves room beside StandardAllocator for Unity's own address regions |
 | SDK-wide node-area and size-class alignment patches | `dm/tools/sdk_patches.py` | Applied to this SDK by the shared function matcher; no game-specific cut or host change |
 | `shader_groups /Data/=data` | `game.tsv` | The serialized files and Addressables bundles all live under `Data/` |
 | `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth (the NSP script's heap check on the registered build); offline pipeline bases must use the matching vertex entry |
@@ -47,5 +47,6 @@ Existing mechanisms used by this profile:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - iPhone/iPad validation, save reload, combat encounters, later areas and the DLC campaign. Only the opening control check above was run; the base version was surveyed but not played or registered.
 - The shader split reports ComputeShader objects in `Data/Resources/unity default resources` whose stripped type hash `abd9135b8ce83d043fef4e9ec7f53366` has no available tree. Their kernels are omitted; no missing-shader runtime diagnostic has appeared in the startup route.

@@ -328,6 +328,48 @@ int main(void) {
     pad.right.r.buttons = 0xE0000000u; pad.left.r.buttons = 0xE0000000u | S2_HOME; ha = hb = 0;
     s2_pad_ab(&pad, &ha, &hb); CHECK(s2_pad_home(&pad) && !ha && !hb);
     memset(&pad, 0, sizeof pad); CHECK(!s2_pad_home(&pad));
+    // The console's command path (s2_command_vc): the report ID, an idle 16-byte rumble block, then the command as s2_command frames it
+    {
+        uint8_t f[64], pl[8]; s2_memory_payload(pl, 0x40, S2_ADDR_INFO);
+        size_t k = s2_command_vc(f, sizeof f, S2_CMD_MEMORY, S2_SUB_MEMORY_READ, pl, 8);
+        uint8_t want[16]; unhex("0291010400080000407e000000300100", want);
+        CHECK(k == S2_VC_PREFIX + 16 && f[0] == 0 && f[16] == 0 && !memcmp(f + S2_VC_PREFIX, want, 16));
+        uint8_t z[16] = {0}; CHECK(!memcmp(f + 1, z, 16));
+        CHECK(!s2_command_vc(f, S2_VC_PREFIX + 7, S2_CMD_MEMORY, S2_SUB_MEMORY_READ, pl, 8) && !s2_command_vc(NULL, 64, 1, 1, NULL, 0));
+    }
+    // Side reports from a NYXI Hyperion 3 (it answers only on the console's channel and sends only its side report), rewritten as the common report. Two reports of the right
+    // Joy-Con lying still, 0.15 s apart (120 ticks of its 800 Hz clock), then two while it was being turned; the expected rates come from an independent decoder of the same bytes
+    {
+        const float grad = S2_GYRO_DPS * 3.14159265358979323846f / 180.f;
+        uint8_t s0[63], s1[63], c[63]; s2_side_motion sm = {0}; s2_report rr;
+        unhex("fa1c00000700f87f000000000000001e7680010c00766c72012ed5bf80d3e68000001b0b000041000000680b00000000000000000000000000000000000000", s0);
+        unhex("ff1c00000700f87f000000000000001eee80010c004280720194dcbf805fea800000120b000031000000610b00000000000000000000000000000000000000", s1);
+        CHECK(s2_side_to_common(s0, 63, 1, 1000, grad, &sm, c) && s2_report_parse(c, 63, &rr));
+        CHECK(sm.have && rr.raw[3] == 0 && rr.raw[4] == 0 && rr.raw[5] == 0);   // the first report: no rate yet
+        CHECK(rr.buttons == 0xE0000000u && rr.rx == 2048 && rr.ry == 2047 && rr.lx == 0 && rr.clock_ms == 1000);   // the stick at rest in the right Joy-Con's slot
+        CHECK(s2_side_to_common(s1, 63, 1, 1150, grad, &sm, c) && s2_report_parse(c, 63, &rr));
+        CHECK(rr.raw[0] == 2834 && rr.raw[1] == 49 && rr.raw[2] == 2913);   // about 1 g, tilted
+        CHECK(abs(rr.raw[3]) <= 3 && abs(rr.raw[4]) <= 3 && abs(rr.raw[5]) <= 3);   // at rest
+        float n = sqrtf(sm.q[0] * sm.q[0] + sm.q[1] * sm.q[1] + sm.q[2] * sm.q[2] + sm.q[3] * sm.q[3]); CHECK(fabsf(n - 1.f) < 1e-3f);
+        uint8_t t0[63], t1[63]; s2_side_motion tm = {0};
+        unhex("a81c00000700f87f000000000000001ec688010c01cc10e401a7ca9c808fb3ac0000b5f9000055010000d9f100000000000000000000000000000000000000", t0);
+        unhex("ad1c00000700f87f000000000000001e3e89010c016c23a001259e5380f134fe0000c5fb0000800d00000d0000000000000000000000000000000000000000", t1);
+        CHECK(s2_side_to_common(t0, 63, 1, 0, grad, &tm, c) && s2_side_to_common(t1, 63, 1, 150, grad, &tm, c) && s2_report_parse(c, 63, &rr));
+        CHECK(abs(rr.raw[3] + 6309) <= 3 && abs(rr.raw[4] + 3847) <= 3 && abs(rr.raw[5] - 2220) <= 3);
+        CHECK(rr.raw[0] == -1083 && rr.raw[1] == 3456 && rr.raw[2] == 13);
+        // a gap of seconds (or a first report after a reconnect) gives no rate rather than a jump
+        s2_side_motion gap = tm; gap.st = (gap.st + 2000) & 0xFFF;
+        CHECK(s2_side_to_common(t1, 63, 1, 0, grad, &gap, c) && s2_report_parse(c, 63, &rr) && rr.raw[3] == 0 && rr.raw[4] == 0 && rr.raw[5] == 0);
+        // buttons: the right Joy-Con's A (byte 2 bit 1), Home (byte 3 bit 0) and SL (byte 3 bit 7); the left one's Down and ZL, its stick in the left slot
+        uint8_t b2[63]; memcpy(b2, s1, 63); b2[2] = 0x02; b2[3] = 0x81;
+        CHECK(s2_side_to_common(b2, 63, 1, 0, grad, NULL, c) && s2_report_parse(c, 63, &rr) && (rr.buttons & S2_A) && (rr.buttons & S2_HOME) && (rr.buttons & S2_SL_R) && !(rr.buttons & S2_B));
+        memcpy(b2, s1, 63); b2[2] = 0x21; b2[3] = 0; b2[0x0E] = 0; b2[0x0F] = 0;
+        CHECK(s2_side_to_common(b2, 63, 0, 0, grad, NULL, c) && s2_report_parse(c, 63, &rr) && (rr.buttons & S2_DOWN) && (rr.buttons & S2_ZL) && !(rr.buttons & S2_A));
+        CHECK(rr.lx == 2048 && rr.ly == 2047 && rr.rx == 0 && rr.raw[0] == 0);   // no motion length: no motion
+        CHECK(!s2_side_to_common(s1, 7, 1, 0, grad, NULL, c) && !s2_side_to_common(NULL, 63, 1, 0, grad, NULL, c));
+        CHECK(s2_side_to_common(s1, 0x2C, 1, 0, grad, NULL, c) && s2_report_parse(c, 63, &rr) && rr.raw[0] == 0);   // cut short: buttons and stick, no motion
+        CHECK(s2_clamp16(NAN) == 0 && s2_clamp16(50000.f) == 32767 && s2_clamp16(-50000.f) == -32767);
+    }
     printf("t_switch2: %d checks, %d failed\n", checks, fails);
     return fails != 0;
 }

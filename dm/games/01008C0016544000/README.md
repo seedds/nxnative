@@ -10,7 +10,7 @@ Update 2.0.59001 (v786432) over the base game, SDK 16.2.0. Unity 2021.3.25f1 IL2
 | Region alignment 4 MB / 32 MB / 1 GB → 2 MB (SDK 20's) | `sdk_patches.py` SDK-wide rules (measured here; a row on this build until 2026-10-30), the same build, `sdk+0x134914` / `+0x13491c` / `+0x134920` | Unity's regions took twice their size in address space; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | `game.tsv` | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)) |
-| `app_pool 0x60000000` (1.5 GB) | `game.tsv` | with the hardware pool Unity got no address region; see [Memory](#memory) |
+| `app_pool 0xCD500000`, `stdalloc_cap 0x60000000` (1.5 GB) | `game.tsv` | with the hardware pool Unity got no address region; see [Memory](#memory) |
 | `pad_layout full` | `game.tsv` | the 3D layout (D-pad, right stick) |
 
 No code of the game is cut. The game asks for present interval 1, so it needs no frame-rate key.
@@ -50,6 +50,7 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 
 ## Open
 
+- The profile was migrated from `app_pool 0x60000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x60000000` (1.5 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - Battles and the MP4 cinematics are untested.
 - iOS: the unsigned IPA (`SeaOfStars.ipa`, 5.1 GB, 5,454,467,672 bytes, with the fps counter; 3,898 iOS shader libraries) is untested on a device.
 

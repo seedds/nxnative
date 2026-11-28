@@ -5,9 +5,23 @@
 #include "../nvn/nvn_mtl.m"
 #undef nvn_event_publish_gpu
 #undef nvn_game_fps
+// Pause the producer inside a command after a fence. This exercises an open job
+// whose published prefix the real replay worker can completely drain.
+#include "../nvn/nvn_capture.h"
+static _Atomic int pause_clear;
+static dispatch_semaphore_t copy_paused, resume_copy;
+static int copy_fields(uint32_t op,uint8_t *payload,uint32_t size,const cap_ops *ops,void *ctx) {
+    if(op==OP_CLEAR_BUF && atomic_exchange(&pause_clear,0)) {
+        dispatch_semaphore_signal(copy_paused);
+        if(dispatch_semaphore_wait(resume_copy,dispatch_time(DISPATCH_TIME_NOW,10000000000ll))) abort();
+    }
+    return cap_rec_fields(op,payload,size,ops,ctx);
+}
+#define cap_rec_fields copy_fields
 #define g_ft g_ft_hle
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#undef cap_rec_fields
 #define P(name) ((NVNT_##name)nvn_lookup(#name))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -259,6 +273,32 @@ static void event_queued_write(int mode) {
     CHECK(done && *result==after,"the consumer's copy reads the producer's payload"); if(!done) { P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,1); _Exit(2); }
     P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
 }
+// A fence right behind such a wait, with no commands between them, waits for the writer: the wait hands the writer's fence on to its queue
+static void event_queued_write_fence(void) {
+    printf("CASE a fence right behind a wait on an in-flight WRITE waits for the writer\n");
+    *source=before; P(nvnEventSignal)(&event,NVN_EVENT_SIGNAL_MODE_WRITE,0);
+    P(nvnQueueFinish)(&queues[0]);   // the consumer queue's last fence is reached: the stale fence would read signalled at once
+    id<MTLSharedEvent> gate=[g_dev newSharedEvent];
+    if (!gate) abort();
+    pthread_mutex_lock(&g_sub_mu); pthread_mutex_lock(&g_res_mu); [g_q4 waitForEvent:gate value:1]; pthread_mutex_unlock(&g_res_mu); pthread_mutex_unlock(&g_sub_mu);
+    NVNsync produced,consumed; P(nvnSyncInitialize)(&produced,&device); P(nvnSyncInitialize)(&consumed,&device);
+    begin_cmd(1); uint32_t payload=after;
+    P(nvnCommandBufferUpdateUniformBuffer)(&commands[1],source_addr,4,0,4,&payload);
+    P(nvnCommandBufferSignalEvent)(&commands[1],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,1);
+    P(nvnCommandBufferFenceSync)(&commands[1],&produced,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    job pj,cj; enqueue(&pj,&queues[1],P(nvnCommandBufferEndRecording)(&commands[1])); int pr=returned(&pj,250000000ull);
+    CHECK(pr && receipt_encoded(&produced,1000000000ull),"producer encodes while its GPU work is held by a shared-event gate");
+    begin_cmd(0); P(nvnCommandBufferWaitEvent)(&commands[0],&event,NVN_EVENT_WAIT_MODE_EQUAL,1);
+    P(nvnCommandBufferFenceSync)(&commands[0],&consumed,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    enqueue(&cj,&queues[0],P(nvnCommandBufferEndRecording)(&commands[0])); int cr=returned(&cj,250000000ull);
+    CHECK(cr && receipt_encoded(&consumed,1000000000ull),"the fence behind the wait publishes while the writer is in flight");
+    CHECK(!landed(&produced,0) && !landed(&consumed,0),"and is not reached before the writer");
+    gate.signaledValue=1;   // always release the GPU before cleanup, including assertion failures
+    require_returned(&pj,pr); require_returned(&cj,cr);
+    int done=landed(&produced,5000000000ull) && landed(&consumed,5000000000ull);
+    CHECK(done && *source==after,"both are reached after the writer"); if(!done) _Exit(2);
+    P(nvnSyncFinalize)(&produced); P(nvnSyncFinalize)(&consumed);
+}
 // A signal does not cut its recording (issue #2112): two signals with commands between them are one Metal submission, and a wait on the first of them, which is not the
 // recording's last, is still encoded behind the in-flight write
 static void event_signal_no_cut(void) {
@@ -381,6 +421,35 @@ static void event_mirror_publication(void) {
     CHECK(P(nvnEventGetValue)(&event)==11,"the terminal event publishes once the storage is visible");
     atomic_store(&event_test_storage,0); P(nvnSyncFinalize)(&fence); P(nvnTextureFinalize)(&texture);
 }
+static void streamed_queue_order(void) {
+    if(!mtl_sub_stream_on()) return;
+    NVNsync prefix, tail, independent;
+    P(nvnSyncInitialize)(&prefix,&device); P(nvnSyncInitialize)(&tail,&device); P(nvnSyncInitialize)(&independent,&device);
+    *source=before; *result=sentinel;
+    begin_cmd(0);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
+    P(nvnCommandBufferFenceSync)(&commands[0],&prefix,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    P(nvnCommandBufferClearBuffer)(&commands[0],result_addr,4,after);
+    NVNcommandHandle first=P(nvnCommandBufferEndRecording)(&commands[0]);
+    begin_cmd(1);
+    P(nvnCommandBufferCopyBufferToBuffer)(&commands[1],result_addr,source_addr,4,0);
+    NVNcommandHandle next=P(nvnCommandBufferEndRecording)(&commands[1]);
+    copy_paused=dispatch_semaphore_create(0); resume_copy=dispatch_semaphore_create(0);
+    atomic_store(&pause_clear,1);
+    job j; enqueue(&j,&queues[0],first);
+    if(dispatch_semaphore_wait(copy_paused,dispatch_time(DISPATCH_TIME_NOW,5000000000ll))) abort();
+    CHECK(landed(&prefix,5000000000ull) && *result==before,"prefix reaches the GPU before the submit thread finishes copying");
+    P(nvnQueueSubmitCommands)(&queues[0],1,&next);
+    P(nvnQueueFenceSync)(&queues[0],&tail,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    CHECK(!landed(&tail,0),"later submission stays behind an empty open job");
+    P(nvnQueueSubmitCommands)(&queues[1],1,&next);
+    P(nvnQueueFenceSync)(&queues[1],&independent,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    CHECK(landed(&independent,5000000000ull) && *source==before,"another ready queue runs while the producer is parked");
+    CHECK(!landed(&tail,0),"independent queue progress does not release the open job's tail");
+    dispatch_semaphore_signal(resume_copy); require_returned(&j,0);
+    CHECK(landed(&tail,5000000000ull) && *source==after,"later submission sees the first job's suffix");
+    P(nvnSyncFinalize)(&prefix); P(nvnSyncFinalize)(&tail); P(nvnSyncFinalize)(&independent);
+}
 int main(void) { @autoreleasepool {
     if (setvbuf(stdout, NULL, _IONBF, 0)) abort(); setenv("DM_PSO_PREPARE","0",1);
     mtl_init();
@@ -403,10 +472,12 @@ int main(void) { @autoreleasepool {
     case_wait("wrap rejects ffffffff before zero",1,0xffffffff,0,0);
     case_wait("wrap accepts half-range minus one",1,0x7fffffff,0,1);
     case_wait("wrap rejects exactly half-range",1,0x80000000,0,0);
+    streamed_queue_order();
     case_cross_queue();
     event_stale_gpu_reset();
     event_queued_write(NVN_EVENT_SIGNAL_MODE_WRITE);
     event_queued_write(NVN_EVENT_SIGNAL_MODE_ADD);
+    event_queued_write_fence();
     event_signal_no_cut();
     frame_shares_allocator();
     vis_ring_grows();

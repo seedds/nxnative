@@ -340,6 +340,38 @@ def selected_inputs(a):
     return mods, msls, pso, tables, pairs, fonts, files
 
 
+def freshen_signed_executables(app):
+    """Give signed executables fresh inodes before the app becomes visible.
+
+    macOS caches signed-code assessments by vnode. A Mach-O assessed while it
+    is being signed can remain blocked after signing succeeds; copying the
+    finished bytes and replacing its inode avoids that stale assessment.
+    Keep signatures, permissions, ACLs and extended attributes intact.
+    """
+    mac = app / 'Contents/MacOS'
+    copyfile = ctypes.CDLL(None, use_errno=True).copyfile
+    copyfile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint)
+    copyfile.restype = ctypes.c_int
+    COPYFILE_ALL = 0x0f  # COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR | COPYFILE_DATA
+    for name in (EXE, 'dmhost'):
+        src = mac / name
+        before = src.stat()
+        fd, sibling = tempfile.mkstemp(prefix=f'.{name}.signed-', dir=mac)
+        os.close(fd)
+        try:
+            if copyfile(os.fsencode(src), os.fsencode(sibling), None, COPYFILE_ALL):
+                err = ctypes.get_errno()
+                raise OSError(err, os.strerror(err), str(src))
+            copied = Path(sibling)
+            if digest(src) != digest(copied) or copied.stat().st_mode != before.st_mode:
+                raise SystemExit(f'signed executable was not copied byte-for-byte: {name}')
+            os.replace(sibling, src)
+            if src.stat().st_ino == before.st_ino:
+                raise SystemExit(f'could not refresh signed executable inode: {name}')
+        finally:
+            Path(sibling).unlink(missing_ok=True)
+
+
 def replace_app(tmp, out):
     if out.exists():
         # RENAME_SWAP exchanges complete directories atomically; a failed swap leaves the old app at out.
@@ -581,6 +613,11 @@ def pack(a):
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign, fresh)   # a new data bundle is read whole once; the app's signature then takes its hash
+    freshen_signed_executables(tmp)
+    # Check the staged outer seal, including references to nested bundle code
+    # hashes. --deep would re-read every reused RomFS/shader bundle and undo
+    # the fast host-only repack introduced by signed data bundles (PR #2673).
+    run([codesign, '--verify', '--strict', tmp])
     had_old = out.exists()
     replace_app(tmp, out)
     # The large inputs as the keys took them, each with the SHA-256 of its bytes where one is known (as_packed): the app's copy's for a clone (the RomFS image, the pipeline

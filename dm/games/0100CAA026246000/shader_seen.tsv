@@ -1,0 +1,31 @@
+# The shader keys (column 4 of shader_map.tsv) in the library of the Mac playtest: the shaders its boot, intro, and menu asked for.
+# A partial build of these alone: docs/development.md, Building selected Mac shaders. Rows: key<TAB>stage.
+key	stage
+0d6e0b0ff1d106fd	vertex
+17b082dfef30eba9	pixel
+24e4cd391d993137	vertex
+2602c6511fa2c05f	pixel
+27a853e87f2a6a18	vertex
+27d94bb84de2731f	vertex
+346a28d9e07b3f40	pixel
+434a982482de867c	vertex
+552bbc8ffc2459e4	compute
+56b607f7741b4532	vertex
+6ee4bdc297f1b52a	vertex
+7d162717bac64fe9	pixel
+889465df59838dc0	pixel
+987c069874bbe974	pixel
+9c35ed5d159d053f	pixel
+a0adb4a6ba7e1431	vertex
+a23dda46c07f800d	pixel
+aa275d7fe65e1e71	vertex
+abcdb66b44f1313d	pixel
+b4a4a961d726116a	vertex
+bf76784f461275c7	pixel
+c36a54e04f51e4a3	pixel
+d19b47f9ea5c3cfe	vertex
+dc11699de6822245	vertex
+e46f75eec323df1d	pixel
+f084dfc6c583415d	vertex
+f3a2af4f812f7366	vertex
+fe49cdc6d72c65ff	vertex

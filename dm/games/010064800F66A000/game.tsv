@@ -1,0 +1,45 @@
+# Game profile of Borderlands: Game of the Year Edition (Switch, 1.0.2 = v131072).
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Gearbox's Unreal Engine 3 (package version 595) with FMOD, SDK 9.3.0, NVN. The shaders are inside the Oodle-compressed .xxx packages plus
+# the global shader cache (GlobalShaderCache-PC-NVN-SM5.bin, BMSG), read by shader_split.py's ue3_body / ue3_shaders
+
+# ---- Identity ----
+title_id	010064800F66A000
+program_id	010064800F66A000
+
+# ---- App ----
+name	Borderlands: Game of the Year Edition
+ipa	BorderlandsGameOfTheYearEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=1c37c3673e0e4e7aadf7860078d55f63	sdk=230994acc1eb0f13878dd155361beff3
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	WillowGame/CookedSwitch/WorldTextures.tfc
+zip_store	.afc:.bin:.bk2:.dat:.tfc:.upk:.xxx:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game selects near-zero NVN depth at run time (the packaged run's own line: "this run needs … depth near=0"), so the offline
+# pipeline archive must be built with main0_z vertex entries; without the key it was made for near=-w and matched none of the run's bases.
+depth_mode	zero
+# The game steps by elapsed time. Its interval of two display ticks is the effective cap below 60 fps.
+present_interval	display
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	/WillowGame/=willowgame
+shader_note	Borderlands: Game of the Year Edition shaders

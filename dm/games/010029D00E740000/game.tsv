@@ -1,0 +1,42 @@
+# Game profile of DOOM 3 (Switch, update 1.0.5 = v327680). Plays on the Mac: new game into Mars City, lit and shadowed, at 60 fps
+# Format: see dm/games/README.md
+# id Software's id Tech 4 in its BFG Edition renderer (DOOM 3, Resurrection of Evil and The Lost Mission), SDK 14.3.0. It renders with NVIDIA's desktop OpenGL 4.5 through EGL (subsdk0,
+# not loaded): main asks eglGetProcAddress for its GL functions, many by their ARB names, after checking a fixed list of extensions, and the host's GL layer implements them on
+# Metal (dm/gfx/gl/hle_gl.m). Its game data is in id's .resources containers in the RomFS.
+# The shaders are GLSL 1.50 its renderer makes at run time from the render programs in _common.resources (renderprogs/*.vertex / *.pixel), each the first time it is used: no game file
+# holds them, so the NSP script captures them by booting the game on the Mac, where the capture run has the renderer convert every render program (dm/gfx/tools/idtech4_programs.py;
+# gl_capture.tsv lists them), and dm/gfx/tools/gl_shaders.py translates them offline; the host finds each by the hash of its text
+
+# ---- Identity ----
+title_id	010029D00E740000
+program_id	010029D00E740000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	DOOM 3
+ipa	Doom3.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v327680	1.0.5	main=367c9c29427a5262d0c687d6d884d5c4	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v327680
+shader_versions	v327680
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk. subsdk0 is NVIDIA's OpenGL driver, which programs the GPU through NvRm: never loaded, the GL layer answers main's EGL and GL calls
+modules	main sdk
+romfs_marker	base/_sound_console.resources
+zip_store	.bik:.resources:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource, so the game has no virtual address memory; main sets a heap of at most the pool − 64 MB, a 3328 MB heap region. The Mac footprint in Mars City
+# is about 0.9 GB
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Shader split ----
+# no NVN shaders: the NVN tables stay empty (gl_shaders.py writes the GL library and its table, not the profile)
+shader_note	DOOM 3 has no NVN shaders (its GLSL shaders go through the GL layer)

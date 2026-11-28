@@ -1,0 +1,56 @@
+# Game profile of stitch. (Switch, update 1.2 = v65536, with its two DLC, 010025801CEA9001 and 010025801CEA9002). Plays by touch in handheld mode, at 60 fps or the player's 30
+# Format: see dm/games/README.md
+# Unity 6000.0.68f1 (IL2CPP) with FMOD, SDK 21.4.4, NVN; subsdk0 is NintendoSDK_movie.
+# The shaders are Unity shader objects in the player's serialized files and bundles under Data/, read by the shader split: 3,153 of them (1,540 vertex, 1,544 pixel, 68 compute and 1 geometry).
+# Started from the NSP script's provisional profile; op_mode, pad_layout, present_interval and fps_target added (README.md).
+
+# ---- Identity ----
+title_id	010025801CEA8000
+program_id	010025801CEA8000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	stitch.
+ipa	Stitch.ipa
+app_category	public.app-category.games
+# handheld: the game reads the touch screen only there (docked it follows the Switch and reads the pads alone); the tutorial's stitches are drags, on the iPhone a finger, on the Mac the mouse.
+# Handheld renders 1280x720 (the game crops its 1080p window textures to 1280x720); Docked gives 1080p, with pads only
+op_mode	handheld
+# touch: the virtual gamepad starts in its Tap layout, every touch to the game; the in-game layout button brings back 2D / 3D for a controller player
+pad_layout	touch
+
+# ---- Versions ----
+build	v65536	1.2	main=8e3517b0a4ce2e327ccf7aedf2e0f6c5	subsdk0=fc537f0b21c880e89d6f247d22a150ca	sdk=148394139d9d26ca8afd5c9ba5d30601
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets0.assets.resS
+zip_store	.assets:.bundle:.dat:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap, so the game takes its memory as address regions: a 5 GB block with a 4.375 GB alias region.
+# The check boot reached alias +2.23 GB in its first 15 s in nnMain; with the iPhone's alias region (DM_ALIAS_SIZE=0x118000000 on the Mac) the tutorial route stays at +2.26 GB of 4.38 GB; with the Mac's 64 GB region the level menu's first puzzle reached +2.50 GB (README.md, Memory)
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Shader split (shader_split.py; Unity shader objects) ----
+# everything is under Data/: the player's serialized files and its bundles
+shader_groups	/Data/=data
+shader_note	stitch. shaders
+
+# ---- Graphics ----
+# the game calls nvnDeviceSetDepthMode with near = 0 (the NSP script's heap check): the pipeline bases made before it runs are made for that mode
+depth_mode	zero
+
+# ---- Frame rate ----
+# 60 fps, as on the Switch: the game asks for present interval 1 and never changes it. It steps by the time that passed (the tutorial's camera is at the same positions
+# at 30 and 60, README.md Frame rate). This main has no engine frame limit the host writes (dm/tools/unity_fps.py finds no internal-call table in Unity 6000.0.68f1), so a cap
+# applies only in display mode, by the present interval alone; at 60 display mode changes nothing. The player's Frame rate picks 30 or 60
+fps_target	60
+present_interval	display

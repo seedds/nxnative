@@ -90,6 +90,67 @@ static void compute_case(NvShader *cs, id<MTLComputePipelineState> pso, int reve
     CHECK(p[0]==(reverse?0:1)&&p[1]==(reverse?1:0)&&p[2]==0&&p[3]==1,"first dispatch reads the current CPU backing in a new submission");
     CHECK(p[4]==(reverse?1:0)&&p[5]==(reverse?0:1)&&p[6]==0&&p[7]==1,"second dispatch reads the new handle after inline update");
 }
+// Cross-submission arena lifetime and repeated-table reuse: unchanged handle tables must emit
+// into the new submission's frame arena (never reading an earlier reclaimed arena slice) without
+// rebuilding or bumping g_psnap_gen, including across arena reclamation and unrelated registrations.
+static void cross_sub_case(NvShader *cs, id<MTLComputePipelineState> pso, const tex_t *unrelated_tex) {
+    uint8_t *ubo = mem + 0x100;
+    uint64_t handle = 1 | (1ull << 20);
+    memset(ubo, 0, 64); memcpy(ubo, &handle, 8);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:16 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "cross-sub readback storage allocated"); if (!result) return; res_add(result);
+
+    // Submission 1: initial build of a fresh UBO handle table.
+    uint64_t builds0 = g_stat_htab_builds;
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)ubo, .size = 16};
+    id<MTL4ComputeCommandEncoder> ce = dispatch_enc(); enc_c_pso(ce, pso);
+    CHECK(encode_args((id<MTLCommandEncoder>)ce, cs, 5, 0), "cross-sub 1 handle tables encoded");
+    enc_c_args(ce, result.gpuAddress, 1); enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+    uint64_t sub1_gpu = g_htab_last ? g_htab_last->gpu : 0;
+    uint64_t builds1 = g_stat_htab_builds, pgen1 = g_psnap_gen;
+    CHECK(builds1 == builds0 + 2, "initial submission builds texture and sampler handle tables once");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "cross-sub 1 completed");
+    const float *p = result.contents;
+    CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 1, "cross-sub 1 reads red texture");
+
+    // Submission 2 (shared arena continuation): unchanged UBO re-emits into new submission without rebuild or g_psnap_gen bump.
+    memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)ubo, .size = 16};
+    ce = dispatch_enc(); enc_c_pso(ce, pso);
+    CHECK(encode_args((id<MTLCommandEncoder>)ce, cs, 5, 0), "cross-sub 2 handle tables encoded");
+    enc_c_args(ce, result.gpuAddress, 1); enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+    CHECK(g_htab_last && g_htab_last->epoch == g_arena_epoch && g_htab_last->gpu != sub1_gpu, "cross-sub 2 re-emits into the current submission arena");
+    CHECK(g_stat_htab_builds == builds1 && g_psnap_gen == pgen1, "unchanged table across submissions skips rebuild and keeps g_psnap_gen");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "cross-sub 2 completed");
+    CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 1, "cross-sub 2 reads red texture from re-emitted slice");
+
+    // Submission 3 (reclaimed arena overwritten from offset 0 before htab_gpu): proves earlier arena slices are never reused.
+    g_arena_next = nil;
+    memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)ubo, .size = 16};
+    __unsafe_unretained id<MTLBuffer> scratch = nil;
+    arena_at clobber = arena_take_u(4096, &scratch);
+    memset(clobber.cpu, 0, 4096);
+    ce = dispatch_enc(); enc_c_pso(ce, pso);
+    CHECK(encode_args((id<MTLCommandEncoder>)ce, cs, 5, 0), "cross-sub 3 handle tables encoded after arena reclamation");
+    enc_c_args(ce, result.gpuAddress, 1); enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+    CHECK(g_htab_last && g_htab_last->epoch == g_arena_epoch && g_htab_last->gpu >= clobber.gpu + 4096, "re-emitted table lands past overwritten recycled arena region");
+    CHECK(g_stat_htab_builds == builds1 && g_psnap_gen == pgen1, "reclaimed-arena re-emit still skips rebuild and keeps g_psnap_gen");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "cross-sub 3 completed");
+    CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 1, "cross-sub 3 reads red texture after reclaimed arena clobber");
+
+    // Submission 4 (unrelated registration bumps g_reg_gen): resolved elements match, so re-emit without rebuild or g_psnap_gen bump.
+    mtl_reg_tex(9, unrelated_tex, NULL);
+    memset(result.contents, 0, 16);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); S.ubo[5][0] = (p_bind_buf){.addr = (uint64_t)ubo, .size = 16};
+    ce = dispatch_enc(); enc_c_pso(ce, pso);
+    CHECK(encode_args((id<MTLCommandEncoder>)ce, cs, 5, 0), "cross-sub 4 handle tables encoded after unrelated registration");
+    enc_c_args(ce, result.gpuAddress, 1); enc_c_dispatch(ce, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+    CHECK(g_stat_htab_builds == builds1 && g_psnap_gen == pgen1, "unrelated registration with unchanged table elements skips rebuild and keeps g_psnap_gen");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "cross-sub 4 completed");
+    CHECK(p[0] == 1 && p[1] == 0 && p[2] == 0 && p[3] == 1, "cross-sub 4 reads red texture after unrelated registration");
+    mtl_reg_tex(9, NULL, NULL);
+}
 int main(void) { @autoreleasepool {
     alarm(45);setenv("DM_PSO_ARCHIVE","off",1);setenv("DM_PSO_PREBUILD","0",1);setenv("DM_PSO_MANIFEST","off",1);setenv("DM_PSO_USER","/dev/null",1);setenv("DM_PSO_RECORD","/dev/null",1);
     mtl_init();NSError *error=nil;
@@ -115,5 +176,6 @@ int main(void) { @autoreleasepool {
     render_case(fs,pso,1|(1ull<<20),2|(1ull<<20),0,1);
     compute_case(cs,cps,0);
     compute_case(cs,cps,1);
+    cross_sub_case(cs,cps,&t[0]);
     printf("t_htab_update: %d checks, %d failed\n",checks,failed);return failed!=0;
 } }

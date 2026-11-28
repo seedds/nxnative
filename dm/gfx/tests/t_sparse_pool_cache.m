@@ -18,7 +18,7 @@ static int checks, failed;
 #define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
 static void next_sub(void) { mtl_sub_commit(); mtl_drain(); mtl_sub_begin(); }
 // The pixel at (0, 0) of element `slot` of a resource-ID table, read on the GPU; then the next submission
-static uint32_t gpu_read(id<MTLBuffer> table, unsigned slot) {
+static uint32_t gpu_read_at(uint64_t table_gpu, unsigned slot) {
     static id<MTLComputePipelineState> ps;
     if (!ps) {
         NSError *error = nil;
@@ -33,13 +33,14 @@ static uint32_t gpu_read(id<MTLBuffer> table, unsigned slot) {
     id<MTLBuffer> out = [g_dev newBufferWithBytes:initial length:sizeof initial options:MTLResourceStorageModeShared]; res_add(out);
     MTL4ArgumentTableDescriptor *d = [MTL4ArgumentTableDescriptor new]; d.maxBufferBindCount = 2;
     id<MTL4ArgumentTable> args = rec_table([g_dev newArgumentTableWithDescriptor:d error:nil]);
-    [args setAddress:table.gpuAddress atIndex:0]; [args setAddress:out.gpuAddress atIndex:1];
+    [args setAddress:table_gpu atIndex:0]; [args setAddress:out.gpuAddress atIndex:1];
     id<MTL4ComputeCommandEncoder> enc = enc_c_begin(); [enc setArgumentTable:args]; enc_c_pso(enc, ps);
     enc_c_dispatch(enc, MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1)); enc_c_end(enc);
     next_sub();
     CHECK(!mtl_last_commit_error(), "the reader's submission completes");
     return *(uint32_t *)out.contents;
 }
+static uint32_t gpu_read(id<MTLBuffer> table, unsigned slot) { return gpu_read_at(table.gpuAddress, slot); }
 static int map(pool_t *virt, pool_t *phys, uint64_t voff, uint64_t poff, uint64_t size) {
     map_req req = {.phys = (NVNmemoryPool *)phys, .voff = (int64_t)voff, .poff = (int64_t)poff, .size = size};
     return h_nvnMemoryPoolMapVirtual((NVNmemoryPool *)virt, 1, (const NVNmappingRequest *)&req);
@@ -148,12 +149,12 @@ int main(void) { @autoreleasepool {
     uint32_t *handles = (uint32_t *)(mem + 0x40000); handles[0] = 1; handles[1] = 0;
     S.ubo[0][0] = (p_bind_buf){.addr = (uintptr_t)handles, .size = 8};
     nvn_rbind binding = {.kind = NVN_RB_TEXH, .reg = 0, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT};
-    htab_gpu(0, &binding, &table);
-    CHECK(gpu_read(table, 0) == B, "the handle table reads the current page");
+    uint64_t hgpu = htab_gpu(0, &binding, &table);
+    CHECK(gpu_read_at(hgpu, 0) == B, "the handle table reads the current page");
     CHECK(map(&virt, &phys, 0, 0x20000, 0x1000), "the texture's page mapped again");
     next_sub();
-    htab_gpu(0, &binding, &table);
-    CHECK(gpu_read(table, 0) == C, "the handle table reads the newly mapped page");
+    hgpu = htab_gpu(0, &binding, &table);
+    CHECK(gpu_read_at(hgpu, 0) == C, "the handle table reads the newly mapped page");
     pool_gpu(0, MTLTextureType2D, NVN_DPF_FLOAT, 0, &table);
     CHECK(gpu_read(table, 1) == C, "so does the pool table");
 

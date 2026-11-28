@@ -17238,10 +17238,11 @@ static inline int prog_border(__unsafe_unretained NvProg *pr) {
 // buffer has one pointer for it, so the table is as long as the last handle the buffer holds. Kirby Air Riders keeps 197 handles up to element 392 in a 4,096-element buffer, and 34,000 textures
 // registered: only those a table names are made here, where pool_gpu's walk over every ID took 16 GB and most of the frame. A table is looked at again in each pass, in each submission (a compute-only
 // submission keeps the last pass's serial), and after a write queued in this submission over its bytes (htab_written: an inline update an open pass defers, a copy, a fill), and rebuilt when the handles
-// or the registered IDs have changed: into a new buffer, as commands already encoded hold the old one. The read bitmap's address stays 0: the translator marks no read of a table (dmsh_reflect.py
-// pool_arrays). Caller holds g_rmu, as for pool_gpu
+// or the registered IDs have changed: into a fresh slice of the submission's frame arena (arena_take_u), as commands already encoded hold the old one and separate MTLBuffers churn the residency set
+// (Hogwarts Legacy builds ~1,800 small tables/s). Resolved elements stay cached on the CPU across submissions so an unchanged table re-emits into the new submission's arena without re-resolving handles
+// or bumping g_psnap_gen. The read bitmap's address stays 0: the translator marks no read of a table (dmsh_reflect.py pool_arrays). Caller holds g_rmu, as for pool_gpu
 #define HTAB_SNAPS 64
-typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, sgen, pass, sub, addr; int npend; uint8_t *copy; uint64_t *ser; uint32_t bytes, cap, n; int samp, dtt, dpf, tb, sb, c2s; } htab_snap;   // ser: each element's texture serial, for fb_texu_reads; sub, npend: the submission and its queued writes (g_npend) when the handles were last read
+typedef struct { __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu, epoch, reg, sgen, pass, sub, sub_trans, trans_gen, addr; int npend; uint8_t *copy; uint64_t *ser, *elems; uint32_t *lead; uint32_t bytes, cap, ecap, lcap, n; int samp, dtt, dpf, tb, sb, c2s, valid; } htab_snap;   // ser: each element's texture serial, for fb_texu_reads; epoch: g_arena_epoch of buf/gpu; sub, npend: the submission and its queued writes (g_npend) when the handles were last read
 // A write queued since the table's handles were last read lands on [a, b) (or cannot be told). Only the writes since are scanned (pend_since), so games that update another uniform block before
 // every draw keep the table without reading it again
 static int htab_written(const htab_snap *p, uint64_t a, uint64_t b) {
@@ -17251,59 +17252,92 @@ static int htab_written(const htab_snap *p, uint64_t a, uint64_t b) {
 }
 static htab_snap g_htab[HTAB_SNAPS], *g_htab_last; static unsigned g_htab_next;
 static uint64_t g_stat_htab_builds, g_stat_htab_reads; static double g_stat_htab_ms;   // reads: the handles read again (a new pass or submission, or a write over them)
+static void htab_emit(htab_snap *p) {
+    size_t metadata = !p->samp && p->dtt == (uint8_t)MTLTextureTypeTextureBuffer ? 4 * (size_t)(p->n + 1) : 0;
+    size_t tbytes = DMSH_POOL_HEAD + 8 * (size_t)(p->n + 1) + metadata;
+    __unsafe_unretained id<MTLBuffer> buf = nil;
+    arena_at at = arena_take_u(tbytes, &buf);
+    uint8_t *c = at.cpu;
+    memset(c, 0, DMSH_POOL_HEAD);
+    *(uint32_t *)(void *)c = p->n;
+    *(uint32_t *)(void *)(c + DMSH_POOL_BIAS) = metadata ? DMSH_POOL_HEAD + 8u * (p->n + 1) : 0;
+    memcpy(c + DMSH_POOL_HEAD, p->elems, 8 * (size_t)(p->n + 1));
+    if (metadata) memcpy(c + DMSH_POOL_HEAD + 8 * (size_t)(p->n + 1), p->lead, metadata);
+    p->buf = buf; p->gpu = at.gpu; p->epoch = g_arena_epoch;
+}
 static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<MTLBuffer> *out) {
     int samp = b->kind == NVN_RB_SAMPH, reg = b->reg;
     const p_bind_buf *u = reg < 16 ? &S.ubo[stage][reg] : NULL;
     uint64_t addr = u ? u->addr + b->off : 0, rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
-    uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) : 0;
+    uint32_t bytes = u && u->addr && u->size > b->off ? (uint32_t)MIN(u->size - b->off, 65536u) & ~7u : 0;
     enum { SAMP_FROM_UBO_HANDLES = -2 };
     int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : SAMP_FROM_UBO_HANDLES;
     htab_snap *p = NULL, *free_ = NULL;
     for (int i = 0; i < HTAB_SNAPS && !p; i++) { htab_snap *q = &g_htab[i];
-        if (!q->buf) { if (!free_) free_ = q; }
+        if (!q->valid) { if (!free_) free_ = q; }
         else if (q->addr == addr && q->samp == samp && q->dtt == b->dtt && q->dpf == b->dpf && q->tb == S.tex_base && q->sb == S.samp_base && q->c2s == c2s) p = q; }
-    if (p && p->pass == g_pass.serial && p->sub == g_sub_serial && p->reg == rg && p->sgen == sg && p->bytes == bytes && !htab_written(p, addr, addr + bytes)) { p->npend = g_npend; g_htab_last = p; *out = p->buf; return p->gpu; }
+    int stale_trans = p && ((p->sub_trans && p->sub_trans != g_sub_serial) || (p->trans_gen && p->trans_gen != g_treg_trans_gen));
+    if (p && p->epoch == g_arena_epoch && p->pass == g_pass.serial && p->sub == g_sub_serial && p->reg == rg && p->sgen == sg && !stale_trans && p->bytes == bytes && !htab_written(p, addr, addr + bytes)) { p->npend = g_npend; g_htab_last = p; *out = p->buf; return p->gpu; }
     static uint8_t now[65536]; g_stat_htab_reads++;
-    bytes &= ~7u; memset(now, 0, bytes); for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
-    if (p && p->reg == rg && p->sgen == sg && p->bytes == bytes && !memcmp(p->copy, now, bytes)) {
-        // Kept for a new pass: its handles are uses as a binding's are (tu_pass), and no shader marks a read of a table
+    for (uint32_t i = 0; i < bytes; i += 4096) ubo_read(stage, reg, b->off + i, MIN(bytes - i, 4096u), now + i);
+    if (p && p->reg == rg && p->sgen == sg && !stale_trans && p->bytes == bytes && (!bytes || !memcmp(p->copy, now, bytes))) {
+        // Kept for a new pass or submission: its handles are uses as a binding's are (tu_pass), and no shader marks a read of a table
         if (!samp) { const uint32_t *hw = (const uint32_t *)now; for (uint32_t k = 0; k < p->n; k++) { int tid = ubo_tex_id(hw[k * 2]); if (tid >= 0 && tid < g_ntreg) g_treg[tid].used = g_tu_now; } }
+        if (p->epoch != g_arena_epoch) htab_emit(p);
         p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; g_htab_last = p; *out = p->buf; return p->gpu; }
     uint64_t t0 = mach_absolute_time();
-    if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; if (p->buf) defer_obj_release(p->buf); uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }
+    if (!p) {
+        p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS];
+        uint8_t *keep = p->copy; uint64_t *ks = p->ser, *ke = p->elems; uint32_t *kl = p->lead;
+        uint32_t cap = p->cap, ecap = p->ecap, lcap = p->lcap;
+        *p = (htab_snap){0};
+        p->copy = keep; p->ser = ks; p->elems = ke; p->lead = kl; p->cap = cap; p->ecap = ecap; p->lcap = lcap;
+    }
     uint32_t n = 0; const uint32_t *w = (const uint32_t *)now;
     for (uint32_t k = bytes / 8; k > 0 && !n; k--) if (w[(k - 1) * 2]) n = k;
     uint64_t dummy = samp ? dummy_samp_rid() : (dummy_tex(b->dtt, b->dpf) ? g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3] : 0);
-    if (p->cap < bytes) { free(p->copy); free(p->ser); p->copy = malloc(bytes ? bytes : 8); p->ser = malloc(bytes ? bytes : 8); p->cap = bytes; }
-    static uint64_t e[8193]; static uint32_t lead[8193]; memset(lead, 0, sizeof lead);
+    if (p->cap < bytes || !p->copy) { free(p->copy); free(p->ser); uint32_t nc = bytes ? bytes : 8; p->copy = realloc_or_die(NULL, nc, "handle table copy"); p->ser = realloc_or_die(NULL, nc, "handle table serials"); p->cap = nc; }
+    int is_tbuf = !samp && b->dtt == (uint8_t)MTLTextureTypeTextureBuffer;
+    size_t metadata = is_tbuf ? 4 * (size_t)(n + 1) : 0;
+    static uint64_t e[8193]; static uint32_t lead[8193];
+    if (is_tbuf) memset(lead, 0, metadata);
+    int has_sub_trans = 0, has_ret_trans = 0;
     for (uint32_t k = 0; k < n; k++) { uint64_t r = 0; p->ser[k] = 0;
         if (samp) { int sid = c2s == SAMP_FROM_UBO_HANDLES ? ubo_samp_id(w[k * 2]) : c2s; if (samp_known(sid) && samp_fast(sid)) r = samp_rid(sid); }
         else { int tid = ubo_tex_id(w[k * 2]); if (tid >= 0 && tid < g_ntreg && g_treg[tid].ok && (g_treg[tid].view || (!g_treg[tid].gone && tex_storage_live(&g_treg[tid].t)))) {   // as for the samplers: other data, not a handle
                 void *tv = NULL; uint8_t vtt = 0; uint64_t tr = tex_fast_rid_meta(tid, &tv, &vtt, NULL); __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
                 if (t && !treg_fam_valid(tid, t)) { t = nil; tr = 0; }
                 if (t && vtt != b->dtt) { uint64_t r2 = 0; t = tex_fit_elem(tid, t, (MTLTextureType)b->dtt, &r2); tr = t ? r2 : 0; }   // a handle the shader does not pick here may be another kind
-                if (t && b->dtt == (uint8_t)MTLTextureTypeTextureBuffer) lead[k] = tbuf_lead(tid, t);
-                if (t) { if (__builtin_expect(g_res_check_on, 0)) res_check(t, "htab_gpu", tid); r = tr; p->ser[k] = g_treg[tid].t.serial; } } }
+                if (t && is_tbuf) lead[k] = tbuf_lead(tid, t);
+                if (t) { if (__builtin_expect(g_res_check_on, 0)) res_check(t, "htab_gpu", tid); r = tr; p->ser[k] = g_treg[tid].t.serial;
+                    if (g_treg[tid].retired) { if (g_treg[tid].transient_sub == g_sub_serial) has_sub_trans = 1; else has_ret_trans = 1; } } } }
         e[k] = r ? r : dummy; }
     e[n] = dummy;
-    memcpy(p->copy, now, bytes);
-    // Registrations come many times a frame and rarely touch a table: the same elements keep the buffer, and argument blocks that hold it
-    size_t metadata = !samp && b->dtt == MTLTextureTypeTextureBuffer ? 4 * (size_t)(n + 1) : 0;
-    if (p->buf && p->n == n && !memcmp((uint8_t *)p->buf.contents + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1))
-        && (!metadata || !memcmp((uint8_t *)p->buf.contents + DMSH_POOL_HEAD + 8 * (size_t)(n + 1), lead, metadata))) { p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->bytes = bytes; g_htab_last = p; *out = p->buf; return p->gpu; }
-    id<MTLBuffer> buf = [g_dev newBufferWithLength:DMSH_POOL_HEAD + 8 * (size_t)(n + 1) + metadata options:MTLResourceStorageModeShared];
-    uint8_t *c = buf.contents; *(uint32_t *)c = n; memcpy(c + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1));
-    *(uint32_t *)(void *)(c + DMSH_POOL_BIAS) = metadata ? DMSH_POOL_HEAD + 8u * (n + 1) : 0;
-    if (metadata) memcpy(c + DMSH_POOL_HEAD + 8 * (size_t)(n + 1), lead, metadata);
-    res_add(buf);
-    if (p->buf) defer_obj_release(p->buf);
-    p->buf = buf; p->gpu = buf.gpuAddress; p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->addr = addr; p->bytes = bytes; p->n = n; p->samp = samp; p->dtt = b->dtt; p->dpf = b->dpf; p->tb = S.tex_base; p->sb = S.samp_base; p->c2s = c2s;
+    if (bytes) memcpy(p->copy, now, bytes);
+    // Registrations come many times a frame and rarely touch a table: the same elements keep the table (and its slice in the current submission, or re-emit into a new submission's arena)
+    if (p->valid && p->n == n && !memcmp(p->elems, e, 8 * (size_t)(n + 1))
+        && (!metadata || (p->lead && !memcmp(p->lead, lead, metadata)))) {
+        if (p->epoch != g_arena_epoch) htab_emit(p);
+        p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial;
+        p->sub_trans = has_sub_trans ? g_sub_serial : 0; p->trans_gen = has_ret_trans ? g_treg_trans_gen : 0;
+        p->npend = g_npend; p->bytes = bytes; g_htab_last = p; *out = p->buf; return p->gpu; }
+    uint32_t need_e = n + 1;
+    if (p->ecap < need_e) { free(p->elems); p->elems = realloc_or_die(NULL, 8 * (size_t)need_e, "handle table elements"); p->ecap = need_e; }
+    memcpy(p->elems, e, 8 * (size_t)need_e);
+    if (metadata) {
+        if (p->lcap < need_e) { free(p->lead); p->lead = realloc_or_die(NULL, 4 * (size_t)need_e, "handle table leads"); p->lcap = need_e; }
+        memcpy(p->lead, lead, metadata);
+    }
+    p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial;
+    p->sub_trans = has_sub_trans ? g_sub_serial : 0; p->trans_gen = has_ret_trans ? g_treg_trans_gen : 0;
+    p->npend = g_npend; p->addr = addr; p->bytes = bytes; p->n = n; p->samp = samp; p->dtt = b->dtt; p->dpf = b->dpf; p->tb = S.tex_base; p->sb = S.samp_base; p->c2s = c2s; p->valid = 1;
+    htab_emit(p);
     g_psnap_gen++;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     double ms = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6; g_stat_htab_ms += ms;
     if (g_stat_htab_builds++ < 16 || g_stat_htab_builds % 1000 == 0)
         MLOG("table of a uniform buffer's handles: %s of %u elements from slot %d +%#x, built in %.3f ms (%llu builds, %.0f ms in all, %llu reads)", samp ? "samplers" : "textures", n, reg, b->off, ms, (unsigned long long)g_stat_htab_builds, g_stat_htab_ms, (unsigned long long)g_stat_htab_reads);
-    g_htab_last = p; *out = buf; return p->gpu;
+    g_htab_last = p; *out = p->buf; return p->gpu;
 }
 static uint32_t g_dispatch_dim[3];   // the current dispatch's workgroup counts (driver segment c0 + 0x200 for compute, and c0 + 4 on NVN2)
 static uint32_t g_draw_binst;   // the current draw's base instance (draw), for c0 + 0x644

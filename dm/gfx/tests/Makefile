@@ -854,6 +854,11 @@ check_t_stencil_view: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_fan: t_vk_fan.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_fan.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_fan: RUN_ENV = MTL_DEBUG_LAYER=1
+# A line or triangle strip restarts at the index type's maximum value in Metal itself; a list draws that value as a
+# vertex. The layer's strip path therefore needs no CPU split, and a restart-disabled pipeline still gets the restart.
+t_vk_restart_strip: t_vk_restart_strip.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_restart_strip.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_restart_strip: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 t_vk_cmds: t_vk_cmds.m ../vk/hle_vk.m $(MTL_T_DEP)

@@ -1,0 +1,34 @@
+# RIVE: Ultimate Edition; profile derived from a survey and validated in runtime testing on Apple M1 hardware
+
+# ---- Identity ----
+title_id	010069C00401A000
+program_id	010069C00401A000
+
+# ---- App ----
+name	RIVE: Ultimate Edition
+ipa	RiveUltimateEdition.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.22	main=4e728908592008924ffdf7512b2dc77c	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	audio/VoiceOver.ttwb
+zip_store	.gba:.ma:.ogg:.ttwb:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/textures/=textures /particles/=particles /scripts/=scripts /audio/=audio /presentation/=presentation /levels/=levels /conversations/=conversations /color_grading/=colorgrading /missions/=missions /movement/=movement /localization/=localization /shaders/=shaders /rumble/=rumble /config/=config /roms/=roms /default/=default /metadata/=metadata
+shader_note	RIVE: Ultimate Edition shaders

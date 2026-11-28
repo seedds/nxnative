@@ -1102,3 +1102,10 @@ t_draw_cache: t_draw_cache.m $(MTL_T_DEP)
 .PHONY: check_t_draw_cache
 check_t_draw_cache: t_draw_cache
 	MTL_DEBUG_LAYER=1 ./t_draw_cache
+
+# Multi-device NVN depth mode lifecycle and depth-keyed shader caching (issue #3382)
+t_depth_mode: t_depth_mode.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_depth_mode.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_depth_mode
+check_t_depth_mode: t_depth_mode
+	./t_depth_mode

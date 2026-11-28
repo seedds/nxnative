@@ -8584,7 +8584,7 @@ static void shmap_read(void) {
     __unsafe_unretained id<MTLBuffer> ab_buf; uint8_t *ab_cpu; uint64_t ab_gpu; size_t ab_off; uint64_t ab_pass; uint32_t ab_binst; uint64_t ab_pgen, ab_gen, ab_ugen;   // ab_gen / ab_ugen: the stage's binding generations it was written at (g_args_gen); ab_pass: serial of the render pass that encoded this argument block - reused only within the same pass (the arena holding a block from another pass / another submission may already have been reclaimed and rewritten); ab_pgen: g_psnap_gen when it was encoded (pools, pool_gpu)
     id<MTLLibrary> bflib; int bflib_state; NSMutableArray *bffn;   // bflib: the readable-tile version <key>_bf (state as afn_state), bffn: its functions specialized by their numbers (NvBfFn, bf_fn)
     uint64_t mis[4];   // mis: texture slots 0-255 already reported for a type mismatch (tex_mis_note)
-    NSString *ventry; id<MTLFunction> vfn; int vfn_state;
+    NSString *ventry; id<MTLFunction> vfn; int vfn_state; uint8_t depth_zero; uint32_t vs_dev_gen;
     NSString *pentry, *wlentry, *vinentry;   // a vertex shader's entry point in its pulling library, that library's wide-line one, and its entry point in the shadow-input library, as the reflection names them (side_entry); nil: ventry's name (a layer entry point)
     id<MTLFunction> pfn, wlfn; int pfn_state, has_pull;   // wlfn: the wide-line entry of the pulling library (wlentry, dmsh_pull.py; nvn_wline.inc), nil when it has none
     id<MTLLibrary> alib; id<MTLFunction> afn; int afn_state, has_alpha, has_bz;   // has_bz: its entry points read the blend weight word (bz_bind)
@@ -8790,8 +8790,20 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     return lib_from_map((msl_map){.data = m, .size = len, .base = m, .base_len = len}, err);
 }
 // NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_entry.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
-// main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it
+// main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it.
+// Depth-dependent stages (vertex, domain, mesh) are cached per depth convention so a re-initialized NVNdevice in a multi-NRO collection never inherits a shader with the other entry.
 static _Atomic int g_depth_zero, g_vs_loaded;
+static _Atomic uint32_t g_depth_dev_gen = 1;
+static inline int stage_uses_depth(int stage) { return stage == 0 || stage == 4; }
+static NSString *shcache_key(NSString *pc, int stage, int zero) {
+    return zero && stage_uses_depth(stage) ? [pc stringByAppendingString:@"#z"] : pc;
+}
+void mtl_device_reset_depth(void) {
+    atomic_fetch_add(&g_depth_dev_gen, 1);
+    atomic_store(&g_vs_loaded, 0);
+    if (atomic_exchange(&g_depth_zero, 0) != 0)
+        MLOG("depth mode: near=-w (GL), vertex shaders use the main0 entry");
+}
 void mtl_set_depth_zero(int on) {
     if (atomic_exchange(&g_depth_zero, on) == on) return;
     MLOG("depth mode: %s", on ? "near=0, vertex shaders use the main0_z entry" : "near=-w (GL), vertex shaders use the main0 entry");
@@ -8966,7 +8978,7 @@ static NSString *side_entry(id side, NSString *key, NSString *own) {
     return [n isKindOfClass:[NSString class]] && [n length] ? n : own;
 }
 // layer: a vertex shader's layer entry points (entry_layer / entry_layer_z, which also write the layer) instead of main0 / main0_z, for a program whose geometry shader is a slice writer (prog_fold_gs)
-static NvShader *shader_load(NSString *pc, int stage, int layer) {
+static NvShader *shader_load_z(NSString *pc, int stage, int layer, int zero, uint32_t dev_gen) {
     NSError *e = nil;
     NSData *jd = msl_data([NSString stringWithFormat:@"%@/%@.json", g_msl_dir, pc]);
     NSDictionary *j = jd ? [NSJSONSerialization JSONObjectWithData:jd options:0 error:nil] : nil;
@@ -8990,15 +9002,16 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
         // (rf.c1 is freed by dealloc when o goes: freeing it here too was a double free, which aborted FINAL FANTASY RESONANCE at its first such shader)
         MLOG("[RED] shader %s reflection conversion failed: a texture handle the translator could not trace to one slot (profile key tex_dyn_slots off)", pc.UTF8String); return nil; }
     NSString *entry = j[@"entry"]; int ez = 0;   // ez: a vertex shader's entry is its near = 0 one
+    o->depth_zero = (uint8_t)(zero != 0);
     if (stage == 0) {
-        atomic_fetch_add(&g_vs_loaded, 1);
-        if (atomic_load(&g_depth_zero)) { if (j[@"entry_z"]) { entry = j[@"entry_z"]; ez = 1; } else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
-        if (layer) entry = atomic_load(&g_depth_zero) ? j[@"entry_layer_z"] : j[@"entry_layer"];
+        if (dev_gen == atomic_load(&g_depth_dev_gen)) { o->vs_dev_gen = dev_gen; atomic_fetch_add(&g_vs_loaded, 1); }
+        if (zero) { if (j[@"entry_z"]) { entry = j[@"entry_z"]; ez = 1; } else RED_ONCE(85, "vertex shader %s has no near=0 entry (entry_z): depth stays in the GL convention", pc.UTF8String); }
+        if (layer) entry = zero ? j[@"entry_layer_z"] : j[@"entry_layer"];
     }
     NSDictionary *mst = [j[@"mesh_stage"] isKindOfClass:[NSDictionary class]] ? j[@"mesh_stage"] : nil;
     if (mst) { o->mesh_kind = [mst[@"kind"] isEqual:@"ts"] ? 1 : 2; o->mesh_threads = (uint16_t)[mst[@"threads"] unsignedIntValue]; o->mesh_payload = (uint16_t)[mst[@"payload"] unsignedIntValue];
                o->mesh_notask = o->mesh_kind == 2 && ![mst[@"task"] boolValue];
-               if (o->mesh_kind == 2 && atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
+               if (o->mesh_kind == 2 && zero && j[@"entry_z"]) entry = j[@"entry_z"]; }   // the depth convention, as a vertex shader takes it above
     if (j[@"entry_geometry_capture"]) {
         NSError *ge = nil;
         o->geo_fn = fn_load(lib, j[@"entry_geometry_capture"], &ge);
@@ -9008,7 +9021,7 @@ static NvShader *shader_load(NSString *pc, int stage, int layer) {
     if ([ts isKindOfClass:NSDictionary.class] && !ts[@"unsupported"] && [ts[@"cp_slots"] intValue] == 33 && [ts[@"patch_slots"] intValue] == 32) {   // dmsh_tess.py, nvn_tess.inc
         if (stage == 3) { o->tess_out_cp = [ts[@"out_cp"] unsignedIntValue]; o->tess_in_bytes = [ts[@"in_bytes"] unsignedIntValue]; o->tess_ok = o->tess_out_cp > 0 && o->tess_out_cp <= 32; }
         if (stage == 4) { o->tess_ok = ([ts[@"mode"] isEqual:@"quads"] || [ts[@"mode"] isEqual:@"triangles"]) && [ts[@"md"] isKindOfClass:NSNumber.class]; o->tess_md = [ts[@"md"] unsignedIntValue];
-            if (atomic_load(&g_depth_zero) && j[@"entry_z"]) entry = j[@"entry_z"]; }
+            if (zero && j[@"entry_z"]) entry = j[@"entry_z"]; }
     }
     NSDictionary *geo = j[@"geometry"];
     if (j[@"geometry_reader"]) o->geo_output = [j[@"geometry_output"] unsignedIntValue];
@@ -9095,23 +9108,33 @@ static int progpf_first(NSString *pc) {
     int fresh = ![g_progpf_seen containsObject:pc]; if (fresh) [g_progpf_seen addObject:pc];
     os_unfair_lock_unlock(&g_progpf_lock); return fresh;
 }
+static NvShader *shader_load(NSString *pc, int stage, int layer) {
+    return shader_load_z(pc, stage, layer, atomic_load(&g_depth_zero), atomic_load(&g_depth_dev_gen));
+}
 static NvShader *shader_get(NSString *pc, int stage) {
+    int zero = atomic_load(&g_depth_zero);
+    uint32_t gen = atomic_load(&g_depth_dev_gen);
+    NSString *ck = shcache_key(pc, stage, zero);
     if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
-    NvShader *o = g_shcache[pc];
-    if (o) return o;
-    uint64_t bt = bp_now(); o = shader_load(pc, stage, 0);
+    NvShader *o = g_shcache[ck];
+    if (o) {
+        if (stage == 0 && o->vs_dev_gen != gen) { o->vs_dev_gen = gen; atomic_fetch_add(&g_vs_loaded, 1); }
+        return o;
+    }
+    uint64_t bt = bp_now(); o = shader_load_z(pc, stage, 0, zero, gen);
     if (!o) return nil;
-    progpf_first(pc);
-    g_shcache[pc] = o;
+    progpf_first(ck);
+    g_shcache[ck] = o;
     g_bp_lib_n++; g_bp_lib_ns += bp_now() - bt;
     return o;
 }
 #include "nvn_raytrace_program.inc"
-// The layer entry points of vertex shader vs as a shader of their own (cached beside it as <key>#l)
+// The layer entry points of vertex shader vs as a shader of their own (cached beside it as <key>#l or <key>#lz)
 static NvShader *shader_get_layer(NvShader *vs) {
-    NSString *pc = @(vs->key), *ck = [pc stringByAppendingString:@"#l"];
+    int zero = vs->depth_zero;
+    NSString *pc = @(vs->key), *ck = [pc stringByAppendingString:zero ? @"#lz" : @"#l"];
     NvShader *o = g_shcache[ck];
-    if (!o && (o = shader_load(pc, 0, 1))) g_shcache[ck] = o;
+    if (!o && (o = shader_load_z(pc, 0, 1, zero, atomic_load(&g_depth_dev_gen)))) g_shcache[ck] = o;
     return o;
 }
 // A program whose geometry shader is a slice writer (a stub with no function, shader_load) draws with its vertex shader's layer entry points instead, which write the layer the geometry
@@ -14752,11 +14775,12 @@ static int warm_stale_vs(NSString *key, uint8_t stage, NSMutableSet<NSString *> 
     }
     return warm_stale(key, stale);
 }
-static NvShader *warm_shader(NSString *key, int stage) {
+static NvShader *warm_shader_z(NSString *key, int stage, int zero, uint32_t dev_gen) {
+    NSString *ck = shcache_key(key, stage, zero);
     os_unfair_lock_lock(&g_warm_dict_lock);
-    id sh = g_warm_dict[key];
+    id sh = g_warm_dict[ck];
     if (sh) { os_unfair_lock_unlock(&g_warm_dict_lock); return sh == NSNull.null ? nil : sh; }
-    WarmLoad *load = g_warm_loads[key];
+    WarmLoad *load = g_warm_loads[ck];
     if (load) {
         // Hold a strong record, not the dictionary lock, across the wait. The owner has no dependency on another warm task.
         os_unfair_lock_unlock(&g_warm_dict_lock);
@@ -14764,18 +14788,21 @@ static NvShader *warm_shader(NSString *key, int stage) {
         return load->shader;
     }
     load = [WarmLoad new]; load->done = dispatch_group_create();
-    dispatch_group_enter(load->done); g_warm_loads[key] = load;
+    dispatch_group_enter(load->done); g_warm_loads[ck] = load;
     os_unfair_lock_unlock(&g_warm_dict_lock);
-    NvShader *n = shader_load(key, stage, 0);
+    NvShader *n = shader_load_z(key, stage, 0, zero, dev_gen);
     if (n && n->stage == 0 && n->has_pull && !n->layer_out && hybrid_on()) pull_load(n);   // fully prepare before publishing
     if (n) g_warm_shaders++;
     os_unfair_lock_lock(&g_warm_dict_lock);
-    g_warm_dict[key] = n ?: (id)NSNull.null;
+    g_warm_dict[ck] = n ?: (id)NSNull.null;
     load->shader = n;
-    [g_warm_loads removeObjectForKey:key];
+    [g_warm_loads removeObjectForKey:ck];
     dispatch_group_leave(load->done);
     os_unfair_lock_unlock(&g_warm_dict_lock);
     return n;
+}
+static NvShader *warm_shader(NSString *key, int stage) {
+    return warm_shader_z(key, stage, atomic_load(&g_depth_zero), atomic_load(&g_depth_dev_gen));
 }
 static void warm_enqueue(WarmItem *item) {
     os_unfair_lock_lock(&g_warm_lock);
@@ -14840,17 +14867,20 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
 }
 static void warm_task(WarmTask *t) {
     @autoreleasepool {
+        int zero = atomic_load(&g_depth_zero);
+        uint32_t gen = atomic_load(&g_depth_dev_gen);
         if (t->kind == 2) {
-            NvShader *cs = warm_shader(t->key, 5); NSError *e = nil; id ps = cs ? cps_new_b(cs->fn, 1, &e) : nil;   // the common pipeline (g_cps)
+            NvShader *cs = warm_shader_z(t->key, 5, zero, gen); NSError *e = nil; id ps = cs ? cps_new_b(cs->fn, 1, &e) : nil;   // the common pipeline (g_cps)
             if (cs && !ps) MLOG("[RED] background compute pipeline creation failed: %s", e.localizedDescription.UTF8String);
             if (ps && g_pre_tool) g_warm_cps++;   // the prebuild tool: captured for the archive, nothing kept
             else if (ps) { WarmItem *item = [WarmItem new]; item->kind = 2; item->key = t->key; item->shader = cs; item->object = ps; warm_enqueue(item); g_warm_cps++; }
             g_warm_done++; return;
         }
         pso_skey sk; [t->rs[0] getBytes:&sk length:sizeof sk];
-        NvShader *vs = warm_shader(t->vkey, sk.vs_stage), *fs = t->fkey.length ? warm_shader(t->fkey, sk.fs_stage) : nil;
+        NvShader *vs = warm_shader_z(t->vkey, sk.vs_stage, zero, gen), *fs = t->fkey.length ? warm_shader_z(t->fkey, sk.fs_stage, zero, gen) : nil;
+        NSString *vs_ck = shcache_key(t->vkey, sk.vs_stage, zero);
         if (t->kind == 3) {
-            NvShader *ts = t->tkey ? warm_shader(t->tkey, 3) : nil;
+            NvShader *ts = t->tkey ? warm_shader_z(t->tkey, 3, zero, gen) : nil;
             if (vs && vs->stage == 4 && vs->mesh_kind == 2 && vs->fn &&
                 (!t->fkey.length || (fs && fs->stage == 1 && fs->fn)) &&
                 (t->tkey ? (ts && ts->stage == 3 && ts->mesh_kind == 1 && ts->fn && !vs->mesh_notask) : vs->mesh_notask)) {
@@ -14859,7 +14889,7 @@ static void warm_task(WarmTask *t) {
                 if (ps && g_pre_tool) g_warm_mps++;   // the prebuild tool: captured for the archive, nothing kept
                 else if (ps) {
                     WarmItem *item = [WarmItem new]; item->kind = 3; item->pso = sk.k; item->object = ps;
-                    item->vs = vs; item->vs_key = t->vkey; item->fs = fs; item->fs_key = t->fkey; item->ts = ts; item->ts_key = t->tkey;
+                    item->vs = vs; item->vs_key = vs_ck; item->fs = fs; item->fs_key = t->fkey; item->ts = ts; item->ts_key = t->tkey;
                     warm_enqueue(item); g_warm_mps++;
                 } else { g_pre_warm_failed++; MLOG("[RED] task / mesh pipeline prewarm failed: task %s mesh %s fragment %s: %s",
                                                    ts ? ts->key : "-", vs->key, fs ? fs->key : "-", error ? error.localizedDescription.UTF8String : "invalid depth/stencil formats"); }
@@ -14883,7 +14913,7 @@ static void warm_task(WarmTask *t) {
             g_warm_done++;
             if (!ps) { g_pre_warm_failed++; MLOG("[RED] background render pipeline creation failed: %s", e.localizedDescription.UTF8String); continue; }
             if (g_pre_tool) { g_warm_rps++; continue; }   // the prebuild tool: the base is in the serializer; keep nothing
-            WarmItem *item = [WarmItem new]; item->kind = 1; item->pull = pull; item->vs_key = t->vkey; item->fs_key = t->fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
+            WarmItem *item = [WarmItem new]; item->kind = 1; item->pull = pull; item->vs_key = vs_ck; item->fs_key = t->fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
             warm_enqueue(item); g_warm_rps++;
         }
     }
@@ -18398,7 +18428,9 @@ static uint64_t g_pf_n, g_pf_ns;
 static void shader_prefetch_rest(void) {
     if (!g_exec_next || !g_shmap) return;   // no shader map loaded yet: no game shader resolved so far (the graphics tests register their programs themselves)
     if (!g_shcache) g_shcache = [NSMutableDictionary dictionary];
-    NSMutableArray<NSString *> *keys = [NSMutableArray array]; NSMutableArray<NSNumber *> *stages = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    int zero = atomic_load(&g_depth_zero);
+    uint32_t gen = atomic_load(&g_depth_dev_gen);
+    NSMutableArray<NSString *> *keys = [NSMutableArray array], *ckeys = [NSMutableArray array]; NSMutableArray<NSNumber *> *stages = [NSMutableArray array]; NSMutableSet<NSString *> *seen = [NSMutableSet set];
     op_cursor cur = {.p = g_exec_next};
     for (int guard = 0; guard < 200000; guard++) {
         const uint8_t *q; op_hdr hq; const void *aq;
@@ -18411,22 +18443,22 @@ static void shader_prefetch_rest(void) {
             NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
             NSString *stage = g_shmap[k]; int st = stage ? stage_of(stage) : -1;
             if (st < 0) continue;
-            NSString *lk = [k stringByAppendingString:@"_b"];
-            if (g_shcache[lk] || [seen containsObject:lk]) continue;
-            [seen addObject:lk]; [keys addObject:lk]; [stages addObject:@(st)];
+            NSString *lk = [k stringByAppendingString:@"_b"], *ck = shcache_key(lk, st, zero);
+            if (g_shcache[ck] || [seen containsObject:ck]) continue;
+            [seen addObject:ck]; [keys addObject:lk]; [ckeys addObject:ck]; [stages addObject:@(st)];
         }
     }
     NSUInteger n = keys.count; if (n < 2) return;   // one alone loads as fast where its draw needs it
     uint64_t t0 = bp_now(); int hy = hybrid_on();
     NSMutableArray *res = [NSMutableArray arrayWithCapacity:n]; for (NSUInteger i = 0; i < n; i++) [res addObject:NSNull.null];
     dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i) { @autoreleasepool {
-        NvShader *o = shader_load(keys[i], stages[i].intValue, 0);
+        NvShader *o = shader_load_z(keys[i], stages[i].intValue, 0, zero, gen);
         if (o && hy && o->stage == 0 && o->has_pull && !o->layer_out) pull_load(o);
         os_unfair_lock_lock(&g_pf_lock); if (o) res[i] = o; os_unfair_lock_unlock(&g_pf_lock);
     } });
     unsigned got = 0;
     for (NSUInteger i = 0; i < n; i++) { NvShader *o = res[i]; if ((id)o == NSNull.null) continue;
-        g_shcache[keys[i]] = o; got++; progpf_first(keys[i]); }
+        g_shcache[ckeys[i]] = o; got++; progpf_first(ckeys[i]); }
     uint64_t dt = bp_now() - t0; g_bp_lib_n += got; g_bp_lib_ns += dt; g_pf_n += got; g_pf_ns += dt;
     static int logged; if (logged++ < 8) MLOG("shader prefetch: %u of %lu shader libraries the rest of the submission binds loaded in parallel in %.1f ms", got, (unsigned long)n, dt / 1e6);
 }
@@ -21740,13 +21772,15 @@ void mtl_prog_prefetch(const prog_t *cp) {
         if (!prefetch) continue;
         int st = stage ? stage_of(stage) : -1;
         if (st < 0) continue;   // not in the package: a built-in kernel (prog_get)
-        NSString *pc = [k stringByAppendingString:@"_b"];
-        if (!progpf_first(pc)) continue;
+        int zero = atomic_load(&g_depth_zero);
+        uint32_t gen = atomic_load(&g_depth_dev_gen);
+        NSString *pc = [k stringByAppendingString:@"_b"], *ck = shcache_key(pc, st, zero);
+        if (!progpf_first(ck)) continue;
         dispatch_async(progpf_queue(), ^{ @autoreleasepool {
-            NvShader *sh = shader_load(pc, st, 0);
+            NvShader *sh = shader_load_z(pc, st, 0, zero, gen);
             if (sh && st == 0 && sh->has_pull && !sh->layer_out && hybrid_on()) pull_load(sh);   // its pulling entry too, as the prewarm does (warm_shader)
             if (!sh) return;
-            WarmItem *item = [WarmItem new]; item->kind = 0; item->key = pc; item->shader = sh; warm_enqueue(item);
+            WarmItem *item = [WarmItem new]; item->kind = 0; item->key = ck; item->shader = sh; warm_enqueue(item);
             if (!g_progpf_loaded++) MLOG("shader prefetch at program creation: first library %s loaded in the background (DM_NVN_PREFETCH=0 turns it off)", pc.UTF8String);
         } });
     }

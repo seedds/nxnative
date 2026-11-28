@@ -138,7 +138,7 @@ NVN(nvnDeviceInitialize, NVNboolean, NVNdevice *d, const NVNdeviceBuilder *b) {
     o->magic = MAGIC('D', 'E', 'V', 0); o->flags = ((const dev_builder_t *)b)->flags;
     nvn_timestamp_ns = dm_sdk_ounce();   // NVN2's counter reports record nanoseconds (nvn_timestamp.h)
     o->origin = NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT; mtl_set_origin_lower_left(1);   // NVN's default; every game so far switched to upper-left right away, Link's Awakening keeps it
-    mtl_set_depth_zero(0);   // NVN's default depth mode: near = -w (GL)
+    mtl_device_reset_depth();   // NVN's default depth mode: near = -w (GL), fresh per-device shader count
     OLOG("DeviceInitialize %p flags=%#x", (void *)d, o->flags);
     return 1;
 }

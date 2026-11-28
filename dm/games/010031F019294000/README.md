@@ -8,7 +8,7 @@ Update 2.20 (v458752) over the base game, SDK 17.5.8. Unity 2022.3.30f1 IL2CPP o
 |---|---|---|
 | Node area cut 1 GB → 62 MB and 2 MB region alignment | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `71b1a025…` (`sdk+0x139468` / `+0x1394fc`; `+0x139654`, `+0x13965c`, `+0x139660`) | the SDK-wide function-matched cuts (node area implementation 4, alignment implementation 4); no cut is registered for the build |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| `app_pool 0x40000000` | `game.tsv` | the heap check's choice: with the hardware pool the alias region was used up to +4.26 GB of 4.38 GB; see [Memory](#memory) |
+| `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | the heap check's choice: with the hardware pool the alias region was used up to +4.26 GB of 4.38 GB; see [Memory](#memory) |
 | `mem_stack 0x28000000` (640 MB), `mem_alias 0x100000000` (4 GB) in the 5 GB block | `game.tsv` | with every other profile's 256 MB stack region, thread creation aborted on some boots; see [Memory](#memory) |
 | `depth_mode zero` | `game.tsv` | the game calls `nvnDeviceSetDepthMode` with near = 0; it only decides the mode of the pipeline bases made before the game runs |
 | `shader_groups /Data/=data` | `game.tsv` | everything is under `Data/`: the player's serialized files and the `StreamingAssets` bundles |
@@ -50,6 +50,7 @@ No code of the game is cut. The game asks for present interval 1, so it needs no
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - **Current (2026-11-05):** the translator deletes 490 bindless accesses in 245 shaders (245 pixel; texture2D 490), whose results read 0: each named by its `[RED]` line in the build's log. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - iOS: no IPA built yet; untested on a device.
 - Not checked: the story's first world, the battle and multiplayer modes, sound on a Mac with audio out.

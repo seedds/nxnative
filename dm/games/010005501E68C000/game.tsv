@@ -38,7 +38,9 @@ zip_store	.assets:.bundle:.dat:.json:.resource:.ress:.metallib
 mem_reserve	0x140000000
 mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0x40000000
+# Switch hardware pool with a 1 GB StandardAllocator cap (docs/reference/memory.md, The heap check's 1 GB pool picked a game's low graphics)
+app_pool	0xCD500000
+stdalloc_cap	0x40000000
 
 # ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
 # engine built-ins (the unitybuiltinshaders bundle, Resources/) go to engine, the player's serialized files to data, the other Addressables bundles to assets

@@ -11,8 +11,8 @@ static int failures;
 static void *writer(void *arg) {
     uint64_t id = (uintptr_t)arg;
     for (uint64_t i = 0; i < N; i++) {
-        ft_event e = {.kind=FT_FEEDBACK, .thread=id, .fence=id*N+i,
-                      .cpu_ns=i, .gpu_begin_s=(double)i, .gpu_end_s=(double)i+1};
+        ft_event e = {.kind=FT_WAIT_END, .thread=id, .fence=id*N+i,
+                      .cpu_ns=i, .value=i+1};
         ft_append(&trace, &e);
     }
     return NULL;
@@ -27,9 +27,9 @@ int main(void) {
     for (size_t i=0;i<c.used;i++) {
         ft_event e=events[i]; CHECK(e.fence<N*4);
         if (e.fence<N*4) { CHECK(!seen[e.fence]); seen[e.fence]=1; }
-        CHECK(e.fence==e.thread*N+e.cpu_ns); CHECK(e.gpu_end_s==e.gpu_begin_s+1);
+        CHECK(e.fence==e.thread*N+e.cpu_ns); CHECK(e.value==e.cpu_ns+1);
     }
-    ft_event late={.kind=FT_FEEDBACK,.fence=999999};
+    ft_event late={.kind=FT_WAIT_END,.fence=999999};
     CHECK(!ft_append(&trace,&late)); CHECK(trace.used==N*4);
     CHECK(events[N*4-1].fence!=999999);
     pthread_mutex_destroy(&trace.lock);

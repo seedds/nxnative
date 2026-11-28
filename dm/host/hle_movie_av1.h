@@ -8,7 +8,8 @@ typedef struct mav1 mav1;
 // and the time its temporal unit came with: dav1d decodes several frames at once, so a picture can come out calls after its unit went in
 typedef struct { const uint8_t *y, *uv; size_t ystride, uvstride; int w, h, matrix, full_range; int64_t ts; } mav1_picture;
 
-mav1 *mav1_new(void);
+struct movie_vt_control;
+mav1 *mav1_new(struct movie_vt_control *control);
 void mav1_free(mav1 *a);
 void mav1_reset(mav1 *a);   // a new stream starts at the next packet with a sequence header
 // One temporal unit (OBUs with their sizes) and its time. 1 and *out set: a picture, the oldest not yet given; 0: nothing to show now (no sequence header seen yet, a unit

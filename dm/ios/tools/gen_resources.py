@@ -35,6 +35,7 @@ def main():
         'DM_RESOURCE_SHADERS': str(Path(shaders).resolve()),
         'DM_RESOURCE_MSLDIR': msldir,
         'DM_RESOURCE_AOC': str(Path(aoc).resolve()) if aoc and Path(aoc).is_dir() else '',
+        'DM_RESOURCE_AOC_CHECKSUM': os.environ.get('DM_RESOURCE_AOC_CHECKSUM', 'NO'),
         'DM_RESOURCE_CHAIN_H': str(Path(chain_h).resolve()),   # dm/gfx/nvn/dmsh_chain.h, which the host is compiled with (one chain version for every game)
         'DM_RESOURCE_PSO': str(Path(pso).resolve()) if pso and Path(pso).is_dir() else '',   # → <App>/pso, which the app hands the host as DM_PSO_BUNDLE
         # what the identity line of a RomFS image names (stage_resources.sh with DM_COPY_ROMFS=NO writes <App>/romfs.id): title ID, display version, package version

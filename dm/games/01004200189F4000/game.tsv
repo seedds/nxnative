@@ -1,0 +1,32 @@
+# Factorio 2.0.76 (Nintendo Switch, SDK 21.4.2). See README.md for Mac validation.
+
+# ---- Identity ----
+title_id	01004200189F4000
+program_id	01004200189F4000
+
+# ---- App ----
+name	Factorio
+ipa	Factorio.ipa
+app_category	public.app-category.simulation-games
+
+# ---- Versions ----
+build	v2031616	2.0.76	main=b1512fb6618a56090c0347f31d1a3297	sdk=a54aeb48bc09ad696a3eca7e7da37105
+package	v2031616
+shader_versions	v2031616
+
+# ---- Files ----
+# The host implements the EGL imports from NintendoSDK_OpenGL, so only main and sdk load.
+modules	main sdk
+romfs_marker	data/core/fonts/NotoSansCJKsc-Bold.ttf
+zip_store	.dat:.ogg:.png:.ttf:.zip:.metallib
+
+# ---- Memory ----
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# main.npdm declares no system resource.
+sys_resource	0x0
+
+# ---- Shaders ----
+shader_note	Factorio uses the OpenGL shader library

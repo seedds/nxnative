@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from analyze_fence_timeline import analyze  # noqa: E402
 
-COLUMNS = 'kind cpu_ns frame thread sync fence latest done site value gpu_begin_s gpu_end_s'.split()
+COLUMNS = 'kind cpu_ns frame thread sync fence latest done site value'.split()
 
 def event(kind: int, time: int, sync: int = 0, fence: int = 7, **extra: int | float):
     row: dict[str, int | float] = dict.fromkeys(COLUMNS, 0)
@@ -19,7 +19,7 @@ class TimelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             p = Path(directory) / 'trace.tsv'
             count = len(events) if declared is None else declared
-            text = f'# fence_trace_v1 CPU=CLOCK_UPTIME_RAW_ns GPU=Metal_seconds; cutoff=999999 first=10 last=20 records={count} dropped={dropped}; cutoff is NOT completion, missing joins remain unknown\n'
+            text = f'# fence_trace_v1 CPU=CLOCK_UPTIME_RAW_ns; cutoff=999999 first=10 last=20 records={count} dropped={dropped}; cutoff is NOT completion, missing joins remain unknown\n'
             text += '\t'.join(COLUMNS) + '\n'
             text += ''.join('\t'.join(str(e[k]) for k in COLUMNS) + '\n' for e in events)
             p.write_text(text)
@@ -30,8 +30,6 @@ class TimelineTests(unittest.TestCase):
         wait = result['waits'][0]
         self.assertTrue(wait['complete_pair'])
         self.assertEqual(wait['duration_cpu_ms'], 0.002)
-        self.assertEqual(wait['target_status'], 'not_observed')
-        self.assertIsNone(wait['target_submission'])
         self.assertEqual(result['dropped'], 2)
         self.assertEqual(len(wait['events']), 4)
 
@@ -45,21 +43,23 @@ class TimelineTests(unittest.TestCase):
         for rows in ([event(1, 100, 4)], [event(1, 100, 4), event(1, 101, 4), event(2, 200, 4)]):
             self.assertFalse(self.parse(rows)['waits'][0]['complete_pair'])
 
-    def test_fence_order_and_gpu_timestamp_availability(self):
-        for start, end in ((0, 0), (2, 1)):
-            fence = self.parse([event(8, 100), event(9, 99), event(10, 98), event(11, 120, gpu_begin_s=start, gpu_end_s=end)])['fences'][0]
-            self.assertEqual(len(fence['invalid_order']), 2)
-            self.assertNotIn('commit_bracket_cpu_ms', fence)
-            self.assertNotIn('record_to_commit_begin_cpu_ms', fence)
-            self.assertNotIn('gpu_span_ms', fence)
-        fence = self.parse([event(11, 120, gpu_begin_s=1, gpu_end_s=1.001)])['fences'][0]
-        self.assertAlmostEqual(fence['gpu_span_ms'], 1)
-        self.assertEqual(fence['missing_or_duplicate'], [8, 9, 10])
+    def test_event_kinds_and_identity_grouping(self):
+        events = [event(1, 100, 4), event(3, 101, 4), event(4, 150, 4, value=1), event(5, 160, 4, value=1),
+                  event(6, 170, 4, value=900), event(7, 400, 4, value=0), event(2, 410, 4, value=2),
+                  event(1, 500, 5), event(2, 600, 5, value=1)]
+        result = self.parse(events)
+        self.assertEqual([w['sync'] for w in result['waits']], [4, 5])
+        self.assertEqual([e['kind'] for e in result['waits'][0]['events']], [1, 3, 4, 5, 6, 7, 2])
+        self.assertEqual(result['waits'][0]['result'], 2)
+        self.assertEqual(result['waits'][1]['duration_cpu_ms'], 0.0001)
+        self.assertNotIn('fences', result)
 
-    def test_duplicate_feedback_and_count_mismatch(self):
-        fence = self.parse([event(11, 120), event(11, 121)])['fences'][0]
-        self.assertIn(11, fence['missing_or_duplicate'])
-        self.assertNotIn('gpu_span_ms', fence)
+    def test_commit_and_feedback_kinds_are_rejected(self):
+        for kind in (8, 11, 12):
+            with self.assertRaises(ValueError):
+                self.parse([event(kind, 100)])
+
+    def test_count_mismatch(self):
         with self.assertRaises(ValueError):
             self.parse([event(1, 100, 4)], declared=2)
 

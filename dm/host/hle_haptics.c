@@ -31,11 +31,6 @@ void dm_haptics_set_enabled(int on) {   // the player's rumble switch while the 
     if (enabled != !!on) { enabled = !!on; for (int p = 0; p < DM_PLAYERS; p++) clear_locked(p); }
     pthread_mutex_unlock(&lock);
 }
-int dm_haptics_has_output(void) {
-    pthread_mutex_lock(&lock);
-    int out = output != NULL;
-    pthread_mutex_unlock(&lock); return out;
-}
 void dm_haptics_route(int p, int on) {
     if (!valid(p)) return;
     pthread_mutex_lock(&lock);

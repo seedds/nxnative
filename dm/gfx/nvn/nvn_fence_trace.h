@@ -6,12 +6,10 @@
 
 enum {
     FT_SYNC_BEGIN = 1, FT_SYNC_END, FT_WAIT_BEGIN, FT_EVENT_RETURN,
-    FT_POST_DONE, FT_FALLBACK, FT_WAIT_END, FT_SUBMIT_RECORD,
-    FT_COMMIT_BEGIN, FT_COMMIT_END, FT_FEEDBACK, FT_CLOCK_PAIR
+    FT_POST_DONE, FT_FALLBACK, FT_WAIT_END
 };
 typedef struct {
     uint64_t cpu_ns, frame, thread, sync, fence, latest, done, value;
-    double gpu_begin_s, gpu_end_s;
     uint32_t kind, site;
 } ft_event;
 typedef struct {
@@ -41,7 +39,7 @@ static inline int ft_append(ft_buffer *b, const ft_event *event) {
     return recorded;
 }
 // After close returns the event array is immutable and can be exported off-thread.
-// Missing begin/end/feedback joins remain missing at this cutoff; no completion is inferred.
+// Missing begin/end joins remain missing at this cutoff; no completion is inferred.
 static inline ft_cutoff ft_close(ft_buffer *b) {
     pthread_mutex_lock(&b->lock);
     b->closed = 1;

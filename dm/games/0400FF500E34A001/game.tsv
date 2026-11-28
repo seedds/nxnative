@@ -1,0 +1,41 @@
+# Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition 2.0.0 (SDK 21.4.4 built for the Switch 2 (Ounce), Monolith's engine, NVN2 with DLSS).
+# The Switch 2 program of a two-program application: the game data is the Switch 1 program's RomFS (0100FF500E34A000) and the upgrade add-on's (0100FF500E34B001).
+# See README.md for the measured bring-up and validation status.
+
+# ---- Identity ----
+title_id	0400FF500E34A001
+program_id	0400FF500E34A001
+
+# ---- App ----
+name	Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition
+ipa	XenobladeChroniclesDefinitiveEditionNintendoSwitch2Edition.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	2.0.0	main=bb7b2f62784f5faa1282aa5f5c61ef16	subsdk0=593524e167fecd3c7a42a184c9da3963	subsdk3=07e685d1c23a77a389fd205288ae904c	sdk=41d4de4a3b78214ad20c896960df0e5e
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# main imports nothing from subsdk1 (NintendoSDK_DLSS) or subsdk2 (C / libc) that the host does not supply (dm/games/profile_guess.py modules)
+modules	main subsdk0 subsdk3 sdk
+# The Switch 2 program's own RomFS holds only dummy.bin (5 bytes); the game files come from the Switch 1 program and the add-on
+romfs_marker	dummy.bin
+zip_store	.bnk:.pcbeb:.pck:.pcsmt:.webm:.wifnt:.wiidcm:.wishp:.wismda:.wismhd:.wismt:.metallib
+
+# ---- Memory ----
+# The NPDM declares 96 MB of system resource, so virtual address memory is on, and main never sets a heap.
+# nninitStartup reserves a 60 GB address region (returning to main+0x969a64), as Xenoblade Chronicles X's does;
+# the Mac's Switch 2 layout supplies the 128 GB alias region, and Switch 2 enforces Horizon's physical-pool limit by default.
+# Through the prologue and its first battle the game mapped up to +8.25 GB of it, stopped by the 9 GB pool: 3.4 GB resident.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+# The Switch 2's 9 GB pool
+app_pool	0x240000000
+sys_resource	0x6000000
+
+# ---- Shader split ----
+shader_groups	/chr/=chr /menu/=menu /eff/=eff /script/=script /bdat/=bdat /cs/=cs /map/=map /monolib/=monolib /sound/=sound /movie/=movie /param/=param /config/=config
+shader_note	Xenoblade Chronicles: Definitive Edition – Nintendo Switch 2 Edition shaders

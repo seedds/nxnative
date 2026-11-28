@@ -1,0 +1,33 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index f528ec1..df2486e 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -9617,14 +9617,23 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
+ 		break;
+ 
+ 	case OpLogicalNotEqual:
+-	case OpFOrdNotEqual:
+-		// TODO: Should probably negate the == result here.
+-		// Typically OrdNotEqual comes from GLSL which itself does not really specify what
+-		// happens with NaN.
+-		// Consider fixing this if we run into real issues.
+ 		MSL_BOP(!=);
+ 		break;
+ 
++	case OpFOrdNotEqual:
++	{
++		bool forward = should_forward(ops[2]) && should_forward(ops[3]);
++		emit_op(ops[0], ops[1],
++		        join("(!isunordered(", to_enclosed_unpacked_expression(ops[2]), ", ",
++		             to_enclosed_unpacked_expression(ops[3]), ") && ",
++		             to_enclosed_unpacked_expression(ops[2]), " != ",
++		             to_enclosed_unpacked_expression(ops[3]), ")"),
++		        forward);
++		inherit_expression_dependencies(ops[1], ops[2]);
++		inherit_expression_dependencies(ops[1], ops[3]);
++		break;
++	}
++
+ 	case OpUGreaterThan:
+ 		MSL_BOP_CAST(>, uint_type);
+ 		break;

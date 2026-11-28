@@ -25,10 +25,22 @@ static _Noreturn void heap_abort(void);
 module_t *g_mod;
 int g_nmod;
 struct dm_flags g_flag;
+int dm_sdk_ounce(void) { return 0; }   // No SDK module is loaded in this fixture.
 void hlecount_svc(int num) { (void)num; }
 int svc_thread(int num, uint64_t *regs) { (void)num; (void)regs; return 0; }
+const hle_readonly_shmem *hle_get_readonly_shmem(uint32_t handle) { (void)handle; return NULL; }
+uint32_t hle_new_transfer_memory(hle_transfer_memory memory) { (void)memory; return 0; }
+int hle_get_transfer_memory(uint32_t handle, hle_transfer_memory *memory) { (void)handle; (void)memory; return 0; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 void dm_backtrace(uint64_t fp) { (void)fp; }
+const uint32_t dm_exl_process_handle = 0xFFFF8001u;
+int dm_exl_rtld_query(uint64_t addr, uint64_t *base, uint64_t *size, uint64_t *state, uint64_t *perm) { (void)addr; (void)base; (void)size; (void)state; (void)perm; return 0; }
+uint64_t dm_exl_rtld_base(void) { return 0; }
+uint64_t dm_exl_rtld_size(void) { return 0; }
+int dm_exl_view_source_ok(uint64_t src, uint64_t size) { (void)src; (void)size; return 0; }
+void dm_exl_code_prepare(uint64_t src) { (void)src; }
+int dm_exl_view_add(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
+int dm_exl_view_remove(uint64_t dst, uint64_t src, uint64_t size) { (void)dst; (void)src; (void)size; return 0; }
 void guest_clock_read_wait(void) {}
 uint64_t guest_ns(void) { return 0; }
 uint64_t guest_ticks(void) { return 0; }

@@ -8,6 +8,7 @@ import importlib.util
 import struct
 import subprocess
 import sys
+import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[3]
@@ -75,6 +76,37 @@ class NativeTools(unittest.TestCase):
         with open(dmsh_chain.LOCK) as f: lock = dict(l.rstrip('\n').split('\t', 1) for l in f if '\t' in l and not l.startswith('#'))
         self.assertEqual(hashlib.sha256(XLATE.read_bytes()).hexdigest()[:16], lock.get('dmsh_xlate'), 'rebuilt translator: tool_lock.py --update-lock and dmsh_chain.py --header')
         self.assertEqual(lock.get('xlate_source'), dmsh_chain.xlate_source_sha(), 'dmsh_xlate sources changed: rebuild it with dm/tools/native_tools.sh dmsh_xlate')
+
+    def test_xlate_source_sha_covers_vendored_ryujinx_sources(self):
+        files = {p.relative_to(REPO / 'dm').as_posix() for p in dmsh_chain.xlate_source_files()}
+        self.assertIn('gfx/tools/dmsh_xlate/Program.cs', files)
+        self.assertIn('gfx/tools/dmsh_xlate/dmsh_xlate.csproj', files)
+        self.assertIn('third_party/ryujinx/src/Ryujinx.Graphics.Shader/CodeGen/Spirv/SpirvGenerator.cs', files)
+        self.assertIn('third_party/ryujinx/Directory.Build.props', files)
+
+        with tempfile.TemporaryDirectory(prefix='xlate_sha_') as tmp:
+            dm_dir = Path(tmp) / 'dm'
+            gfx = dm_dir / 'gfx'
+            (gfx / 'tools/dmsh_xlate').mkdir(parents=True)
+            (gfx / 'tools/dmsh_xlate/Program.cs').write_text('// a\n')
+            (gfx / 'tools/dmsh_xlate/dmsh_xlate.csproj').write_text('<Project />\n')
+            ryu = dm_dir / 'third_party/ryujinx/src/Ryujinx.Graphics.Shader'
+            ryu.mkdir(parents=True)
+            spv = ryu / 'SpirvGenerator.cs'
+            spv.write_text('class SpirvGenerator {}\n')
+
+            base = dmsh_chain.xlate_source_sha(gfx)
+            # Non-compiled docs and obj/bin build outputs do not change the source digest.
+            (dm_dir / 'third_party/ryujinx/README.md').write_text('ignored\n')
+            (ryu / 'obj').mkdir()
+            (ryu / 'obj/generated.cs').write_text('ignored\n')
+            (ryu / 'bin').mkdir()
+            (ryu / 'bin/out.cs').write_text('ignored\n')
+            self.assertEqual(dmsh_chain.xlate_source_sha(gfx), base)
+
+            # Editing a vendored Ryujinx source file changes the digest so a stale binary fails the check.
+            spv.write_text('class SpirvGenerator { /* edited */ }\n')
+            self.assertNotEqual(dmsh_chain.xlate_source_sha(gfx), base)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'runs the Mac executables')
     def test_built_from_the_sources_beside_them(self):

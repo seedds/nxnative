@@ -1,4 +1,5 @@
-"""Virtuos SRYK archives (FFX/X-2 Switch): two MD5 tables, 32-byte file records, names and 64 KB zlib/raw blocks.
+"""Virtuos SRYK archives (FFX/X-2 and FFXII TZA Switch): two MD5 tables, 32-byte file records, names and 64 KB raw or compressed blocks,
+zlib streams in FFX/X-2 and raw LZ4 blocks (no frame, no size prefix) in FFXII TZA, told apart by whether the block is one whole zlib stream of the block's size.
 Read members through romfs.open so archives inside a RomFS image need no extraction. Missing/shared entries have offset UINT64_MAX.
 """
 import struct
@@ -40,10 +41,22 @@ def read(f, entry):
         n = min(65536, size); length = length or 65536
         data = f.read(length)
         if len(data) != length: raise ValueError(f'{name}: truncated VBF block')
-        if length != n:
-            dec = zlib.decompressobj()
-            data = dec.decompress(data, n + 1)
-            if not dec.eof or dec.unconsumed_tail: raise ValueError(f'{name}: invalid VBF compressed block')
+        if length != n: data = block(data, n, name)
         if len(data) != n: raise ValueError(f'{name}: VBF block size mismatch')
         chunks.append(data); size -= n
     return b''.join(chunks)
+
+
+def block(data, n, name):
+    """A compressed block of n bytes: one whole zlib stream (FFX/X-2), else a raw LZ4 block (FFXII TZA: token 0xf6 0x90 then 'Language=' in gamedata/nxgamesetting.ini)"""
+    try:
+        dec = zlib.decompressobj()
+        out = dec.decompress(data, n + 1)
+        if dec.eof and not dec.unconsumed_tail and len(out) == n: return out
+    except zlib.error:
+        pass
+    import lz4.block
+    try: out = lz4.block.decompress(data, uncompressed_size=n)
+    except lz4.block.LZ4BlockError: raise ValueError(f'{name}: invalid VBF compressed block (neither zlib nor LZ4)') from None
+    if len(out) != n: raise ValueError(f'{name}: VBF block size mismatch')
+    return out

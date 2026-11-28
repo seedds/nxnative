@@ -1,0 +1,43 @@
+# Stray, Switch update 1.6.0 (v131072)
+# Unreal Engine 4.27.2, SDK 17.5.6, NVN, Bink movies. See README.md for validation.
+
+# ---- Identity ----
+title_id	010075101EF84000
+program_id	010075101EF84000
+
+# ---- App ----
+name	Stray
+ipa	Stray.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.6.0	main=109d974e180a5aa100c3e9e3464058ab	subsdk0=540b08ec046f39a50014ed6cd9117eb9	sdk=38873c89d24e5d11020e8d0aafe51cab
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# Horizon load order. The subsdk0 module is NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	Hk_project/Content/Paks/Hk_project-Switch.pak
+zip_store	.bk2:.mp4:.pak:.metallib
+
+# ---- Memory ----
+# The NPDM declares 80 MiB of system resources. The shared Unreal region rule fits its
+# startup reservation in this alias region when using the iPhone address layout.
+sys_resource	0x5000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- Graphics ----
+# The game sets near-zero NVN depth. The pipeline bases use the main0_z entry point.
+depth_mode	zero
+
+# ---- Input ----
+# The D-pad drives menus and game actions, and the right stick controls the camera.
+pad_layout	full
+
+# ---- Shader split ----
+shader_groups	GlobalShaderCache=global #Engine/=engine #Hk_project/=game
+shader_note	Stray shaders

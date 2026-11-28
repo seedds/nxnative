@@ -256,6 +256,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [SteamWorld Heist: Ultimate Edition](010016100A186000/README.md) | `010016100A186000` | 2.2.1 | 4.5.0 | Image & Form's own engine (SteamWorld) | NVN | — |
 | [stitch.](010025801CEA8000/README.md) | `010025801CEA8000` | 1.2 | 21.4.4 | Unity 6000.0.68f1 IL2CPP, FMOD | NVN | [60 fps target](010025801CEA8000/README.md#frame-rate) |
 | [STORY OF SEASONS: Friends of Mineral Town](0100ED400EEC2000/README.md) | `0100ED400EEC2000` | 1.0.5 | 8.2.0 | — | NVN | — |
+| [Stray](010075101EF84000/README.md) | `010075101EF84000` | 1.6.0 | 17.5.6 | Unreal Engine 4.27.2, Bink | NVN | — |
 | [Streets of Rage 4](0100EC9010258000/README.md) | `0100EC9010258000` | 1.0.9 | 9.3.1 | MonoGame (C# → C++ by BRUTE) | NVN | — |
 | [Subnautica](0100429011144000/README.md) | `0100429011144000` | 1.23.83358 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |
 | [Subnautica: Below Zero](010014C011146000/README.md) | `010014C011146000` | 1.23.55063 | 13.3.5 | Unity 2019.4.36f1 IL2CPP, FMOD | NVN | — |

@@ -23,20 +23,20 @@ private struct CloudSavesSection: View {
     var body: some View {
         Section {
             HStack {
-                Text("Cloud saves")
+                Text(launcherString("Cloud saves"))
                 Spacer()
-                Text(folder.isEmpty ? "Off" : (folder as NSString).lastPathComponent)
+                Text(folder.isEmpty ? launcherString("Off") : (folder as NSString).lastPathComponent)
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            Button(folder.isEmpty ? "Choose a folder in iCloud Drive…" : "Choose a different folder…", action: choose)
+            Button(folder.isEmpty ? launcherString("Choose a folder in iCloud Drive…") : launcherString("Choose a different folder…"), action: choose)
                 .disabled(checking)
             if !folder.isEmpty {
-                Button("Turn off cloud saves", role: .destructive, action: clear)
+                Button(launcherString("Turn off cloud saves"), role: .destructive, action: clear)
                     .disabled(checking)
             }
         } footer: {
             Text(note.isEmpty
-                 ? "Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups."
+                 ? launcherString("Choose a folder in iCloud Drive, and the same one in the Mac app's Cloud saves. The save comes in when the game starts and goes out after each save; a save that is replaced is kept in save-backups.")
                  : note)
         }
     }
@@ -77,33 +77,33 @@ private struct LauncherView: View {
             switch result {
             case .success(let url):
                 if dm_store_cloud_saves(url) {
-                    cloudNote = "Saved. The game uses this folder when you press Play."
+                    cloudNote = launcherString("Saved. The game uses this folder when you press Play.")
                     refreshCloudSaves()
                 } else {
-                    cloudNote = "That folder could not be remembered — try a different one."
+                    cloudNote = launcherString("That folder could not be remembered — try a different one.")
                 }
             case .failure(let error):
                 let ns = error as NSError
                 if error is CancellationError || (ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError) { return }
                 fputs("launcher: cloud-save folder picker failed: \(error.localizedDescription)\n", stderr)
-                cloudNote = "That folder could not be opened — try a different one."
+                cloudNote = launcherString("That folder could not be opened — try a different one.")
             }
         }
         .confirmationDialog(SaveSyncReport.chooseTitle, isPresented: isAsking(.choose), titleVisibility: .visible, presenting: report) { r in
             Button(r.localLabel(here: "iPhone")) { go(r.localChoice) }
             Button(r.cloudLabel) { go(r.cloudChoice) }
-            Button("Cancel", role: .cancel) {}
+            Button(launcherString("Cancel"), role: .cancel) {}
         } message: { r in Text(r.chooseMessage(here: "iPhone")) }
         .confirmationDialog(SaveSyncReport.unreadableTitle, isPresented: isAsking(.unreadable), titleVisibility: .visible, presenting: report) { r in
-            Button("Play This iPhone's Save") { go("offline") }   // the mount does not wait for the cloud again
-            Button("Try Again") { DispatchQueue.main.async { start() } }
-            Button("Cancel", role: .cancel) {}
+            Button(launcherString("Play This iPhone's Save")) { go("offline") }   // the mount does not wait for the cloud again
+            Button(launcherString("Try Again")) { DispatchQueue.main.async { start() } }
+            Button(launcherString("Cancel"), role: .cancel) {}
         } message: { r in Text(r.unreadableMessage(here: "iPhone")) }
         .confirmationDialog(SaveSyncReport.missingTitle, isPresented: isAsking(.missing), titleVisibility: .visible, presenting: report) { r in
-            Button("Try Again") { DispatchQueue.main.async { start() } }
-            Button("Play Without Sending") { go("offline") }   // this iPhone's save, not sent: the next start compares again
+            Button(launcherString("Try Again")) { DispatchQueue.main.async { start() } }
+            Button(launcherString("Play Without Sending")) { go("offline") }   // this iPhone's save, not sent: the next start compares again
             Button(r.sendLabel(here: "iPhone"), role: .destructive) { go(r.localChoice) }   // local:none
-            Button("Cancel", role: .cancel) {}
+            Button(launcherString("Cancel"), role: .cancel) {}
         } message: { r in Text(r.missingMessage(here: "iPhone")) }
         .task {
             while !Task.isCancelled {
@@ -123,7 +123,7 @@ private struct LauncherView: View {
         var stale: ObjCBool = false
         cloudFolder = dm_cloud_saves_path(&stale) ?? ""
         if stale.boolValue && cloudFolder.isEmpty {
-            cloudNote = "The folder you chose before is no longer readable. Please choose it again."
+            cloudNote = launcherString("The folder you chose before is no longer readable. Please choose it again.")
         }
     }
 
@@ -134,9 +134,9 @@ private struct LauncherView: View {
                     .clipShape(RoundedRectangle(cornerRadius: size * 22 / 96))
                     .accessibilityHidden(true)
             }
-            Text((info("CFBundleDisplayName") as? String) ?? "Game")
+            Text((info("CFBundleDisplayName") as? String) ?? launcherString("Game"))
                 .font(.title.weight(.bold)).multilineTextAlignment(.center)
-            Text("Version \((info("CFBundleShortVersionString") as? String) ?? "")")
+            Text(String(format: launcherString("Version %@"), (info("CFBundleShortVersionString") as? String) ?? ""))
                 .font(.callout).foregroundStyle(.secondary)
             playButton
         }
@@ -147,16 +147,16 @@ private struct LauncherView: View {
             ForEach(m.sections, id: \.self) { section in
                 let rows = m.rows(in: section)
                 if !rows.isEmpty {
-                    Section(section) {
+                    Section(rows[0].displaySection()) {
                         ForEach(rows) { SettingRow(s: $0, m: m) }
                     }
                 }
             }
             Section {
-                Button("Reset to tested defaults") { m.reset() }
+                Button(launcherString("Reset to tested defaults")) { m.reset() }
                     .disabled(!m.changed)
             } footer: {
-                Text("Brings back all settings this game was tested with.")
+                Text(launcherString("Brings back all settings this game was tested with."))
             }
             // The background save check reads the selected folder until it returns.
             CloudSavesSection(
@@ -171,7 +171,7 @@ private struct LauncherView: View {
             }
             Section {
                 HStack {
-                    Text("Memory available")
+                    Text(launcherString("Memory available"))
                     Spacer()
                     Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory)).monospacedDigit().foregroundStyle(.secondary)
                 }
@@ -182,12 +182,12 @@ private struct LauncherView: View {
     }
 
     @ViewBuilder var playButton: some View {
-        let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
+        let button = Button(action: start) { Text(launcherString("Play")).font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
         if checking {
             VStack(spacing: 6) {
-                HStack(spacing: 6) { ProgressView(); Text("Checking the cloud save…").font(.callout).foregroundStyle(.secondary) }
-                Button("Play Without It") { check += 1; go("offline") }.font(.callout)
+                HStack(spacing: 6) { ProgressView(); Text(launcherString("Checking the cloud save…")).font(.callout).foregroundStyle(.secondary) }
+                Button(launcherString("Play Without It")) { check += 1; go("offline") }.font(.callout)
             }
         }
     }

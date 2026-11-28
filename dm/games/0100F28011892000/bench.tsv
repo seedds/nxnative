@@ -1,0 +1,4 @@
+# Requires slot 1 saved in the original campaign's Intro Apocalypse tutorial.
+# Use --env DM_FOCUS_KEEP=1 --env DM_PSO_PREBUILD=0: keep the game focused and build pipelines on demand.
+# name	DM_KEYS	measure from (s)	measure length (s)	description
+intro-walk	25:L+R~0.3,28:A~0.2,30:Down~0.2,32:A~0.2,36:A~0.2,42:A~0.12*110/0.7,128:LDown~0.5,131:LDown~0.5	136	10	Continue Intro Apocalypse, advance dialogue, then walk down for 0.5 s twice; compare screenshots at 127, 130 and 133 s when checking game speed.

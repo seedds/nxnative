@@ -149,9 +149,9 @@ int main(void) { @autoreleasepool {
         CHECK("the pool has an entry to log", want > 0);
         id<MTLBuffer> w = [g_dev newBufferWithLength:GML_BYTES options:MTLResourceStorageModeShared];
         ((uint32_t *)w.contents)[want / 32] = 1u << (want % 32);
-        gml_read(w, map, 0, 0);
+        gml_read(w, map, 0, 0, nil);
         CHECK("the bit teaches its range", g_gml_n == n0 + 1 && g_gml_lo[n0] <= base + 900 * MB && base + 900 * MB < g_gml_hi[n0]);
-        gml_read(w, map, 0, 0);
+        gml_read(w, map, 0, 0, nil);
         CHECK("a known range adds nothing", g_gml_n == n0 + 1);
         finish();
     }
@@ -171,6 +171,48 @@ int main(void) { @autoreleasepool {
         uint8_t *um = mmap(NULL, GB, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0); if (um == MAP_FAILED) abort();
         uint64_t ub = (uint64_t)(uintptr_t)um, at = ub + 100 * MB + 16;
         mtl_pool_add(um, GB);
+        // Empty direct draws and zero-byte copies do no GPU work and must neither open a pass nor pass len=0 into pool lookup (which big_lookup treats as unknown extent)
+        {
+            tex_t rt = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 99900};
+            rt.d = (nvn_texdesc){.target = 1, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 1, .levels = 1, .samples = 1};
+            nvn_tex_layout(&rt.d, &rt.L);
+            NSError *derr = nil;
+            id<MTLLibrary> dlib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal; vertex float4 v(uint i [[vertex_id]]) { return float4(0, 0, 0, 1); } fragment float4 f() { return float4(1); }" options:nil error:&derr];
+            prog_t pg = {.serial = 99901};
+            NvProg *pr = [NvProg new]; pr->sh[0] = [NvShader new]; pr->sh[1] = [NvShader new];
+            pr->sh[0]->fn = [dlib newFunctionWithName:@"v"]; pr->sh[0]->stage = 0;
+            pr->sh[1]->fn = [dlib newFunctionWithName:@"f"]; pr->sh[1]->stage = 1;
+            pr->sh[1]->rf.color_known = 1; pr->sh[1]->rf.color_mask = 1;
+            serial_put(pg.serial, pr);
+            state_reset(); memset(&R, 0, sizeof R);
+            S.prog = &pg; R.rt.n = 1; R.rt.color[0] = &rt; R.has_rt = 1; R.clear_c[0] = 1;
+            S.vbuf[0].address = at; S.vbuf[0].size = 0;
+            mtl_sub_begin();
+            int empty_before = g_npool;
+            uint64_t draws0 = g_stat_draw, mdraws0 = g_cm_mdraws;
+            p_draw_idx di = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = 1, .count = 0, .base_vertex = 7, .instances = 1, .ibuf = at};
+            draw(NULL, &di);
+            CHECK("empty direct indexed draw opens no pass, resolves no buffer, and emits nothing",
+                  g_npool == empty_before && !g_big[big_of(at)].full && !g_enc && R.clear_c[0] && g_stat_draw == draws0 && g_cm_mdraws == mdraws0);
+            di.count = -1; di.itype = 2;
+            draw(NULL, &di);
+            CHECK("negative-count direct indexed draw resolves no buffer and emits nothing",
+                  g_npool == empty_before && !g_big[big_of(at)].full && !g_enc && g_stat_draw == draws0 && g_cm_mdraws == mdraws0);
+            p_draw dw = {.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 0, .instances = 1};
+            draw(&dw, NULL);
+            CHECK("empty direct array draw opens no pass and emits nothing",
+                  g_npool == empty_before && !g_big[big_of(at)].full && !g_enc && R.clear_c[0] && g_stat_draw == draws0 && g_cm_mdraws == mdraws0);
+            mtl_sub_copy(at, at + 4096, 0);
+            CHECK("zero-byte buffer copy resolves no buffer and opens no blit encoder",
+                  g_npool == empty_before && !g_big[big_of(at)].full && !g_blit);
+            uint16_t *ix = (uint16_t *)(uintptr_t)at; ix[0] = 0; ix[1] = 1; ix[2] = 2;
+            di = (p_draw_idx){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = 1, .count = 3, .instances = 1, .ibuf = at};
+            draw(NULL, &di);
+            CHECK("following positive-count indexed draw opens a pass, resolves a bounded chunk, and emits",
+                  g_enc != nil && g_cm_mdraws == mdraws0 + 1 && g_npool == empty_before + 1 && !g_big[big_of(at)].full);
+            finish();
+            state_reset(); memset(&R, 0, sizeof R); mtl_tex_release(&rt);
+        }
         id<MTLBuffer> short_view = look(at, 64);   // a chunk short of the pool's end, now in this thread's lookup cache
         int before = g_npool;
         CHECK("unknown extent: not the short chunk the cache holds", mtl_gpu_addr(at, 1, &mb, &mo, &gpu) && (__bridge id<MTLBuffer>)mb != short_view);

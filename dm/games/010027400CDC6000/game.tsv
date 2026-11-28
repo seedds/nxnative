@@ -31,6 +31,12 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 sys_resource	0x200000
 
+# ---- Frame rate ----
+# The game asks for interval 2 but advances by elapsed time. Use the host's
+# general present cap; the opening-ship walk has the same speed at 30 and 60.
+present_interval	display
+fps_target	60
+
 # ---- Shaders ----
 shader_groups	/Data/=data
 shader_note	Divinity Original Sin 2 shaders

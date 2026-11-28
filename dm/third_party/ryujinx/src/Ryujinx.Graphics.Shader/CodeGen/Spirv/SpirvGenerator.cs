@@ -203,6 +203,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             Declarations.DeclareLocals(context, function);
 
+            if (funcIndex == 0 && context.IndexedFragmentInputs != null)
+            {
+                SpvInstruction[] loaded = new SpvInstruction[context.IndexedFragmentInputs.Length];
+
+                for (int i = 0; i < loaded.Length; i++)
+                {
+                    loaded[i] = context.Load(context.IndexedFragmentInputElemType, context.IndexedFragmentInputs[i]);
+                }
+
+                SpvInstruction composite = context.CompositeConstruct(context.IndexedFragmentInputArrayType, loaded);
+                context.Store(context.IndexedFragmentInputArray, composite);
+            }
+
             Generate(context, function.MainBlock);
 
             // Functions must always end with a return.
@@ -365,6 +378,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.SelectionMerge(context.GetNextLabel(mergeBlock), SelectionControlMask.MaskNone);
                     context.BranchConditional(condition, context.GetNextLabel(ifTrueBlock), context.GetNextLabel(ifFalseBlock));
                 }
+                else if (e.Block.Type == AstBlockType.ElseIf)
+                {
+                    throw new InvalidOperationException("SPIR-V code generation expects nested Else/If blocks, not ElseIf.");
+                }
                 else if (e.Block.Type == AstBlockType.DoWhile)
                 {
                     SpvInstruction continueTarget = context.Label();
@@ -413,9 +430,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         }
                     }
 
-                    bool hasElse = AstHelper.Next(e.Block) is AstBlock nextBlock &&
-                        (nextBlock.Type == AstBlockType.Else ||
-                         nextBlock.Type == AstBlockType.ElseIf);
+                    bool hasElse = AstHelper.Next(e.Block) is AstBlock nextBlock && nextBlock.Type == AstBlockType.Else;
 
                     // Re-enter the parent block.
                     if (e.Block.Parent != null && !hasElse)

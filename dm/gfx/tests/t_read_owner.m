@@ -73,7 +73,7 @@ static void case_b(void) {
     NVNtexture tex = {0}; make(&tex, 0x30000, 0); tex_t *t = (tex_t *)&tex;
     submit(t);   // zeros at first use: not the CPU's content, a GPU texture
     __unsafe_unretained id have = tex_get(t->serial);
-    CHECK(have && ![have isKindOfClass:[NvPkg class]] && !tex_cpu_written(t->serial), "  resolved as a GPU texture");
+    CHECK(have && ![have isKindOfClass:[NvPkg class]] && !tex_cpu_written(t), "  resolved as a GPU texture");
     dm_guest_write_prepare(t->mem, t->L.size);
     CHECK(!nvn_swizzle(&t->d, 0, 0, g_want, W * 4, t->mem), "  the CPU rewrites the storage");
     mtl_tex_cpu_written(t);   // as the poll marks a rewrite (mtl_tex_cpu_rewritten)
@@ -92,7 +92,7 @@ static void case_c(void) {
     CHECK(reads_pattern(t), "  ReadTexels off the submit thread gives the storage");
     CHECK(!tex_get(t->serial), "  and leaves it unresolved");
     submit(t);
-    CHECK(tex_cpu_written(t->serial) && [tex_get(t->serial) isKindOfClass:[NvPkg class]], "  its first use on the submit thread takes it from its storage");
+    CHECK(tex_cpu_written(t) && [tex_get(t->serial) isKindOfClass:[NvPkg class]], "  its first use on the submit thread takes it from its storage");
     h_nvnTextureFinalize(&tex);
 }
 

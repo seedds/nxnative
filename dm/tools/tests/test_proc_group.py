@@ -1,6 +1,6 @@
-"""proc_group.py and its two callers, the NSP script's run and regress.py's run_heavy, on real process trees (fixtures/proc_tree.py: a wrapper and a child of it in the
+"""proc_group.py and its callers (the NSP script's run and rewrite, regress.py's run_heavy and modules_for) on real process trees (fixtures/proc_tree.py: a wrapper and a child of it in the
 group the supervisor owns, each ready before the test acts): a cancellation (an interrupt raised in the progress callback, a SIGTERM, a SIGHUP, an error writing the log, a second
-interrupt, a paused job) stops the whole group within its grace period, a child left running after the wrapper's normal exit (holding the output or not) is stopped and
+interrupt, a paused job, a failed sibling rewrite) stops every group within its grace period, a child left running after the wrapper's normal exit (holding the output or not) is stopped and
 fails the step, exit codes in ok pass and others fail, and cli gives SIGTERM's and SIGHUP's handlers back. Every check is that no process of the group is left, not only the wrapper.
 No game files needed; a temporary folder per test."""
 import contextlib
@@ -287,6 +287,163 @@ class Supervisor(Tree):
         self.assert_gone(w, c)
         self.assertEqual(self.marks(), ['TERM'])
         self.assertEqual(g.stragglers, [])   # a stop, not a straggler: the caller reports its own error
+
+    def test_stop_all_stops_multiple_groups_in_one_grace_period(self):
+        with mock.patch.object(proc_group, 'GRACE', 1.0):
+            groups, pairs = [], []
+            for i in range(2):
+                fifo = self.dir / f'ready_{i}'; os.mkfifo(fifo)
+                g = proc_group.Group([sys.executable, TREE, self.dir / f'marker_{i}', '--fifo', fifo, '--child', 'ignore'],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.pgids.append(g.pgid); groups.append(g)
+                with mock.patch.object(self, 'fifo', return_value=fifo): pairs.append(self.wait_ready())
+            t0 = time.monotonic()
+            proc_group.stop_all(groups, signal.SIGTERM)
+            secs = time.monotonic() - t0
+        self.assertGreaterEqual(secs, 1.0)
+        self.assertLess(secs, 1.9)   # one shared grace window, not one per group
+        for w, c in pairs: self.assert_gone(w, c)
+
+    def test_stop_all_second_interrupt_still_reaps_every_group(self):
+        with mock.patch.object(proc_group, 'GRACE', 60.0):
+            groups, pairs = [], []
+            for i in range(2):
+                fifo = self.dir / f'ready_int_{i}'; os.mkfifo(fifo)
+                g = proc_group.Group([sys.executable, TREE, self.dir / f'marker_int_{i}', '--fifo', fifo, '--child', 'ignore'],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.pgids.append(g.pgid); groups.append(g)
+                with mock.patch.object(self, 'fifo', return_value=fifo): pairs.append(self.wait_ready())
+            sleep, n = time.sleep, []
+            def second(s):
+                n.append(s)
+                if len(n) == 3: raise KeyboardInterrupt
+                sleep(s)
+            t0 = time.monotonic()
+            with mock.patch.object(proc_group.time, 'sleep', side_effect=second), self.assertRaises(KeyboardInterrupt):
+                proc_group.stop_all(groups, signal.SIGINT)
+        self.assertLess(time.monotonic() - t0, BOUND)
+        for w, c in pairs: self.assert_gone(w, c)
+
+
+FAKE_REWRITER = '''
+import os, signal, sys, time
+from pathlib import Path
+src, out, mod = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+mode = os.environ.get('FAKE_MODE', 'ok')
+if mode == 'fail_with_sibling_worker':
+    if mod == 'slow':
+        pid = os.fork()
+        if pid == 0:
+            if os.environ.get('WORKER_IGNORE') == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            (out / 'worker_pids').write_text(f'{os.getppid()} {os.getpid()}\\n')
+            time.sleep(1.0)
+            (out / 'late_from_worker').write_text('late')
+            os._exit(0)
+        time.sleep(30)
+    else:
+        end = time.monotonic() + 5
+        while not (out / 'worker_pids').is_file() and time.monotonic() < end: time.sleep(0.01)
+        sys.exit(1)
+elif mode == 'straggler':
+    pid = os.fork()
+    if pid == 0:
+        (out / 'straggler_pid').write_text(f'{os.getppid()} {os.getpid()}\\n')
+        time.sleep(30)
+        os._exit(0)
+    end = time.monotonic() + 5
+    while not (out / 'straggler_pid').is_file() and time.monotonic() < end: time.sleep(0.01)
+    sys.exit(0)
+for ext in ('patched.bin', 'fixups.tsv', 'gates.tsv'):
+    (out / f'{mod}.{ext}').write_bytes(b'ok')
+'''
+
+
+class ParallelRewrite(Tree):
+    """regress.modules_for and nsp.rewrite: a failed or straggling rewrite stops sibling process groups and closes every log"""
+    def setUp(self):
+        super().setUp()
+        for mod in (proc_group, regress.proc_group):
+            for attr, val in (('GRACE', 0.4), ('DRAIN', 0.3)):
+                cm = mock.patch.object(mod, attr, val)
+                cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def _regress_fixture(self, modules='slow main', env=None):
+        tree_dir = self.dir / 'tree'; (tree_dir / 'dm/tools').mkdir(parents=True, exist_ok=True)
+        (tree_dir / 'dm/tools/patch_nso.py').write_text(FAKE_REWRITER)
+        build = self.dir / 'build'; exefs = build / 'extract/v0/ExeFS'; exefs.mkdir(parents=True, exist_ok=True)
+        for m in modules.split(): (exefs / m).write_bytes(m.encode())
+        base_env = {'DM_GAME': 'game'} | (env or {})
+        g = NS(id='game', folder=self.dir / 'nsp', build=build, ver='v0', patched=build / 'patched_v0', derived=False,
+               env=lambda tree: dict(base_env))
+        tree = NS(id='tree', path=tree_dir, py=lambda code, e: modules)
+        return tree, g
+
+    def test_regress_modules_for_failure_reaps_sibling_group_closes_logs_and_retries(self):
+        real_open = open
+        for ignore in ('0', '1'):
+            with self.subTest(worker_ignore=ignore):
+                tree, g = self._regress_fixture(env={'FAKE_MODE': 'fail_with_sibling_worker', 'WORKER_IGNORE': ignore})
+                opened = []
+                def track_open(path, *a, _opened=opened, **k):
+                    fh = real_open(path, *a, **k)
+                    if Path(path).name.startswith('rewrite_'): _opened.append(fh)
+                    return fh
+                with mock.patch.object(regress, 'rewriter_key', return_value=f'rev-{ignore}'), mock.patch.object(regress, 'say'), \
+                     mock.patch.object(regress, 'open', create=True, side_effect=track_open):
+                    with self.assertRaises(regress.HarnessError):
+                        regress.modules_for(tree, g, True, 2)
+                tmp = next((self.dir / 'nsp/game-work/regress/patched').glob('*/*.partial.*'))
+                sib, worker = (int(x) for x in (tmp / 'worker_pids').read_text().split())
+                self.pgids.append(sib)
+                self.assert_gone(sib, worker)
+                self.assertTrue(opened and all(f.closed for f in opened))
+                self.assertFalse((tmp / 'late_from_worker').exists())
+                time.sleep(0.9)
+                self.assertFalse((tmp / 'late_from_worker').exists())
+
+                # A retry in the same process reuses the same .partial.<pid> path cleanly.
+                tree_ok, g_ok = self._regress_fixture(env={'FAKE_MODE': 'ok'})
+                with mock.patch.object(regress, 'rewriter_key', return_value=f'rev-{ignore}'), mock.patch.object(regress, 'say'):
+                    dst, _ = regress.modules_for(tree_ok, g_ok, True, 2)
+                self.assertTrue((dst / '.done').is_file())
+                self.assertTrue((dst / 'slow.patched.bin').is_file())
+
+    def test_regress_modules_for_straggler_worker_fails_rewrite(self):
+        tree, g = self._regress_fixture(modules='main', env={'FAKE_MODE': 'straggler'})
+        with mock.patch.object(regress, 'rewriter_key', return_value='rev-strag'), mock.patch.object(regress, 'say'):
+            with self.assertRaises(regress.HarnessError):
+                regress.modules_for(tree, g, True, 1)
+        tmp = next((self.dir / 'nsp/game-work/regress/patched').glob('*/*.partial.*'))
+        parent, worker = (int(x) for x in (tmp / 'straggler_pid').read_text().split())
+        self.pgids.append(parent)
+        self.assert_gone(parent, worker)
+        self.assertIn('[RED] patch_nso.py exited', (tmp / 'rewrite_main.log').read_text())
+
+    def test_nsp_rewrite_failure_reaps_sibling_group_and_closes_logs(self):
+        repo = self.dir / 'repo'; (repo / 'dm/tools').mkdir(parents=True)
+        (repo / 'dm/tools/patch_nso.py').write_text(FAKE_REWRITER)
+        exe = self.dir / 'exe'; exe.mkdir()
+        for m in ('slow', 'main'): (exe / m).write_bytes(m.encode())
+        out, logs = self.dir / 'patched_v0', self.dir / 'logs'
+        g = NS(modules_in=lambda folder: ['slow', 'main'])
+        opened, real_open = [], open
+        def track_open(path, *a, **k):
+            fh = real_open(path, *a, **k)
+            if Path(path).name.startswith('rewrite_'): opened.append(fh)
+            return fh
+        with mock.patch.object(nsp, 'PROG', nsp.Progress('off')), mock.patch.object(nsp, 'collect_nros', return_value={}), \
+             mock.patch.object(nsp, 'patch_files', return_value=[]), mock.patch.object(nsp, 'open', create=True, side_effect=track_open), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(nsp.BuildError):
+                nsp.rewrite(Path(sys.executable), repo, exe, out, {'FAKE_MODE': 'fail_with_sibling_worker', 'WORKER_IGNORE': '1'}, logs, g)
+        partial = out.with_name(out.name + '.partial')
+        sib, worker = (int(x) for x in (partial / 'worker_pids').read_text().split())
+        self.pgids.append(sib)
+        self.assert_gone(sib, worker)
+        self.assertTrue(opened and all(f.closed for f in opened))
+        self.assertFalse((partial / 'late_from_worker').exists())
+        time.sleep(0.9)
+        self.assertFalse((partial / 'late_from_worker').exists())
 
 
 def proc_status(pid):   # a process's state from its proc_bsdinfo: gone, zombie, stopped or running

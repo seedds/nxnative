@@ -149,11 +149,11 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     EXPECT("1: a view on the pool's buffer", 1, t[1] && t[1].buffer && t[1].bufferBytesPerRow == 64);
     EXPECT("2: not a view on the pool's buffer after the read", 1, t[2] && !t[2].buffer);
     for (int i = 3; i < N; i++) EXPECT(i == 3 ? "3: not a view on the pool's buffer" : i == 4 ? "4: not a view on the pool's buffer" : "5: not a view on the pool's buffer", 1, t[i] && !t[i].buffer);
-    EXPECT("0: CPU-written", 1, tex_cpu_written(((const tex_t *)&tex[0])->serial));
-    EXPECT("2: CPU-written", 1, tex_cpu_written(((const tex_t *)&tex[2])->serial));
-    EXPECT("3: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written(((const tex_t *)&tex[3])->serial));
-    EXPECT("4: not CPU-written (the GPU wrote its storage)", 0, tex_cpu_written(((const tex_t *)&tex[4])->serial));
-    EXPECT("5: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written(((const tex_t *)&tex[5])->serial));
+    EXPECT("0: CPU-written", 1, tex_cpu_written((const tex_t *)&tex[0]));
+    EXPECT("2: CPU-written", 1, tex_cpu_written((const tex_t *)&tex[2]));
+    EXPECT("3: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written((const tex_t *)&tex[3]));
+    EXPECT("4: not CPU-written (the GPU wrote its storage)", 0, tex_cpu_written((const tex_t *)&tex[4]));
+    EXPECT("5: CPU-written (the GPU has not written its storage)", 1, tex_cpu_written((const tex_t *)&tex[5]));
     mtl_wait(mtl_sub_commit(), 5000000000ull);
     static const char *const up[N] = {"0: 6 rows uploaded at the storage's stride", "1: 6 rows read as stored", "2: 6 rows uploaded at the storage's stride", "3: 6 rows uploaded at the storage's stride",
                                       "4: 6 rows filled at the storage's stride", "5: 6 rows uploaded at the storage's stride"};
@@ -185,7 +185,7 @@ static void unaligned_upload_case(void) {   // a pool made through NVN, so that 
     EXPECT("3: uploaded again on the submit thread with the CPU's row", 0, next ? blit_bad(next, want3, 24) : 6);
     mtl_tex_gpu_written((const tex_t *)&tex[3]);
     mtl_sub_begin(); id<MTLTexture> gpu = tex_mtl((const tex_t *)&tex[3]); mtl_wait(mtl_sub_commit(), 5000000000ull);
-    EXPECT("3: not CPU-written after a GPU write into its storage", 0, tex_cpu_written(((const tex_t *)&tex[3])->serial));
+    EXPECT("3: not CPU-written after a GPU write into its storage", 0, tex_cpu_written((const tex_t *)&tex[3]));
     EXPECT("3: the GPU texture keeps its content", 0, gpu ? blit_bad(gpu, want3, 24) : 6);
     EXPECT("3: ReadTexels reads the GPU texture", 0, read_bad(&tex[3], want3, 24));
     h_nvnCommandBufferFinalize(&cmd);
@@ -211,9 +211,39 @@ static void nonlinear_image_readback_case(void) {
     for (unsigned i = 0; i < sizeof pattern; i++) pattern[i] = (uint8_t)(i * 17 + 3);
     NVNcopyRegion region = {0, 0, 0, 6, 6, 1};
     h_nvnTextureWriteTexels(&tex, NULL, &region, pattern);
-    EXPECT("nonlinear image serial is CPU-written", 1, tex_cpu_written(((const tex_t *)&tex)->serial));
+    EXPECT("nonlinear image serial is CPU-written", 1, tex_cpu_written((const tex_t *)&tex));
     EXPECT("nonlinear IMAGE readback preserves block-linear rows", 0, read_bad(&tex, pattern, 24));
     h_nvnTextureFinalize(&tex); h_nvnMemoryPoolFinalize(&pool); defer_drain(); munmap(mem, len);
+}
+static void linear_size_case(unsigned width, unsigned height, int fits) {
+    const NSUInteger align = tbuf_align([g_dev minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatR8Unorm]);
+    const size_t stride = (width + align - 1) / align * align;
+    const size_t page = (size_t)getpagesize();
+    const size_t len = (stride * height + page - 1) / page * page;
+    void *mem = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (mem == MAP_FAILED) abort();
+    NVNmemoryPool pool;
+    pool_builder_t pb = {.mem = mem, .size = len, .flags = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
+    if (!h_nvnMemoryPoolInitialize(&pool, (const NVNmemoryPoolBuilder *)&pb)) abort();
+    NVNtextureBuilder tb;
+    NVNtexture tex;
+    h_nvnTextureBuilderSetDefaults(&tb);
+    h_nvnTextureBuilderSetWidth(&tb, width);
+    h_nvnTextureBuilderSetHeight(&tb, height);
+    h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R8);
+    h_nvnTextureBuilderSetFlags(&tb, NVN_TEXTURE_FLAGS_LINEAR);
+    h_nvnTextureBuilderSetStride(&tb, stride);
+    h_nvnTextureBuilderSetStorage(&tb, &pool, 0);
+    if (!h_nvnTextureInitialize(&tex, &tb)) abort();
+    id<MTLTexture> texture = tex_mtl((const tex_t *)&tex);
+    printf("LINEAR_SIZE %ux%u\n", width, height);
+    EXPECT("linear texture resolves within the device limit", fits, texture != nil);
+    if (fits) EXPECT("linear texture at the limit uses its pool's buffer", 1, texture.buffer != nil);
+    texture = nil;
+    h_nvnTextureFinalize(&tex);
+    h_nvnMemoryPoolFinalize(&pool);
+    defer_drain();
+    munmap(mem, len);
 }
 int main(void) { @autoreleasepool { setenv("DM_TBUF_ALIGN", "64", 1);   // before the first lookup (tbuf_align reads it once); the other cases' rows and offsets are 64-byte aligned
     mtl_init(); run_case(NVN_FORMAT_RGBA8); run_case(NVN_FORMAT_RGBA8_SRGB);
@@ -221,5 +251,9 @@ int main(void) { @autoreleasepool { setenv("DM_TBUF_ALIGN", "64", 1);   // befor
     scaled_copy_case();
     unaligned_upload_case();
     nonlinear_image_readback_case();
+    unsigned limit = [g_dev supportsFamily:MTLGPUFamilyApple10] ? 32768 : 16384;
+    linear_size_case(64, limit, 1);
+    linear_size_case(64, limit + 1, 0);
+    linear_size_case(limit + 1, 1, 0);
     printf("LINEAR_READBACK cases=%d failed=%d\n",cases,failed); return failed != 0;
 } }

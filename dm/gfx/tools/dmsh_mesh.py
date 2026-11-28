@@ -75,6 +75,10 @@ def _entry(src, kind, name):
     return m
 
 
+def guards(src):
+    """The include-guard macros a source defines (#ifndef X directly followed by #define X), in order"""
+    return list(dict.fromkeys(re.findall(r'^\s*#ifndef (\w+)\s*\n\s*#define \1\b', src, re.M)))
+
 def compose(vs_src, gs_src, reads):
     """vs_src: the vertex shader's library source (<key>_b.metal); gs_src: the lean kernel
     (<geometry key>_bl3.metal) and the capture words it reads, in its record order."""
@@ -136,7 +140,9 @@ def compose(vs_src, gs_src, reads):
     n = len(reads)
     stores = ' '.join(f'dm_rec[dm_t * {n}u + {i}u] = as_type<float>({word(w)});' for i, w in enumerate(reads))
     out = ['#include <metal_stdlib>', '#include <simd/simd.h>', '#include <metal_atomic>', 'using namespace metal;',
-           'namespace dm_v {', _strip_head(pulled), '}', 'namespace dm_g {', _strip_head(gfn), '}', 'using namespace dm_v;',
+           # a helper under an include guard (#ifndef X / #define X: dmsh_rewrite.UWORD) is written once per translated shader; in one file the vertex part's copy defines the
+           # macro, so the kernel's copy was skipped and its calls named a helper only dm_v holds. Each guard the vertex part defines is undefined, so each namespace has its own
+           'namespace dm_v {', _strip_head(pulled), '}', *(f'#undef {m}' for m in guards(pulled)), 'namespace dm_g {', _strip_head(gfn), '}', 'using namespace dm_v;',
            'struct dm_mesh_draw { device const uchar* ib; uint itype; uint first; uint count; int base_vertex; uint base_instance; };',
            'struct dm_mesh_prim { bool culled [[primitive_culled]]; };',
            f'struct dm_mesh_rec {{ constant uchar* slot[{RUN_SLOTS}]; dm_mesh_draw d; uint group_end; uint n; }};']

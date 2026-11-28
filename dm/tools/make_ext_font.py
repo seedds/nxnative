@@ -43,7 +43,7 @@ def rot(pts, cx, cy, deg):
 
 class Letters:
     def __init__(self, path):
-        self.f = TTFont(path); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
+        self.f = TTFont(path, fontNumber=0); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
     def knock(self, pen, text, cx, cy, h):
         # knock text out of the plate, centred at (cx, cy) with height h
         names = [self.cmap[ord(ch)] for ch in text]; x = 0; parts = []
@@ -124,7 +124,7 @@ def build(out, letter_font):
     for n in order: glyf[n].recalcBounds(glyf)
     fb.setupHorizontalMetrics({n: (adv[n], getattr(glyf[n], 'xMin', 0)) for n in order})
     fb.setupHorizontalHeader(ascent=ASC, descent=DESC)
-    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular'})
+    fb.setupNameTable({'familyName': 'DM Nintendo Extension Stand-in', 'styleName': 'Regular', 'fullName': 'DM Nintendo Extension', 'psName': 'DM-Nintendo-Extension'})   # the full name is what the font engine reports (LoadFont): one of its own, as a game can load every shared font into one engine
     fb.setupOS2(sTypoAscender=ASC, sTypoDescender=DESC, sTypoLineGap=0, usWinAscent=ASC, usWinDescent=-DESC)
     fb.setupPost(); fb.save(out)
     print('%s: %d glyphs, %d code points' % (out, len(order), len(cmap)))

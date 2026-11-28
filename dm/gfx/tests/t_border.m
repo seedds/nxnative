@@ -96,7 +96,7 @@ static void specialization_cases(void) {
         id<MTLFunction> f = deferred == 2 ? geo_mesh_entry(lib, @"probe") : deferred ? fn_spec(lib, @"probe", cv, &error) : fn_lib_spec(lib, @"probe", cv, &error);
         CHECK(f != nil, "original specialization exists (%d)", deferred); if (!f) continue;
         id<MTLFunction> off = fn_dev_b(f, 1);   // the variant is no function object of its own (fn_off): a descriptor and a device function beside f's
-        CHECK(fn_off(f) && fn4_of_b(f, 1) != fn4_of(f) && fn4_of_b(f, 1) == fn4_of_b(f, 1) && fn4_of_b(f, 0) == fn4_of(f), "border specialization has a descriptor of its own, cached (%d)", deferred);
+        CHECK(fn_off(f, FN_OFF_BORDER) && fn4_of_b(f, 1) != fn4_of(f) && fn4_of_b(f, 1) == fn4_of_b(f, 1) && fn4_of_b(f, 0) == fn4_of(f), "border specialization has a descriptor of its own, cached (%d)", deferred);
         CHECK(off && off != fn_dev(f) && off == fn_dev_b(f, 1) && fn_dev_b(f, 0) == fn_dev(f), "its device function is distinct and cached (%d)", deferred);
         MTL4SpecializedFunctionDescriptor *pre = (MTL4SpecializedFunctionDescriptor *)pre_fn(lib, @"probe");
         id<MTLFunction> warm = fn_lib_spec(lib, @"probe", pre.constantValues, &error);
@@ -112,6 +112,49 @@ static void specialization_cases(void) {
             [e dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
             CHECK(cb.status == MTLCommandBufferStatusCompleted, "specialization GPU work completed");
             CHECK(*(uint32_t *)out.contents == (variant == 2 ? 13u : prior + (variant == 0)), "prior constant and border match variant %d (%d)", variant, deferred);
+        }
+    }
+    // Both dm_border_off and dm_blend_off (all four FN_OFF_* masks, plus pre_fn): shader_load initializes dm_blend_off = false so FN_OFF_BORDER matches pre_fn,
+    // and FN_OFF_BLEND overwrites it to true. A function with dm_blend_off alone has no FN_OFF_BORDER variant (falls back to fn4_of, matching pre_fn).
+    for (int has_border = 1; has_border >= 0; has_border--) {
+        NSString *src = has_border
+            ? [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n"
+                "constant bool dm_border_off [[function_constant(%u)]];\nconstant bool dm_blend_off [[function_constant(%u)]];\n"
+                "kernel void probe_bb(device uint *out [[buffer(0)]]) {\n"
+                "  uint b = (!is_function_constant_defined(dm_border_off) || !dm_border_off) ? 1u : 0u;\n"
+                "  uint z = (is_function_constant_defined(dm_blend_off) && dm_blend_off) ? 0u : 2u;\n"
+                "  out[0] = b | z;\n}\n", (unsigned)DMSH_BORDER_FC, (unsigned)DMSH_BLEND_OFF_FC]
+            : [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n"
+                "constant bool dm_blend_off [[function_constant(%u)]];\n"
+                "kernel void probe_b0(device uint *out [[buffer(0)]]) {\n"
+                "  uint z = (is_function_constant_defined(dm_blend_off) && dm_blend_off) ? 0u : 2u;\n"
+                "  out[0] = z;\n}\n", (unsigned)DMSH_BLEND_OFF_FC];
+        NSString *name = has_border ? @"probe_bb" : @"probe_b0";
+        NSError *error = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:src options:nil error:&error];
+        CHECK(lib != nil, "blend/border fixture compiles (%d): %s", has_border, error.localizedDescription.UTF8String);
+        if (!lib) continue;
+        MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new]; BOOL no = NO;
+        [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+        id<MTLFunction> f = fn_spec(lib, name, cv, &error);
+        CHECK(f != nil, "shader_load blend=false specialization exists (%d)", has_border); if (!f) continue;
+        if (!has_border) CHECK(fn_off(f, FN_OFF_BORDER) == nil && fn4_of_b(f, FN_OFF_BORDER) == fn4_of(f), "blend-only shader has no border-off variant");
+        MTL4SpecializedFunctionDescriptor *pre = (MTL4SpecializedFunctionDescriptor *)pre_fn(lib, name);
+        id<MTLFunction> warm = pre ? fn_lib_spec(lib, name, pre.constantValues, &error) : nil;
+        CHECK(warm != nil, "pre_fn specialization exists (%d)", has_border);
+        for (int mask = 0; mask <= 4; mask++) {
+            id<MTLFunction> fn = mask == 4 ? warm : fn_dev_b(f, mask);
+            id<MTLFunction> dfn = mask == 4 ? (fn ? fn_dev(fn) : nil) : fn;
+            if (!dfn) continue;
+            id<MTLComputePipelineState> p = [g_dev newComputePipelineStateWithFunction:dfn error:&error];
+            CHECK(p != nil, "mask %d pipeline builds (%d): %s", mask, has_border, error.localizedDescription.UTF8String); if (!p) continue;
+            id<MTLBuffer> out = [g_dev newBufferWithLength:4 options:MTLResourceStorageModeShared];
+            CHECK(out != nil, "mask %d output buffer allocated (%d)", mask, has_border); if (!out) continue;
+            id<MTLCommandBuffer> cb = q_cb(); id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+            [e setComputePipelineState:p]; [e setBuffer:out offset:0 atIndex:0];
+            [e dispatchThreads:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)]; [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+            CHECK(cb.status == MTLCommandBufferStatusCompleted, "mask %d GPU work completed (%d)", mask, has_border);
+            uint32_t want = mask == 4 ? 2u : ((has_border && !(mask & FN_OFF_BORDER)) ? 1u : 0u) | (!(mask & FN_OFF_BLEND) ? 2u : 0u);
+            CHECK(*(uint32_t *)out.contents == want, "mask %d (has_border=%d): got %u, want %u", mask, has_border, *(uint32_t *)out.contents, want);
         }
     }
 }

@@ -1,0 +1,36 @@
+# Bloodstained: Curse of the Moon 1.1.1 (v131072), SDK 4.5.0, NVN.
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	01004B800AF5A000
+program_id	01004B800AF5A000
+
+# ---- App ----
+name	Bloodstained: Curse of the Moon
+ipa	BloodstainedCurseOfTheMoon.ipa
+app_category	public.app-category.action-games
+
+# ---- Versions ----
+build	v131072	1.1.1	main=82deca0a867052bfbf13d0ff563174bd	subsdk0=ec9581652c9c92188b895221f183e89d	sdk=e01ad5381c948c4ec3b0bb210b08d5c8
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# subsdk0 compiles the game's embedded GLSL at boot.
+modules	main subsdk0 sdk
+romfs_marker	GROUP_COMMON.bfgrp
+zip_store	.metallib
+
+# ---- Memory ----
+# The game takes a 3.14 GB heap within this 3.25 GB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource, so virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+# The split reads the outputs captured from the game's own GLSLC.
+shader_groups	/glslc_capture/=other
+shader_note	Bloodstained: Curse of the Moon shaders

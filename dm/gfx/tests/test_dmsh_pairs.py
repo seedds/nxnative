@@ -85,6 +85,10 @@ class Pairing(unittest.TestCase):
 
     def test_split_fallback_union_and_defaults(self):
         self.assertEqual(self.ns['PAIRS'], {'v': {'f0', 'f1', 'f6'}})
+        # Padding readers must still include # cover rows even though pso_offline/pso_prebuild skip them.
+        self.g.table('shader_pairs.tsv').write_text('# kind: evidence\nv\tf0\n# cover: single-stage padding pairs\nv\tf6\n')
+        self.assertEqual(self.ns['load_pairs'](self.g, self.package), {'v': {'f0', 'f1', 'f6'}})
+        self.assertEqual(pso_offline.read_pairs(self.g.table('shader_pairs.tsv').read_bytes()), [('v', 'f0')])
         src, pad = self.ns['vs_pad']('v', VS)
         self.assertEqual(pad, [1, 6])
         for loc in pad:
@@ -122,18 +126,25 @@ class Pairing(unittest.TestCase):
         manifest.write_text('G\t1111111111111111\t2222222222222222\nS\tv_b\t0\nR\t00ff\n')   # order and other rows do not count
         self.assertEqual(dmsh_chain.inputs(self.g), recorded)
 
+    def test_mesh_pairs_from_the_split_geometry_pairs(self):   # every vertex / geometry pair of a variation (geo_pairs.tsv): the profile's, else the split's copy beside the package
+        split_copy = self.package.parent / 'geo_pairs.tsv'
+        split_copy.write_text('# kind: evidence  split\n4444444444444444\t2222222222222222\n')
+        self.assertEqual(dmsh_chain.mesh_pairs(self.g), set())   # no package named: the profile only
+        self.assertEqual(dmsh_chain.mesh_pairs(self.g, str(self.package)), {('4444444444444444', '2222222222222222')})
+        before = dmsh_chain.inputs(self.g)
+        self.g.table('geo_pairs.tsv').write_text('5555555555555555\t2222222222222222\n')
+        self.assertEqual(dmsh_chain.mesh_pairs(self.g, str(self.package)), {('5555555555555555', '2222222222222222')})   # the profile's table wins
+        self.assertNotEqual(dmsh_chain.inputs(self.g), before)
+
     def test_vertex_cache_depends_on_extra_pairs_and_pixel_code(self):
         self.ns.update(FACTS={}, MAP_ROWS={}, MAP_CONFLICT_ROWS={}, TOOL_FP=b'tools', CODE_FP='code',
-                       PROFILE_ROWS=b'', DUAL_WANT=set(), shader_rule_source=lambda name: b'')
+                       PROFILE_ROWS=b'', shader_rule_source=lambda name: b'')
         key = self.ns['shader_key']
         v1 = key('v', 'pkg.bin', b'vertex')
         self.ns['PAIRS']['v'].remove('f6')
         self.assertNotEqual(v1, key('v', 'pkg.bin', b'vertex'))
         f1, f2 = key('f1', 'pkg.bin', b'pixel'), key('f1', 'pkg.bin', b'changed pixel')
         self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [f2]))
-        self.ns['DUAL_WANT'].add('f1')
-        dual = key('f1', 'pkg.bin', b'pixel')
-        self.assertNotEqual(self.ns['pair_keyed'](v1, [f1]), self.ns['pair_keyed'](v1, [dual]))
 
     @unittest.skipUnless(shutil.which('xcrun'), 'needs the Metal compiler')
     def test_metal_archive_with_padded_regular_and_pulling_entries(self):
@@ -167,14 +178,26 @@ class Pairing(unittest.TestCase):
 
 
 class VariationPairs(unittest.TestCase):
-    def test_mesh_pairs_with_its_pixel_shader(self):   # NVN2: Ocarina of Time's foliage variations hold a mesh and a pixel shader, no vertex shader
+    def test_mesh_pairs_with_its_pixel_shader(self):   # NVN2: Ocarina of Time's foliage variations hold a mesh (with or without task / pixel) shader, no vertex shader
         import shader_split as split
         sh = lambda tag: (bytes([tag]) * 0x40, bytes([tag]) * 0x40)
         found = [('a.bfsha#BNSH@0x10#var0', 'vs', *sh(1)), ('a.bfsha#BNSH@0x10#var0', 'ps', *sh(2)),
                  ('a.bfsha#BNSH@0x10#var1', 'ms', *sh(3)), ('a.bfsha#BNSH@0x10#var1', 'ps', *sh(4)),
-                 ('a.bfsha#BNSH@0x10#var2', 'ms', *sh(5))]   # no pixel shader: no pair
+                 ('a.bfsha#BNSH@0x10#var2', 'ms', *sh(5)),   # depth-only mesh: no 2-col pair, emits depth-only mesh triple
+                 ('a.bfsha#BNSH@0x10#var3', 'ts', *sh(6)), ('a.bfsha#BNSH@0x10#var3', 'ms', *sh(7)), ('a.bfsha#BNSH@0x10#var3', 'ps', *sh(8))]
         k = lambda tag: split.skey(*sh(tag))
-        self.assertEqual(split.var_pairs(found), {(k(1), k(2)), (k(3), k(4))})
+        self.assertEqual(split.var_pairs(found), {
+            (k(1), k(2)), (k(3), k(4)), (k(7), k(8)),
+            ('-', k(3), k(4), 'mesh'), ('-', k(5), '-', 'mesh'), (k(6), k(7), k(8), 'mesh'),
+        })
+
+    def test_geometry_pairs(self):   # a variation with a vertex and a geometry shader: (vertex, geometry, 'geo'), for geo_pairs.tsv and its mesh library
+        import shader_split as split
+        sh = lambda tag: (bytes([tag]) * 0x40, bytes([tag]) * 0x40)
+        found = [('a.bfsha#BNSH@0x10#var28', 'vs', *sh(1)), ('a.bfsha#BNSH@0x10#var28', 'gs', *sh(2)), ('a.bfsha#BNSH@0x10#var28', 'ps', *sh(3)),
+                 ('a.bfsha#BNSH@0x10#var29', 'gs', *sh(4))]   # no vertex shader: no pair
+        k = lambda tag: split.skey(*sh(tag))
+        self.assertEqual(split.var_pairs(found), {(k(1), k(3)), (k(1), k(2), 'geo')})
 
 
 if __name__ == '__main__': unittest.main()

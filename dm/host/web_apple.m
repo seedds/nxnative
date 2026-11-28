@@ -6,7 +6,8 @@
 // left right), and key events: the D-pad and the left stick are the arrow keys with key repeat, and the browser's spatial navigation as their default action (the focus moves
 // to the nearest focusable element that way, unless the page prevented the key or moved the focus itself); at load the first element in tab order takes the focus. A is
 // keyCode 32 (as the pause menu reads it) and clicks the focused link or button when the page does not take it. B goes back, or ends the page from its first one
-// (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3); other URLs outside the document are refused.
+// (exit reason 1), unless the page took B over with nx.footer. The page ends when it loads a URL under its callback URL (exit reason 3), or when it calls window.close()
+// (exit reason 4, no last URL); other URLs outside the document are refused.
 // Input: hle_hid.c's state while the page is shown (dm_input_peek: the keyboard, every controller, DM_CTL), sent to the page 60 times a second; buttons held when it appears count
 // only once released. A click or touch on the page focuses what it lands on and presses A there. The page is transparent where it draws nothing, over the game's picture; its
 // 1280x720 is fitted to the game's 16:9 picture. Its sounds follow the host's audio (DM_AUDIO; silent on the Mac by default)
@@ -68,6 +69,8 @@ static NSString *const SHIM = @R"JS(
     }, 'footer.')
   };
   window.nx = stub(nx, '');
+  // The browser's own close(): the Switch's web applet ends with exit reason 4 (window closed, no last URL). Pages use it as their confirm button with no navigation
+  window.close = function () { post({k: 'end', r: 4}); };
 
   // Sounds follow the host's audio: muted, every connection to the speakers goes through a gain of 0 (the sounds still play and end, for pages that wait for them)
   if (cfg.muted && window.AudioNode) {

@@ -80,11 +80,11 @@ int main(void) { @autoreleasepool {
         h_nvnTextureFinalize(&btex);
         mtl_sub_begin(); os_unfair_lock_lock(&g_rmu);
         id<MTLTexture> bt2 = tex_by_id(2); uint64_t rid = 0, made0 = g_tb2_made;
-        id<MTLTexture> rows = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid) : nil;
+        id<MTLTexture> rows = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid, NULL) : nil;
         id<MTLTexture> root = bt2; while (root.parentTexture) root = root.parentTexture;
         uint64_t ra = vc_addr(root); vc_set *rs = nvn_hm_get(&g_vc, &ra);
         int kept = rows && rs && rs->rows == (__bridge void *)rows;
-        id<MTLTexture> rows2 = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid) : nil;
+        id<MTLTexture> rows2 = bt2 ? tbuf_as_2d(2, bt2, NVN_DPF_FLOAT, &rid, NULL) : nil;
         os_unfair_lock_unlock(&g_rmu); mtl_wait(mtl_sub_commit(), 5000000000ull);
         CHECK(bt2 && holds(root), "the finalized buffer texture resolves, held by the owner");
         CHECK(kept && g_tb2_made == made0 + 1, "its rows, first asked for after its finalization, are kept with the texture");

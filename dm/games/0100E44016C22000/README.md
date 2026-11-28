@@ -8,7 +8,7 @@ Update 1.0.1 (v65536) over the base game, SDK 13.3.7. Unity 2020.3.30f1 IL2CPP w
 |---|---|---|
 | Node area cut 1 GB → 62 MB; regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (the constructor at `sdk+0x37c3a0`: the movs at `+0x37c3b0` and `+0x37c44c`; the placement's alignments at `+0x37c5a4`, `+0x37c5ac`, `+0x37c5b0`) | `StandardAllocator::Initialize` aborted at its `CentralHeap::Init`; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | the layout of Ace Attorney Investigations Collection ([010005501E68C000](../010005501E68C000/README.md)) and Brain Memory Training Academy ([0100F5D01DA3A000](../0100F5D01DA3A000/README.md)): a 1 GB pool (in place of the provisional profile's hardware pool) and the 5 GB block (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | the layout of Ace Attorney Investigations Collection ([010005501E68C000](../010005501E68C000/README.md)) and Brain Memory Training Academy ([0100F5D01DA3A000](../0100F5D01DA3A000/README.md)): a 1 GB pool (in place of the provisional profile's hardware pool) and the 5 GB block (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region) |
 | Shared fonts as plain TTFs | host, `hle_sdk16.c` `font_skip` (every game) | Japanese, Korean and Chinese text drew nothing; see [Fonts](#fonts) |
 | `shader_groups /Resources/=engine /Data/=data` | `game.tsv` | engine built-ins (`Resources/`: `unity default resources`, `unity_builtin_extra`) go to engine, the player's serialized files to data |
 | No `pad_layout` (the 2D default) | `game.tsv` | controller only; see [Input](#input) |
@@ -48,5 +48,6 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - The built-in VR blit's geometry shader does not build.
 - The A button: docs/development.md says "A redo", the `game.tsv` header "A to confirm".

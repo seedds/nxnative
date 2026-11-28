@@ -1,19 +1,4 @@
-# The rewriter's patches of Nintendo SDK module builds (sdk), which several games can ship: dm/tools/patch_nso.py applies those of a module's NSO build ID, whatever the game.
-# A patch of a game's own module (main) goes in its profile's patches.py (dm/games/<id>/patches.py). CUTS as described in patch_nso.py ("Registered patches")
-CUTS = {
-  # Kingdom Battle 1.9.589692, SDK 4.4.0: the older VammManager reserves a
-  # full 1 GB node area (constructor +0x93dd8, occupied range +0x93e98).
-  # Snowdrop's compact 3 GB region follows its small metadata reservation;
-  # 1 GB placement alignment still cannot fit it in the iPhone guest block.
-  # Platform-limit cuts: 64 MB node area and 32 MB large-region alignment.
-  '9de92bad67c4150268943ab4843ace65': [
-    (0x93dfc, 'e9030232', '0980a052', 'VammManager node area limit: 1 GB to 64 MB'),
-    (0x93e8c, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
-    (0x93fe0, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
-  ],
-}
-
-# SDK-wide function patches (dm/tools/nso_match.py): the two fixes above that hold for any game on an iPhone's small address space, for every game's sdk of a build with no CUTS
+# SDK-wide function patches (dm/tools/nso_match.py) for every game's sdk of a build with no CUTS
 # (patch_nso.py "Registered patches"), so a new game or a new version of one gets them without a cut for its build. The Switch's alias region is
 # 64 GB, where neither matters; the host's is about 4.4 GB:
 # - the AddressRegionManager constructor's node area: 0x3fe00000 (about 1 GB) at the start of the alias region → 0x3e00000 (62 MB, about 1.35 million 0x30-byte nodes; a few hundred
@@ -148,7 +133,29 @@ def align(size, fingerprints, old_32m, old_1g, old_4m):   # the three large clas
         (0x64, old_32m, '0b04a052', f'AllocateAddressRegion: alignment of regions from 32 MB to 1 GB {mov(old_32m, 0x2000000)} → mov w11,#0x200000 (2 MB, as SDK 20)'),
         (0x6c, old_1g, '0a04a052', f'AllocateAddressRegion: alignment of regions of 1 GB and more {mov(old_1g, 0x40000000)} → mov w10,#0x200000 (2 MB, as SDK 20)'),
         (0x70, old_4m, '0804a052', f'AllocateAddressRegion: alignment of regions from 4 MB to 32 MB {mov(old_4m, 0x400000)} → mov w8,#0x200000 (2 MB, as SDK 20)')]}
+
+
+old_vamm = 'Older VammManager: 64 MB node area and 32 MB large-region alignment'
+
+
+def vamm(node_size, occupied, node_fingerprint, align_fingerprint):
+    """Older VammManager implementations reserve a full 1 GB of nodes. Cut both functions together so Snowdrop's region fits on iPhone after its metadata."""
+    return {'name': old_vamm, 'functions': [
+        {'size': node_size, 'fingerprints': [node_fingerprint], 'cuts': [
+            (0x24, 'e9030232', '0980a052', 'VammManager node area limit: 1 GB to 64 MB'),
+            (occupied, 'ea030232', '0a80a052', 'VammManager occupied node area: 1 GB to 64 MB'),
+        ]},
+        {'size': 328, 'fingerprints': [align_fingerprint], 'cuts': [
+            (0x60, 'ea030232', '0a40a052', 'AllocateAddressRegion: align regions of 1 GB and more to 32 MB'),
+        ]},
+    ]}
+
+
 MATCH_CUTS = {'sdk': [
+    # SDK 3.5.1 (South Park 1.0 / 1.05). Reproduces all three original cut sites and replacement bytes.
+    vamm(288, 0xb8, '1afa13cc6a6b823fde0b57f324da45b2dfbebfacb0d8dd09158a150d3d006609', '3726c7d94ae67a37e2c30df6ccf76e8ca7e9204a83b05cedb7a7631e8b3b5bab'),
+    # SDK 4.4.0 (Kingdom Battle 1.9.589692). Reproduces all three original cut sites and replacement bytes.
+    vamm(284, 0xb4, '4f75a781115b851e83adab390e7280d2b83750be14c5bee8e3936ebdbae14164', '4b4883a77c04ac0837a0d879215e7fdcd52796ed2dad6086adbbdbf5cb5d4dbb'),
     # SDK 7.3.2 (DRAGON QUEST XI S), 8.2.1 (Super Smash Bros. Ultimate), 8.3.1 (Paper Mario: The Origami King)
     node(276, ['5c81bb821d119d00ffcda6c3a4f1b827fc08c084fa53995e3a6262b5bf37cded'], 0x10, 'e9230b32', '097ca052', 0xb0, 'e9230b32', '097ca052'),
     # SDK 10.4.1 (Advance Wars 1+2), 10.4.8 (Pikmin 4)
@@ -191,7 +198,7 @@ BINDING = [
     {'what': 'node area 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20: the SDK-wide rules', 'now': 'sdk', 'goal': 'sdk', 'purpose': 'address space',
      'checked': '20 registered builds rewritten byte-identical with the rules alone, 2026-10-29 and 2026-10-30; the 2 MB alignment on every sdk build on the drive, 2026-10-30',
      'why': 'one rule per reviewed implementation; every sdk build without CUTS gets them'},
-    {'what': 'VammManager node area and alignment, SDK 4.4.0 (9de92bad)', 'now': 'build', 'goal': 'sdk', 'purpose': 'address space',
-     'why': 'an older implementation no rule covers (its large regions aligned to 32 MB, not the rules\' 2 MB); a rule once a second game ships it',
-     'blocked': 'one game ships it'},
+    {'what': old_vamm, 'now': 'sdk', 'goal': 'sdk', 'purpose': 'address space',
+     'why': 'the two older SDK implementations need smaller reservations and alignment to fit the iPhone alias region after the Snowdrop metadata reservation',
+     'checked': 'both function pairs reproduced all three exact cuts on the two original SDK builds, with six more equivalent implementations found in 48 distinct SDK builds'},
 ]

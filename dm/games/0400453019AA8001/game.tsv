@@ -1,0 +1,34 @@
+# Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition 2.0.0 (SDK 20.5.14, Monolith, NVN2).
+
+# ---- Identity ----
+title_id	0400453019AA8001
+program_id	0400453019AA8001
+
+# ---- App ----
+name	Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition
+ipa	XenobladeChroniclesXDefinitiveEditionNintendoSwitch2Edition.ipa
+app_category	public.app-category.role-playing-games
+pad_layout	full
+
+# ---- Versions ----
+build	v0	2.0.0	main=cecd404955035a51747c746cfa652e10	sdk=dfb937c3d3e764f8393c5ce38dd276bf
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# The host supplies main's imports from NintendoSDK_movie (subsdk0).
+modules	main sdk
+romfs_marker	sts.ard
+zip_store	.ard:.pck:.webm:.metallib
+
+# ---- Memory ----
+# The Mac's Switch 2 layout supplies the 128 GiB alias region for Monolith's 60 GiB reservation.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0x240000000
+sys_resource	0x6000000
+
+# ---- Shader split ----
+shader_groups	/movie/=movie /movie4/=movie4 /sound/=sound
+shader_note	Xenoblade Chronicles X: Definitive Edition – Nintendo Switch 2 Edition shaders

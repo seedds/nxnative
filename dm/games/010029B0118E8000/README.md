@@ -42,6 +42,7 @@ The reader's [resource checks](../../../docs/reference/shaders.md#glslc-outputs-
 
 General changes first needed here; each applies to every game:
 
+- [AudioOut crackle on a Bluetooth route](../../../docs/reference/audio.md#audioout-crackle-on-a-bluetooth-route) (`hle_audio.c`)
 - [GLSLC outputs in Criterion's Bundle 2 resources](../../../docs/reference/shaders.md#glslc-outputs-in-criterions-bundle-2-resources) (`shader_split.py`)
 - [A texture upgrade while a draw binds its arguments ends the pass](../../../docs/reference/rendering.md#a-texture-upgrade-while-a-draw-binds-its-arguments-ends-the-pass) (`nvn_mtl.m`)
 - `hle_fpslock.c`: frame times in system ticks, frame steps in seconds and a mode switch as frame-limit fields; the profile key `enc_thread`

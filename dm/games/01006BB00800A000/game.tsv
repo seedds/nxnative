@@ -1,0 +1,32 @@
+# NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Burst, Switch update 1.0.1, SDK 4.4.0
+
+# ---- Identity ----
+title_id	01006BB00800A000
+program_id	01006BB00800A000
+
+# ---- App ----
+name	NARUTO SHIPPUDEN™: Ultimate Ninja® STORM 3 Full Burst
+ipa	NarutoShippudenUltimateNinjaStorm3FullBurst.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=1f3bde8d5e55742767b332bc9308074f	sdk=ba520906609c503227871a314a94fb5f
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	data/sim/stage.cpk
+zip_store	.cpk:.nsh:.metallib
+
+# ---- Memory ----
+# The NPDM enables virtual address memory. Reserve a 2.25 GiB heap region for the game's observed 2.15 GiB request.
+mem_reserve	0x140000000
+mem_alias	0x90000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x2000000
+
+# ---- Shader split ----
+shader_groups	/data/=data
+shader_note	NARUTO SHIPPUDEN™: Ultimate Ninja® STORM 3 Full Burst shaders

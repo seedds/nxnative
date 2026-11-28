@@ -8,7 +8,7 @@ Update 1.23.55063 (v655360) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 |---|---|---|
 | `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `sys_resource 0x800000` | [`game.tsv`](game.tsv) | the NPDM's 8 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | nirvanA Initiative's layout; the NSP script's heap check set the 1 GB pool; see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | nirvanA Initiative's layout; the NSP script's heap check set the 1 GB pool; see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `3644a676…` | nirvanA Initiative's build |
 | Region alignment 4 MB / 32 MB / 1 GB → 2 MB | `dm/tools/sdk_patches.py` SDK-wide rules (measured here; a row on this build until 2026-10-30), `sdk` build `3644a676…` (`sdk+0x37c334`, `+0x37c33c`, `+0x37c340`) | Unity's regions spill past each size class; see [Memory](#memory) |
 | ALLOC_BUCKET at most 63 blocks (255 on the Switch) | the engine-wide rule `dm/tools/unity_bucket.py`, found by the allocator's name in any build (`main+0x6517f4` on `5b050c55…`) | a 1 GB address region of which 80 MB is used; see [Memory](#memory) |
@@ -46,6 +46,7 @@ Update 1.23.55063 (v655360) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - iOS untested.
 - The audio device stall at the landing ([Audio](#audio)).
 - Only the opening and the crash site were played. Address space after longer play, underwater and in bases, is not measured: watch the `[mem] alias region mapped up to` lines.

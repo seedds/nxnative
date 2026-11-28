@@ -100,6 +100,49 @@ class LooseNarc(unittest.TestCase):
         (_, keys, pairs, extra), log = self.scan(archive([member(0x10, b'BNTX' + bytes(64)), b'']))
         self.assertEqual((keys, pairs, extra, log), ({}, set(), {}, ''))
 
+    def test_malformed_archive_and_member_keep_the_reader_diagnosis(self):
+        missing_sections = struct.pack('<4sHHIHH', b'NARC', 0xfffe, 0, 16, 16, 0)
+        cases = (
+            (missing_sections, 'no BTAF or GMIF'),
+            (archive([b'\x60\0\0\x02\x80\x12\0']), 'an LZ distance before the start'),
+            (archive([b'\x60\0\0\0\x01']), 'an LZ stream cut inside a token'),
+            (archive([b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0']), 'would expand to 4294967295'),
+            (archive([b'\x94\0\0\0\x10\0\0\0\xff\xff']), 'an LZ4 member:'),
+            (archive([b'Z\0\0\0\x10\0\0\0\0\0\0\0']), 'a zstd member:'),
+            (archive([b'MMMM\0\0']), 'MMMM header cut'),
+            (archive([b'MMMM' + struct.pack('<II', 0, 9)]), 'MMMM table of 9 chunks'),
+        )
+        for data, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc.*' + message):
+                    ss.scan_blob(data, '/court.narc', [])
+                fz.fuzzlib.replay('shader_split', fz.check, data)   # accepted under the fuzz harness's allocation guard
+
+    def test_cra_shaders_reports_member_errors_through_red(self):
+        import cra
+        raw = b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0'
+        plain = raw + bytes(-len(raw) & 15)
+        with tempfile.TemporaryDirectory() as directory:
+            arc = Path(directory) / '42'
+            # 2021 layout: scramble by reversing bits and xoring with keys_2021
+            ks = cra.keys_2021('shader/bad.bin')
+            scrambled = (int.from_bytes(plain.translate(cra.REV8), 'little')
+                         ^ int.from_bytes((ks * (len(plain) // 16 + 1))[:len(plain)], 'little')).to_bytes(len(plain), 'little')
+            arc.write_bytes(scrambled)
+            entry = (1, 'shader/bad.bin', len(raw), 0, zlib.crc32(raw) ^ cra.SUM_2021, cra.LAYOUT_2021)
+            with self.assertRaisesRegex(SystemExit, r'\[RED\] /42/shader/bad\.bin: .*would expand to 4294967295'):
+                ss.cra_shaders(str(arc), '42', (entry,), [])
+
+    def test_narc_tables_are_bounded_before_reading(self):
+        raw = archive([b'plain'])
+        cases = [(b'NARC', 'header cut short')]
+        for offset, value, message in ((20, 0, 'invalid NARC section size'), (20, len(raw), 'invalid NARC section size'),
+                                       (24, 0xffffffff, 'member table cut short'), (32, 0xffffffff, 'past the GMIF end')):
+            data = bytearray(raw); struct.pack_into('<I', data, offset, value); cases.append((bytes(data), message))
+        for data, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(SystemExit, r'\[RED\] /court.narc: .*' + message):
+                ss.scan_blob(data, '/court.narc', [])
+
     def test_cli_matches_a_plain_archive(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); rom = root / 'RomFS'; rom.mkdir()

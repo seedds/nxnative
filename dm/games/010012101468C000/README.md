@@ -13,7 +13,6 @@ Brought up on the Mac: boot, the title, the save slot and difficulty menus, a ne
 | `sys_resource 0x0` | `game.tsv` | the NPDM declares 0 MB of system resource |
 | `modules main subsdk0 sdk` | `game.tsv` | every module `main` imports from |
 | `shader_groups` (`/Worlds/`, `/Preload/`, `/UI/`) | `game.tsv` | the shader split's groups ([Shaders](#shaders)) |
-| [`dual_want.tsv`](dual_want.tsv) | profile | `ab809a7456f59614` writes colour output 1 that a pipeline blends as the second source |
 
 No rendering key: what the game needed beyond the profile is general ([Found on this game](#found-on-this-game)).
 

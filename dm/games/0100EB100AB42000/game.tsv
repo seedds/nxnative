@@ -1,5 +1,5 @@
 # FINAL FANTASY XII THE ZODIAC AGE 1.1.0, SDK 6.4.0. Square Enix's PhyreEngine port (VBF archives with LZ4 blocks), NVN.
-# Started from the NSP script's provisional profile; brought up on the Mac with depth_mode zero and dual_want.tsv added (README.md).
+# Started from the NSP script's provisional profile; brought up on the Mac with depth_mode zero added (README.md).
 
 # ---- Identity ----
 title_id	0100EB100AB42000

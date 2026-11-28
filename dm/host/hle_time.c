@@ -2,11 +2,59 @@
 // Layout follows the public Horizon ABI: PosixTime = int64 seconds; CalendarTime = {s16 year, s8 month/day/hour/minute/second};
 // CalendarAdditionalInfo = {u32 day of week, u32 day of year, char time zone name[8], u32 DST, s32 UTC offset in seconds}.
 #include "hle.h"
+#include <CoreFoundation/CoreFoundation.h>
 #include <stdatomic.h>
 #include <time.h>
 
 typedef struct { int16_t year; int8_t month, day, hour, minute, second; int8_t pad; } CalendarTime;
 typedef struct { uint32_t wday, yday; char tzname[8]; uint32_t dst; int32_t offset; } CalendarAdditionalInfo;
+static const int64_t ns_per_second = 1000000000;
+enum { LOCATION_NAME_SIZE = 0x24 };   // nn::time::LocationName: char[0x24], NUL-terminated
+
+// Extract a valid Switch LocationName ("UTC" or a known IANA Area/Location name) from a TZ value or zoneinfo path, zero-filling out.
+// Rejects abbreviations ("PST"), POSIX rules ("PST8PDT,M3.2.0,M11.1.0", "EST5EDT", "JST-9"), path traversal (".."), and names >= 0x24 bytes.
+static int location_name_from_tz(const char *s, char out[LOCATION_NAME_SIZE]) {
+    if (!s) return 0;
+    if (*s == ':') s++;
+    for (const char *z; (z = strstr(s, "zoneinfo/"));) s = z + 9;
+    size_t n = strlen(s);
+    if (!n || n >= LOCATION_NAME_SIZE || *s == '/' || strstr(s, "..")) return 0;
+    if (!strcmp(s, "UTC")) { memset(out, 0, LOCATION_NAME_SIZE); memcpy(out, "UTC", 3); return 1; }
+    if (!strchr(s, '/')) return 0;
+    CFStringRef name = CFStringCreateWithCString(NULL, s, kCFStringEncodingUTF8);
+    if (!name) return 0;
+    CFTimeZoneRef tz = CFTimeZoneCreateWithName(NULL, name, false);
+    CFRelease(name);
+    if (!tz) return 0;
+    CFRelease(tz);
+    memset(out, 0, LOCATION_NAME_SIZE);
+    memcpy(out, s, n);
+    return 1;
+}
+
+// Device location name (char[0x24], NUL-terminated, zero-filled): an IANA name ("Asia/Tokyo", "UTC"), as a Switch reports it.
+// Honors a valid TZ override first (main.c sets TZ=UTC for DM_FIXED_TIME, and unit tests set TZ); otherwise queries CoreFoundation
+// (CFTimeZoneCopySystem, sandbox-safe on both macOS and iOS) and falls back to "UTC".
+static void device_location_name(char out[LOCATION_NAME_SIZE]) {
+    if (location_name_from_tz(getenv("TZ"), out)) return;
+    memset(out, 0, LOCATION_NAME_SIZE);
+    CFTimeZoneRef tz = CFTimeZoneCopySystem();
+    if (tz) {
+        CFStringRef name = CFTimeZoneGetName(tz);
+        char buf[LOCATION_NAME_SIZE];
+        if (name && CFStringGetCString(name, buf, sizeof buf, kCFStringEncodingUTF8) &&
+            buf[0] && (strchr(buf, '/') || !strcmp(buf, "UTC") || !strcmp(buf, "GMT"))) {
+            strlcpy(out, !strcmp(buf, "GMT") ? "UTC" : buf, LOCATION_NAME_SIZE);
+            CFRelease(tz);
+            return;
+        }
+        CFRelease(tz);
+    }
+    memcpy(out, "UTC", 3);
+}
+HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "device time zone name → host time zone (IANA name)", Result, h_time_LocName, char *out) {
+    device_location_name(out); return RES_OK;
+}
 
 // DM_FIXED_TIME=seconds (for deterministic comparison): the user clock always returns this value (and main.c pins the host time zone to UTC)
 static int64_t fixed_time(void) {
@@ -18,11 +66,19 @@ static int64_t fixed_time(void) {
 HLE_FORCE("_ZN2nn4time10InitializeEv", "connect to the time service; clocks come from the host system time instead", Result, h_time_Initialize, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn4time13IsInitializedEv", "the time service is taken over, always initialized", int, h_time_IsInitialized, void) { return 1; }
 // Steady clock (seconds since boot + a clock source ID, a 16-byte UUID): the host's monotonic seconds with a fixed source ID. GetSpanBetween runs as is in sdk: it subtracts only when the source IDs match
+static void write_steady_point(uint8_t *out, int64_t seconds) {
+    memcpy(out, &seconds, 8); memcpy(out + 8, "dmhost-steady-01", 16);
+}
 HLE_FORCE("_ZN2nn4time19StandardSteadyClock19GetCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock → host monotonic clock (seconds), fixed source ID", Result, h_time_SteadyNow, uint8_t *out) {
-    int64_t s = (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1000000000ull);
-    memcpy(out, &s, 8); memcpy(out + 8, "dmhost-steady-01", 16); return RES_OK;
+    write_steady_point(out, (int64_t)(clock_gettime_nsec_np(CLOCK_MONOTONIC) / ns_per_second));
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time38GetStandardSteadyClockCurrentTimePointEPNS0_20SteadyClockTimePointE", "steady clock (the free function form, SDK 20) → host monotonic clock", Result, h_time_SteadyNowFn, uint8_t *out) { return h_time_SteadyNow(out); }
+// The C++ clock form, a time_point of seconds in x0: the SDK asks the time service's steady-clock session (a global that time::Initialize fills) for GetCurrentTimePoint and returns 0
+// without one (SDK 3.7, sdk+0x16edf4 in Mega Man Legacy Collection). Initialize is taken over and makes no session, so the clock never moved: the same seconds as GetCurrentTimePoint
+HLE_FORCE("_ZN2nn4time19StandardSteadyClock3nowEv", "steady clock (std::chrono form) → host monotonic clock (seconds)", int64_t, h_time_SteadyClockNow, void) {
+    uint8_t tp[24]; h_time_SteadyNow(tp); int64_t s; memcpy(&s, tp, 8); return s;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "user clock → host time()", Result, h_time_GetCurrentTime, int64_t *out) {
     int64_t ft = fixed_time(); *out = ft >= 0 ? ft : time(NULL); return RES_OK;
 }
@@ -56,23 +112,44 @@ static int h_time_mono_timespec(int64_t *ts) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); ts[0] = t.tv_sec; ts[1] = t.tv_nsec; return 0;
 }
 HLE_FORCE("_ZN2nn4time37GetStandardSteadyClockCurrentTimespecEP8timespec", "C library monotonic clock from the steady clock → host monotonic time", int, h_time_MonoTimespec, int64_t *ts) { return h_time_mono_timespec(ts); }
-// User clock context (0x20 bytes: s64 offset + the steady time point it was made at; user time = offset + a steady time point of the same source ID, the snapshot below fills its +0x00 the same way).
-// The SDK reads it from the time service's shared memory, which the host never opens: it returns 0x74 and writes nothing. Unity's DateTime.UtcNow (Engage main+0x4ad40c; Ace Attorney Investigations
-// 1&2 per PR #14) then never starts its clock and reads 0001-01-01. Unity takes its time from GetCurrentTime plus system ticks and only compares the context to notice the clock being set, so like a
-// Switch's it stays the same until the host clock moves against the guest ticks by more than a second (clock set by hand, a sleep mach_absolute_time did not count); with DM_FIXED_TIME it is made once
+typedef struct { int64_t wall_ns, steady_ns; } TimeSample;
+static TimeSample sample_clocks(void) {
+    int64_t before = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    int64_t wall = clock_gettime_nsec_np(CLOCK_REALTIME);
+    int64_t after = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    return (TimeSample){wall, before + (after - before) / 2};
+}
+// The context is an s64 offset and the steady time point where it was set. Subtract the
+// paired clocks before rounding to the SDK's whole seconds. Rounding each one first
+// made the offset depend on the phase of the first read after each process start.
+static TimeSample read_clock_context(uint8_t *out, int64_t fixed) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint8_t ctx[0x20];
+    static int64_t anchor_offset;
+    static int made;
+    pthread_mutex_lock(&mu);
+    TimeSample sample = sample_clocks();
+    int64_t delta_ns = sample.wall_ns - sample.steady_ns;
+    int64_t steady = sample.steady_ns / ns_per_second;
+    int64_t off = fixed >= 0 ? fixed - steady :
+        (delta_ns + (delta_ns >= 0 ? ns_per_second / 2 : -ns_per_second / 2)) / ns_per_second;
+    // Preserve the existing whole-second threshold. Use the snapshot's own steady
+    // clock so pausing guest ticks cannot look like a wall-clock adjustment.
+    if (!made || (fixed < 0 && llabs(off - anchor_offset) > 1)) {
+        if (made) LOG("time: host clock moved %+lld s against the steady clock, new user clock context",
+                      (long long)(off - anchor_offset));
+        memcpy(ctx, &off, 8);
+        write_steady_point(ctx + 8, steady);
+        anchor_offset = off;
+        made = 1;
+    }
+    memcpy(out, ctx, sizeof ctx);
+    pthread_mutex_unlock(&mu);
+    return sample;
+}
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock21GetSystemClockContextEPNS0_18SystemClockContextE", "user clock context from the time service; the host's user clock over its steady clock, renewed when the host clock is set",
           Result, h_time_GetContext, uint8_t *out) {
-    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint8_t ctx[0x20]; static int64_t drift; static int made;
-    uint8_t tp[0x18]; int64_t now; h_time_SteadyNow(tp); h_time_GetCurrentTime(&now);
-    int64_t d = now - (int64_t)(guest_ns() / 1000000000ull);
-    pthread_mutex_lock(&mu);
-    if (!made || (fixed_time() < 0 && llabs(d - drift) > 1)) {
-        int64_t off = now - *(const int64_t *)tp; memcpy(ctx, &off, 8); memcpy(ctx + 8, tp, 0x18);
-        if (made) LOG("time: host clock moved %+lld s against the guest ticks, new user clock context", (long long)(d - drift));
-        drift = d; made = 1;
-    }
-    memcpy(out, ctx, 0x20);
-    pthread_mutex_unlock(&mu);
+    read_clock_context(out, fixed_time());
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time23StandardUserSystemClock3nowEv", "user clock → host time()", int64_t, h_time_now, void) {
@@ -125,14 +202,14 @@ HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock20IsAccuracySufficientEv", "ne
 // source ID, so CalculateSpanBetween (below) takes their steady time points; one made on a Switch (a save brought over) has another, and the span comes from the network times
 HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "snapshot from the time service; the host fills it on the spot (network clock = user clock)", Result, h_time_Snapshot, uint8_t *s) {
     memset(s, 0, 0xd0);
-    uint8_t tp[0x18]; h_time_SteadyNow(tp);
-    int64_t now; h_time_GetCurrentTime(&now);
-    h_time_GetContext(s);   // +0x00: the user clock context, the same in every snapshot until the host clock is set (worked out per snapshot it moved by a second at random, a "clock change" to the user difference below)
+    int64_t fixed = fixed_time();
+    TimeSample sample = read_clock_context(s, fixed);
+    int64_t now = fixed >= 0 ? fixed : sample.wall_ns / ns_per_second;
     memcpy(s + 0x40, &now, 8);
     h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
     memcpy(s + 0x20, s, 0x20); memcpy(s + 0x48, &now, 8); memcpy(s + 0x58, s + 0x50, 8); memcpy(s + 0x78, s + 0x60, 0x18);   // the network clock's context, time, calendar and its info
-    memcpy(s + 0x90, tp, 0x18);
-    tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    write_steady_point(s + 0x90, sample.steady_ns / ns_per_second);
+    device_location_name((char *)s + 0xa8);
     s[0xcd] = 1;   // The SDK passes type 1 for standard snapshots, 2 for adjustable snapshots; 0 is uninitialized.
     return RES_OK;
 }
@@ -178,16 +255,16 @@ HLE_FORCE("_ZN2nn4time39ClaimPeriodicBenefitWithUserSystemClockEPNS0_27PeriodicB
     LOG("time: periodic benefit claim → %u", (unsigned)r);
     return r;
 }
-// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch (a location such as Asia/Tokyo where the
-// host's is its zone abbreviation, automatic correction on) or a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
+// The two service questions of the claim above (each through g_pStaticService in the SDK, which the host never sets). A saved claim context from a Switch in another zone, one saved
+// before the host answered IANA names (a zone abbreviation such as JST), one with automatic correction on, or one from a Mac whose time zone changed reaches them. The host knows neither moment, so the time point comes back cleared: its source ID matches
 // no snapshot's, and the claim then uses only the snapshots (it takes the time point only when its source ID is the current snapshot's steady clock's, SDK 6.5's detail:: +0x2e8 and +0x3b0)
 HLE_FORCE("_ZN2nn4time6detail56GetStandardUserSystemClockAutomaticCorrectionUpdatedTimeEPNS0_20SteadyClockTimePointE",
           "when automatic correction was last switched (time service); not known on the host: a time point of no clock", Result, h_time_AutoCorrUpdated, uint8_t *tp) {
     memset(tp, 0, 0x18); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time6detail35GetDeviceLocationNameAndUpdatedTimeEPNS0_12LocationNameEPNS0_20SteadyClockTimePointE",
-          "device location and when it was set (time service): the host's zone, as in its snapshots, and a time point of no clock", Result, h_time_LocUpdated, char *name, uint8_t *tp) {
-    memset(name, 0, 0x24); tzset(); strlcpy(name, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+          "device location and when it was set (time service): the host's zone (IANA name), as in its snapshots, and a time point of no clock", Result, h_time_LocUpdated, char *name, uint8_t *tp) {
+    device_location_name(name);
     memset(tp, 0, 0x18); return RES_OK;
 }
 // The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
@@ -207,10 +284,6 @@ HLE_FORCE("_ZN2nn4time18ToPosixTimeFromUtcERKNS0_12CalendarTimeE", "UTC calendar
     struct tm tm = {.tm_year = ct->year - 1900, .tm_mon = ct->month - 1, .tm_mday = ct->day, .tm_hour = ct->hour, .tm_min = ct->minute, .tm_sec = ct->second};
     return (int64_t)timegm(&tm);
 }
-// Local time conversion is forced onto the host libc: the SDK's own localtime / localtime_r / mktime have no time zone data and always use UTC
-// (a game's local timestamps were off by the time zone's offset). The SDK on a real Switch converts by the system time zone, so only following the host system time zone here is consistent;
-// the host TZ normally = the system time zone, and is pinned to UTC only for deterministic comparison with DM_FIXED_TIME (main.c). The struct tm layout is the same on both sides (9 ints, long offset, time zone name pointer).
-// gmtime / gmtime_r / timegm are UTC anyway and are not taken over. The same-named pass-through entries in hle_table.c only take effect when the symbol has no definition (the SDK defines them), hence HLE_FORCE
-HLE_FORCE("localtime", "local time → host localtime (follows the system time zone)", struct tm *, h_localtime, const int64_t *t) { time_t v = (time_t)*t; return localtime(&v); }
-HLE_FORCE("localtime_r", "local time → host localtime_r (follows the system time zone)", struct tm *, h_localtime_r, const int64_t *t, struct tm *out) { time_t v = (time_t)*t; return localtime_r(&v, out); }
-HLE_FORCE("mktime", "local calendar → absolute seconds, host mktime (follows the system time zone)", int64_t, h_mktime, struct tm *tm) { return (int64_t)mktime(tm); }
+// The C library's localtime / localtime_r / mktime are not taken over: on a Switch they are UTC. The SDK's musl time zone helper (__secs_to_zone) is a fixed stub, offset 0, no DST, name "UTC",
+// in every sdk checked from SDK 3.5.0 to 22.2.10, so its mktime(gmtime_r(t)) == t. Local time on a Switch comes only from nn::time (ToCalendarTime / ToPosixTime above, in the host's zone).
+// The host once forced them onto its own local-time functions: Hades II then read its save times' UTC struct tm as local time and showed them shifted by the host's offset (issue #2784)

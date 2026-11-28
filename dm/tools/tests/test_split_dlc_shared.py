@@ -37,6 +37,21 @@ class SharedKeys(unittest.TestCase):
         with_dlc, _, _ = ss.merge_keys([DLC, GAME]); without, _, _ = ss.merge_keys([GAME])
         self.assertEqual(with_dlc, without)
 
+    def test_registered_dlc_cannot_displace_game_copy(self):
+        key = 'aaaaaaaaaaaaaaaa'
+        earlier = result('aoc/0/earlier.pak', '/aoc/0/earlier.pak#1')
+        sources = {(key, 'vertex'): DLC[1][key][0]}
+        for order in ([earlier, DLC, GAME], [GAME, earlier, DLC]):
+            with self.subTest(order=[r[0] for r in order]):
+                self.assertEqual(ss.merge_keys(order, sources)[0], GAME[1])
+
+    def test_registered_source_must_match_the_stage(self):
+        key = 'aaaaaaaaaaaaaaaa'
+        later = result('later.pak', '/later.pak#1')
+        source = later[1][key][0]
+        self.assertEqual(ss.merge_keys([GAME, later], {(key, 'pixel'): source})[0], GAME[1])
+        self.assertEqual(ss.merge_keys([GAME, later], {(key, 'vertex'): source})[0], later[1])
+
     def test_first_copy_kept_otherwise(self):
         a, b = result('a.pak', '/a.pak#1'), result('b.pak', '/b.pak#2')
         self.assertEqual(ss.merge_keys([a, b])[0]['aaaaaaaaaaaaaaaa'][0], '/a.pak#1')

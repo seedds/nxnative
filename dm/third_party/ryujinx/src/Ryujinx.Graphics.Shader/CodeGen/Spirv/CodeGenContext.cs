@@ -32,6 +32,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         public Dictionary<int, Instruction> LocalMemories { get; } = new();
         public Dictionary<int, Instruction> SharedMemories { get; } = new();
 
+        public Instruction RayQueryScene { get; set; }
+        public Instruction RayQueryVariable { get; set; }
+
         public Dictionary<SetBindingPair, SamplerType> SamplersTypes { get; } = new();
         public Dictionary<SetBindingPair, SamplerDeclaration> Samplers { get; } = new();
         public Dictionary<SetBindingPair, ImageDeclaration> Images { get; } = new();
@@ -40,6 +43,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         public Dictionary<IoDefinition, Instruction> Outputs { get; } = new();
         public Dictionary<IoDefinition, Instruction> InputsPerPatch { get; } = new();
         public Dictionary<IoDefinition, Instruction> OutputsPerPatch { get; } = new();
+
+        // nxnative: indexed fragment inputs with mixed per-location interpolation modes are split into
+        // individually decorated Input vec4 variables and gathered into a Private array at main entry
+        public Instruction[] IndexedFragmentInputs { get; set; }
+        public Instruction IndexedFragmentInputArray { get; set; }
+        public Instruction IndexedFragmentInputElemType { get; set; }
+        public Instruction IndexedFragmentInputArrayType { get; set; }
 
         public StructuredFunction CurrentFunction { get; set; }
         private readonly Dictionary<AstOperand, Instruction> _locals = new();
@@ -151,7 +161,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             List<Instruction> mainInterface = [];
 
-            mainInterface.AddRange(Inputs.Values);
+            foreach (Instruction input in Inputs.Values)
+            {
+                if (input != IndexedFragmentInputArray)
+                {
+                    mainInterface.Add(input);
+                }
+            }
+
+            if (IndexedFragmentInputs != null)
+            {
+                mainInterface.AddRange(IndexedFragmentInputs);
+            }
+
             mainInterface.AddRange(Outputs.Values);
             mainInterface.AddRange(InputsPerPatch.Values);
             mainInterface.AddRange(OutputsPerPatch.Values);

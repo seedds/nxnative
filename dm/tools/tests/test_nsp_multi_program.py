@@ -329,7 +329,7 @@ class PackAppProgramsTsv(unittest.TestCase):
             msl=str(tmp / 'msl'), tables=str(tmp / 'tables'), font=str(tmp / 'font'), title_id=f'{APP:016X}',
             name='Vol.9', version='1.0', bundle_id=f'org.nxnative.{APP:016x}', category='public.app-category.games',
             marker='marker', lang='en-US', sign='-', aoc=None, icon=None, pso=None, pso_pairs=None, env_file=None,
-            settings=None, html=None, control_nacp=None, msl_name=None, runtime_python=None,
+            settings=None, html=None, control_nacp=None, msl_name=None, runtime_python=None, show_fps=False,
             program=['\t'.join(['6', str(tmp / 'p6/patched'), str(tmp / 'p6/romfs'), str(tmp / 'p6/msl'), str(tmp / 'p6/tables'), str(tmp / 'p6/html')])],
         )
         with mock.patch.object(pack_app, 'min_os', return_value='15.0'), \

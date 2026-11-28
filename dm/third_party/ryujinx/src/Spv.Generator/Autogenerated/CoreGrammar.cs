@@ -4714,9 +4714,9 @@ namespace Spv.Generator
 
         public Instruction TypeRayQueryKHR()
         {
-            Instruction result = NewInstruction(Op.OpTypeRayQueryKHR, GetNewId());
+            Instruction result = NewInstruction(Op.OpTypeRayQueryKHR);
 
-            AddToFunctionDefinitions(result);
+            AddTypeDeclaration(result, false);
 
             return result;
         }
@@ -4905,9 +4905,9 @@ namespace Spv.Generator
 
         public Instruction TypeAccelerationStructureKHR()
         {
-            Instruction result = NewInstruction(Op.OpTypeAccelerationStructureKHR, GetNewId());
+            Instruction result = NewInstruction(Op.OpTypeAccelerationStructureKHR);
 
-            AddToFunctionDefinitions(result);
+            AddTypeDeclaration(result, false);
 
             return result;
         }

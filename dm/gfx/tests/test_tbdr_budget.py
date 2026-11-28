@@ -11,13 +11,20 @@ DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Works
 TOOL = Path(os.environ.get('TBDR_BUDGET_TOOL', Path(__file__).resolve().parents[1] / 'tools/tbdr_budget.py'))
 
 class BudgetExport(unittest.TestCase):
-    def export(self, text):
+    def export(self, text, shader_map=None):
         root = Path(DM_ROOT) / 'run/gfx'
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='budget_test_', dir=root) as tmp:
             log, out = Path(tmp) / 'pass.log', Path(tmp) / 'pass.tsv'
             log.write_text(text)
-            p = subprocess.run([sys.executable, str(TOOL), str(log), '700', '170', '--tsv=' + str(out)], capture_output=True, text=True)
+            profiles = Path(tmp) / 'profiles'
+            profile = profiles / '0100000000000000'
+            profile.mkdir(parents=True)
+            (profile / 'game.tsv').write_text('name\tBudget fixture\n')
+            if shader_map is not None:
+                (profile / 'shader_map.tsv').write_text(shader_map)
+            env = dict(os.environ, DM_GAME=profile.name, DM_GAMES_DIR=str(profiles), DM_GAMES_FIRST='1', DM_ROOT=tmp)
+            p = subprocess.run([sys.executable, str(TOOL), str(log), '700', '170', '--tsv=' + str(out)], capture_output=True, text=True, env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertTrue(out.exists(), 'the full pass TSV was not exported')
             with out.open() as f:
@@ -33,7 +40,7 @@ class BudgetExport(unittest.TestCase):
 
     def test_draws_attachment_bytes_and_untruncated_shader_keys(self):
         key = '0123456789abcdef'
-        rows = self.export(f'''[pass] F700 P 501 c0 ser=1 fmt=70 4x4 ms1 lv0 sl0 load
+        log = f'''[pass] F700 P 501 c0 ser=1 fmt=70 4x4 ms1 lv0 sl0 load
 [pass] F700 Z 501 c ser=1 lv0 sl0 dontcare why=0
 [pass] F700 P 502 c0 ser=2 fmt=70 8x4 ms1 lv0 sl0 clear
 [pass] F700 K 502 st1 key={key}_b nb=1
@@ -41,12 +48,16 @@ class BudgetExport(unittest.TestCase):
 [pass] F700 R 502 st1 ser=12
 [pass] F700 d 502 fs={key}_b vc=3
 [pass] F700 d 502 fs={key}_b vc=3
-''')
-        self.assertEqual((rows[0]['load_bytes'], rows[0]['store_bytes']), ('64', '0'))
-        self.assertEqual((rows[1]['draws'], rows[1]['draw_source']), ('2', 'PASSDUMP_ALL'))
-        self.assertEqual(rows[1]['fragment_keys'], key)
-        self.assertEqual(rows[1]['texture_est_bytes'], '128')
-        self.assertEqual(rows[1]['unknown_textures'], '0')
+'''
+        for shader_map, name in ((None, key[:8]), (f'fixture.bin\t0\tpixel\t{key}\tfixture\n', 'fixture')):
+            with self.subTest(shader_map=shader_map):
+                rows = self.export(log, shader_map)
+                self.assertEqual((rows[0]['load_bytes'], rows[0]['store_bytes']), ('64', '0'))
+                self.assertEqual((rows[1]['draws'], rows[1]['draw_source']), ('2', 'PASSDUMP_ALL'))
+                self.assertEqual(rows[1]['fragment_keys'], key)
+                self.assertEqual(rows[1]['fragment_names'], name)
+                self.assertEqual(rows[1]['texture_est_bytes'], '128')
+                self.assertEqual(rows[1]['unknown_textures'], '0')
 
     def test_unknown_texture_metadata_is_reported(self):
         rows = self.export('''[pass] F700 P 1 c0 ser=1 fmt=70 4x4 ms1 lv0 sl0 clear

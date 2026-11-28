@@ -7,7 +7,7 @@ Base game 1.0.0 (v0), SDK 16.2.4. Unity 2022.3.5f1 IL2CPP with FMOD on NVN. Modu
 | Setting | Where | Why |
 |---|---|---|
 | Node area cut 1 GB → 62 MB; regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (the constructor `AddressRegionManagerC2` at `sdk+0x134768`: the movs at `+0x134778` and `+0x13480c`; the placement's alignments at `+0x134964`, `+0x13496c`, `+0x134970`) | `StandardAllocator::Initialize` aborted in `nninitStartup`; see [Memory](#memory) |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | [`game.tsv`](game.tsv) | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): a 1 GB pool and the 5 GB block (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | [`game.tsv`](game.tsv) | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): a 1 GB pool and the 5 GB block (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region) |
 | `shader_groups /Resources/=engine /Data/=data` | `game.tsv` | engine built-ins (`Resources/`: `unity default resources`, `unity_builtin_extra`) go to engine, the player's serialized files to data |
 | No `pad_layout` (the 2D default) | `game.tsv` | controller only; see [Input](#input) |
 
@@ -42,5 +42,6 @@ General changes first needed here; each applies to every game:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - The built-in VR blit's geometry shader does not build.
 - `game.tsv` has no `sys_resource` row, so the host reports its default, 32 MB (`game.py`, `hle_svc.c`), where the NPDM declares 16 MB.

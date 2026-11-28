@@ -22,6 +22,7 @@ build	v655360	1.0.141667	main=a862861fa2eeedea1d873c94324fca7b	sdk=190030518b5d6
 # so v0's tables are already the union of both, and packing either version needs only what the folder always holds
 package	v0
 shader_versions	v0
+shader_covers	v655360
 
 # ---- Files ----
 modules	main sdk

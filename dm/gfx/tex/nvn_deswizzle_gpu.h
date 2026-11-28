@@ -5,6 +5,7 @@
 #include "nvn_deswizzle.h"
 
 int nvn_deswz_gpu_init(id<MTLDevice> dev);
+int nvn_deswz_gpu_sparse_supported(void);
 // Small RGBA16F arrays: write raw component bits through an integer texture
 // view, across all layers in one dispatch per mip (no per-face staging/copies).
 int nvn_deswz_gpu_direct_supported(const nvn_texdesc *d);
@@ -15,6 +16,6 @@ int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, ui
                          const nvn_texdesc *d, unsigned level, unsigned layer,
                          id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);
 int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
-                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off,
+                            id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off, int sparse,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
                             id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);

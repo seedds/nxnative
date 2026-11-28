@@ -1,0 +1,40 @@
+# Thronebreaker: The Witcher Tales (Switch, update 1.0.2 = v131072).
+# Unity 2018.4.2f1 IL2CPP, Wwise, SDK 8.2.1, NVN. subsdk0 is NintendoSDK_movie.
+# Format: see dm/games/README.md.
+
+# ---- Identity ----
+title_id	0100E910103B4000
+program_id	0100E910103B4000
+
+# ---- App ----
+name	Thronebreaker: The Witcher Tales
+ipa	ThronebreakerTheWitcherTales.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=1bd046113635234d85f43dafb297fe8b	subsdk0=60c6edbbfcebd4176cc301d5d9cb5a6f	sdk=5fd4f531c1195e9e5510c9e73f22cd39
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/audio/campaign_mahakam.pck
+zip_store	.assets:.dat:.mp4:.pck:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM reserves 8 MiB of system resource. At boot the game maps through
+# the alias region without setting a heap. See README.md for the region check.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x800000
+
+# ---- Frame rate ----
+# The rewriter finds Unity's limiter through internal-call registration.
+fps_target	60
+
+# ---- Shader split ----
+depth_mode	zero
+shader_groups	/Data/=data
+shader_note	Thronebreaker: The Witcher Tales shaders

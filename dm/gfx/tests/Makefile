@@ -1095,3 +1095,10 @@ t_scan_cache: t_scan_cache.m $(MTL_T_DEP)
 .PHONY: check_t_scan_cache
 check_t_scan_cache: t_scan_cache
 	MTL_DEBUG_LAYER=1 ./t_scan_cache
+
+# Per-draw replay caches: cbsize_table_u, encode_args_patch_cb, g_args_geo_only, g_ed_dirty, per-program PSO cache, g_vbuf_dirty, border_need, vbuf_prepare, vconv_bind, udc_note_draw
+t_draw_cache: t_draw_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_draw_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_draw_cache
+check_t_draw_cache: t_draw_cache
+	MTL_DEBUG_LAYER=1 ./t_draw_cache

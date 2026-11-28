@@ -600,6 +600,9 @@ static int geo_mesh_take(id<MTL4RenderCommandEncoder> en) {
     uint32_t tris = g_geo_mesh.a.count / 3; g_mrun.groups += (tris + g_mrun.prims - 1) / g_mrun.prims; r->group_end = g_mrun.groups;
     return 1;
 }
+// The geometry stage's block of the last mesh draw (geo_mesh_encode) and the stage's non-UBO/SSBO binding generation when that draw ended (geo_mesh_draw):
+// the next mesh draw of the same lean shader with that generation unchanged patches that block (g_args_geo_only) instead of encoding it in full.
+static struct { const void *sh, *ab; size_t off; uint64_t gen; } g_gme;
 // The draw itself (draw() calls it with its pipeline, the vertex and fragment arguments and the pulling layout bound): the kernel's arguments, with vb_info
 // m0 = (0, 1 instance) and m1.x = the draw's triangles, and the draw's index source
 static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
@@ -609,7 +612,14 @@ static void geo_mesh_encode(id<MTLRenderCommandEncoder> en_) {
     uint32_t info[8] = {0, 1, 0, 0, tris, 0, 0, 0}; memcpy(at.cpu, info, 32); memcpy(at.cpu + 32, &g_geo_mesh.a, sizeof g_geo_mesh.a);
     enc_r_vbuf(en, GEO_MESH_DRAW_SLOT, at.gpu + 32);
     uint64_t save[5]; memcpy(save, g_geo_bind, sizeof save); memset(g_geo_bind, 0, sizeof g_geo_bind); g_geo_bind[3] = at.gpu;
-    args_dirty(2); g_args_mesh = GEO_MESH_GS_SLOT; encode_args(en, g_geo_mesh.lean, 2, 0); g_args_mesh = 0; args_dirty(2);
+    args_sync_dirty();
+    __unsafe_unretained NvShader *lean = g_geo_mesh.lean;
+    if (lean->rf.sblen && !lean->ab_gnp) ab_gix_build(lean);
+    int sblen_ok = !lean->rf.sblen || (lean->ab_sblen_ok && lean->ab_sblen_cpu && lean->ab_sblen_epoch == g_arena_epoch);
+    int geo_patch = !g_res_check_on && g_gme.sh == (__bridge const void *)lean && g_gme.gen == g_args_ngen[2] && sblen_ok && lean->ab_buf && (__bridge const void *)lean->ab_buf == g_gme.ab && lean->ab_off == g_gme.off;
+    if (!geo_patch) args_dirty(2);
+    g_args_mesh = GEO_MESH_GS_SLOT; g_args_geo_only = geo_patch; encode_args(en, lean, 2, 0); g_args_geo_only = 0; g_args_mesh = 0; args_dirty(2);
+    g_gme.sh = (__bridge const void *)lean; g_gme.ab = (__bridge const void *)lean->ab_buf; g_gme.off = lean->ab_off; g_gme.gen = 0;
     memcpy(g_geo_bind, save, sizeof save);
     if (geo_mesh_take(en)) return;   // drawn with its run, which sets the mesh stage's table itself (geo_mesh_flush_)
     [en setArgumentTable:g_vt atStages:MTLRenderStageMesh];   // only a draw that draws alone needs it here: set at every mesh draw, it was one more recorded call a draw for the encode thread
@@ -853,14 +863,14 @@ static void mesh_tasks_draw(const p_draw *dw) {
     if (!g_mtk_n++) MLOG("task / mesh: first draw, task %s mesh %s fragment %s, %u workgroups from %u%s", ts ? ts->key : "-", ms->key, pr->sh[1] ? pr->sh[1]->key : "-", g_mtk.count, g_mtk.first, ind ? " (indirect)" : "");
 }
 static uint64_t g_geo_mesh_n, g_geo_mesh_wait;   // mesh draws; draws the compute path drew while their mesh pipeline was built
-static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
-    uint64_t ib = 0; void *mb; uint64_t mo;
-    if (di && !mtl_gpu_addr(di->ibuf, 1, &mb, &mo, &ib)) { g_geo_why = GCP_IB; return 0; }
+static int geo_mesh_draw(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    __unsafe_unretained id<MTLFunction> fn = geo_mesh_fn(pr, dw, di); if (!fn) return 0;
+    uint64_t ib = 0;
+    if (di && !ib_gpu_addr(di->ibuf, 1, &ib, NULL)) { g_geo_why = GCP_IB; return 0; }
     // The synthetic raster program below keeps only VS/FS and drops di, so draw_()'s ubd_conflict cannot see the lean GS's
     // stage-2 bindings or an indexed draw's index buffer. Land conflicting inline updates before encoding, as native task/mesh
     // draws do for their stages; shadowable uniform reads keep their deferral.
-    NvShader *lean = pr->sh[2]->geo_lean_v[3];
+    __unsafe_unretained NvShader *lean = pr->sh[2]->geo_lean_v[3];
     if (g_nubd && (g_enc || ubd_lazy()) && (ubd_conflict_sh(lean, 2) || (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + ((uint64_t)di->count << di->itype))))) { g_ubd_conflicts++; rp_end(); ubd_land(); }
     if (g_enc && g_pass_vbar) rp_end();   // an in-pass vertex barrier does not order mesh stages
     rt_sub_check(pr);   // check the real program including geometry stage before draw() swaps in raster
@@ -877,7 +887,7 @@ static int geo_mesh_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     g_geo_omit_colors = 0;
     // The draw bound the geometry stage's arguments in the vertex table and the vertex stage's for its raster program: those stages encode again. The fragment stage's block is the one
     // the raster program's fragment shader had, from the same bindings, so it stays: re-encoded at every mesh draw, it moved in the frame arena and its address split every run (geo_mesh_ft_change)
-    { uint64_t f = g_args_gen[1]; g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all(); if (!g_geo_mesh.miss) g_args_gen[1] = f; }   // the fragment bindings' generation, as the draw wrote its block
+    { uint64_t f = g_args_gen[1], fn1 = g_args_ngen[1]; g_geo_program = nil; g_geo_mesh.on = 0; args_dirty_all(); if (!g_geo_mesh.miss) { g_args_gen[1] = f; g_args_ngen[1] = fn1; g_gme.gen = g_args_ngen[2]; } }   // the fragment bindings' generation, as the draw wrote its block
     if (g_geo_mesh.miss) { g_geo_mesh_wait++; g_geo_why = GCP_PSO; return 0; }
     // the kernel's storage writes, noted as its arguments were encoded (always: geo_mesh_encode), so a drain's list of later writes holds them (g_wr_geo, drw_valid)
     swrite_note(pr); udc_note_draw(pr, 0); g_wr_epoch++; g_wr_geo++; g_mdx_epoch++;
@@ -1334,7 +1344,7 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
         geo_capture_one(re, &g_geo_run[n]);
         n++;
     }
-    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; fbc_gen_bump(); g_vbuf_ubd_clean = 0;
+    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; state_restore_caches();
     return n;
 }
 static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
@@ -1380,7 +1390,7 @@ static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvPro
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
     }
-    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; fbc_gen_bump(); g_vbuf_ubd_clean = 0; }
+    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; state_restore_caches(); }
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {

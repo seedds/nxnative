@@ -67,9 +67,10 @@ typedef struct { VkFormat vk; MTLPixelFormat pf; MTLVertexFormat vf; uint8_t byt
 #define FD(v, p, b, k) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, k}
 #define FB(v, p, b, w, h) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, w, h, K_BLOCK}
 #define FV(v, x, b) {VK_FORMAT_##v, MTLPixelFormatInvalid, MTLVertexFormat##x, b, 1, 1, K_COLOR}
-// Packed formats Metal does not have: the texture has a wider format and the host unpacks the texels into it (conv_unpack). Only for linear images the CPU writes (conv_sync):
-// Super Mario 3D All-Stars' Super Mario 64 keeps its N64 textures so, R4G4 among them
-enum { CV_NONE, CV_R4G4, CV_B4G4R4A4, CV_B5G6R5, CV_B5G5R5A1 };
+// Packed formats Metal has no texture for: the texture is the wider format and the host unpacks the texels into it (conv_unpack for the linear images the CPU
+// fills through their memory, conv_row in the buffer-to-image copy for the optimal-tiled ones). Super Mario 3D All-Stars' Super Mario 64 keeps its N64 textures so,
+// R4G4 among them
+enum { CV_NONE, CV_R4G4, CV_B4G4R4A4, CV_B5G6R5, CV_B5G5R5A1, CV_A4R4G4B4, CV_A4B4G4R4 };
 #define FX(v, p, b, c) {VK_FORMAT_##v, MTLPixelFormat##p, MTLVertexFormatInvalid, b, 1, 1, K_COLOR, c}
 static const fmt_t g_fmts[] = {
     FC(R8_UNORM, R8Unorm, UCharNormalized, 1), FC(R8_SNORM, R8Snorm, CharNormalized, 1), FI(R8_UINT, R8Uint, UChar, 1), FI(R8_SINT, R8Sint, Char, 1),
@@ -116,10 +117,24 @@ static const fmt_t g_fmts[] = {
     FV(R16G16B16A16_USCALED, UShort4, 8), FV(R16G16B16A16_SSCALED, Short4, 8),
 };
 static const fmt_t *g_fmt_by[VK_FORMAT_ASTC_12x12_SRGB_BLOCK + 1];
+// VK_EXT_4444_formats: its enum values are 1000340000 and up, past the dense table above (indexed by VkFormat), so they get a short scan of their own.
+// Metal names a packed format's components from the low bits and Vulkan from the high bits (MTLPixelFormatABGR4Unorm reads 0x4321 as R 4, G 3, B 2, A 1), so
+// R4G4B4A4 (R high, A low) is exactly ABGR4Unorm while A4B4G4R4 (A high, R low) would come out R and A swapped.
+// A4R4G4B4 (A high, R low too) is the one STAR WARS Battlefront Classic Collection's REI renderer uses: RedFont::Init's atlas, white RGB with the glyph coverage in
+// A, in the high nibble. Read through ABGR4Unorm its alpha lands in red and its blue in alpha, so every glyph cell drew as an opaque block (cyan rectangle, white
+// glyph, for the version text). Neither format has a Metal equivalent, so both take an RGBA8Unorm texture and the host unpacks the nibbles (conv_row), leaving the
+// channels in Vulkan's order: sampled texels and the attachment writes of a pipeline built for the same VkFormat agree, since the attachment format comes through
+// fmt_of as well.
+static const fmt_t g_fmts_ext[] = {
+    FX(A4R4G4B4_UNORM_PACK16, RGBA8Unorm, 2, CV_A4R4G4B4),   // A 15:12, R 11:8, G 7:4, B 3:0
+    FX(A4B4G4R4_UNORM_PACK16, RGBA8Unorm, 2, CV_A4B4G4R4),   // A 15:12, B 11:8, G 7:4, R 3:0
+};
 static void fmt_init(void) { for (size_t i = 0; i < sizeof g_fmts / sizeof *g_fmts; i++) g_fmt_by[g_fmts[i].vk] = &g_fmts[i]; }
 static const fmt_t *fmt_of(VkFormat f) {
     static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, fmt_init);
-    return (unsigned)f < sizeof g_fmt_by / sizeof *g_fmt_by ? g_fmt_by[f] : NULL;
+    if ((unsigned)f < sizeof g_fmt_by / sizeof *g_fmt_by) return g_fmt_by[f];
+    for (size_t i = 0; i < sizeof g_fmts_ext / sizeof *g_fmts_ext; i++) if (g_fmts_ext[i].vk == f) return &g_fmts_ext[i];
+    return NULL;
 }
 static int fmt_has_depth(const fmt_t *f) { return f && (f->kind == K_DEPTH || f->kind == K_DS); }
 static int fmt_has_stencil(const fmt_t *f) { return f && (f->kind == K_STENCIL || f->kind == K_DS); }
@@ -407,7 +422,10 @@ static VkResult fill_names(const char *const *names, uint32_t n, uint32_t *count
 }
 static const char *const g_inst_ext[] = {"VK_KHR_surface", "VK_NN_vi_surface", "VK_KHR_get_physical_device_properties2", "VK_KHR_get_surface_capabilities2"};
 static const char *const g_dev_ext[] = {"VK_KHR_swapchain", "VK_KHR_descriptor_update_template", "VK_KHR_maintenance1", "VK_KHR_get_memory_requirements2",
-                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2"};
+                                        "VK_KHR_dedicated_allocation", "VK_KHR_bind_memory2",
+                                        // STAR WARS Battlefront Classic Collection's REI renderer maps its 4-bit-alpha font format REI_Format 0xf to
+                                        // VK_FORMAT_A4R4G4B4_UNORM_PACK16 only when this extension is listed, and to VK_FORMAT_UNDEFINED otherwise
+                                        "VK_EXT_4444_formats"};
 static void join_names(char *out, size_t n, const char *const *names, uint32_t count) {
     out[0] = 0; size_t o = 0;
     for (uint32_t i = 0; i < count && o + 2 < n; i++) o += snprintf(out + o, n - o, "%s%s", i ? " " : "", names[i]);
@@ -497,7 +515,15 @@ static void dedicated_req(void *pn) {
 VK(vkGetPhysicalDeviceProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties *p) { (void)pd; pdev_props(p); }
 VK(vkGetPhysicalDeviceProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceProperties2 *p) { (void)pd; pdev_props(&p->properties); }
 VK(vkGetPhysicalDeviceFeatures, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures *f) { (void)pd; pdev_feats(f); }
-VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); }
+// VK_EXT_4444_formats is a device feature extension: a game that chains VkPhysicalDevice4444FormatsFeaturesEXT into the features query is told both
+// formats are supported, because fmt_of() maps them (g_fmts_ext). Every other feature struct keeps the host's old treatment: left as the game set it
+static void feats_4444(void *pn) {
+    for (VkBaseOutStructure *s = pn; s; s = s->pNext)
+        if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT) {
+            VkPhysicalDevice4444FormatsFeaturesEXT *x = (void *)s; x->formatA4R4G4B4 = x->formatA4B4G4R4 = VK_TRUE;
+        }
+}
+VK(vkGetPhysicalDeviceFeatures2, void, VkPhysicalDevice pd, VkPhysicalDeviceFeatures2 *f) { (void)pd; pdev_feats(&f->features); feats_4444(f->pNext); }
 VK(vkGetPhysicalDeviceMemoryProperties, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties *m) { (void)pd; pdev_mem(m); }
 VK(vkGetPhysicalDeviceMemoryProperties2, void, VkPhysicalDevice pd, VkPhysicalDeviceMemoryProperties2 *m) { (void)pd; pdev_mem(&m->memoryProperties); }
 VK(vkGetPhysicalDeviceQueueFamilyProperties, void, VkPhysicalDevice pd, uint32_t *n, VkQueueFamilyProperties *p) {
@@ -616,6 +642,11 @@ VK(vkEnumerateDeviceExtensionProperties, VkResult, VkPhysicalDevice pd, const ch
 }
 VKB(vkCreateDevice, VkResult, VkPhysicalDevice pd, const VkDeviceCreateInfo *ci, const VkAllocationCallbacks *a, VkDevice *out) {
     (void)pd; (void)a; dev_init();
+    // VkPhysicalDevice4444FormatsFeaturesEXT in the chain: the host has the formats either way (it does not gate on features), so its booleans are written
+    // back true, the way a driver that supports them would. Any other feature struct is ignored, as before
+    for (const VkBaseInStructure *x = ci->pNext; x; x = x->pNext)
+        if (x->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT)
+            feats_4444((VkBaseOutStructure *)(uintptr_t)x);
     char ext[512]; join_names(ext, sizeof ext, ci->ppEnabledExtensionNames, ci->enabledExtensionCount);
     uint32_t nq = 0; for (uint32_t i = 0; i < ci->queueCreateInfoCount; i++) nq += ci->pQueueCreateInfos[i].queueCount;
     VLOG("CreateDevice: %u queues; extensions %s", nq, ext);
@@ -722,20 +753,26 @@ static void conv_remove(VkImage im) {
     pthread_mutex_unlock(&g_convmu);
 }
 static uint32_t x4(uint32_t v) { return v * 17; } static uint32_t x5(uint32_t v) { return (v << 3) | (v >> 2); } static uint32_t x6(uint32_t v) { return (v << 2) | (v >> 4); }
-static void conv_unpack(VkImage im, const uint8_t *src, uint8_t *dst) {   // one row after another; dst rows are tightly packed
-    uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4;
-    for (uint32_t y = 0; y < im->h; y++) {
-        const uint8_t *r = src + (size_t)y * im->pitch; uint8_t *o = dst + (size_t)y * im->w * ob;
-        for (uint32_t x = 0; x < im->w; x++, o += ob) {
-            if (im->f->conv == CV_R4G4) { o[0] = (uint8_t)x4(r[x] >> 4); o[1] = (uint8_t)x4(r[x] & 15); continue; }
-            uint32_t v = r[2 * x] | (uint32_t)r[2 * x + 1] << 8;
-            switch (im->f->conv) {
-                case CV_B4G4R4A4: o[0] = (uint8_t)x4(v >> 4 & 15); o[1] = (uint8_t)x4(v >> 8 & 15); o[2] = (uint8_t)x4(v >> 12); o[3] = (uint8_t)x4(v & 15); break;
-                case CV_B5G6R5: o[0] = (uint8_t)x5(v & 31); o[1] = (uint8_t)x6(v >> 5 & 63); o[2] = (uint8_t)x5(v >> 11); o[3] = 255; break;
-                case CV_B5G5R5A1: o[0] = (uint8_t)x5(v >> 1 & 31); o[1] = (uint8_t)x5(v >> 6 & 31); o[2] = (uint8_t)x5(v >> 11); o[3] = v & 1 ? 255 : 0; break;
-            }
+static uint32_t conv_ob(int conv) { return conv == CV_R4G4 ? 2 : 4; }   // the texture's bytes per texel
+// A row of packed texels expanded into the texture's own layout, as Vulkan orders the components: RGBA red first for the 4444 packs, so the nibble each channel
+// comes from is the one the format's name puts it in, high nibble first (A4R4G4B4: A 15:12, R 11:8, G 7:4, B 3:0)
+static void conv_row(int conv, const uint8_t *r, uint8_t *o, uint32_t n) {
+    uint32_t ob = conv_ob(conv);
+    for (uint32_t x = 0; x < n; x++, o += ob) {
+        if (conv == CV_R4G4) { o[0] = (uint8_t)x4(r[x] >> 4); o[1] = (uint8_t)x4(r[x] & 15); continue; }
+        uint32_t v = r[2 * x] | (uint32_t)r[2 * x + 1] << 8;
+        switch (conv) {
+            case CV_B4G4R4A4: o[0] = (uint8_t)x4(v >> 4 & 15); o[1] = (uint8_t)x4(v >> 8 & 15); o[2] = (uint8_t)x4(v >> 12); o[3] = (uint8_t)x4(v & 15); break;
+            case CV_A4R4G4B4: o[0] = (uint8_t)x4(v >> 8 & 15); o[1] = (uint8_t)x4(v >> 4 & 15); o[2] = (uint8_t)x4(v & 15); o[3] = (uint8_t)x4(v >> 12); break;
+            case CV_A4B4G4R4: o[0] = (uint8_t)x4(v & 15); o[1] = (uint8_t)x4(v >> 4 & 15); o[2] = (uint8_t)x4(v >> 8 & 15); o[3] = (uint8_t)x4(v >> 12); break;
+            case CV_B5G6R5: o[0] = (uint8_t)x5(v & 31); o[1] = (uint8_t)x6(v >> 5 & 63); o[2] = (uint8_t)x5(v >> 11); o[3] = 255; break;
+            case CV_B5G5R5A1: o[0] = (uint8_t)x5(v >> 1 & 31); o[1] = (uint8_t)x5(v >> 6 & 31); o[2] = (uint8_t)x5(v >> 11); o[3] = v & 1 ? 255 : 0; break;
         }
     }
+}
+static void conv_unpack(VkImage im, const uint8_t *src, uint8_t *dst) {   // one row after another; dst rows are tightly packed
+    uint32_t ob = conv_ob(im->f->conv);
+    for (uint32_t y = 0; y < im->h; y++) conv_row(im->f->conv, src + (size_t)y * im->pitch, dst + (size_t)y * im->w * ob, im->w);
 }
 // Before a submit: every converted linear image whose memory changed since it was last unpacked is unpacked again (the textures are small: N64 textures)
 static void conv_sync(void) {
@@ -745,7 +782,7 @@ static void conv_sync(void) {
         VkImage im = g_conv[i]; id<MTLBuffer> b = mem_buf(im->cmem); if (!b || !im->tex) continue;
         const uint8_t *src = (const uint8_t *)b.contents + im->coff;
         if (im->conv_synced && !memcmp(src, im->shadow, im->size)) continue;
-        uint32_t ob = im->f->conv == CV_R4G4 ? 2 : 4; size_t need = (size_t)im->w * im->h * ob;
+        uint32_t ob = conv_ob(im->f->conv); size_t need = (size_t)im->w * im->h * ob;
         if (!need) continue;
         memcpy(im->shadow, src, im->size);
         if (need > tcap) { uint8_t *n = realloc(tmp, need); if (!n) die("[vk] out of memory %zu", need); tmp = n; tcap = need; }
@@ -769,7 +806,8 @@ VKB(vkCreateImage, VkResult, VkDevice d, const VkImageCreateInfo *ci, const VkAl
         OLOG("CreateImage %p %ux%u format %d linear (pitch %u) usage %#x", (void *)im, im->w, im->h, ci->format, im->pitch, ci->usage);
         *out = im; return VK_SUCCESS;
     }
-    if (f->conv) { LOG("[vk] [RED] image format %d is converted only for linear images (this one is optimal)", ci->format); return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+    // A converted format's optimal image is the wider texture (f->pf) the copy path unpacks the texels into (C_COPYB2I, conv_row); the game's own memory layout
+    // still comes from f->bytes, which is why the subresource layout and the image requirements above follow the packed format.
     if (ci->tiling == VK_IMAGE_TILING_LINEAR) RED1("linear image %ux%u format %d levels %u layers %u: content does not follow the bound memory", ci->extent.width, ci->extent.height, ci->format, ci->mipLevels, ci->arrayLayers);
     @autoreleasepool {
         uint32_t layers = umax(1, ci->arrayLayers), samples = umax(1, ci->samples);
@@ -2694,6 +2732,26 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
                     NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes, bpi = bpr * ((ih + f->bh - 1) / f->bh);
                     int is3d = im->type == VK_IMAGE_TYPE_3D;
+                    if (f->conv) {   // the texture is the wider format: the staged rows are expanded into it, one layer (and one depth slice) at a time
+                        uint32_t ob = conv_ob(f->conv), ew = r->imageExtent.width, eh = r->imageExtent.height, ed = is3d ? r->imageExtent.depth : 1;
+                        NSUInteger dpr = (NSUInteger)ew * ob, dpi = dpr * eh;
+                        const uint8_t *base = (const uint8_t *)[sb contents];
+                        if (!base) { RED1("the staging buffer of a converted format's upload is not CPU-readable"); break; }
+                        for (uint32_t l = 0; l < (is3d ? 1u : r->imageSubresource.layerCount); l++) {
+                            VkDeviceSize need = (VkDeviceSize)dpi * (is3d ? ed : 1);
+                            id<MTLBuffer> tb = [g_dev newBufferWithLength:need ? need : 1 options:MTLResourceStorageModeShared];
+                            if (!tb) { RED1("cannot make the %llu-byte buffer for the expanded upload of format %d", (unsigned long long)need, (int)im->fmt); break; }
+                            const uint8_t *sp = base + x->src->off + r->bufferOffset + (VkDeviceSize)l * bpi; uint8_t *dp = tb.contents;
+                            for (uint32_t z = 0; z < (is3d ? ed : 1); z++)
+                                for (uint32_t y = 0; y < eh; y++)
+                                    conv_row(f->conv, sp + (size_t)z * bpi + (size_t)y * bpr, dp + (size_t)z * dpi + (size_t)y * dpr, ew);
+                            [be copyFromBuffer:tb sourceOffset:0 sourceBytesPerRow:dpr sourceBytesPerImage:is3d || im->layers > 1 ? dpi : 0
+                                    sourceSize:MTLSizeMake(ew, eh, is3d ? ed : 1) toTexture:im->tex
+                              destinationSlice:is3d ? 0 : r->imageSubresource.baseArrayLayer + l destinationLevel:r->imageSubresource.mipLevel
+                             destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, is3d ? r->imageOffset.z : 0)];
+                        }
+                        continue;
+                    }
                     MTLBlitOption opt = f->kind == K_DS ? (r->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil) : MTLBlitOptionNone;
                     for (uint32_t l = 0; l < (is3d ? 1 : r->imageSubresource.layerCount); l++)
                         [be copyFromBuffer:sb sourceOffset:x->src->off + r->bufferOffset + l * bpi sourceBytesPerRow:bpr sourceBytesPerImage:is3d || im->layers > 1 ? bpi : 0
@@ -2739,6 +2797,10 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
             case C_COPYI2B: {   // read-back into a buffer (shared storage: the CPU sees it once the submit's fence has signalled)
                 const c_copyi2b *x = c; VkImage im = x->src; const fmt_t *f = im->f;
                 if (!x->dst->mem || !im->tex) { RED1("the readback buffer has no bound memory or the image was not created"); break; }
+                // A converted format's texture is the wider one and its rows are not the game's packed layout: the pack back would need the GPU's data on the
+                // CPU after this submit completed. Nothing does it yet (STAR WARS Battlefront only ever uploads its font atlases), so report rather than write
+                // 4-byte texels into a 2-byte row.
+                if (f->conv) { RED1("readback of format %d: the texture holds %u bytes per texel, the pack back to %u is not implemented", (int)im->fmt, conv_ob(f->conv), f->bytes); break; }
                 id<MTLBlitCommandEncoder> be = blit(s, h->op); id<MTLBuffer> db = mem_buf(x->dst->mem);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i]; int is3d = im->type == VK_IMAGE_TYPE_3D;

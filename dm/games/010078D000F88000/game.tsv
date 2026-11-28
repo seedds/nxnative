@@ -1,0 +1,37 @@
+# DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH, update 1.26.01. Plays on the Mac.
+# Nintendo SDK 10.4.1 and NVN. See README.md for the build and playtest.
+
+# ---- Identity ----
+title_id	010078D000F88000
+program_id	010078D000F88000
+
+# ---- App ----
+name	DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH
+ipa	DragonBallXenoverse2ForNintendoSwitch.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v2621440	1.26.01	main=d3b3f636a2bf3628ba644e9242991265	subsdk0=ebedb2645cb8a961714ebc29e9eee0a9	subsdk1=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v2621440
+shader_versions	v2621440
+
+# ---- Files ----
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	data2.cpk
+zip_store	.cpk:.metallib
+
+# ---- Memory ----
+# NPDM declares no system resource. The startup heap fits the 3.25 GiB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	DRAGON BALL XENOVERSE 2 FOR NINTENDO SWITCH shaders

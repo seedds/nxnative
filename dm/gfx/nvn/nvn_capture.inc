@@ -276,7 +276,7 @@ static void cap_tex_read(const tex_t *t, int rec) {   // rec: named by a record 
     nvn_hm_put(&g_cap_read, &t->serial, (void *)(uintptr_t)(!o && !rec ? 2 : 1));
     if (!seen) {   // how the replay layer holds it
         int live = own_tex_live(t->serial);
-        int cpu = tex_cpu_written(t->serial) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
+        int cpu = tex_cpu_written(t) || ([o isKindOfClass:[NvPkg class]] && !t->has_layout);
         cap_tknd k = {*t, (live ? CAP_TK_LIVE : 0) | (cpu ? CAP_TK_CPU : 0), 0};
         if (k.kind) { cap_tex_enc(&k.t, "texture kind"); cap_buf_put(&g_cap_kind, &k, sizeof k); }
     }

@@ -1,0 +1,33 @@
+# Alien: Isolation, Switch update 1.1.5_64113. Nintendo SDK 8.2.0, NVN 53.312.
+title_id	010075D00E8BA000
+program_id	010075D00E8BA000
+name	Alien: Isolation
+ipa	AlienIsolation.ipa
+app_category	public.app-category.games
+
+build	v327680	1.1.5_64113	main=1fedf6bf6d8c7392f122cef2ab8ed7b5	subsdk0=8df876f80ce4ceee62360b31405c452f	subsdk1=c8a3cc0b1d1858330a881c0c2fc87940	sdk=3ae34e689d7a35f13cbf42bfd672af8b
+package	v327680
+shader_versions	v327680
+
+# subsdk0 is NintendoSDK_movie and subsdk1 is the NVN shader compiler.
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	resources/nvn_shader_cache
+zip_store	.bnk:.fzip:.gz:.pak:.pak_switch:.pck:.png:.webm:.wem:.metallib
+
+# The NPDM declares no system resource. The SDK asks for a 3.14 GB heap.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# The renderer sets near depth to zero. Prebuild the same pipeline variant.
+depth_mode	zero
+
+# The Switch renderer requests a two-refresh hold in gameplay even with its
+# 60 fps preference. Pace the Mac and iOS presents at one refresh by default.
+present_interval	display
+fps_target	60
+
+shader_groups	/data/=data /resources/=resources
+shader_note	Alien: Isolation shaders

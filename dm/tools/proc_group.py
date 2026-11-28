@@ -1,4 +1,4 @@
-"""A subprocess in a process group of its own, which the caller owns with every process it starts (the NSP script's run, regress.py's run_heavy).
+"""A subprocess in a process group of its own, which the caller owns with every process it starts (the NSP script's run and rewrite, regress.py's run_heavy and modules_for).
 
 The caller's interrupt does not reach that group by itself: Spyder's interrupt goes to its kernel alone, a front end's SIGTERM to the script alone, and a terminal's Ctrl-C to
 the terminal's foreground group, which this group is not in (a session of its own: no signal from the terminal reaches it, and a member that reads the terminal fails at once
@@ -84,16 +84,7 @@ class Group:
     def stop(self, sig=signal.SIGTERM):
         """sig to the group (resumed first: a stopped process acts on no signal but SIGKILL), up to grace seconds, then SIGKILL; returns once the direct child is reaped and
         no member is left, or REAP seconds after the SIGKILL (a member stuck in the kernel). Re-raises the last interrupt (or SIGTERM, exit) that came while it waited"""
-        late, self.done = None, True
-        try:
-            self.resume(); self._signal(sig)
-            if self._gone(self.grace): self.p.wait(); return
-        except BaseException as e: late = e   # a second interrupt or SIGTERM: no more grace
-        while True:   # each step can be repeated; an interrupt here only repeats it
-            try:
-                self._signal(signal.SIGKILL); self.p.wait(); self._gone(REAP); break
-            except BaseException as e: late = e
-        if late is not None: raise late
+        stop_all([self], sig)
 
     def finish(self):
         """After the direct child's exit (waits for it): drain seconds for the other members to go, then stop() those left, listed in stragglers. → the child's exit status"""
@@ -130,6 +121,45 @@ class Group:
             sel.close()
         buf += dec.decode(b'', final=True)
         if buf: yield buf
+
+
+def stop_all(groups, sig=signal.SIGTERM):
+    """sig to every group together (resumed first: a stopped process acts on no signal but SIGKILL), up to their grace seconds, then SIGKILL to what is left; returns once every
+    direct child is reaped and no member is left, or REAP seconds after the SIGKILL (a member stuck in the kernel). Re-raises the last interrupt (or SIGTERM, exit) that came while waiting"""
+    groups = list(groups)
+    if not groups: return
+    late = None
+    for g in groups: g.done = True
+    def still_alive(pool):
+        out = []
+        for g in pool:
+            g.p.poll()
+            if members(g.pgid): out.append(g)
+        return out
+    alive = groups
+    try:
+        for g in alive: g.resume(); g._signal(sig)
+        end = time.monotonic() + max(g.grace for g in alive)
+        while True:
+            alive = still_alive(alive)
+            if not alive or time.monotonic() >= end: break
+            time.sleep(TICK)
+        if not alive:
+            for g in groups: g.p.wait()
+            return
+    except BaseException as e: late = e   # a second interrupt or SIGTERM: no more grace
+    while True:   # each step can be repeated; an interrupt here only repeats it
+        try:
+            for g in alive: g._signal(signal.SIGKILL)
+            for g in groups: g.p.wait()
+            end = time.monotonic() + REAP
+            while True:
+                alive = still_alive(alive)
+                if not alive or time.monotonic() >= end: break
+                time.sleep(TICK)
+            break
+        except BaseException as e: late = e
+    if late is not None: raise late
 
 
 def describe(stragglers):   # for the caller's message

@@ -1,0 +1,51 @@
+# Game profile of Atelier Ryza 3: Alchemist of the End & the Secret Key (Switch, update v524288 = 1.6.0). Plays on the Mac
+# Format: see dm/games/README.md
+# Gust's engine on Koei Tecmo's KTGL (KTSL2 sound, KIDS tasks), on NVN, SDK 14.3.0. Modules main + subsdk0 (NintendoSDK_movie) + sdk (build 2aef2cff..., which other profiles share).
+# RomFS: loose files, 10.49 GB, 23,519 files: Data/NX (G1T textures, G1S shader files, 9,570 .gz archives, KTSL2 sound banks, MP4 movies), event scripts (Event/event_EN, event_JP), XML tables, text.
+# 8 DLC packages (indices 202-205, 207, 400, 401, 700; 400 and 401 are licences with no data); the NSP script packs each DLC's RomFS as build/aoc/<index>.img, the host reports them owned and mounts them
+
+# ---- Identity ----
+title_id	010095E018944000
+program_id	010095E018944000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Atelier Ryza 3: Alchemist of the End & the Secret Key
+ipa	AtelierRyza3AlchemistOfTheEndTheSecretKey.ipa
+app_category	public.app-category.role-playing-games
+# A 3D game: right stick for the camera, the D-pad for the field map. main reads no touch screen, mouse or keyboard
+pad_layout	full
+
+# ---- Versions ----
+build	v524288	1.6.0	main=f459e3f8b833718bcbf809040d9277aa	subsdk0=c781dd63daf0ddcdb9975da50a198f93	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v524288
+shader_versions	v524288
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/NX/Res_CMN/Movie/previousstory.mp4
+zip_store	.gz:.ktsl2asbin:.ktsl2stbin:.mp4:.pdat:.trmd:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (META +0x14 = 0): no virtual address memory; nninitStartup sets a heap of 3.14 GB. The DX's 4 GB layout (256 MB in front + 256 MB alias region + 256 MB
+# stack region + 3.25 GB heap region)
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Presentation ----
+# The Switch version runs at 30 fps: the game asks for present interval 2 (1 on the logos and the title) and nothing else limits it, and its logic steps by the time that passed
+# (the tutorial battle's AP bar fills at the same wall-clock rate at 30 and at 60 fps: 11 AP a minute in both Mac runs). So present_interval display (frames follow the display tick,
+# the player's Frame rate row sets 30 or 60 through the present interval alone) is all it takes. Mac, M4 Pro, headless, 60 fps over the opening dialogue and the prologue battle
+# (five runs of 8 to 10 minutes): frame time p50 16.66 ms, p95 16.9 ms, GPU p50 6.5 to 9.6 ms (battle about 9 to 9.6), GPU p95 about 11 ms; at 30 fps over the same opening: GPU p50 8.7 ms.
+# In the field (the start of Kurken Island, from the autosave, one run): frame p50 16.6-16.9 ms, GPU p50 6.9-8.0 ms. Some runs overlapped other work on the Mac, so the GPU times
+# are contended. Mac numbers, not phone numbers
+present_interval	display
+fps_target	60
+
+# ---- Shader split (shader_split.py; 1,756 GLSLC outputs in the G2S containers of Data/NX/Shader/*.g1s, the .fpo / .cpo files, the elixir archives and main) ----
+shader_groups	/Data/=data /Event/=event /Saves/=saves /DLC/=dlc
+shader_note	Atelier Ryza 3: Alchemist of the End & the Secret Key shaders

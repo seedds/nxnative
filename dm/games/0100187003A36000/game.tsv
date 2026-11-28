@@ -1,0 +1,25 @@
+# Pokémon: Let's Go, Eevee! 1.0.2, Game Freak's engine, Nintendo SDK 5.4.151 and NVN.
+title_id	0100187003A36000
+program_id	0100187003A36000
+name	Pokémon: Let's Go, Eevee!
+ipa	PokemonLetsGoEevee.ipa
+app_category	public.app-category.role-playing-games
+
+build	v131072	1.0.2	main=5831ec64d6b696fd69e69505821b97b1	subsdk0=7440b3aa6a8857b516f254b19b9ff184	subsdk1=89d8d937ddece47a93cccf87525a059c	sdk=1101700d4118f1fd1458391c671f81d5
+package	v131072
+shader_versions	v131072
+
+# subsdk0 supplies GLSLC and subsdk1 supplies NintendoSDK_movie.
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	bin/app/staff_roll/bin/staff_roll_00.arc
+zip_store	.arc:.bfotf:.gfpak:.ptcl:.webm:.metallib
+
+# The NPDM declares no system resource. Use the standard 4 GB layout.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+shader_groups	/bin/=bin /system_resource/=systemresource
+shader_note	Pokémon: Let's Go, Eevee! shaders

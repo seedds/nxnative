@@ -8,7 +8,7 @@ Update 1.0.2 (v131072), SDK 13.3.5. Unity 2020.3.30f1 IL2CPP (Patrick's Parabox'
 |---|---|---|
 | Node area cut 1 GB → 62 MB, regions of 4 MB and more aligned to 2 MB (SDK 20's, measured on Subnautica: Below Zero) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `3644a676…` | `nninitStartup` hands pool − used to StandardAllocator as virtual address memory and Unity reserves its own regions beside it; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM declares 16 MB of system resource, so `IsVirtualAddressMemoryEnabled` is true |
-| 5 GB block with a 1 GB pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region. With the hardware pool the alias region was nearly full within 5 s |
+| 5 GB block with a 1 GB pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region. With the hardware pool the alias region was nearly full within 5 s |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the investigation moves its cursor with the left stick and the view with the right one |
 
 ## Memory
@@ -44,5 +44,6 @@ Update 1.0.2 (v131072), SDK 13.3.5. Unity 2020.3.30f1 IL2CPP (Patrick's Parabox'
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - The 6 geometry shaders are listed as not building in `game.tsv`; no source says whether the geometry compute path that now builds AI: THE SOMNIUM FILES' three ([010089B00D09C000](../010089B00D09C000/README.md)) builds these.
 - The game has no entry in the development notes; its route on the Mac (a new game into the first investigation) is known only from `game.tsv`'s memory comment.

@@ -89,7 +89,17 @@ The game's own languages. The app was packed with one of them; pick another here
 
 ### Picture
 
-iPhone, iPad and Mac. **Fit**, the default, shows the game's picture (16:9, or the taller one of [Picture shape](#picture-shape)) as large as it fits, with black bars where the screen has another shape. **Fill** enlarges it until it covers the whole screen and crops what lies outside; nothing is stretched. An iPhone loses some of the top and bottom, an iPad some of each side, so health bars, subtitles or maps near the edges can be cut off. A picture that fills the screen without cropping needs a patch for each game that renders a wider view. On iPhone and iPad, Fill applies in landscape; in portrait the picture stays fitted above the controls, and on a TV it is always fitted. On a Mac, Fill crops the picture to the window's shape: in fullscreen on a 16:10 screen a 16:9 game fills it and loses about 5.5 % at each side, with nothing stretched.
+iPhone, iPad and Mac. **Fit**, the default, shows the game's picture (16:9, or the taller one of [Picture shape](#picture-shape)) as large as it fits, with black bars where the screen has another shape. **Fill** enlarges it until it covers the whole screen and crops what lies outside; nothing is stretched. An iPhone loses some of the top and bottom, an iPad some of each side, so health bars, subtitles or maps near the edges can be cut off. **Stretch** covers the whole screen without cropping anything: the picture is stretched to the screen's shape, so on an iPhone (about 19.5:9) everything looks about a fifth wider, and on a 4:3 iPad a third taller; the whole HUD stays on screen. A picture that fills the screen without cropping or stretching needs a patch for each game that renders a wider view. On iPhone and iPad, Fill and Stretch apply in landscape; in portrait the picture stays fitted above the controls, and on a TV it is always fitted. Stretch is not offered on a Mac. There, Fill crops the picture to the window's shape: in fullscreen on a 16:10 screen a 16:9 game fills it and loses about 5.5 % at each side, with nothing stretched.
+
+```mermaid
+flowchart LR
+    G["Game's picture, 16:9"] --> P{Picture}
+    P -->|Fit| F["Whole picture, its shape kept<br/>black bars at the sides"]
+    P -->|Fill| C["Whole screen, its shape kept<br/>top and bottom cropped"]
+    P -->|Stretch| S["Whole screen, whole picture<br/>stretched wider"]
+```
+
+Touches on the game's touch screen follow the picture in all three. With Stretch the app draws the picture once, straight at the screen's resolution; **Upscaling**'s MetalFX applies only to a picture that keeps its shape, so a stretched picture is scaled smoothly (Standard).
 
 ### Picture shape
 
@@ -293,7 +303,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
 | Cloud saves folder (Mac) | `DM_SAVE_SYNC` | a folder; `icloud`: iCloud Drive › nxnative Saves; `0`: off |
 | Start save backups | `DM_SAVE_BACKUPS` | `0`: off (on by default: keeps up to 10 / 256 MB in `<save>-backups/<date> start`) |
-| Picture | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen (or Mac window), cropped |
+| Picture | `DM_PICTURE_FIT` | `fit` 16:9 with black bars, `fill` covers the screen (or Mac window), cropped, `stretch` (iPhone and iPad) covers the screen, stretched |
 | Picture shape | `DM_SCREEN_ASPECT` | On builds with screen-shape stubs, `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.6` MacBook (16:10, Mac only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Rotation (iPhone and iPad) | `DM_ROTATION` | `auto` as the device turns, `landscape`, `portrait` |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |

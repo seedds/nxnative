@@ -1117,7 +1117,7 @@ class Main(Base):
             with self.assertRaisesRegex(nsp.BuildError, 'version to pack .* is not in the folder'):
                 self.run_main(target, package='v0')
 
-    def test_both_forms_of_no_base_pack_alike(self):   # Mario's profile needs v0 and registers the update: without a base game it is packed from a derived profile, whichever the form
+    def test_both_forms_of_no_base_pack_alike(self):   # Wonder generates shader tables from the registered update alone
         tid, ver = 0x010015100B514000, 327680
         for packages, flags in (([(1, tid, ver, version(tid=tid), META)], pack_nup.STANDALONE), ([(0, 0, 0, {'exefs': {}}, META), (1, tid, ver, version(tid=tid), b'')], 0)):
             with self.subTest(flags=flags):
@@ -1126,7 +1126,8 @@ class Main(Base):
                 self.assertFalse((work / 'extract/v0').exists())
                 self.assertEqual((work / f'extract/v{ver}/ExeFS/main').read_bytes(), b'code')
                 self.assertEqual(nacp.name(work / f'extract/v{ver}/control.nacp'), 'Test Game')
-                self.assertTrue(any('the folder has no v0' in s for s in said), said)
+                self.assertIn(f'game profile: {tid:016X}', said)
+                self.assertFalse(any('from a profile derived from it' in s for s in said), said)
                 self.assertIn(pack_nup.NO_BASE, said)
 
     def test_a_version_it_cannot_pack_is_a_red_line(self):   # through cli(): the disk check reads the RomFS folder before any extraction

@@ -13,6 +13,7 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NULL; }
 void *guest_sym(const char *name) { (void)name; return NULL; }
 void svc_thread_dump(void) {}
+void dm_thread_native_wait(int entering) { (void)entering; }   // no guest scheduler in this test
 
 static unsigned checks, failures;
 #define CHECK(label, condition) do { checks++; if (!(condition)) { failures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)

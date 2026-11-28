@@ -637,6 +637,9 @@ static void pool_depth_case(void) {
     rp_end(); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "that submission completed");
 }
 static void pool_depth_snapshot_case(void) {
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared];
+    CHECK(result != nil, "pool feedback readback buffer allocates");
+    if (!result) return;
     tex_t colour, depth, unrelated;
     target(&colour, 99810);
     depth = (tex_t){.magic=MAGIC('T','E','X',0), .serial=99811, .mem=(uint8_t *)g_ubo_words,
@@ -663,7 +666,7 @@ static void pool_depth_snapshot_case(void) {
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureType2D, .dpf=NVN_DPF_FLOAT};
     fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_TEXP, .dtt=MTLTextureTypeCube, .dpf=NVN_DPF_FLOAT};
     const nvn_rbind *binding = &fs->rf.b[0];
-    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     g_fb_pass = UINT64_MAX;
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; R.rt.depth = &depth;

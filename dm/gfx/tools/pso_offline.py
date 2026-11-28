@@ -64,7 +64,7 @@ def mwa_on(platform, osmin):
 
 
 def host_constants(platform='ios', osmin=None):
-    return {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_OFF_FC, False), 'dm_mwa3_fc': (abi.MWA_FC, mwa_on(platform, osmin))}
+    return {'dm_border_off': (abi.BORDER_FC, True), 'dm_blend_off': (abi.BLEND_OFF_FC, False), 'dm_pool_mark_off': (abi.POOL_MARK_FC, False), 'dm_mwa3_fc': (abi.MWA_FC, mwa_on(platform, osmin))}
 
 
 HOST_CONSTANTS = host_constants()

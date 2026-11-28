@@ -92,6 +92,7 @@ class Functions(unittest.TestCase):
             self.assertEqual(po.functions(p), {'main0': True, 'main0_u': True, 'vs': False})
             self.assertEqual(po.HOST_CONSTANTS['dm_border_off'], (216, True))   # dmsh_abi.h DMSH_BORDER_FC, set as nvn_mtl.m pre_fn sets it
             self.assertEqual(po.HOST_CONSTANTS['dm_blend_off'], (217, False))   # dmsh_abi.h DMSH_BLEND_OFF_FC: false in the pair archive so hybrid stand-ins serve every blend state
+            self.assertEqual(po.HOST_CONSTANTS['dm_pool_mark_off'], (218, False))   # dmsh_abi.h DMSH_POOL_MARK_FC: false in the pair archive so hybrid stand-ins keep pool read marks
             self.assertEqual(po.HOST_CONSTANTS['dm_mwa3_fc'], (220, False))   # dmsh_abi.h DMSH_MWA_FC: off by default (issue #3405; DM_NVN_METALWA=1 opts in)
             self.assertEqual(po.host_constants('macos', '27.0')['dm_mwa3_fc'], (220, False))
             self.assertEqual(po.host_constants('macos', '26.0')['dm_mwa3_fc'], (220, False))

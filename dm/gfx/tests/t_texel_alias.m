@@ -372,6 +372,50 @@ int main(void) { @autoreleasepool {
     CHECK(g_treg[27].used == 0, "ua_prepare_bindless does not stamp scanned IDs as slot-bind uses");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "13 submission completes");
 
+    // 14. Active level-0 colour attachment in g_ua_bdirty must not split an open pass in ua_prepare_bindless
+    //     (which would otherwise trigger rp_end -> ua_flush -> ua_note_write -> re-dirty -> 1-draw pass collapse),
+    //     and must still sync once a later compute dispatch or non-matching pass reads bindless textures.
+    static uint8_t s14[STOR];
+    tex_t act_rt = tex2d(NVN_FORMAT_RGBA8, W, H, s14), act_al = tex2d(NVN_FORMAT_R32UI, W, H, s14);
+    mtl_tex_init(&act_rt); mtl_tex_init(&act_al);
+    mtl_reg_tex(42, &act_rt, NULL); mtl_reg_tex(43, &act_al, NULL);
+    id<MTLTexture> mact_al = base_of(&act_al);
+    os_unfair_lock_lock(&g_rmu);
+    g_seen_typed[seen_sec((int)MTLTextureType2D)][43 >> 5] |= 1u << (43 & 31);
+    os_unfair_lock_unlock(&g_rmu);
+    NvShader *fs_bindless14 = [NvShader new];
+    fs_bindless14->rf.nb = 1;
+    fs_bindless14->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_UINT};
+    NvProg *pr_bindless14 = [NvProg new]; pr_bindless14->sh[1] = fs_bindless14;
+    NvShader *cs_bindless14 = [NvShader new];
+    cs_bindless14->rf.nb = 1;
+    cs_bindless14->rf.b[0] = (nvn_rbind){.kind = NVN_RB_TEXP, .dtt = MTLTextureType2D, .dpf = NVN_DPF_UINT};
+    // First pass writes green into act_rt and ends, pushing act_rt into g_ua_bdirty.
+    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &act_rt; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 1, 0, 1);
+    mtl_sub_begin(); CHECK(rp_begin() != nil, "14 first pass opens");
+    g_stat_draw++; rp_end();
+    CHECK(g_nua_bdirty > 0, "14 first pass end leaves act_rt dirty for bindless aliases");
+    // Second pass reopens on act_rt (e.g. after a mid-pass split) with blue clear; bindless draw inside it must not split!
+    R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 0, 1, 1);
+    id<MTL4RenderCommandEncoder> enc14 = rp_begin();
+    CHECK(enc14 != nil, "14 second pass opens on act_rt");
+    g_stat_draw++;
+    c0 = g_ua_copies;
+    ua_prepare_prog(pr_bindless14, 0x1f);
+    CHECK(g_enc == enc14, "14 ua_prepare_prog does not split open render pass for active RT in g_ua_bdirty");
+    CHECK(g_ua_copies == c0, "14 ua_prepare_prog performs zero alias copies while target is active RT");
+    rp_end();
+    // Subsequent compute dispatch (even while R.has_rt still holds act_rt) must sync the final blue pixels once.
+    ua_prepare_shader(cs_bindless14, 5);
+    CHECK(g_ua_copies == c0 + 1, "14 subsequent compute dispatch syncs act_rt to bindless alias once");
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "14 submission completes");
+    {
+        id<MTLBuffer> got14 = bytes_of(mact_al);
+        const uint32_t *px14 = (const uint32_t *)got14.contents;
+        CHECK(px14[0] == 0xffff0000u && px14[W * H - 1] == 0xffff0000u, "14 bindless alias receives final blue RT pixels");
+    }
+    R.has_rt = 0; R.rt.n = 0; R.rt.color[0] = NULL; R.clear_c[0] = 0;
+
     printf("t_texel_alias: %d checks, %d failed (ua_copies=%llu, zero_fills=%llu)\n", checks, failed, (unsigned long long)g_ua_copies, (unsigned long long)g_ua_zero_fills);
     return failed != 0;
 } }

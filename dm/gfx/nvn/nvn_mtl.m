@@ -8574,6 +8574,7 @@ static id<MTLFunction> fn_load(id<MTLLibrary> lib, NSString *name, NSError **e) 
     if (!fc.count) return fn4_note(f, lib, name, nil);
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
     if (fc[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    if (fc[@"dm_pool_mark_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_POOL_MARK_FC]; }
     fc_set_mwa(cv, fc);
     return fn_spec(lib, name, cv, e);
 }
@@ -8601,15 +8602,15 @@ static id<MTLFunction> fn_dev(id<MTLFunction> f) {
 // cached by that descriptor. nil: f has no variant (no library descriptor, or its entry point does not declare the constant), and off builds what on builds
 @interface FnOff : NSObject { @public MTL4FunctionDescriptor *d4; MTLFunctionConstantValues *cv; id<MTLFunction> dev; int none, dev_failed; } @end
 @implementation FnOff @end
-// off is a bitmask: FN_OFF_BORDER (border corrections off, DMSH_BORDER_FC) and FN_OFF_BLEND (blend fix-up off, DMSH_BLEND_OFF_FC, for a pipeline whose blend words are both 0).
+// off is a bitmask: FN_OFF_BORDER (border corrections off, DMSH_BORDER_FC), FN_OFF_BLEND (blend fix-up off, DMSH_BLEND_OFF_FC), and FN_OFF_POOL_MARK (pool read tracking off, DMSH_POOL_MARK_FC).
 // One FnOff per descriptor and mask; a mask whose constants f's entry point does not declare is none (it builds as on)
-enum { FN_OFF_BORDER = 1, FN_OFF_BLEND = 2 };
-@interface FnOffSet : NSObject { @public FnOff *m[4]; } @end
+enum { FN_OFF_BORDER = 1, FN_OFF_BLEND = 2, FN_OFF_POOL_MARK = 4 };
+@interface FnOffSet : NSObject { @public FnOff *m[8]; } @end
 @implementation FnOffSet @end
 static os_unfair_lock g_fn_off_lock = OS_UNFAIR_LOCK_INIT;
 static NSMapTable *g_fn_off;   // MTL4FunctionDescriptor (fn4_of) → FnOffSet
 static FnOff *fn_off(id<MTLFunction> f, int mask) {
-    mask &= 3; if (!mask) return nil;
+    mask &= 7; if (!mask) return nil;
     MTL4FunctionDescriptor *fd = fn4_of(f);
     if (!fd) return nil;   // no library to specialize from (diagnostic overrides)
     os_unfair_lock_lock(&g_fn_off_lock);
@@ -8628,10 +8629,10 @@ static FnOff *fn_off(id<MTLFunction> f, int mask) {
         MTL4LibraryFunctionDescriptor *ld = [fd isKindOfClass:MTL4LibraryFunctionDescriptor.class] ? (MTL4LibraryFunctionDescriptor *)fd : nil;
         // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
         NSDictionary *fc = ld ? [ld.library newFunctionWithName:ld.name].functionConstantsDictionary : nil;   // the entry's, not f's: a specialized f lists no constants
-        int border = (mask & FN_OFF_BORDER) && fc[@"dm_border_off"], blend = (mask & FN_OFF_BLEND) && fc[@"dm_blend_off"];
-        if (!border && !blend) { o->none = 1; return nil; }
+        int border = (mask & FN_OFF_BORDER) && fc[@"dm_border_off"], blend = (mask & FN_OFF_BLEND) && fc[@"dm_blend_off"], pmark = (mask & FN_OFF_POOL_MARK) && fc[@"dm_pool_mark_off"];
+        if (!border && !blend && !pmark) { o->none = 1; return nil; }
         if (!cv) { cv = [MTLFunctionConstantValues new]; fc_set_mwa(cv, fc); }
-        BOOL yes = YES; if (border) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; if (blend) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC];
+        BOOL yes = YES; if (border) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; if (blend) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; if (pmark) [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_POOL_MARK_FC];
         MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv;
         o->cv = cv; o->d4 = sd;
         return o;
@@ -9404,6 +9405,14 @@ static void pool_seen_retype(int id_) {
         g_seen_typed[s_][(unsigned)id_ >> 5] &= ~b;
         if (g_seen_buf) atomic_fetch_and((_Atomic uint32_t *)g_seen_buf.contents + s_ * POOL_SEEN_WORDS + ((unsigned)id_ >> 5), ~b);
     }
+}
+static _Atomic uint64_t g_pm_on_until = 2;   // keep dm_pool_mark active through this frame (startup, active streaming bursts)
+static uint64_t g_pm_tu_probe_frame, g_pm_tu_probe_fence;   // 1-frame mark-ON probe before tu_pass() runs
+static int g_pm_skipped_since_tu;
+static void pool_mark_warm(uint64_t frames) {
+    uint64_t want = atomic_load(&g_cur_frame) + frames;
+    uint64_t cur = atomic_load_explicit(&g_pm_on_until, memory_order_relaxed);
+    while (want > cur && !atomic_compare_exchange_weak_explicit(&g_pm_on_until, &cur, want, memory_order_relaxed, memory_order_relaxed)) {}
 }
 // The NVN target a registration is read as: its view's, if the view sets one
 static int tex_reg_target_of(const tex_t *t, const view_t *v) { return v && v->set_target ? (int)v->target : t->d.target; }
@@ -12893,7 +12902,7 @@ static int fd_host_fc(MTL4FunctionDescriptor *fd) {
     // NOLINTNEXTLINE(clang-analyzer-nullability.NullablePassedToNonnull): the descriptor's name is set when it is made (fn4_note refuses a nil name, pre_fn takes the name its function was made from) and never changed
     NSDictionary *fc = [l.library newFunctionWithName:l.name].functionConstantsDictionary;
     if (!fc.count) return 0;
-    for (NSString *k in fc) if (![k isEqualToString:@"dm_border_off"] && ![k isEqualToString:@"dm_blend_off"] && ![k isEqualToString:@"dm_mwa3_fc"]) return 0;
+    for (NSString *k in fc) if (![k isEqualToString:@"dm_border_off"] && ![k isEqualToString:@"dm_blend_off"] && ![k isEqualToString:@"dm_pool_mark_off"] && ![k isEqualToString:@"dm_mwa3_fc"]) return 0;
     return 1;
 }
 static id<MTLComputePipelineState> cps_new_b(id<MTLFunction> f, int off, NSError **e) {   // off: without the border corrections (fn_off), the common dispatch's
@@ -13384,9 +13393,10 @@ static int pso_blend_live(const pso_key *k, NvShader *fs, int merged) {
     const uint8_t *lm = merged ? k->lmap : NULL;
     return (bz_word_for(k->cfmt, lm, k->blend_en, k->blend) | rop_word_for(k->cfmt, lm, k->blend_en, k->blend, k->logic != 0)) != 0;
 }
-// The FN_OFF_* mask a pipeline of key k is built with (fn_off): without border corrections when no bound sampler has a twin, without the blend fix-up when fs has it and both words are 0
+// The FN_OFF_* mask a pipeline of key k is built with (fn_off): without border corrections when no bound sampler has a twin, without the blend fix-up when fs has it and both words are 0, and without pool read marks when steady-state pools need none
+static int pool_mark_off(void);
 static inline int pso_off(const pso_key *k, NvShader *fs, int merged) {
-    return (k->border ? 0 : FN_OFF_BORDER) | (fs && fs->has_bz && !pso_blend_live(k, fs, merged) ? FN_OFF_BLEND : 0);
+    return (k->border ? 0 : FN_OFF_BORDER) | (fs && fs->has_bz && !pso_blend_live(k, fs, merged) ? FN_OFF_BLEND : 0) | (k->pool_mark_off ? FN_OFF_POOL_MARK : 0);
 }
 // Early tests can count a discarded fragment or update its attachments before the discard.
 // With only a read-only depth comparison and no observed query, its rejection is invisible to the game.
@@ -13403,6 +13413,7 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
     for (int i = 0; i < 8; i++) if (k->cfmt[i] || lmap) k->blend[i] = S.blend[i];
     k->logic = lop_key(k, fs, lmap);
     k->early_read_only = !lmap && dfmt && !k->a2c && !k->atest && !k->logic && pso_early_read_only(fs);
+    k->pool_mark_off = ((vs && vs->rf.pool) || (fs && fs->rf.pool)) && pool_mark_off();
     k->border = border_need(vs, vs->stage) || border_need(fs, 1);   // as prog_border, which the draw compares
     const nvn_refl *rf = &vs->rf;
     for (int v = 0; v < rf->nv; v++) { int a = rf->v[v].nvn; if (a < 32 && a < S.nattr) { if (a < 16) k->attr[a] = S.attr[a]; else k->attr_hi[a - 16] = S.attr[a]; int st = S.attr[a].stream; if (st < 16) k->stream[st] = S.stream[st]; } }
@@ -13728,6 +13739,7 @@ static MTL4FunctionDescriptor *pre_fn(id<MTLLibrary> lib, NSString *name) {   //
     MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
     if (fc[@"dm_border_off"]) { BOOL yes = YES; [cv setConstantValue:&yes type:MTLDataTypeBool atIndex:DMSH_BORDER_FC]; }
     if (fc[@"dm_blend_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_BLEND_OFF_FC]; }
+    if (fc[@"dm_pool_mark_off"]) { BOOL no = NO; [cv setConstantValue:&no type:MTLDataTypeBool atIndex:DMSH_POOL_MARK_FC]; }
     fc_set_mwa(cv, fc);
     MTL4SpecializedFunctionDescriptor *sd = [MTL4SpecializedFunctionDescriptor new]; sd.functionDescriptor = ld; sd.constantValues = cv; return sd;
 }
@@ -14881,15 +14893,27 @@ static uint32_t g_seen_todo[POOL_SEEN_WORDS];
 static uint64_t g_fb_split_pool; static int g_fb_dread_pool;   // the passes ended because a pool shader that may read the depth attachment came before a depth write: if a later area reads its main depth through a pool, this counts what that costs
 // The depth and stencil textures shaders have read through a pool, from the bitmap at each submission, by what makes them one Metal texture (alias_key): a pool shader may name any registered texture, and a game can keep its depth attachment in the very pool the draw reads,
 // so what the pool could hold says nothing; fb_prepare asks this whether a draw can have read the depth attachment it would otherwise have to end the pass for
-static nvn_hmap g_pool_ds = {.klen = sizeof(alias_key)}; static uint64_t g_pool_ds_gen;
+typedef struct { uint64_t pool; int64_t off; } pool_ds_loc;
+static nvn_hmap g_pool_ds = {.klen = sizeof(alias_key)};
+static nvn_hmap g_pool_ds_loc = {.klen = sizeof(pool_ds_loc)};
+static uint64_t g_pool_ds_gen;
 static void pool_ds_note(int id_) {
     if (id_ < 0 || id_ >= g_ntreg || !g_treg[id_].ok || !fmt_depth(g_treg[id_].t.d.format)) return;
     alias_key k = tex_alias_key(&g_treg[id_].t);
-    if (!nvn_hm_get(&g_pool_ds, &k)) { nvn_hm_put(&g_pool_ds, &k, (void *)1); g_pool_ds_gen++; }
+    pool_ds_loc loc = {k.pool, k.off};
+    int chg = 0;
+    if (!nvn_hm_get(&g_pool_ds, &k)) { nvn_hm_put(&g_pool_ds, &k, (void *)1); chg = 1; }
+    if (loc.pool && !nvn_hm_get(&g_pool_ds_loc, &loc)) { nvn_hm_put(&g_pool_ds_loc, &loc, (void *)1); chg = 1; }
+    if (chg) g_pool_ds_gen++;
 }
 static int pool_ds_read(const tex_t *t) {
     static uint64_t ser = 0, gen = ~0ull; static int read;   // asked for every pool draw of a pass: the answer holds until the target or the set changes
-    if (t->serial != ser || g_pool_ds_gen != gen) { alias_key k = tex_alias_key(t); read = nvn_hm_get(&g_pool_ds, &k) != NULL; ser = t->serial; gen = g_pool_ds_gen; }
+    if (t->serial != ser || g_pool_ds_gen != gen) {
+        alias_key k = tex_alias_key(t);
+        pool_ds_loc loc = {k.pool, k.off};
+        read = nvn_hm_get(&g_pool_ds, &k) != NULL || (loc.pool && nvn_hm_get(&g_pool_ds_loc, &loc) != NULL);
+        ser = t->serial; gen = g_pool_ds_gen;
+    }
     return read;
 }
 // A stand-in for a texture the walk leaves out. Once the budget is full (pool_budget) a texture no shader has read is not made until one reads its ID, and until then its table entry
@@ -15119,9 +15143,10 @@ static void pool_seen_scan(void) {
             int b = __builtin_ctz(bits), id_ = (int)i * 32 + b;
             if (id_ < 0 || id_ >= g_ntreg || !g_treg[id_].ok || g_treg[id_].gone || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_].t))) { g_seen_todo[i] &= ~(1u << b); continue; } // NOLINT(clang-analyzer-core.BitwiseShift): bits is nonzero, so ctz returns 0..31
             if (!g_treg[id_].view && pool_unwritten_target(&g_treg[id_].t)) { g_seen_todo[i] &= ~(1u << b); continue; }
-            if (!g_treg[id_].view && !pkg_shared(&g_treg[id_].t) && !tex_get(g_treg[id_].t.serial)) { if (g_walk_req >= POOL_REQ_BYTES) return; g_walk_req += pool_tex_size(&g_treg[id_].t); }
+            if (!g_treg[id_].view && !pkg_shared(&g_treg[id_].t) && !tex_get(g_treg[id_].t.serial)) { pool_mark_warm(1); if (g_walk_req >= POOL_REQ_BYTES) return; g_walk_req += pool_tex_size(&g_treg[id_].t); }
             g_seen_todo[i] &= ~(1u << b);
             void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (!tv || !tr) continue;
+            g_treg[id_].evicted = 0;
             if (!treg_fam_pool_ok(id_, (__bridge id<MTLTexture>)tv, g_treg[id_].t.serial)) continue;
             MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
@@ -15601,6 +15626,19 @@ static void tu_pass(void) { @autoreleasepool {
              TU_IDLE / 10, (unsigned long long)f, (unsigned long long)g_tu_n, (unsigned long long)(g_tu_bytes >> 20), (unsigned long long)g_tu_serials, (unsigned long long)g_tu_pinned, (unsigned long long)remade, live,
              (unsigned long long)g_tu_passes, g_tu_ns / 1e6); }
 } }
+static uint32_t g_nua_bdirty;
+static uint32_t g_pm_probe_tu;   // g_tu_now when the last mark-ON frame ran
+static int pool_mark_skip_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_POOL_MARK_SKIP", 1); return m; }
+static int pool_mark_off(void) {
+    if (!sw_on(pool_mark_skip_mode()) || !g_seen_buf) return 0;
+    uint64_t f = atomic_load(&g_cur_frame);
+    if (f <= atomic_load_explicit(&g_pm_on_until, memory_order_relaxed)) { g_pm_probe_tu = g_tu_now; return 0; }
+    if (g_pm_tu_probe_frame && f <= g_pm_tu_probe_frame) { g_pm_probe_tu = g_tu_now; return 0; }
+    // Periodic 1-frame discovery probe every 30 frames (covers stand-in promotion, evicted reload, type bridges, and tu_pass usage).
+    if ((f % 30) == 0) { g_pm_probe_tu = g_tu_now; return 0; }
+    g_pm_skipped_since_tu = 1;
+    return 1;
+}
 static int g_tu_manual;   // the tests keep the clock themselves and call tu_pass
 static int tu_mode(void) { static int m = -1; if (m < 0) m = sw_mode("DM_NVN_RT_DEAD", 1); return m; }
 static void tu_tick(void) {   // when a submission begins; DM_NVN_RT_DEAD=0 keeps them all (the stamps go on), ab alternates it with the DM_AB phases
@@ -15608,6 +15646,19 @@ static void tu_tick(void) {   // when a submission begins; DM_NVN_RT_DEAD=0 keep
     static uint64_t t0; uint64_t ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (!t0) t0 = ns;
     g_tu_now = (uint32_t)((ns - t0) / 100000000ull) + 1;
     if (g_tu_now - g_tu_last >= 10) {
+        if (g_pm_skipped_since_tu && !g_pm_tu_probe_frame && (!g_pm_probe_tu || g_tu_now - g_pm_probe_tu >= 15)) {
+            // Run one complete frame with pool read marks enabled if no periodic/warm probe ran in the last 1.5 s (half of TU_IDLE).
+            g_pm_tu_probe_frame = atomic_load(&g_cur_frame) + 1;
+            g_pm_tu_probe_fence = 0;
+            return;
+        }
+        if (g_pm_tu_probe_frame) {
+            uint64_t f = atomic_load(&g_cur_frame);
+            if (f <= g_pm_tu_probe_frame) return;
+            if (!g_pm_tu_probe_fence) g_pm_tu_probe_fence = atomic_load(&g_fence);
+            if (g_done < g_pm_tu_probe_fence) return;
+            g_pm_tu_probe_frame = 0; g_pm_tu_probe_fence = 0; g_pm_skipped_since_tu = 0;
+        }
         if (sw_on(tu_mode())) tu_pass();
         else { g_tu_last = g_tu_now; os_unfair_lock_lock(&g_rmu); seen_stamp_used(g_tu_now, 1); os_unfair_lock_unlock(&g_rmu); }
     }
@@ -19979,6 +20030,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     static int cur_border; int border = prog_border(pr);
     static int cur_early_read_only; int early_read_only = pso_early_read_only(pr->sh[1]);
     if (early_read_only != cur_early_read_only) { cur_early_read_only = early_read_only; g_pso_dirty = 1; }
+    static int cur_pool_mark_off; int pm_off = ((pr->sh[0] && pr->sh[0]->rf.pool) || (pr->sh[1] && pr->sh[1]->rf.pool)) && pool_mark_off();
+    if (pm_off != cur_pool_mark_off) { cur_pool_mark_off = pm_off; g_pso_dirty = 1; }
     static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
     if (g_fb_tseq == g_draw_seq && g_fb_tfn) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
     if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
@@ -20474,7 +20527,7 @@ static uint64_t loop_state(NvShader *cs) {
     return cs->loop_gpu;
 }
 static id<MTLComputePipelineState> dispatch_pso(NvShader *cs) {
-    int off = !border_need(cs, 5);
+    int off = (!border_need(cs, 5) ? FN_OFF_BORDER : 0) | (cs->rf.pool && pool_mark_off() ? FN_OFF_POOL_MARK : 0);
     cps_key k = {(__bridge const void *)cs, (uintptr_t)off};
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
@@ -21545,7 +21598,16 @@ static void ua_flush(int from_pass) {
         ua_note_write(&p->t, m, ic, ic && p->zero_clear);
     }
 }
-static void ua_prepare_bindless(uint8_t bmask) {
+static int ua_active_rt_mem(const void *mem) {
+    if (!mem || !R.has_rt) return 0;
+    for (int i = 0; i < R.rt.n && i < 8; i++) {
+        if (!R.rt.color[i] || R.rt.color[i]->mem != mem) continue;
+        if (R.rt.has_cview[i] && R.rt.cview[i].set_levels && R.rt.cview[i].base_level) continue;
+        return 1;
+    }
+    return 0;
+}
+static void ua_prepare_bindless(uint8_t bmask, int in_draw) {
     if (!bcp_on() || !bmask || !g_nua_bdirty) return;
     ua_drain_drops();
     uint32_t nb = g_nua_bdirty;
@@ -21559,6 +21621,14 @@ static void ua_prepare_bindless(uint8_t bmask) {
     for (uint32_t i = 0; i < nb; i++) {
         ua_entry *w = nvn_hm_get(&g_ua_wr, &list[i]);
         if (!w) continue;
+        // Do not sync a texture's storage to bindless aliases while it is an active level-0 colour attachment of the current draw:
+        // ua_sync_tex's blit() would end the open pass, ua_flush(1) would immediately re-mark the same attachment dirty with a newer gen,
+        // and every subsequent bindless draw in the pass would repeat the blit and collapse the pass into one-draw passes.
+        // Leave it dirty so the first draw or dispatch after rendering to this target finishes syncs it once.
+        if (in_draw && ua_active_rt_mem(w->mem)) {
+            g_ua_bdirty[g_nua_bdirty++] = w->mem;
+            continue;
+        }
         if (!(bmask & (uint8_t)~w->bsynced)) {
             g_ua_bdirty[g_nua_bdirty++] = w->mem;
             continue;
@@ -21707,7 +21777,7 @@ static void ua_prepare_prog(NvProg *pr, unsigned stages) {
     }
     ua_flush_tids(tids, ntids, hits, &nh, 32);
     for (int i = 0; i < nh; i++) ua_before_read(&hits[i], nil);
-    if (bindless && g_nua_bdirty) ua_prepare_bindless(bindless);
+    if (bindless && g_nua_bdirty) ua_prepare_bindless(bindless, 1);
 }
 static void ua_prepare_shader(NvShader *sh, int st) {
     if (!bcp_on() || !sh) return;
@@ -21720,7 +21790,7 @@ static void ua_prepare_shader(NvShader *sh, int st) {
     ua_prepare_stage(sh, st, tids, &ntids, 64, hits, &nh, 32, &bindless);
     ua_flush_tids(tids, ntids, hits, &nh, 32);
     for (int i = 0; i < nh; i++) ua_before_read(&hits[i], nil);
-    if (bindless && g_nua_bdirty) ua_prepare_bindless(bindless);
+    if (bindless && g_nua_bdirty) ua_prepare_bindless(bindless, 0);
 }
 // GPU: texture -> texture (previously mislisted as a no-op, 3 times per frame on the character select page). Same size, not mirrored, same format -> blit layer by layer; the other semantics (scaling with filtering, mirroring, format change) cannot be expressed by blit: report a failure, to be implemented
 static id<MTLTexture> copy_t2t_enc(const p_copy_t2t *c) {

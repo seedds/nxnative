@@ -13,9 +13,18 @@ int main(int argc, char **argv) { @autoreleasepool {
     MTLCompileOptions *options = [MTLCompileOptions new];
     options.languageVersion = MTLLanguageVersion4_0;
     id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&error];
-    id<MTLFunction> function = [library newFunctionWithName:@"main0"];
+    MTLFunctionConstantValues *cv = [MTLFunctionConstantValues new];
+    BOOL markOff = NO;
+    [cv setConstantValue:&markOff type:MTLDataTypeBool atIndex:218];
+    id<MTLFunction> function = [library newFunctionWithName:@"main0" constantValues:cv error:&error];
     id<MTLComputePipelineState> pipeline = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
     if (!pipeline) { fprintf(stderr, "%s\n", error.description.UTF8String); return 2; }
+    MTLFunctionConstantValues *cvOff = [MTLFunctionConstantValues new];
+    BOOL markOffYes = YES;
+    [cvOff setConstantValue:&markOffYes type:MTLDataTypeBool atIndex:218];
+    id<MTLFunction> fnOff = [library newFunctionWithName:@"main0" constantValues:cvOff error:&error];
+    id<MTLComputePipelineState> pipelineOff = fnOff ? [device newComputePipelineStateWithFunction:fnOff error:&error] : nil;
+    if (!pipelineOff) { fprintf(stderr, "%s\n", error.description.UTF8String); return 2; }
     id<MTLArgumentEncoder> arguments = [function newArgumentEncoderWithBufferIndex:0];
     id<MTLBuffer> argumentBuffer = [device newBufferWithLength:arguments.encodedLength options:MTLResourceStorageModeShared];
     id<MTLBuffer> output = [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
@@ -62,6 +71,23 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (unsigned i = 0; i < 16; i++) {
         if ((i < 4 || i >= 12) && ((uint32_t *)output.contents)[i] != 0xabcd0000u + i) return 1;
         if (((uint32_t *)seen.contents)[i] != (i == 4 ? 3 : 0xdef00000u + i)) return 1;
+    }
+    // With dm_pool_mark_off = true, sampling returns the same pixels while leaving seen untouched.
+    for (unsigned i = 0; i < 16; i++) ((uint32_t *)output.contents)[i] = 0xabcd0000u + i;
+    ((uint32_t *)seen.contents)[4] = 0;
+    id<MTLCommandBuffer> commandOff = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoderOff = [commandOff computeCommandEncoder];
+    [encoderOff setComputePipelineState:pipelineOff];
+    [encoderOff setBuffer:argumentBuffer offset:0 atIndex:0];
+    for (id<MTLResource> resource in @[output,seen,textures,samplers,first,second])
+        [encoderOff useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    [encoderOff dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(2,1,1)];
+    [encoderOff endEncoding]; [commandOff commit]; [commandOff waitUntilCompleted];
+    if (commandOff.error) { fprintf(stderr, "%s\n", commandOff.error.description.UTF8String); return 1; }
+    if (memcmp((uint8_t *)output.contents + 16, colors, sizeof colors)) return 1;
+    for (unsigned i = 0; i < 16; i++) {
+        if ((i < 4 || i >= 12) && ((uint32_t *)output.contents)[i] != 0xabcd0000u + i) return 1;
+        if (((uint32_t *)seen.contents)[i] != (i == 4 ? 0 : 0xdef00000u + i)) return 1;
     }
     puts("callable pool GPU: two colors, nested forwarding, read bitmap and guards passed");
     return 0;

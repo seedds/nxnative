@@ -202,6 +202,10 @@
 // rop_word_for: no zero-weight NaN rule and no NVIDIA rounding for any of its targets), so the fix-up and the read of its words go. False or undefined, the words are read at
 // DMSH_BLEND_BUFFER as before (pair archives keep false so one pulling base serves every draw of a shader pair)
 #define DMSH_BLEND_OFF_FC 217
+// Texture-pool read-tracking function constant (bool, shaders with dm_pool_mark, dmsh_reflect.py POOL_MARK): true compiles out the bitmap load and atomic OR when the host does not need
+// GPU-side read marks (no budget-deferred, stand-in, or evicted pool entries and outside periodic usage probes). Removing the device atomic restores Apple Silicon TBDR hidden surface removal
+// on opaque pool fragments and hardware early-Z rejection on discarding pool fragments, and removes the per-sample bitmap load across all stages (nvn_mtl.m pool_mark_off, FN_OFF_POOL_MARK)
+#define DMSH_POOL_MARK_FC 218
 // Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): bool, opt-in KosmicKrisp KK_WORKAROUND_3 ballot rewrite (default false). The host (nvn_mtl.m mwa_on)
 // and pso_offline.py leave it false by default (issue #3405: enabling KK3 on macOS 26.7.3 / M2 Max corrupted Ocarina of Time) so KK3 shaders stay in offline archives; DM_NVN_METALWA=1 opts in
 #define DMSH_MWA_FC 220

@@ -32,10 +32,12 @@ int main(void) { @autoreleasepool {
     assert(!m.sensorsActive && !m.valueChangedHandler);
     unsetenv("DM_MOTION"); dm_motion_attach((id)c, 2);
     assert(m.sensorsActive && m.valueChangedHandler);
-    m.valueChangedHandler((id)m);
+    m.valueChangedHandler((id)m); m.valueChangedHandler((id)m);
     assert(!samples);   // An advertised sensor with zero-only reports must not suppress the phone or the flat pose.
     m.hasGravityAndUserAcceleration = YES;
     m.gravity = (GCAcceleration){0, 0, -1}; m.userAcceleration = (GCAcceleration){0.25, 0, 0};
+    for (int i = 0; i < 4; i++) m.valueChangedHandler((id)m);
+    assert(!samples);   // Nonzero acceleration alone must not qualify a constant rotation rate (NX2Apple #971).
     m.rotationRate = (GCRotationRate){0, 1, 0}; m.valueChangedHandler((id)m);
     assert(samples == 1 && player == 2 && acc[0] == 0.25f && acc[2] == -1 && rot[1] == 1);
     m.hasGravityAndUserAcceleration = NO; m.rotationRate = (GCRotationRate){0};
@@ -43,6 +45,14 @@ int main(void) { @autoreleasepool {
     assert(samples == 2 && acc[2] == 0);   // Once real data arrives, a zero acceleration can be free fall.
     dm_motion_detach((id)c, 2);
     assert(!m.sensorsActive && !m.valueChangedHandler && cleared == 2);
+    // The heuristic also withholds constant nonzero rotation; reattachment must forget the earlier qualification.
+    samples = 0; dm_motion_attach((id)c, 1);
+    m.rotationRate = (GCRotationRate){0.5, 0, 0}; for (int i = 0; i < 4; i++) m.valueChangedHandler((id)m);
+    assert(!samples);
+    m.rotationRate = (GCRotationRate){0.5, 0.001, 0}; m.valueChangedHandler((id)m);
+    assert(samples == 1 && player == 1 && rot[1] == 0.001f);
+    dm_motion_detach((id)c, 1);
+    assert(!m.sensorsActive && !m.valueChangedHandler && cleared == 1);
     puts("t_motion_apple: passed");
     return 0;
 } }

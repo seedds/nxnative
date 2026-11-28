@@ -1,5 +1,6 @@
 """Early fragment tests come from control +0x718 of a pixel shader (NVN2: +0x5b), unless its SPH writes depth (dmsh_build.py early_fragment_tests)."""
 import ast
+import hashlib
 import os
 from pathlib import Path
 import struct
@@ -8,10 +9,9 @@ import tempfile
 import unittest
 
 path = Path(__file__).resolve().parents[1] / 'tools/dmsh_build.py'
-nodes = [n for n in ast.parse(path.read_text()).body if (isinstance(n, ast.FunctionDef) and n.name in ('early_fragment_tests', 'job_for'))
-         or (isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', None) == 'NVN2_STAGE_INDEX')]
+nodes = [n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name in ('early_fragment_tests', 'job_for', 'unity_acescc_lut')]
 sys.path.insert(0, str(path.parent)); import dmsh_ampere, dmsh_abi
-scope = {'struct': struct, 'os': os, 'dmsh_ampere': dmsh_ampere, 'abi': dmsh_abi, 'FACTS': {}, 'tf_layout': lambda key, ctl: None, 'vertex_ab': lambda key, code, ctl: None}
+scope = {'struct': struct, 'os': os, 'hashlib': hashlib, 'dmsh_ampere': dmsh_ampere, 'abi': dmsh_abi, 'FACTS': {}, 'tf_layout': lambda key, ctl: None, 'vertex_ab': lambda key, code, ctl: None}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), scope)
 early = scope['early_fragment_tests']; job_for = scope['job_for']
 

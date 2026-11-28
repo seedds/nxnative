@@ -102,7 +102,7 @@ class UnityPassPairsTests(unittest.TestCase):
             with mock.patch.object(unityfs, 'is_serialized', return_value=True), \
                  mock.patch.object(split, 'unity_shaders', side_effect=read):
                 _, _, pairs, _ = split.scan_file_in((str(path), 'resources.assets'))
-        self.assertEqual(pairs, {(*pair, 'prog')})
+        self.assertEqual(pairs, {(*pair, 'cover')})
 
 
 if __name__ == '__main__': unittest.main()

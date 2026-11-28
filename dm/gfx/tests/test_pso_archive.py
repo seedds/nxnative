@@ -43,7 +43,7 @@ class ArchiveRestartTests(unittest.TestCase):
                 self.assertEqual(data[:8], b'DMPSOIX2')
                 keys.write_bytes(b'DMPSOIX1' + data[8:])
             log = run('seed')   # the cold start's checks: every base compiled, none from the archive
-            self.assertIn('4 files indexed by library file names removed (1 of them the prebuild', log)
+            self.assertIn('4 files indexed by library file names moved out (1 of them the prebuild', log)
             self.assertFalse((root / 'p00009.mtl4a').exists() or (root / 'prebuilt.tsv').exists())
             self.assertEqual(len(list(root.glob('*.mtl4a'))), 3)
             self.assertTrue(all(k.read_bytes()[:8] == b'DMPSOIX2' for k in root.glob('*.keys')))
@@ -70,6 +70,23 @@ class ArchiveRestartTests(unittest.TestCase):
             self.assertIn('p00009.mtl4a not usable', log)
             self.assertFalse((root / 'p00009.mtl4a').exists() or (root / 'p00009.keys').exists() or (root / 'prebuilt.tsv').exists())
             self.assertEqual(len(list(root.glob('*.mtl4a'))), 3)
+
+    def test_unused_file_moved_to_obsolete(self):
+        with tempfile.TemporaryDirectory(prefix='pso-sweep-') as folder, tempfile.TemporaryDirectory(prefix='pso-obsolete-') as obsolete:
+            env = dict(os.environ, DM_PSO_MTL4='1', MTL_DEBUG_LAYER='1')
+            for name in ('DM_GPU_CAPTURE', 'MTL_CAPTURE_ENABLED', 'DM_TEST_ARCHIVE_CONSTANTS', 'DM_TEST_ARCHIVE_MIXED', 'DM_OBSOLETE'):
+                env.pop(name, None)
+            for phase in ('seed', 'next'):
+                if phase == 'next': env['DM_OBSOLETE'] = obsolete
+                result = subprocess.run([executable, '--sweep-' + phase, folder], env=env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, phase + '\n' + result.stdout + result.stderr)
+            # the second file and its index, in this run's folder of the obsolete folder (<date time> <archive folder's name>); the first stays
+            self.assertEqual(sorted(p.name for p in Path(folder).glob('*.mtl4a')), ['00000-4.mtl4a'])
+            moved = list(Path(obsolete).iterdir())
+            self.assertEqual(len(moved), 1); self.assertTrue(moved[0].name.endswith(' ' + Path(folder).name), moved[0].name)
+            self.assertEqual(sorted(p.name for p in moved[0].iterdir()), ['00001-4.keys', '00001-4.mtl4a'])
+            self.assertIn('pipeline archive: 1 files no pipeline was taken from (0 of bases without a vertex layout)', result.stdout + result.stderr)
+            self.assertIn('pipeline archive: 1 indexed files kept, 4 of their 4 pipelines taken; 0 of them under a quarter used (0.0 MB)', result.stdout + result.stderr)
 
     def test_cold_start_cut_short(self):
         with tempfile.TemporaryDirectory(prefix='pso-cold-cut-') as folder:

@@ -19,7 +19,8 @@ def eh_frame_hdr(img):
 
 def _read(img, o, enc, ehs):
     fmt, app = enc & 0xF, enc & 0x70
-    if fmt == 0x3: v, sz = struct.unpack_from('<I', img, o)[0], 4
+    if fmt == 0x1: v, end = _uleb(img, o); sz = end - o
+    elif fmt == 0x3: v, sz = struct.unpack_from('<I', img, o)[0], 4
     elif fmt == 0xB: v, sz = struct.unpack_from('<i', img, o)[0], 4
     elif fmt in (0x0, 0x4): v, sz = struct.unpack_from('<Q', img, o)[0], 8
     elif fmt == 0xC: v, sz = struct.unpack_from('<q', img, o)[0], 8
@@ -83,6 +84,60 @@ def fde_ranges(img):
         ln, _ = _read(img, f + 8 + s, enc & 0xF, ehs)
         out.append((st, st + ln))
     return sorted(out)
+
+
+def landing_pads(img):
+    """{landing pad: [(start, end) of the calls it catches]} from every FDE's LSDA (.gcc_except_table, C++ exceptions): the unwinder enters a landing pad from one of those
+    calls, with the callee-saved registers as the call left them. Empty for a module without exception tables. Only a CIE with a personality routine ('P') has such an
+    LSDA: one with 'L' alone points at the runtime's own data (Absolum main, .NET NativeAOT: 'zLR'), and a table whose records leave its function is not one either"""
+    ehs, _ = eh_frame_hdr(img)
+    cies, out = {}, {}
+
+    def cie(c):   # (FDE pointer encoding, LSDA encoding or None, augmented)
+        if c not in cies:
+            p = c + 8; ver = img[p]; p += 1
+            aug = img[p:img.index(b'\0', p)]; p += len(aug) + 1
+            _, p = _uleb(img, p)
+            while img[p] & 0x80: p += 1
+            p += 1
+            p = p + 1 if ver == 1 else _uleb(img, p)[1]
+            enc, lenc = 0, None
+            if aug.startswith(b'z'):
+                _, p = _uleb(img, p)
+                for ch in aug[1:]:
+                    if ch == ord('R'): enc = img[p]; p += 1
+                    elif ch == ord('P'): pe = img[p]; p += 1; p += _read(img, p, pe, ehs)[1]
+                    elif ch == ord('L'): lenc = img[p]; p += 1
+            cies[c] = (enc, lenc, aug.startswith(b'z') and b'P' in aug)
+        return cies[c]
+
+    for _, f in fde_table(img):
+        try:
+            cptr = f + 4
+            enc, lenc, z = cie(cptr - struct.unpack_from('<I', img, cptr)[0])
+            if lenc is None or lenc == 0xFF or not z: continue
+            st, s = _read(img, f + 8, enc, ehs); p = f + 8 + s
+            ln, s = _read(img, p, enc & 0xF, ehs); p += s
+            _, p = _uleb(img, p)   # augmentation length
+            lsda, _ = _read(img, p, lenc, ehs)
+            if not lsda: continue
+            p = lsda; lpe = img[p]; p += 1
+            lpstart = st
+            if lpe != 0xFF: lpstart, s = _read(img, p, lpe, ehs); p += s
+            tte = img[p]; p += 1
+            if tte != 0xFF: _, p = _uleb(img, p)
+            cse = img[p]; p += 1
+            n, p = _uleb(img, p); end = p + n; got = []
+            while p < end:
+                cs, s = _read(img, p, cse & 0xF, ehs); p += s
+                cl, s = _read(img, p, cse & 0xF, ehs); p += s
+                lp, s = _read(img, p, cse & 0xF, ehs); p += s
+                _, p = _uleb(img, p)   # action
+                if cs + cl > ln or (lp and not st <= lpstart + lp < st + ln): raise ValueError('a call site outside its function')
+                if lp: got.append((lpstart + lp, (st + cs, st + cs + cl)))
+            for pad, r in got: out.setdefault(pad, []).append(r)
+        except (ValueError, IndexError, struct.error): continue   # a table this reader does not know: its pads stay unseen, as without exception tables
+    return out
 
 
 def data_blocks(img, text_end, md):

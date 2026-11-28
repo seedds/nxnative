@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # A game's shader libraries as one file (dm/tools/shader_lib.py): the folder and image states, and a read by the host's C reader (dm/gfx/nvn/msl_image.h, dm/host/romfs_image.h).
-import os, subprocess, sys, tempfile, unittest
+import errno, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -44,6 +45,23 @@ class Base(unittest.TestCase):
 
 
 class States(Base):
+    def test_failed_write_removes_part_and_keeps_existing_image(self):
+        self.image.write_bytes(b'old image')
+        def full(): raise OSError(errno.ENOSPC, 'No space left on device')
+        with self.assertRaises(OSError) as raised:
+            shader_lib.write({'a': b'written', 'b': full}, str(self.image))
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertFalse(Path(f'{self.image}.part').exists())
+        self.assertEqual(self.image.read_bytes(), b'old image')
+
+    def test_failed_rename_removes_part_and_keeps_existing_image(self):
+        self.image.write_bytes(b'old image')
+        with mock.patch.object(shader_lib.os, 'replace', side_effect=OSError(errno.ENOSPC, 'No space left on device')):
+            with self.assertRaises(OSError) as raised: shader_lib.write({'a': b'new'}, str(self.image))
+        self.assertEqual(raised.exception.errno, errno.ENOSPC)
+        self.assertFalse(Path(f'{self.image}.part').exists())
+        self.assertEqual(self.image.read_bytes(), b'old image')
+
     def test_pack_replaces_the_folder_and_reads_in_place(self):
         self.folder(k_b__metallib=b'lib', k_b__json=b'{}', k_b__metal=b'src')
         self.assertTrue(self.pack())
@@ -120,6 +138,45 @@ class States(Base):
         self.assertEqual(os.listdir(self.root), [])
 
 
+class Write(Base):   # dmsh_build.py writes the image from functions that read its outputs out of the shader cache: called ahead of the writer on a few threads, taken in order
+    def test_functions_are_called_ahead_and_written_in_order(self):
+        import threading
+        data = {f'{i:04x}_b.metallib': os.urandom(1 + i % 97) for i in range(300)}
+        threads, calls, lock = set(), [], threading.Lock()
+        def source(name):
+            def read():
+                with lock: threads.add(threading.get_ident()); calls.append(name)
+                return data[name]
+            return read
+        files: dict = {n: source(n) for n in data}
+        files['path.json'] = str(self.root / 'on-disk'); (self.root / 'on-disk').write_bytes(b'from a path'); files['bytes.tsv'] = b'given'
+        shader_lib.write(files, str(self.image))
+        self.assertEqual(sorted(calls), sorted(data))   # each once
+        self.assertNotIn(threading.get_ident(), threads); self.assertGreater(len(threads), 1)
+        got = {p.name: p.read_bytes() for p in romfs.Path(str(self.image)).iterdir()}
+        self.assertEqual(got, {**data, 'path.json': b'from a path', 'bytes.tsv': b'given'})
+        plain = self.root / 'plain.img'; shader_lib.write({**data, 'path.json': b'from a path', 'bytes.tsv': b'given'}, str(plain))   # the bytes themselves, on no thread
+        self.assertEqual(plain.read_bytes(), self.image.read_bytes())
+
+    def test_write_reports_progress(self):
+        events = []
+        shader_lib.write({'a': b'1234', 'b': lambda: b'56789'}, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 2), (1, 2), (2, 2)])
+        self.assertEqual(events[0][2], 0)
+        self.assertGreater(events[1][2], 0)
+        self.assertGreater(events[2][2], events[1][2])
+        empty = []
+        shader_lib.write({}, str(self.root / 'empty.img'), on_progress=lambda d, t, b: empty.append((d, t, b)))
+        self.assertEqual(empty, [(0, 0, 0)])
+
+    def test_a_function_that_fails_or_has_no_bytes_leaves_no_image(self):
+        def gone(): raise OSError('the cache lost it')
+        for bad, error in ((gone, 'the cache lost it'), (lambda: None, 'no bytes to write')):
+            with self.subTest(error=error), self.assertRaisesRegex(OSError, error):
+                shader_lib.write({'a_b.metallib': b'lib', 'b_b.metallib': bad, **{f'c{i}_b.metallib': (lambda: b'x') for i in range(100)}}, str(self.image))
+            self.assertFalse(self.image.exists())
+
+
 class LeaveOutPulling(Base):
     def names(self): return sorted(p.name for p in shader_lib.view(self.lib).iterdir())
 
@@ -147,6 +204,22 @@ class LeaveOutPulling(Base):
         self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull'); self.pack()
         self.assertFalse(shader_lib.left_out_pulling(self.lib)); self.assertIn('k_bp.metallib', self.names())
 
+    def test_pack_reports_progress_only_when_writing(self):
+        self.folder(k_b__metallib=b'lib', k_bp__metallib=b'pull')
+        events = []
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual([(d, t) for d, t, _ in events], [(0, 3), (1, 3), (2, 3), (3, 3)])
+        events.clear()
+        with mock.patch.object(shader_lib.romfs, 'Image', side_effect=AssertionError('should not open image')):
+            self.assertTrue(shader_lib.pack(self.lib, self.said.append, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events, [])
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events[0][:2], (0, 3))
+        self.assertEqual(events[-1][:2], (3, 3))
+        events.clear()
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True, on_progress=lambda d, t, b: events.append((d, t, b))))
+        self.assertEqual(events, [])
+
 
 class AppSubset(Base):
     def test_only_what_the_host_reads(self):
@@ -161,6 +234,86 @@ class AppSubset(Base):
     def test_refuses_a_library_with_no_shaders(self):
         self.folder(k_b__json=b'{}')
         with self.assertRaises(ValueError): shader_lib.subset(self.lib, self.root / 'app.img')
+
+
+class SharedPayloads(Base):
+    def test_share_keys_dedup_mixed_sources_and_skip_alias_loaders(self):
+        payload = b'same compiled shader' * 100
+        source = self.root / 'source.metallib'; source.write_bytes(payload)
+        calls, events = [], []
+        def load(name):
+            def read(): calls.append(name); return payload
+            return read
+        files = {
+            'a_b.metallib': load('a_b.metallib'),
+            'b_b.metallib': source,
+            'c_b.metallib': load('c_b.metallib'),
+            'd_b.metallib': payload,
+            'e_b.metallib': payload,   # unshared (None)
+            'f_b.metallib': b'unique',
+        }
+        share = {'a_b.metallib': 'k1', 'b_b.metallib': 'k1', 'c_b.metallib': 'k1', 'd_b.metallib': 'k1', 'e_b.metallib': None, 'f_b.metallib': 'k2'}
+        shader_lib.write(files, str(self.image), on_progress=lambda d, t, b: events.append((d, t, b)), share=share)
+        image = romfs.Image(self.image)
+        ranges = [image.entry(image.find(n))[:2] for n in ('a_b.metallib', 'b_b.metallib', 'c_b.metallib', 'd_b.metallib')]
+        self.assertEqual(len(set(ranges)), 1, 'entries sharing a key must share one payload range')
+        self.assertNotEqual(image.entry(image.find('e_b.metallib'))[:2], ranges[0])
+        self.assertNotEqual(image.entry(image.find('f_b.metallib'))[:2], ranges[0])
+        self.assertEqual(calls, ['a_b.metallib'], 'only the first sorted entry for a share key is loaded')
+        self.assertEqual([(d, t) for d, t, _ in events], [(i, len(files)) for i in range(len(files) + 1)])
+        for name in files:
+            want = b'unique' if name == 'f_b.metallib' else payload
+            self.assertEqual((romfs.Path(self.image) / name).read_bytes(), want)
+
+    def test_empty_shared_files_and_failed_first_entry(self):
+        shader_lib.write({'a': b'', 'b': b''}, str(self.image), share={'a': 1, 'b': 1})
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('a'))[:2], image.entry(image.find('b'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'b').read_bytes(), b'')
+        before = self.image.read_bytes()
+        def boom(): raise OSError(errno.EIO, 'read failed')
+        with self.assertRaises(OSError):
+            shader_lib.write({'a': boom, 'b': lambda: b'never'}, str(self.image), share={'a': 1, 'b': 1})
+        self.assertEqual(self.image.read_bytes(), before)
+
+    def test_pack_preserves_sharing_across_partial_update_and_leave_out(self):
+        shader_lib.write(
+            {'a_b.metallib': b'same', 'b_b.metallib': b'same', 'c_b.metallib': b'same', 'k_bp.metallib': b'pull', 'inputs.tsv': b'game\t0100\ninputs\tabc\n'},
+            str(self.image),
+            share={'a_b.metallib': 1, 'b_b.metallib': 1, 'c_b.metallib': 1},
+        )
+        self.folder(stamp=False, a_b__metallib=b'updated')
+        self.assertTrue(self.pack())
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('b_b.metallib'))[:2], image.entry(image.find('c_b.metallib'))[:2])
+        self.assertNotEqual(image.entry(image.find('a_b.metallib'))[:2], image.entry(image.find('b_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'a_b.metallib').read_bytes(), b'updated')
+        self.assertEqual((romfs.Path(self.image) / 'b_b.metallib').read_bytes(), b'same')
+        self.assertTrue(shader_lib.pack(self.lib, self.said.append, leave_out=True))
+        image = romfs.Image(self.image)
+        self.assertEqual(image.entry(image.find('b_b.metallib'))[:2], image.entry(image.find('c_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(self.image) / 'c_b.metallib').read_bytes(), b'same')
+
+    def test_subset_preserves_shared_payloads_without_rereading_duplicates(self):
+        payload = b'shared' * 500
+        shader_lib.write(
+            {'a_b.metallib': payload, 'b_b.metallib': payload, 'c_b.metal': payload, 'inputs.tsv': b'game\t0100\ninputs\tabc\n'},
+            str(self.image),
+            share={'a_b.metallib': 1, 'b_b.metallib': 1, 'c_b.metal': 1},
+        )
+        app = self.root / 'app.img'
+        real_open = romfs.open
+        opened = []
+        def count_open(path, *args, **kwargs):
+            opened.append(os.path.basename(str(path)))
+            return real_open(path, *args, **kwargs)
+        with mock.patch.object(shader_lib.romfs, 'open', side_effect=count_open):
+            self.assertEqual(shader_lib.subset(self.lib, app), 3)
+        self.assertEqual(opened.count('b_b.metallib'), 0, 'duplicate entry in source image must not be opened again')
+        self.assertEqual(opened.count('a_b.metallib'), 1)
+        image = romfs.Image(app)
+        self.assertEqual(image.entry(image.find('a_b.metallib'))[:2], image.entry(image.find('b_b.metallib'))[:2])
+        self.assertEqual((romfs.Path(app) / 'b_b.metallib').read_bytes(), payload)
 
 
 class HostReader(Base):
@@ -179,6 +332,14 @@ class HostReader(Base):
         got = subprocess.run([self.reader(), self.image, *asked], capture_output=True, check=True).stdout
         want = b''.join(names[n] + b'\n' if n in names else b'missing\n' for n in asked)
         self.assertEqual(got, want)
+
+    def test_the_host_maps_shared_payloads_by_every_name(self):
+        names = {f'{i:016x}_b.metallib': b'shared shader' for i in range(12)}
+        shader_lib.write(names, str(self.image), share={n: 'shared' for n in names})
+        image = romfs.Image(self.image)
+        self.assertEqual(len({image.entry(image.find(n))[:2] for n in names}), 1)
+        got = subprocess.run([self.reader(), self.image, *names], capture_output=True, check=True).stdout
+        self.assertEqual(got, b'shared shader\n' * len(names))
 
     def test_the_host_refuses_a_cut_copy(self):
         self.folder(k_b__metallib=b'lib' * 100); self.pack()

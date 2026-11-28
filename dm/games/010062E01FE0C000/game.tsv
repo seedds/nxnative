@@ -1,0 +1,39 @@
+# Digimon Story Time Stranger (Switch, update 1.2.2 = v262144), Media.Vision MVGL engine on NVN, SDK 20.5.21.
+
+# ---- Identity ----
+title_id	010062E01FE0C000
+program_id	010062E01FE0C000
+
+# ---- App ----
+name	Digimon Story Time Stranger
+ipa	DigimonStoryTimeStranger.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.2.2	main=135c83cdea06aec2d858e1bc7d53d72f	subsdk0=a870a783a09f57256d3630b73485398e	sdk=c668ae02ea221e429677aa61d3dab7c6
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	app_0.nx64.mvgl
+zip_store	.cpk:.mvgl:.metallib
+
+# ---- Memory ----
+# the NPDM declares 20 MB of system resource (virtual address memory) and main initializes StandardAllocator for 30 GB;
+# a 1 GB stdalloc_cap ran out of memory at frame 678 during title load, while 3 GB fits inside the 4.375 GB alias region alongside the game's other regions (~0.10 GB at boot)
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1400000
+stdalloc_cap	0xc0000000
+
+# ---- Graphics ----
+# main calls nvnDeviceSetDepthMode with near = 0
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/=romfs
+shader_note	Digimon Story Time Stranger shaders

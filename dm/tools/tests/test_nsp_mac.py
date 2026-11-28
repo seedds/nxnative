@@ -2,7 +2,9 @@
 rebuilt after an iOS-only NVN build and an iOS build is not reused after a Mac-only one but builds its Mac libraries again (kept for the Mac run command), neither key without the Mac outputs' stamp (inputs.tsv, which the one
 chain version's c1_full.tsv / cb_extent.tsv name); the run command's environment file is read as the iOS app reads it.
 No game files, keys or Xcode needed (temporary files only in a temporary folder)."""
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
 import shutil
 import sys
@@ -23,6 +25,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp)
         self.sh, self.logs, self.ran = self.tmp / 'shader', self.tmp / 'logs', []
+        self.lib_bytes, self.omit_targets, self.omit_tables, self.fail_partial = b'lib', set(), set(), False
         self.cas_used = [LIVE]   # the cache entries a full dmsh_build.py run lists as used
         self.logs.mkdir()
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'say', lambda m: None), mock.patch.object(nsp, 'run', self.fake_run)):
@@ -33,9 +36,14 @@ class Base(unittest.TestCase):
         tool = Path(cmd[1]).name
         if tool in ('vk_shaders.py', 'gl_shaders.py'):
             api, a = tool[:2], [str(c) for c in cmd]
-            outs = [Path(a[a.index('--ios') - 1]), Path(a[a.index('--ios') + 1])] if '--ios' in a else [Path(a[-1])]
-            for o in outs: (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(b'lib')
+            mac_out = Path(a[a.index('--ios') - 1]) if '--ios' in a else Path(a[-1])
+            outs = [('mac', mac_out)] + ([('ios', Path(a[a.index('--ios') + 1]))] if '--ios' in a else [])
+            for target, o in outs:
+                if target in self.omit_targets: continue
+                (o / api).mkdir(parents=True, exist_ok=True); (o / api / f'{api}_shaders.metallib').write_bytes(self.lib_bytes)
+                if target not in self.omit_tables: (o / api / f'{api}_shaders.tsv').write_text('# table\n')
             log.write_text('macosx: 3 shaders\n' + ('iphoneos: 3 shaders\n' if '--ios' in a else ''))
+            if self.fail_partial: raise nsp.BuildError('simulated translator failure after partial write')
         elif tool == 'own_compilers.py':   # a full dmsh_build.py run: the libraries, their stamp, and the profile's tables naming it
             outs = [self.sh / 'cache'] + ([Path(env['IOSOUT'])] if 'IOSOUT' in env else [])
             targets = (env or {}).get('DMSH_TARGETS', 'mac').split(',')
@@ -50,32 +58,137 @@ class Base(unittest.TestCase):
 
 
 class Layer(Base):
-    def vk(self, mac, key='K'):
+    APIS = (('vk', 'Vulkan'), ('gl', 'GL'))
+
+    def run_layer(self, api, name, mac, key='K', payload=b'lib'):
         self.ran.clear()
-        return nsp.layer_shaders(sys.executable, REPO, 'vk', 'Vulkan', [self.tmp / 'romfs'], self.sh, key, self.logs, {'WORK': str(self.tmp)}, mac)
+        self.lib_bytes = payload
+        return nsp.layer_shaders(sys.executable, REPO, api, name, [self.tmp / 'romfs'], self.sh, key, self.logs, {'WORK': str(self.tmp)}, mac)
 
     def test_mac_only(self):   # no --ios, only the Mac key, the Mac folder for DM_MSL_DIR
-        self.assertEqual(self.vk(True), self.sh)
-        self.assertNotIn('--ios', self.ran[0][0])
-        self.assertTrue((self.sh / 'vk.key').is_file()); self.assertFalse((self.sh / 'ios/vk.key').exists())
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])   # reused
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.assertEqual(self.run_layer(api, name, True), self.sh)
+                self.assertNotIn('--ios', self.ran[0][0])
+                self.assertTrue((self.sh / f'{api}.key').is_file()); self.assertFalse((self.sh / f'ios/{api}.key').exists())
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # reused
 
-    def test_mac_after_ios(self):   # an iOS build makes the Mac library too: a Mac-only build is reused
-        self.assertEqual(self.vk(False), self.sh / 'ios')
-        self.assertIn('--ios', self.ran[0][0])
-        (self.sh / 'vk.key').unlink()   # an iOS build from before Mac-only builds wrote only its own key
-        self.assertEqual(self.vk(True), self.sh); self.assertEqual(self.ran, [])
+    def test_mac_after_ios_and_legacy_unstamped_layout(self):   # dual builds stamp both targets; a missing Mac stamp triggers one rebuild
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios')
+                self.assertIn('--ios', self.ran[0][0])
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios'); self.assertEqual(self.ran, [])   # dual reuse
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # Mac reuses kmac
+                (self.sh / f'{api}.key').unlink()   # legacy unstamped layout: no Mac stamp
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(len(self.ran), 1)
+                self.assertTrue((self.sh / f'{api}.key').is_file())
+                self.assertEqual(self.run_layer(api, name, True), self.sh); self.assertEqual(self.ran, [])   # rebuilt once, then reused
+
+    def test_dual_a_mac_b_mac_a_rebuilds_with_distinct_bytes(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                lib = self.sh / api / f'{api}_shaders.metallib'
+                ios_lib = self.sh / f'ios/{api}/{api}_shaders.metallib'
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                self.assertEqual((lib.read_bytes(), ios_lib.read_bytes()), (b'bytes-A', b'bytes-A'))
+                self.run_layer(api, name, True, 'B', b'bytes-B')
+                self.assertEqual((len(self.ran), lib.read_bytes(), ios_lib.read_bytes()), (1, b'bytes-B', b'bytes-A'))
+                # Requesting Mac A again must not falsely hit ios/<api>.key = A while Mac holds bytes-B.
+                self.run_layer(api, name, True, 'A', b'bytes-A')
+                self.assertEqual((len(self.ran), lib.read_bytes()), (1, b'bytes-A'))
+
+    def test_failed_mac_partial_output_does_not_reuse_ios_stamp(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                self.fail_partial = True
+                try:
+                    with self.assertRaises(nsp.BuildError):
+                        self.run_layer(api, name, True, 'B', b'partial-B')
+                finally:
+                    self.fail_partial = False
+                lib = self.sh / api / f'{api}_shaders.metallib'
+                self.assertEqual(lib.read_bytes(), b'partial-B')
+                self.assertFalse((self.sh / f'{api}.key').exists())
+                # iOS A stamp is still intact, yet Mac A must rebuild instead of returning partial-B.
+                self.assertEqual(nsp.reused(self.sh / f'ios/{api}.key', 'A'), '3 shaders for the Mac and iOS')
+                self.run_layer(api, name, True, 'A', b'bytes-A')
+                self.assertEqual((len(self.ran), lib.read_bytes()), (1, b'bytes-A'))
+
+    def test_dual_missing_mac_output_does_not_publish_stamps(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.omit_targets = {'mac'}
+                try:
+                    with self.assertRaisesRegex(nsp.BuildError, 'no Mac'):
+                        self.run_layer(api, name, False, 'A', b'bytes-A')
+                finally:
+                    self.omit_targets = set()
+                self.assertFalse((self.sh / f'{api}.key').exists())
+                self.assertFalse((self.sh / f'ios/{api}.key').exists())
 
     def test_ios_after_mac(self):   # a Mac-only build made no iPhone library: an iOS build runs
-        self.vk(True)
-        self.assertEqual(self.vk(False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
-        self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, True)
+                self.assertEqual(self.run_layer(api, name, False), self.sh / 'ios'); self.assertEqual(len(self.ran), 1)
+                self.assertTrue((self.sh / f'ios/{api}/{api}_shaders.metallib').is_file())
 
     def test_changed_inputs(self):
-        self.vk(False)
-        self.vk(True, 'K2'); self.assertEqual(len(self.ran), 1)
+        self.run_layer('vk', 'Vulkan', False)
+        self.run_layer('vk', 'Vulkan', True, 'K2'); self.assertEqual(len(self.ran), 1)
         self.assertTrue((self.sh / 'ios/vk/vk_shaders.metallib').is_file())   # the iPhone library stays, under its own (older) key
         self.assertEqual(nsp.reused(self.sh / 'ios/vk.key', 'K'), '3 shaders for the Mac and iOS')
+
+    def test_missing_table_triggers_rebuild_and_keeps_targets_independent(self):
+        for api, name in self.APIS:
+            with self.subTest(api=api):
+                shutil.rmtree(self.sh, ignore_errors=True)
+                self.run_layer(api, name, False, 'A', b'bytes-A')
+                mac_tsv = self.sh / api / f'{api}_shaders.tsv'
+                ios_tsv = self.sh / f'ios/{api}/{api}_shaders.tsv'
+                self.assertTrue(mac_tsv.is_file() and ios_tsv.is_file())
+                # Deleting Mac's table leaves iOS reusable, while Mac must rebuild and restore the table.
+                mac_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                # Deleting iOS's table leaves Mac reusable, while iOS must rebuild and restore the table.
+                ios_tsv.unlink()
+                self.assertEqual(self.run_layer(api, name, True, 'A', b'bytes-A'), self.sh)
+                self.assertEqual(self.ran, [])
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(len(self.ran), 1)
+                self.assertTrue(ios_tsv.is_file() and mac_tsv.is_file())
+                self.assertEqual(self.run_layer(api, name, False, 'A', b'bytes-A'), self.sh / 'ios')
+                self.assertEqual(self.ran, [])
+
+    def test_omitted_table_cannot_publish_stamps(self):
+        for api, name in self.APIS:
+            for mac, omit, pattern in ((True, {'mac'}, f'no Mac.*{api}_shaders\\.tsv'),
+                                       (False, {'ios'}, f'no iOS.*{api}_shaders\\.tsv'),
+                                       (False, {'mac'}, f'no Mac.*{api}_shaders\\.tsv')):
+                with self.subTest(api=api, mac=mac, omit=sorted(omit)):
+                    shutil.rmtree(self.sh, ignore_errors=True)
+                    self.omit_tables = set(omit)
+                    try:
+                        with self.assertRaisesRegex(nsp.BuildError, pattern):
+                            self.run_layer(api, name, mac, 'A', b'bytes-A')
+                    finally:
+                        self.omit_tables = set()
+                    self.assertFalse((self.sh / f'{api}.key').exists())
+                    self.assertFalse((self.sh / f'ios/{api}.key').exists())
 
 
 class Nvn(Base):
@@ -138,7 +251,10 @@ class Nvn(Base):
             self.assertEqual(self.build(False), self.sh / 'ios')
         self.assertEqual(self.left(), [f'cache/b-{CHAIN}.img', f'ios/b-{CHAIN}.img', f'ios/b-{CHAIN}.key'])
         self.assertTrue(nsp.shader_lib.has_library(self.sh / 'ios' / f'b-{CHAIN}'))
-        self.assertEqual([m for m in said if m.startswith('removed old shader libraries')], ['removed old shader libraries b-157e1b96c8da, b-a78f966a7b38 (0.4 KB)'])
+        self.assertEqual([m for m in said if m.startswith('removed old shader libraries')], ['removed old shader libraries b-157e1b96c8da, b-a78f966a7b38 (0.4 KB) to obsolete/'])
+        moved = list((self.sh.parent / 'obsolete').iterdir())   # into this build's folder there, at their places in the build folder
+        self.assertEqual(len(moved), 1); self.assertTrue(nsp.STAMP.match(moved[0].name) and moved[0].name.endswith(' build'), moved[0].name)
+        self.assertTrue((moved[0] / 'shader/ios/b-157e1b96c8da').exists() and (moved[0] / 'shader/mac-b-a78f966a7b38.key').exists())
         self.stale(); said.clear()   # a reused build prunes too
         with mock.patch.object(nsp, 'say', said.append):
             self.build(False)
@@ -154,11 +270,11 @@ class Nvn(Base):
 
     def test_failed_prune_keeps_the_build(self):   # a folder that cannot be removed is a [RED] line; the others go and the build still returns its libraries
         self.stale()
-        real, said = nsp.rmtree, []
-        def stuck(p):
+        real, said = nsp.retire, []
+        def stuck(work, p):
             if p.name == 'b-157e1b96c8da' and p.parent.name == 'ios': raise PermissionError(13, 'Permission denied', str(p))
-            real(p)
-        with mock.patch.object(nsp, 'rmtree', stuck), mock.patch.object(nsp, 'say', said.append):
+            real(work, p)
+        with mock.patch.object(nsp, 'retire', stuck), mock.patch.object(nsp, 'say', said.append):
             self.assertEqual(self.build(False), self.sh / 'ios')
         self.assertEqual(self.left(), sorted([f'cache/b-{CHAIN}.img', 'ios/b-157e1b96c8da', f'ios/b-{CHAIN}.img', f'ios/b-{CHAIN}.key']))
         self.assertEqual(len([m for m in said if m.startswith('[RED] could not remove old shader libraries')]), 1)
@@ -192,9 +308,9 @@ class Nvn(Base):
 
     def test_the_iphone_image_leaves_out_what_its_app_does_not_read(self):
         real = nsp.shader_lib.pack
-        def with_pulling(lib, say=print, leave_out=False):   # the stand-in build makes no pulling library: one in the folder, as dmsh_build.py's
+        def with_pulling(lib, say=print, leave_out=False, on_progress=None):   # the stand-in build makes no pulling library: one in the folder, as dmsh_build.py's
             if Path(lib).is_dir(): (Path(lib) / 'k_bp.metallib').write_bytes(b'pull')
-            return real(lib, say, leave_out)
+            return real(lib, say, leave_out, on_progress=on_progress)
         ios = self.sh / 'ios' / f'b-{CHAIN}'
         with mock.patch.object(nsp.shader_lib, 'pack', with_pulling):
             self.build_ios(False)
@@ -260,7 +376,7 @@ class Nvn(Base):
         self.assertEqual(seen, [False])
 
     def store(self):
-        s = nsp.shader_cache.Store(self.sh / 'cache/cas.db'); self.addCleanup(s.close)
+        s = nsp.shader_cache.Store(self.sh / f'cache/cas-{CHAIN}.db'); self.addCleanup(s.close)
         return s
 
     def entries(self):   # the shaders the cache holds, as the next build that runs would read them
@@ -269,7 +385,7 @@ class Nvn(Base):
     def cas(self, *names, when=0):   # cache entries with a source and a library, last changed at when
         s = self.store()
         for n in names:
-            s.put(f'shader/{n}/mac/k_b.metal', b'm' * 100 + n.encode()[:0], when); s.put(f'shader/{n}/mac/k_b.metallib', b'l' * 1000, when)
+            s.put(f'shader/{n}/mac/k_b.metal', bytes(range(100)), when); s.put(f'shader/{n}/mac/k_b.metallib', b'l' * 1000, when)
         s.close()
 
     def test_prune_shader_cache(self):   # entries the build did not list go once it succeeded; a listed one, one newer than the list and other names stay; only the sources count
@@ -282,6 +398,36 @@ class Nvn(Base):
         self.cas(OLD); said.clear()   # a reused build prunes too
         with mock.patch.object(nsp, 'say', said.append): self.build(False)
         self.assertEqual(self.ran, []); self.assertNotIn(OLD, self.entries()); self.assertIn(NEW, self.entries())
+
+    def test_older_compile_caches_go_with_a_build(self):   # other chains' files and the one file from before generations, once this chain has its own; a failed build keeps them
+        old = nsp.shader_cache.Store(self.sh / 'cache/cas.db'); old.put('metallib/ios/i.metallib', b'ios'); old.close()
+        other = nsp.shader_cache.Store(self.sh / 'cache/cas-fedcba987654.db'); other.put('metallib/mac/m.metallib', b'mac'); other.close()
+        self.build(False)
+        self.assertTrue((self.sh / 'cache/cas.db').exists())   # the chain has no file of its own yet
+        self.store().put('metallib/mac/a.metallib', b'a')
+        (self.sh / 'ios' / f'b-{CHAIN}.key').unlink()   # not reused: the step runs, and fails
+        def failing(cmd, log, env=None, cwd=None, on_line=None): raise nsp.BuildError('translator failed')
+        with mock.patch.object(nsp, 'run', failing), self.assertRaises(nsp.BuildError): self.build(False)
+        self.assertTrue((self.sh / 'cache/cas-fedcba987654.db').exists())
+        said = []
+        with mock.patch.object(nsp, 'say', said.append): self.build(False)
+        self.assertEqual(sorted(p.name for p in (self.sh / 'cache').glob('cas*.db')), [f'cas-{CHAIN}.db'])
+        self.assertEqual(self.store().get('metallib/ios/i.metallib'), b'ios')
+        self.assertTrue(any(m.startswith('removed old shader compile caches ') and m.endswith(' to obsolete/') for m in said), said)
+        self.assertEqual(sorted(p.name for p in (self.sh.parent / 'obsolete').glob('* build/shader/cache/cas*.db')), ['cas-fedcba987654.db', 'cas.db'])
+
+    def test_obsolete_emptied_by_the_next_successful_build(self):   # what earlier builds and runs moved there goes; what this build moved stays, and one line says how much
+        ob = self.sh.parent / 'obsolete'
+        for name in ('2026-01-02 030405 build', '2026-01-02 030406 pso_archive', 'loose file'):
+            (ob / name).mkdir(parents=True); (ob / name / 'x').write_bytes(b'x' * 10)
+        (ob / '2026-02-01 000000 build').mkdir(); (ob / '2026-02-01 000000 build' / 'y').write_bytes(b'y' * 2048)
+        said = []
+        with mock.patch.object(nsp, 'BUILD_STARTED', '2026-02-01 000000'), mock.patch.object(nsp, 'say', said.append): nsp.empty_obsolete(self.sh.parent)
+        self.assertEqual([p.name for p in ob.iterdir()], ['2026-02-01 000000 build'])
+        self.assertEqual(said, [f'no longer used: 2.0 KB in {ob}, removed after the next successful build (deleting the folder now costs nothing)'])
+        said.clear()
+        with mock.patch.object(nsp, 'BUILD_STARTED', '2026-03-01 000000'), mock.patch.object(nsp, 'say', said.append): nsp.empty_obsolete(self.sh.parent)
+        self.assertFalse(ob.exists()); self.assertEqual(said, [])
 
     def test_prune_shader_cache_needs_success_and_the_list(self):   # a failed build, or libraries from before the list, keep every entry
         self.build(False); self.cas(OLD)
@@ -332,6 +478,37 @@ class Nvn(Base):
         self.assertEqual(watch(), {'step': 'compiling', 'done': 7, 'total': 10, 'unit': 'shaders', 'note': '4 not cached'})
         p.write_text('{"step": "comp')   # half written: no progress this time, not an error
         self.assertIsNone(watch())
+
+    def test_shader_watch_follows_all_phases(self):   # RT, mesh, single/dual library images, and table tools straight from DMSH_PROGRESS
+        p = self.tmp / 'progress.json'; watch = nsp.ShaderWatch(p)
+        p.write_text('{"step": "compiling", "done": 42848, "total": 42848, "cached": 42848, "misses": 0}')
+        self.assertEqual(watch(), {'step': 'compiling', 'done': 42848, 'total': 42848, 'unit': 'shaders', 'note': ''})
+        p.write_text('{"step": "compiling RT library", "done": 0, "total": 1}')
+        self.assertEqual(watch(), {'step': 'compiling RT library', 'done': 0, 'total': 1})
+        p.write_text('{"step": "compiling mesh libraries", "done": 3, "total": 12, "unit": "pairs"}')
+        self.assertEqual(watch(), {'step': 'compiling mesh libraries', 'done': 3, 'total': 12, 'unit': 'pairs'})
+        p.write_text('{"step": "writing the library image", "done": 0, "total": 100, "unit": "files", "bytes": 0}')
+        self.assertEqual(watch(), {'step': 'writing the library image', 'done': 0, 'total': 100, 'unit': 'files'})
+        p.write_text('{"step": "writing the Mac library image", "done": 50, "total": 100, "unit": "files", "bytes": 2097152}')
+        self.assertEqual(watch(), {'step': 'writing the Mac library image', 'done': 50, 'total': 100, 'unit': 'files', 'note': '2.0 MB'})
+        p.write_text('{"step": "writing the iOS library image", "done": 10, "total": 40, "unit": "files", "bytes": 1048576}')
+        self.assertEqual(watch(), {'step': 'writing the iOS library image', 'done': 10, 'total': 40, 'unit': 'files', 'note': '1.0 MB'})
+        p.write_text('{"step": "c1 guard"}')
+        self.assertEqual(watch(), {'step': 'c1 guard'})
+        p.write_text('{"step": "uniform read extents"}')
+        self.assertEqual(watch(), {'step': 'uniform read extents'})
+        with contextlib.redirect_stdout(io.StringIO()):
+            prog = nsp.Progress('off'); prog.plan(1); prog.stage('iOS shaders')
+            for step_payload in (
+                '{"step": "writing the Mac library image", "done": 50, "total": 100, "unit": "files", "bytes": 2097152}',
+                '{"step": "writing the iOS library image", "done": 10, "total": 40, "unit": "files", "bytes": 1048576}',
+                '{"step": "c1 guard"}',
+            ):
+                p.write_text(step_payload)
+                got = watch(); assert got is not None; prog.set(**got)
+            assert prog.cur is not None
+            self.assertEqual((prog.cur.step, prog.cur.done, prog.cur.total, prog.cur.unit, prog.cur.note), ('c1 guard', None, None, '', ''))
+            prog.close()
 
 
 class EnvFile(Base):

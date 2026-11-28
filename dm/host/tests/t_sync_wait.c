@@ -1,8 +1,15 @@
-// WaitSynchronization through real SVCs. Hold G across notification and clear
-// to make the lost-notification window deterministic, without scheduler sleeps.
+// Real synchronization SVCs and relative waits with the replay clock pinned.
+// Hold G across notification and clear to make the lost-notification window deterministic.
 #include "../hle_thread.c"
 #include <assert.h>
 #include <unistd.h>
+
+// Unused host facilities referenced by the real clock and entropy code.
+module_t *g_mod;
+int g_nmod;
+void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NULL; }
+int dm_sdk_ounce(void) { return 1; }
+void crash_watch_frame(void) {}
 
 typedef struct { uint32_t write, read; } ends_t;
 typedef struct {
@@ -29,9 +36,9 @@ static thr_t *new_thread(void) {
     thr_t *t = calloc(1, sizeof *t); assert(t);
     pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->mask = 7;
-    pthread_mutex_lock(&G);
+    g_lock();
     t->handle = h_new(O_THREAD, t); t->all = g_all; g_all = t;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     return t;
 }
 static void *wait_body(void *arg) {
@@ -46,7 +53,7 @@ static void wait_start(waiter_t *w) {
     assert(!pthread_create(&w->pt, NULL, wait_body, w));
     uint64_t deadline = now_ns() + 2000000000;
     for (;;) {
-        pthread_mutex_lock(&G); int waiting = w->thread->wkind == 4; pthread_mutex_unlock(&G);
+        g_lock(); int waiting = w->thread->wkind == 4; g_unlock();
         if (waiting) return;
         assert(now_ns() < deadline); sched_yield();
     }
@@ -86,9 +93,9 @@ static void framing(void) {
     assert(wait_now(handles, 1, -1, NULL) == R_CANCELLED);
     assert(wait_now(handles, 1, 0, NULL) == R_TIMEOUT);
     assert(wait_now(handles, 1, 100000, NULL) == R_TIMEOUT);
-    pthread_mutex_lock(&G);
+    g_lock();
     assert(((event_t *)h_peek(e.read, O_EVENT_R))->refs == 2);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     event_close(e);
 }
 static uint64_t event_svc(int num, uint32_t handle) {
@@ -120,10 +127,10 @@ static void signal_then_clear(void) {
     waiter_t first = {.handles = {a.read, b.read, b.read}, .count = 3};
     waiter_t second = {.handles = {b.read}, .count = 1};
     wait_start(&first); wait_start(&second);
-    pthread_mutex_lock(&G);
+    g_lock();
     signal_locked(b.write);
     ((event_t *)h_peek(b.write, O_EVENT_W))->signaled = 0;
-    pthread_mutex_unlock(&G);
+    g_unlock();
     wait_finish(&first, 0, 1); wait_finish(&second, 0, 0);
     assert(wait_now(&b.read, 1, 0, NULL) == R_TIMEOUT);
     event_close(a); event_close(b);
@@ -133,21 +140,21 @@ static void close_and_reuse(void) {
     waiter_t w = {.handles = {old.read}, .count = 1}; wait_start(&w);
     close_handle(old.read);
     ends_t replacement = event_new(); assert(replacement.write == old.read);
-    pthread_mutex_lock(&G);
+    g_lock();
     signal_locked(replacement.write); assert(w.thread->wkind == 4);
     signal_locked(old.write);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     close_handle(old.write);
     wait_finish(&w, 0, 0); event_close(replacement);
 }
 static void handle_array_snapshot(void) {
     ends_t old = event_new(), replacement = event_new();
     waiter_t w = {.handles = {old.read}, .count = 1}; wait_start(&w);
-    pthread_mutex_lock(&G);
+    g_lock();
     w.handles[0] = replacement.read;
     signal_locked(replacement.write); assert(w.thread->wkind == 4);
     signal_locked(old.write);
-    pthread_mutex_unlock(&G);
+    g_unlock();
     wait_finish(&w, 0, 0); event_close(old); event_close(replacement);
 }
 static void cancellation_and_release(void) {
@@ -220,7 +227,7 @@ static void core_mask(void) {
         uint64_t r[32] = {t->handle, (uint64_t)-3, i & 1 ? 1 : 4}; assert(svc_thread(0x0F, r) && !r[0]);
     }
     query_stop = 1; assert(!pthread_join(pt, NULL));
-    pthread_mutex_lock(&G); t->exited = 1; pthread_mutex_unlock(&G);
+    g_lock(); t->exited = 1; g_unlock();
     close_handle(t->handle);
 }
 // CloseHandle before StartThread: the real CreateThread's pthread waits for the start, and must end
@@ -239,10 +246,94 @@ static void closed_unstarted(void) {
         assert(now_ns() < deadline); usleep(1000);
     }
 }
+static const uint64_t replay_delays[] = {1000000, 33333334};   // a job poll and a two-vsync sleep
+static void replay_sleep(void) {
+    dm_guest_frame_tick();
+    assert(dm_detclock_enabled());
+    uint64_t tick = guest_ns();
+    for (unsigned i = 0; i < sizeof replay_delays / sizeof *replay_delays; i++) {
+        uint64_t ns = replay_delays[i], start = now_ns();
+        uint64_t r[32] = {ns};
+        assert(svc_thread(0x0B, r));
+        assert(now_ns() - start >= ns - 20000);   // sleep_precise permits up to 20 us early
+        assert(guest_ns() == tick);
+    }
+}
+static void replay_timeout(void) {
+    dm_guest_frame_tick();
+    assert(dm_detclock_enabled());
+    uint64_t tick = guest_ns();
+    ends_t e = event_new();
+    uint32_t word = 0;
+    for (unsigned i = 0; i < sizeof replay_delays / sizeof *replay_delays; i++) {
+        uint64_t ns = replay_delays[i], start = now_ns();
+        assert(wait_now(&e.read, 1, (int64_t)ns, NULL) == R_TIMEOUT);
+        assert(now_ns() - start >= ns);
+        assert(guest_ns() == tick);
+
+        start = now_ns();
+        uint64_t r[32] = {(uint64_t)&word, 2, 0, ns};   // WaitForAddress while word == 0
+        assert(svc_thread(0x34, r) && r[0] == R_TIMEOUT);
+        assert(now_ns() - start >= ns);
+        assert(guest_ns() == tick);
+    }
+    event_close(e);
+}
+typedef struct { _Atomic int entered, done; int applet; } cw_arg_t;
+static void *cw_reader(void *p) {
+    cw_arg_t *a = p;
+    atomic_store(&a->entered, 1);
+    if (a->applet) guest_applet_wait(); else guest_clock_read_wait();
+    atomic_store(&a->done, 1);
+    return NULL;
+}
+static void clock_freeze_wait(void) {
+    // Reason 2 (system keyboard) freezes the clock without parking clock reads.
+    guest_clock_freeze_for(2, 1);
+    guest_clock_read_wait();
+    guest_clock_freeze_for(2, 0);
+
+    // Reasons 3 (NVN prepare) and 4 (NVN archive init) park non-host-work readers and compose with reason 1 (background).
+    guest_clock_freeze_for(3, 1);
+    guest_clock_freeze_for(4, 1);
+    dm_host_work++;
+    guest_clock_read_wait();   // host work never parks itself
+    dm_host_work--;
+    cw_arg_t a = {0};
+    pthread_t th;
+    assert(!pthread_create(&th, NULL, cw_reader, &a));
+    while (!atomic_load(&a.entered)) sched_yield();
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(4, 0);   // reason 3 still holds
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(1, 1);   // background overlaps prepare
+    guest_clock_freeze_for(3, 0);   // reason 1 still holds
+    usleep(15000);
+    assert(!atomic_load(&a.done));
+    guest_clock_freeze_for(1, 0);   // all wait reasons lifted: reader wakes
+    assert(!pthread_join(th, NULL));
+    assert(atomic_load(&a.done));
+
+    guest_clock_freeze_for(DM_CLOCK_APPLET, 1);
+    guest_clock_freeze_for(1, 1);
+    cw_arg_t applet = {.applet = 1};
+    assert(!pthread_create(&th, NULL, cw_reader, &applet));
+    while (!atomic_load(&applet.entered)) sched_yield();
+    usleep(15000);
+    assert(!atomic_load(&applet.done));
+    guest_clock_freeze_for(DM_CLOCK_APPLET, 0);
+    assert(!pthread_join(th, NULL));   // the applet gate reopens even while background keeps the clock frozen
+    assert(atomic_load(&applet.done));
+    guest_clock_freeze_for(1, 0);
+}
 int main(int argc, char **argv) {
-    alarm(10); svc_thread_main_init();
-    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted"};
-    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted};
+    alarm(10);
+    assert(!setenv("DM_DETCLOCK", "16666667", 1));
+    svc_thread_main_init();
+    const char *names[] = {"framing", "endpoints", "signal-clear", "close-reuse", "snapshot", "cancel-release", "thread-close", "query-close", "core-mask", "closed-unstarted", "replay-sleep", "replay-timeout", "clock-freeze-wait"};
+    void (*tests[])(void) = {framing, endpoints, signal_then_clear, close_and_reuse, handle_array_snapshot, cancellation_and_release, closed_thread_wait, query_close, core_mask, closed_unstarted, replay_sleep, replay_timeout, clock_freeze_wait};
     for (unsigned i = 0; i < sizeof tests / sizeof *tests; i++) {
         if (argc > 1 && strcmp(argv[1], names[i])) continue;
         tests[i](); printf("PASS: %s\n", names[i]);

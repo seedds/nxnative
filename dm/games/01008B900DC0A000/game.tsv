@@ -1,0 +1,36 @@
+# FINAL FANTASY VIII Remastered, BaseEngine, SDK 7.4.0. main is a small loader (3,712 instructions); the game is 14 NROs it loads with nn::ro. Rendering.nro and Platform.nro
+# draw with OpenGL ES through EGL and compile their GLSL with GLSLC at run time (captured by booting the game on the Mac). subsdk2 is NVIDIA's OpenGL driver: never loaded, the GL layer
+# answers the NROs' EGL / GL imports. Math.nro and Platform.nro need dm/tools/mod_layout.py in patch_nso.py (their data shared the code's 16 KB page)
+
+# ---- Identity ----
+title_id	01008B900DC0A000
+program_id	01008B900DC0A000
+
+# ---- App ----
+name	FINAL FANTASY VIII Remastered
+ipa	FinalFantasyVIIIRemastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.0.1_5	main=7f59549f6e7929368d6743a882fa700a	sdk=e30d2170165e907aba457c79fd83383d	subsdk0=a36dac0e0a5ed3b41482b6bb85625c73	subsdk1=a0492af5b413a8bbdd463a470e8991ba
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk. main imports only from sdk; the NROs import from subsdk0 (GLSLC) and subsdk1 (NintendoSDK_movie)
+modules	main subsdk0 subsdk1 sdk
+romfs_marker	weepff8/game_data/data/field.fs
+zip_store	.dat:.fs:.mp4:.nro:.ogg:.png:.wav:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/weepff8/=weepff8 /.nrr/=nrr /be_loc/=beloc /font/=font
+shader_note	FINAL FANTASY VIII Remastered shaders

@@ -71,6 +71,9 @@ int main(void) {
     mii_charinfo made = el[2].c;
     CHECK(made.nickname[0] == 'n' && made.height == 64 && memcmp(made.create_id, el[0].c.create_id, 16), "the default Mii, with a create ID of its own");
     CHECK(h_mii_Index(NULL, &idx, &made) == RES_OK && idx == 2, "GetIndex finds the new Mii");
+    // EditAndUpdateMii, which a game calls right after AppendMii: the editor closed with no change
+    mii_charinfo edited; memset(&edited, 0, sizeof edited);
+    CHECK(h_mii_EditUpdate(&edited, &made) == RES_OK && !memcmp(&edited, &made, sizeof made), "EditAndUpdateMii keeps the Mii as given");
     struct stat after; stat(p, &after);
     CHECK(after.st_size == before.st_size && after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec && after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, "the console's file is not written");
     char hp[256]; snprintf(hp, sizeof hp, "%s/host/MiiDatabase.dat", root);

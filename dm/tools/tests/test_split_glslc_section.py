@@ -2,9 +2,11 @@
 (+0x20) only when the header gives no usable section. SDK 21's GLSLC (Trails in the Sky 2nd Chapter 1.0.4, the compute shader at main+0x7774a8) keeps
 its assembly listing after the control section's own length and puts the code area further on, where the section header says; the +0x20 rule read
 listing text as a compute code area with no header, which passed the check under a key the game never uses. Synthetic outputs, no game files needed."""
+import json
 import os
 import struct
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -69,6 +71,22 @@ class GlslcSectionTest(unittest.TestCase):
         a, = ss.glslc_shaders(output(own, own), 'm', need=False)
         b, = ss.glslc_shaders(output(own, own, header=False), 'm', need=False)
         self.assertEqual(ss.skey(a[2], a[3]), ss.skey(b[2], b[3]))
+
+    def test_play_capture_cannot_take_a_known_shaders_row(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capture = root / '0123456789abcdef.glslc'
+            capture.write_bytes(output(0x880, 0x880))
+            truncated = root / 'fedcba9876543210.glslc'; truncated.write_bytes(capture.read_bytes()[:-1])
+            manifest = root / 'play.json'; manifest.write_text(json.dumps([str(capture), str(truncated)]))
+            played, pairs = ss.glslc_play(manifest)
+            self.assertEqual(len(played), 1)
+            self.assertEqual(pairs, set())
+            key, (src, stage, ctl, code) = next(iter(played.items()))
+            self.assertTrue(src.startswith('/glslc_play/'))
+            dlc = ('/aoc/0/file', stage, ctl, code)
+            keys, _, _ = ss.merge_keys([('dlc', {key: dlc}, set(), {}), ('play', played, set(), {})])
+            self.assertEqual(keys, {key: dlc})
 
 
 if __name__ == '__main__':

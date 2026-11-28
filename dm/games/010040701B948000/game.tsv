@@ -1,0 +1,41 @@
+# STAR WARS Battlefront Classic Collection (Switch, 2024; base game + update 1.0.4 = v262144), SDK 16.
+# Vulkan: the collection's REI renderer compiles its GLSL to SPIR-V at run time, so the RomFS holds no SPIR-V at all and the profile lists the keys the packer captures (vk_capture.tsv).
+# One launcher (nro1) and two games behind it, Battlefront (nro0) and Battlefront II (nro2), loaded with nn::ro as NROs of the launcher's process.
+# The memory partition is the survey's guess (dm/games/profile_guess.py), not measured on this title: it is the partition the shipped app was packed from.
+
+# ---- Identity ----
+title_id	010040701B948000
+program_id	010040701B948000
+
+# ---- App ----
+name	STAR WARS™: Battlefront Classic Collection
+ipa	StarWarsBattlefrontClassicCollection.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v262144	1.0.4	main=b4aa53d6b0d7b359e361485466f36454	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_OpenGL), subsdk1 (NintendoSDK_Vulkan)
+modules	main sdk
+romfs_marker	data1/_lvl_common/side/all.lvl
+zip_store	.bnk:.lvl:.mvs:.nro:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Textures ----
+# every staged buffer this title copies proves its padded layout by its own size (C_COPYB2I's layouts A and B, for 2D images and the 3D light volumes),
+# so the ambiguous "buffer larger than either padded total" case does not arise and no texture key is set
+
+# ---- Shader split ----
+shader_groups	/data2/=data2 /data1/=data1 /addon1/=addon1 /addon2/=addon2 /nro/=nro /.nrr/=nrr
+shader_note	STAR WARS™: Battlefront Classic Collection has no NVN shaders (its SPIR-V shaders go through the Vulkan layer)

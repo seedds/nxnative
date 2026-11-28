@@ -109,6 +109,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Donkey Kong Bananza](040074A01BF12000/README.md) | `040074A01BF12000` | v458752 (Switch 2) | 20.5.19 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 | — |
 | [Splatoon Raiders](0400380020056000/README.md) | `0400380020056000` | v65536 (Switch 2) | 21.4.4 (Ounce) | Nintendo EPD (sead / agl / gsys) | NVN2 | — |
 | [Star Fox](0400E88025B1A000/README.md) | `0400E88025B1A000` | v131072 (Switch 2) | 21.4.4 (Ounce) | Its own engine (`vrender`, `vfs`), Wwise | NVN2 | — |
+| [STAR WARS Battlefront Classic Collection](010040701B948000/README.md) | `010040701B948000` | 1.0.4 | 16 | REI renderer | Vulkan | — |
 | [Donkey Kong Country Returns HD](01009D901BC56000/README.md) | `01009D901BC56000` | 1.1.0 | 18.3.5 | Unity 6000.0.28f1 IL2CPP | NVN | — |
 | [Donkey Kong Country: Tropical Freeze](0100C1F0051B6000/README.md) | `0100C1F0051B6000` | 1.0.2 | 4.4.0 | Retro Studios' engine | NVN | — |
 | [DOOM 3](010029D00E740000/README.md) | `010029D00E740000` | 1.0.5 | 14.3.0 | id Tech 4 (BFG Edition renderer), FMOD | OpenGL | — |

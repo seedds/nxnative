@@ -96,14 +96,28 @@ static void *watchdog_main(void *arg) {
     }
     return NULL;
 }
+// Format an address for crash dumps: guest module offset, host symbol offset, or (when iOS redacts or omits the symbol) image basename + image offset + raw PC.
+int crash_fmt_addr(char *buf, size_t cap, const char *tag, uint64_t a, const module_t *m, const Dl_info *di) {
+    const char *sep = (tag && *tag) ? "=" : "";
+    if (!tag) tag = "";
+    if (m) return snprintf(buf, cap, " %s%s%s+%#llx", tag, sep, m->name, (unsigned long long)(a - (uint64_t)m->base));
+    if (di && di->dli_sname && strcmp(di->dli_sname, "<redacted>") != 0)
+        return snprintf(buf, cap, " %s%s%s+%#lx", tag, sep, di->dli_sname, (unsigned long)(a - (uint64_t)di->dli_saddr));
+    if (di && di->dli_fname && *di->dli_fname) {
+        const char *slash = strrchr(di->dli_fname, '/');
+        const char *img = (slash && slash[1]) ? slash + 1 : di->dli_fname;
+        return snprintf(buf, cap, " %s%s%s+%#lx(%#llx)", tag, sep, img, (unsigned long)(a - (uint64_t)di->dli_fbase), (unsigned long long)a);
+    }
+    return snprintf(buf, cap, " %s%s%#llx", tag, sep, (unsigned long long)a);
+}
 void crash_off(const char *tag, uint64_t a) {   // Also used by diag.c
 #define off crash_off
-
     module_t *m = module_of((void *)a);
     Dl_info di;
-    if (m) fprintf(stderr, " %s%s%s+%#llx", tag, *tag ? "=" : "", m->name, a - (uint64_t)m->base);
-    else if (dladdr((void *)a, &di) && di.dli_sname) fprintf(stderr, " %s%s%s+%#lx", tag, *tag ? "=" : "", di.dli_sname, (unsigned long)(a - (uint64_t)di.dli_saddr));
-    else fprintf(stderr, " %s%s%#llx", tag, *tag ? "=" : "", a);
+    int have = !m && dladdr((void *)a, &di);
+    char b[256];
+    crash_fmt_addr(b, sizeof b, tag, a, m, have ? &di : NULL);
+    fputs(b, stderr);
 }
 // Frame pointer backtrace: x29 chain [fp]=previous frame's fp, [fp+8]=return address; only 8-byte aligned, monotonically increasing frames are walked.
 // Each frame is read with vm_read_overwrite, which fails instead of faulting: code built without frame pointers keeps data in x29 (STEINS;GATE RE:BOOT's main+0x38921c: x29 = 0x430),
@@ -158,6 +172,7 @@ static void crash_gate(int sig) {
     for (;;) pause();
 }
 __attribute__((weak)) void dm_gfx_addr_note(uint64_t a, char *note, size_t n) { (void)a; if (n) note[0] = 0; }   // nvn_mtl.m provides the strong definition
+__attribute__((weak)) void dm_vm_census(FILE *f) { (void)f; }   // memstat.m provides the strong definition (tests that link crash.c alone have none)
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     if (sig == SIGTRAP && g_trap_hook && g_trap_hook(uc)) return;
@@ -235,6 +250,8 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
         }
         fputc('\n', stderr); }
+    // How full the address space is: an allocation that found no room (a thread's stack, a realloc, a Metal heap) aborts with the footprint far below the memory limit (issue #2444)
+    dm_vm_census(stderr);
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

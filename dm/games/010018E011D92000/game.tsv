@@ -1,0 +1,41 @@
+# Pokémon Shining Pearl 1.3.0 (Unity 2019.4.27f1 IL2CPP, SDK 11.4.3, NVN).
+# Format: see dm/games/README.md.
+
+# ---- Identity ----
+title_id	010018E011D92000
+program_id	010018E011D92000
+
+# ---- App ----
+name	Pokémon Shining Pearl
+ipa	PokemonShiningPearl.ipa
+app_category	public.app-category.role-playing-games
+
+# ---- Versions ----
+build	v393216	1.3.0	main=38f59cbda2eb9c44b72f94c4d25935a2	subsdk0=507f19d1240d09d00992248e8a0fd77e	sdk=2d369d9999e3e10e665106f840ffff9b
+package	v393216
+shader_versions	v393216
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Movie/pea/Ending/movie_pea_ed_male_01.webm
+zip_store	.bin:.dat:.en:.fr:.ge:.h:.it:.jp:.ko:.ress:.si:.sp:.tr:.webm:.metallib
+
+# ---- Memory ----
+# StandardAllocator uses the Switch application pool through virtual address memory.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# Unity sets the NVN near plane to zero at device initialization.
+depth_mode	zero
+
+# ---- Frame rate ----
+# Unity's frame limiter is discovered from its internal calls in each main.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Pokémon Shining Pearl shaders

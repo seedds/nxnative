@@ -1,0 +1,37 @@
+# Mario Golf: Super Rush (update v262144, 4.0.0). Plays on the Mac: see README.md
+# Camelot's engine on NintendoWare (G3d, Vfx), SDK 11.4.0, NVN. main loads the game's code, one NRO, with nn::ro; the game's files are one archive, rom:/42 (the 2021 layout of Camelot's CRA, dm/gfx/tools/cra.py).
+# Moved from the provisional profile the NSP script wrote (dm/games/profile_guess.py and the heap check); shader_groups and shader_note are kept as it wrote them, since both are shader inputs.
+
+# ---- Identity ----
+title_id	0100C9C00E25C000
+program_id	0100C9C00E25C000
+
+# ---- App ----
+name	Mario Golf: Super Rush
+ipa	MarioGolfSuperRush.ipa
+app_category	public.app-category.sports-games
+
+# ---- Versions ----
+# the NRO the game loads imports from subsdk0 (NintendoSDK_movie), which main does not: the opening movie and the movies between modes need it
+build	v262144	4.0.0	main=c83882f4352bc4d9bba8e0907a414c46	sdk=b39add63421be525d352e576dab438d3	subsdk0=535249a546887cac875a099e9c8ef367
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	42
+zip_store	.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself.
+# In its first 15 s in nnMain the game's regions reach alias +8.06 GB, past the 4.38 GB alias region only by StandardAllocator regions, which the host makes fit (2026-11-13, rewrite 97122e3013da).
+# On the Mac: 3.9 GB resident and 3.6 GB of GPU allocations on the Rookie Course's first hole (M6).
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/.nrr/=nrr
+shader_note	Mario Golf: Super Rush shaders

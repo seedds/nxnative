@@ -1,4 +1,4 @@
-"""Offer the resolution control only when the rewritten build supports it, and the game's upscaler choice only to games whose shader map holds their own upscaler (agl's NDSR network: game.py upscaler_keys)."""
+"""Offer the resolution control only when the rewritten build supports it, and the game's upscaler choice only to games whose shader map holds their own upscaler (an NDSR pack's network: game.py upscaler_keys)."""
 from pathlib import Path
 import sys,tempfile,unittest
 from unittest.mock import patch
@@ -21,21 +21,44 @@ class ResolutionSetting(unittest.TestCase):
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']])
 
 class FrameRateOption(unittest.TestCase):
-    def test_120_only_on_the_mac_for_a_game_checked_at_that_speed(self):
+    def test_120_for_a_game_checked_at_that_speed_on_either_platform(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
             (Path(tmp)/'main.fixups.tsv').write_text('')
-            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',False),('010056B015FE8000','mac',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
+            for gid,platform,has in [('04007EF01F8AE000','mac',True),('04007EF01F8AE000','ios',True),('010056B015FE8000','mac',False),('010056B015FE8000','ios',False)]:   # Fortune's Weave (fps_max 120), NieR:Automata (none)
                 with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
                     fps=next(s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
                 self.assertEqual(fps['default'],'60',gid)
                 self.assertEqual(fps['options'],[['30','30 fps'],['60','60 fps']]+([['120','120 fps']] if has else []),(gid,platform))
 
+    def test_40_only_where_the_frame_step_takes_ticks_of_1_120_s(self):
+        """40 fps needs a frame step stub in ticks of 1/120 s (FRAME_STEP_120 in main's fixups table: Ocarina of Time's ratio stub); both platforms offer it, the host and iOS launcher check the screen"""
+        with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
+            p=Path(tmp)/'main.fixups.tsv'
+            for header,platform,has in [('# FRAME_STEP_120\t1\n','ios',True),('# FRAME_STEP_120\t1\n','mac',True),('','ios',False),('# DYNAMIC_RESOLUTION\t1\n','mac',False)]:
+                p.write_text(header)
+                with patch.dict(settings.os.environ,{'SETTINGS_PLATFORM':platform}):
+                    fps=next(s for s in settings.build('0400486024DEC000',tmp,'unused')['settings'] if s['env']=='DM_FPS_TARGET')
+                self.assertEqual(fps['default'],'60',(header,platform))
+                self.assertEqual(fps['options'],[['30','30 fps']]+([['40','40 fps']] if has else [])+[['60','60 fps']],(header,platform))
+
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
-            (Path(tmp)/'main.fixups.tsv').write_text('')
-            for gid,shown in [('040074A01BF12000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (its NDSR network), NieR:Automata (none)
-                up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
+            root=Path(tmp)
+            (root/'main.fixups.tsv').write_text('')
+            profiles=root/'profiles'
+            # Synthetic working profiles matching build_ipa_from_nsp.py's generated shader_map.tsv:
+            # an NDSR compute shader (#NDSR@0x...) enables DM_UPSCALER; a profile without one does not.
+            for gid,rows,shown in [
+                ('040074A01BF12000','package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\t0123456789abcdef\t/Lib/agl/ndsr.bin#NDSR@0x0\n',True),
+                ('040077201BE50000','package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\tfedcba9876543210\t/ndsr/upscale.bin#NDSR@0x100\n',True),
+                ('010056B015FE8000','',False),
+            ]:
+                pdir=profiles/gid; pdir.mkdir(parents=True)
+                (pdir/'game.tsv').write_text((Path(settings.__file__).resolve().parent/gid/'game.tsv').read_text(encoding='utf-8'),encoding='utf-8')
+                if rows:(pdir/'shader_map.tsv').write_text(rows,encoding='utf-8')
+                with patch.dict(settings.os.environ,{'DM_GAMES_DIR':str(profiles),'DM_GAMES_FIRST':'1'}):
+                    up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
 

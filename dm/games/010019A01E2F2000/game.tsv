@@ -2,7 +2,7 @@
 # Format: see dm/games/README.md
 # Retro Studios' engine (little-endian RFRM forms as in Metroid Prime Remastered: MaterialArchive.arc and .pak archives) on SDK 19.3.15, NVN; subsdk0 is the SDK's movie library.
 # Its shaders are SNVN program records, zstd streams here, in MaterialArchive.arc and in the packs' MTRL resources (shader_split.py rfrm_shaders / snvn_records).
-# Every value below is the provisional profile's (profile_guess.py); the bring-up changed none, added dual_want.tsv and needed no host change (README.md)
+# Every value below is the provisional profile's (profile_guess.py); the bring-up changed none and needed no host change (README.md)
 
 # ---- Identity ----
 title_id	010019A01E2F2000

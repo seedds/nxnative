@@ -26,7 +26,7 @@ class NroPack(unittest.TestCase):
         self.row = 'refused\t' + 'ab' * 32 + '\t128\tgame.nrr\tloose sdk.nro\n'
         self.collections = self.rewrites = 0
         for cm in (mock.patch.object(nsp, 'PROG', mock.Mock()), mock.patch.object(nsp, 'run', self.collect),
-                   mock.patch.object(nsp.subprocess, 'Popen', self.rewrite_process), mock.patch.object(nsp.time, 'sleep')):
+                   mock.patch.object(nsp.proc_group, 'Group', self.rewrite_process), mock.patch.object(nsp.time, 'sleep')):
             cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
 
     def collect(self, cmd, log, **kwargs):
@@ -35,7 +35,7 @@ class NroPack(unittest.TestCase):
 
     def rewrite_process(self, cmd, **kwargs):
         self.rewrites += 1; (Path(cmd[3]) / f'{cmd[4]}.patched.bin').write_bytes(b'rewritten')
-        return types.SimpleNamespace(poll=lambda: 0, returncode=0)
+        return types.SimpleNamespace(p=types.SimpleNamespace(poll=lambda: 0, returncode=0), finish=lambda: 0, stragglers=[])
 
     def build(self): nsp.rewrite(sys.executable, self.repo, self.exe, self.out, {}, self.logs, self.g)
 
@@ -51,10 +51,10 @@ class NroPack(unittest.TestCase):
 
     def test_parser_changes_recollect(self):
         self.build()
-        for i, f in enumerate(('dm/gfx/tools/smash_arc.py', 'dm/tools/nso_syms.py'), 2):
-            (self.repo / f).write_text('v2'); self.build()
-            self.assertEqual(self.collections, i)
-        self.assertEqual(self.rewrites, 1)   # identical collected bytes do not need another rewrite
+        (self.repo / 'dm/gfx/tools/smash_arc.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (2, 1))   # identical collected bytes can reuse the rewrite
+        (self.repo / 'dm/tools/nso_syms.py').write_text('v2'); self.build()
+        self.assertEqual((self.collections, self.rewrites), (3, 2))   # the rewriter also reads symbols directly
 
     def test_removed_registration_drops_stale_manifest(self):
         self.build(); (self.rom / 'game.nrr').unlink(); self.build()

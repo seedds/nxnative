@@ -1,0 +1,35 @@
+# Splatoon 2 5.5.2 (SDK 3.4.1, Nintendo EPD sead / agl / gsys, NVN).
+# See README.md for the bring-up and test results.
+
+# ---- Identity ----
+title_id	01003BC0000A0000
+program_id	01003BC0000A0000
+
+# ---- App ----
+name	Splatoon 2
+ipa	Splatoon2.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v3342336	5.5.2	main=592c7051a4e620563d0296096d8f0ac5	sdk=ead5aad43c3efa01682460ece70a8189
+package	v3342336
+shader_versions	v3342336
+
+# ---- Files ----
+modules	main sdk
+romfs_marker	Model/Fld_Tunnel02A.Nin_NX_NVN.szs
+zip_store	.bfstm:.pack:.szs:.metallib
+
+# ---- Memory ----
+# Startup requests 0xC9400000 bytes of heap. The guest reservation leaves 3328 MiB for it.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource, so virtual address memory is disabled.
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Sound/=sound /Param/=param /Model/=model /Layout/=layout /Map/=map /Env/=env /Rumble/=rumble /Message/=message /System/=system /Etc/=etc /Font/=font /Pack/=pack /Shader/=shader /ELink2/=elink2 /Effect/=effect /SLink2/=slink2
+shader_note	Splatoon 2 shaders

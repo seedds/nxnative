@@ -6,9 +6,11 @@
 import re, struct, sys, zlib
 from pathlib import Path
 
-# The NACP's languages in its own order (the bit order of SupportedLanguageFlag and the order of the title entries): the language code nn::oe::GetDesiredLanguage returns for each, and its name
+# The NACP's languages in its own order (the bit order of SupportedLanguageFlag and the order of the title entries): the language code nn::oe::GetDesiredLanguage returns for each, and its name.
+# Polish and Thai use control-data bits 16 and 17 on either console. The SDK language enum numbers them 18 and 19 (hle_sdk16.c).
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'), ('es', 'Spanish'), ('it', 'Italian'),
-             ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese')]
+             ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'), ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese'),
+             ('pl', 'Polish'), ('th', 'Thai')]
 
 
 def name(path):
@@ -30,12 +32,36 @@ def name(path):
     return ''
 
 
+def display_version(path):
+    """The raw NACP display version (0x10 bytes at 0x3060, e.g. '1.0.2 b723'), as Horizon's nn::oe::GetDisplayVersion returns it; a missing file or non-printable value returns an empty string"""
+    p = Path(path)
+    return display_version_data(p.read_bytes()) if p.is_file() else ''
+
+
+def display_version_data(data):
+    """Read the raw NACP display version from NACP bytes (0x10 bytes at 0x3060, NUL-terminated)."""
+    if len(data) < 0x3070: return ''
+    raw = data[0x3060:0x3070].split(b'\0', 1)[0]
+    try: s = raw.decode('ascii').strip()
+    except UnicodeDecodeError: return ''
+    return s if s and all(0x20 <= ord(c) < 0x7f for c in s) else ''
+
+
 def version(path):
     """The display version (0x10 bytes at 0x3060, e.g. 1.2.1), cut to what iOS accepts as a bundle version (up to three dot-separated integers); a missing file or no leading number returns an empty string"""
     p = Path(path)
-    if not p.is_file(): return ''
-    m = re.match(rb'\d+(\.\d+){0,2}', p.read_bytes()[0x3060:0x3070])
-    return m.group().decode() if m else ''
+    return version_data(p.read_bytes()) if p.is_file() else ''
+
+
+def version_data(data):
+    """Read a display version from NACP bytes, including a NACP held in NUP metadata."""
+    return bundle_version(data[0x3060:0x3070].decode('ascii', errors='replace'))
+
+
+def bundle_version(display):
+    """The leading numeric version in NACP or profile metadata, in the form used by the app packers."""
+    m = re.match(r'[0-9]+(?:\.[0-9]+){0,2}', display)
+    return m.group() if m else ''
 
 
 def languages(path):

@@ -122,6 +122,215 @@ int main(void) {
     char root[1024], save[1100], work[1200], p[1200];
     const char *sp = getenv("TMPDIR"); snprintf(root, sizeof root, "%s/t_fs.XXXXXX", sp ? sp : "/private/tmp");
     if (!mkdtemp(root)) { perror("mkdtemp"); return 1; }
+    {   // cache storage list: the <DM_TEMP>_cache<N> folders that exist when the list opens, in index order, a page at a time; a closed or foreign handle finds no list
+        char temp[1100], c[1200]; snprintf(temp, sizeof temp, "%s/temp", root); setenv("DM_TEMP", temp, 1);
+        uint64_t empty = 0; int count = -1; uint8_t rec[4 * 0x20];
+        CHECK(h_fs_OpenCacheList(&empty) == RES_OK && h_fs_ReadCacheList(&count, rec, empty, 4) == RES_OK && count == 0, "cache list: none on a fresh run");
+        h_fs_CloseCacheList(empty);
+        for (int i = 0; i < 4; i++) { static const char *names[] = {"_cache8", "_cache2", "_cache300", "_cache65535"}; snprintf(c, sizeof c, "%s%s", temp, names[i]); mkdir(c, 0755); }
+        snprintf(c, sizeof c, "%s_cache08", temp); mkdir(c, 0755);   // not a name cache_dir writes
+        snprintf(c, sizeof c, "%s_cache65536", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache9x", temp); mkdir(c, 0755);
+        snprintf(c, sizeof c, "%s_cache5", temp); put(c, "a file");
+        uint64_t l = 0; CHECK(h_fs_OpenCacheList(&l) == RES_OK && l, "cache list opens");
+        snprintf(c, sizeof c, "%s_cache6", temp); mkdir(c, 0755);   // after the open: the next list's
+        memset(rec, 0xff, sizeof rec);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 3 && rec[0] == 2 && rec[0x20] == 8 && rec[0x40] == 0x2c && rec[0x41] == 1, "cache list: first page in index order");
+        int zero = 1; for (int i = 4; i < 0x20; i++) zero &= !rec[i];
+        CHECK(zero && !rec[1] && !rec[2] && !rec[3], "cache list: an entry is the index and zeroed reserved bytes");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 1 && rec[0] == 0xff && rec[1] == 0xff, "cache list: second page, index 65535; nothing the open did not see");
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 3) == RES_OK && count == 0, "cache list: the end");
+        uint64_t l2 = 0; CHECK(h_fs_OpenCacheList(&l2) == RES_OK && l2 != l && h_fs_ReadCacheList(&count, rec, l2, 4) == RES_OK && count == 4 && rec[0x40] == 8, "cache list: a new list sees the folder made since");
+        h_fs_CloseCacheList(l); h_fs_CloseCacheList(l);
+        CHECK(h_fs_ReadCacheList(&count, rec, l, 1) != RES_OK && count == 0, "cache list: a closed handle is no list");
+        CHECK(h_fs_ReadCacheList(&count, rec, 0x7bbd001230ull, 1) != RES_OK, "cache list: a handle never opened is no list");
+        h_fs_CloseCacheList(l2);
+        uint64_t many[17]; int opened = 0; for (int i = 0; i < 17; i++) opened += h_fs_OpenCacheList(&many[i]) == RES_OK;
+        CHECK(opened == 16, "cache list: 16 open at once, the 17th fails");
+        for (int i = 0; i < 16; i++) h_fs_CloseCacheList(many[i]);
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK, "cache list: closed lists free their slots"); h_fs_CloseCacheList(l);
+        unsetenv("DM_TEMP");
+    }
+    {   // fs::GetCacheStorageMax: the application's control data, DM_CONTROL_NACP else control.nacp beside the RomFS
+        char ver[1100], rom[1200], control[1300]; snprintf(ver, sizeof ver, "%s/v65536", root); snprintf(rom, sizeof rom, "%s/RomFS", ver); mkdir(ver, 0755); mkdir(rom, 0755);
+        snprintf(control, sizeof control, "%s/control.nacp", ver);
+        unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom, 1);
+        int index = -1; int64_t size = -1;
+        CHECK(h_fs_CacheMax(&index, &size) != RES_OK && index == -1, "cache storage max: no control data is an error, not a guess");
+        static uint8_t nacp[0x4000]; const uint64_t max = 1715470336; memcpy(nacp + 0x3180, &max, 8); nacp[0x3188] = 43;
+        FILE *f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43 && size == 1715470336, "cache storage max: control.nacp beside the RomFS folder");
+        char slash[1300]; snprintf(slash, sizeof slash, "%s/", rom); setenv("DM_ROMFS", slash, 1); index = -1;
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 43, "cache storage max: a RomFS path with a trailing slash");
+        nacp[0x3188] = 7; nacp[0x3189] = 1; char other[1300]; snprintf(other, sizeof other, "%s/other.nacp", root);
+        f = fopen(other, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_CONTROL_NACP", other, 1);
+        CHECK(h_fs_CacheMax(&index, &size) == RES_OK && index == 0x107, "cache storage max: DM_CONTROL_NACP first, the index a u16");
+        put(other, "short"); CHECK(h_fs_CacheMax(&index, &size) != RES_OK, "cache storage max: a short file is an error");
+        unsetenv("DM_CONTROL_NACP");
+        // fs::GetCacheStorageSize: the size the storage was created with; a folder without a record takes the control data's default (here none, then 50 MB / 1 MB); no storage is an error
+        char temp[1100], c[1300]; snprintf(temp, sizeof temp, "%s/temp2", root); setenv("DM_TEMP", temp, 1);
+        int64_t journal = -1; size = -1;
+        CHECK(h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND && size == -1, "cache storage size: no storage is ResultTargetNotFound");
+        CHECK(h_fs_CreateCache(3, 54198272, 180224) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272 && journal == 180224, "cache storage size: the size it was created with");
+        CHECK(h_fs_CreateCache(3, 1 << 20, 1 << 20) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_OK && size == 54198272, "cache storage size: creating it again keeps its size");
+        uint64_t l = 0; int count = -1; uint8_t rec[2 * 0x20];
+        CHECK(h_fs_OpenCacheList(&l) == RES_OK && h_fs_ReadCacheList(&count, rec, l, 2) == RES_OK && count == 1 && rec[0] == 3, "cache storage size: the list skips the record beside the folder");
+        h_fs_CloseCacheList(l);
+        CHECK(h_fs_DeleteCache(3) == RES_OK && h_fs_CacheSize(&size, &journal, 3) == RES_TARGET_NOT_FOUND, "cache storage size: deleting removes the storage");
+        snprintf(c, sizeof c, "%s_cache3.size", temp); CHECK(access(c, F_OK), "cache storage size: deleting removes the record");
+        CHECK(h_fs_MountCache("cachet", 4) == RES_OK && h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 256 << 20 && journal == 256 << 20, "cache storage size: no record, no default: 256 MB");
+        const int64_t def[2] = {50 << 20, 1 << 20}; memcpy(nacp + 0x3170, def, sizeof def);
+        f = fopen(control, "wb"); fwrite(nacp, 1, sizeof nacp, f); fclose(f); setenv("DM_ROMFS", rom, 1);
+        CHECK(h_fs_CacheSize(&size, &journal, 4) == RES_OK && size == 50 << 20 && journal == 1 << 20, "cache storage size: no record: the control data's default");
+        {   // one mount name for the cache storages in turn, unmounted in between (Taiko no Tatsujin: Rhythm Festival mounts index 1, unmounts, mounts index 2, all as "MyIndexCache")
+            char got[16], f1[1300], f2[1300]; int before = g_nmnt;
+            snprintf(c, sizeof c, "%s_cache11", temp); mkdir(c, 0755); snprintf(f1, sizeof f1, "%s/song", c); put(f1, "one");
+            snprintf(c, sizeof c, "%s_cache12", temp); mkdir(c, 0755); snprintf(f2, sizeof f2, "%s/song", c); put(f2, "two");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: the first index under a name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_PATH_EXISTS && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one"), "cache storage mount: another index under a name still in use is refused, as on Horizon");
+            h_fs_Unmount("MyCache"); CHECK(!h_fs_IsMounted("MyCache"), "cache storage mount: Unmount releases the name");
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: the next index under that name shows its own files (got %s)", got);
+            h_fs_Unmount("MyCache");
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "one") && g_nmnt == before + 2,
+                  "cache storage mount: the first index again takes its entry back (%d entries for two storages)", g_nmnt - before);
+            CHECK(h_fs_MountCache("MyCache", 11) == RES_OK, "cache storage mount: the same index again under a name in use is harmless");
+            h_fs_Unmount("MyCache"); h_fs_Unmount("MyCache");   // an unmount of a name not mounted is a no-op
+            CHECK(h_fs_MountCache("MyCache", 12) == RES_OK && read_fs("MyCache:/song", got, sizeof got) && !strcmp(got, "two"), "cache storage mount: and the second");
+            h_fs_Unmount("MyCache");
+            snprintf(c, sizeof c, "%s_cache13", temp); mkdir(c, 0755);
+            CHECK(mount("PermCache", c, 0) == RES_OK && h_fs_MountCache("PermCache", 13) == RES_OK, "cache storage mount: repeating a permanent mount of the same folder succeeds");
+            h_fs_Unmount("PermCache");
+            CHECK(h_fs_IsMounted("PermCache"), "cache storage mount: repeating a permanent mount does not make it releasable");
+        }
+        unsetenv("DM_TEMP"); unsetenv("DM_ROMFS");
+    }
+    {   // fs::GetSaveDataSize, GetDeviceSaveDataSize, GetSaveDataSizeMax, ExtendSaveData, ExtendDeviceSaveData
+        char sroot[1100], sdir[1200], nacp_path[1200], rec[1300], tmp[1300];
+        snprintf(sroot, sizeof sroot, "%s/savesize", root); mkdir(sroot, 0755);
+        snprintf(sdir, sizeof sdir, "%s/save", sroot);
+        snprintf(nacp_path, sizeof nacp_path, "%s/control.nacp", sroot);
+        const uint64_t uid1[2] = {DM_UID0, DM_UID1}, uid2[2] = {DM_UID0 + 1, DM_UID1}, bad_uid[2] = {0x1234, 0x5678};
+        int64_t size = -1, journal = -1;
+        setenv("DM_SAVE", sdir, 1); setenv("DM_CONTROL_NACP", nacp_path, 1);
+        // No control.nacp and no record: fallback is 256 MB data + 16 MB journal (size > journal)
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "device save size: fallback without control.nacp or record is 256 MB / 16 MB");
+        size = journal = -1;
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size max: fallback without control.nacp is 256 MB / 16 MB");
+        // Without control.nacp, ExtendSaveData and ExtendDeviceSaveData enforce the same 256 MB / 16 MB fallback max
+        snprintf(rec, sizeof rec, "%s.size", sdir);
+        CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 512 MiB above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0,
+              "extend save: rejects 32 MiB journal above fallback max when control.nacp is absent");
+        CHECK(h_fs_ExtendSave(uid1, 256 << 20, 16 << 20) == RES_OK && access(rec, F_OK) != 0,
+              "extend save: no-op at fallback limit succeeds without writing a record");
+        CHECK(h_fs_ExtendDeviceSave((int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(256 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+              "extend device save: rejects requests above fallback max when control.nacp is absent");
+        // Grandfathering pre-existing oversized records when control.nacp is absent: GetSaveDataSizeMax stays title-level (256/16),
+        // existing oversized capacity stays readable and usable as monotonic no-ops, non-oversized dimensions can still grow up to max,
+        // and new growth above max (on this user or another user) is rejected.
+        {
+            char u2rec[1300], drec[1300];
+            const uint64_t uid3[2] = {DM_UID0 + 2, DM_UID1};
+            CHECK(dm_account_create_user(1) == 0 && dm_account_create_user(2) == 0, "save size: register users 2 and 3 for grandfathering");
+            snprintf(u2rec, sizeof u2rec, "%s_user2.size", sdir);
+            snprintf(drec, sizeof drec, "%s_device.size", sdir);
+            put(rec, "536870912 33554432\n");     // 512 MiB / 32 MiB
+            put(u2rec, "536870912 8388608\n");    // 512 MiB / 8 MiB (data oversized, journal below 16 MiB max)
+            put(drec, "536870912 33554432\n");    // 512 MiB / 32 MiB device
+            CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (256 << 20) && journal == (16 << 20),
+                  "save size max: stays title-level 256 MB / 16 MB even with grandfathered oversized records");
+            CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20),
+                  "save size: pre-existing oversized account record stays readable (512 MiB / 32 MiB)");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendSave(uid1, (int64_t)300 << 20, 16 << 20) == RES_OK,
+                  "extend save: requests within grandfathered capacity remain monotonic no-ops");
+            CHECK(h_fs_ExtendSave(uid1, (int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, (int64_t)512 << 20, 48 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: further growth past grandfathered record above max is rejected");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 16 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK &&
+                  size == ((int64_t)512 << 20) && journal == (16 << 20),
+                  "extend save: under-limit journal can still grow to policy max while preserving grandfathered data size");
+            CHECK(h_fs_ExtendSave(uid2, (int64_t)512 << 20, 20 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: growing journal above policy max on grandfathered record is rejected");
+            CHECK(h_fs_ExtendSave(uid3, (int64_t)512 << 20, 16 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend save: another user without an oversized record is bounded by reported 256 MiB max");
+            CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == ((int64_t)512 << 20) && journal == (32 << 20) &&
+                  h_fs_ExtendDeviceSave((int64_t)512 << 20, 32 << 20) == RES_OK && h_fs_ExtendDeviceSave((int64_t)600 << 20, 32 << 20) == RES_EXT_SIZE_TOO_LARGE,
+                  "extend device save: grandfathers existing oversized record and rejects further growth above fallback max");
+            unlink(rec); unlink(u2rec); unlink(drec);
+        }
+        // Unknown or NULL UID is rejected as TargetNotFound without touching outputs
+        size = journal = -1;
+        CHECK(h_fs_SaveSize(&size, &journal, bad_uid) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: unknown UID returns TargetNotFound");
+        CHECK(h_fs_SaveSize(&size, &journal, NULL) == RES_TARGET_NOT_FOUND && size == -1 && journal == -1, "save size: NULL UID returns TargetNotFound");
+        CHECK(h_fs_ExtendSave(bad_uid, 64 << 20, 4 << 20) == RES_TARGET_NOT_FOUND && h_fs_ExtendSave(NULL, 64 << 20, 4 << 20) == RES_TARGET_NOT_FOUND, "extend save: unknown or NULL UID returns TargetNotFound");
+        // Short/corrupt control.nacp falls back cleanly
+        put(nacp_path, "short");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (256 << 20) && journal == (16 << 20), "save size: short control.nacp falls back to 256 MB / 16 MB");
+        // control.nacp with account (62 MB / 1 MB) and device (32 MB / 2 MB), no separate max
+        static uint8_t snacp[0x4000]; memset(snacp, 0, sizeof snacp);
+        const int64_t acc[2] = {62 << 20, 1 << 20}, dev[2] = {32 << 20, 2 << 20};
+        memcpy(snacp + 0x3080, acc, sizeof acc); memcpy(snacp + 0x3090, dev, sizeof dev);
+        FILE *f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: reads UserAccountSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: reads DeviceSaveDataSize/JournalSize from control.nacp");
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size max: falls back to base NACP account size when max is 0");
+        // Without a separate NACP max, extending above base returns ResultExtensionSizeTooLarge; a no-op within base succeeds without writing a record
+        snprintf(rec, sizeof rec, "%s.size", sdir);
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_EXT_SIZE_TOO_LARGE && access(rec, F_OK) != 0, "extend save: rejects growth past base when NACP max is 0");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 2 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend device save: rejects growth past base when NACP device max is 0");
+        CHECK(h_fs_ExtendSave(uid1, 62 << 20, 1 << 20) == RES_OK && access(rec, F_OK) != 0, "extend save: no-op within base succeeds without writing a record");
+        // Partial NACP max (journal max 0 < base journal 1 MB) never reports max below base
+        const int64_t partial_mx[2] = {128 << 20, 0}; memcpy(snacp + 0x3148, partial_mx, sizeof partial_mx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (1 << 20), "save size max: clamps partial NACP max journal >= base journal");
+        // control.nacp with explicit account max (128 MB / 8 MB) and device max (64 MB / 4 MB)
+        const int64_t mx[2] = {128 << 20, 8 << 20}, dmx[2] = {64 << 20, 4 << 20};
+        memcpy(snacp + 0x3148, mx, sizeof mx); memcpy(snacp + 0x3158, dmx, sizeof dmx);
+        f = fopen(nacp_path, "wb"); fwrite(snacp, 1, sizeof snacp, f); fclose(f);
+        CHECK(h_fs_SaveSizeMax(&size, &journal) == RES_OK && size == (128 << 20) && journal == (8 << 20), "save size max: reads UserAccountSaveDataSizeMax/JournalSizeMax from control.nacp");
+        // Negative arguments, over-max requests, and unaligned growing sizes are rejected without writing a record
+        CHECK(h_fs_ExtendSave(uid1, -1, 0) == RES_INVALID_SIZE && h_fs_ExtendSave(uid1, 64 << 20, -1) == RES_INVALID_SIZE, "extend save: rejects negative size or journal with ResultInvalidSize");
+        CHECK(h_fs_ExtendDeviceSave(-1, 0) == RES_INVALID_SIZE && h_fs_ExtendDeviceSave(48 << 20, -1) == RES_INVALID_SIZE, "extend device save: rejects negative size or journal with ResultInvalidSize");
+        CHECK(h_fs_ExtendSave(uid1, 129 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendSave(uid1, 96 << 20, 9 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend save: rejects requests above NACP max");
+        CHECK(h_fs_ExtendDeviceSave(65 << 20, 4 << 20) == RES_EXT_SIZE_TOO_LARGE && h_fs_ExtendDeviceSave(48 << 20, 5 << 20) == RES_EXT_SIZE_TOO_LARGE, "extend device save: rejects requests above NACP device max");
+        CHECK(h_fs_ExtendSave(uid1, (96 << 20) + 1, 4 << 20) == RES_EXT_SIZE_INVALID && h_fs_ExtendSave(uid1, 96 << 20, (4 << 20) + 1) == RES_EXT_SIZE_INVALID, "extend save: rejects unaligned growth with ResultExtensionSizeInvalid");
+        CHECK(access(rec, F_OK) != 0, "extend save: rejected requests write no record");
+        // ExtendSaveData persists beside DM_SAVE and grows monotonically per dimension (never shrinks)
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (96 << 20) && journal == (4 << 20), "extend save: subsequent GetSaveDataSize returns extended size");
+        CHECK(!access(rec, F_OK), "extend save: record sits beside DM_SAVE");
+        CHECK(h_fs_ExtendSave(uid1, 112 << 20, 0) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (4 << 20), "extend save: journal 0 grows data while preserving current journal");
+        CHECK(h_fs_ExtendSave(uid1, 0, 8 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: size 0 grows journal while preserving current data size");
+        CHECK(h_fs_ExtendSave(uid1, 80 << 20, 2 << 20) == RES_OK && h_fs_ExtendSave(uid1, (80 << 20) + 1, (2 << 20) + 1) == RES_OK && h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: smaller sizes are monotonic no-ops and never shrink");
+        // Device save has its own record, isolated from account save
+        CHECK(h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (32 << 20) && journal == (2 << 20), "device save size: unaffected by account ExtendSaveData");
+        CHECK(h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_OK && h_fs_DeviceSaveSize(&size, &journal) == RES_OK && size == (48 << 20) && journal == (4 << 20), "extend device save: recorded independently");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "account save size: unaffected by ExtendDeviceSaveData");
+        // Additional account user keeps its own record
+        CHECK(h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: user 2 reads control.nacp before its own extend");
+        CHECK(h_fs_ExtendSave(uid2, 80 << 20, 2 << 20) == RES_OK && h_fs_SaveSize(&size, &journal, uid2) == RES_OK && size == (80 << 20) && journal == (2 << 20), "extend save: user 2 gets its own record");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (112 << 20) && journal == (8 << 20), "extend save: user 1 record is untouched by user 2");
+        // Persistence failures return failure instead of RES_OK and leave no .tmp behind
+        char bad_save[1200];
+        snprintf(bad_save, sizeof bad_save, "%s/missing_dir/save", sroot);
+        setenv("DM_SAVE", bad_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL, "extend save: returns failure when parent directory does not exist");
+        char blk_save[1200];
+        snprintf(blk_save, sizeof blk_save, "%s/blocked", sroot);
+        snprintf(rec, sizeof rec, "%s.size", blk_save); mkdir(rec, 0755);   // directory at destination makes rename fail
+        snprintf(tmp, sizeof tmp, "%s.tmp", rec);
+        setenv("DM_SAVE", blk_save, 1);
+        CHECK(h_fs_ExtendSave(uid1, 96 << 20, 4 << 20) == RES_FAIL && access(tmp, F_OK) != 0, "extend save: returns failure when rename fails and cleans up .tmp");
+        rmdir(rec);
+        setenv("DM_SAVE", sdir, 1);
+        // NULL output pointers and unset DM_SAVE
+        CHECK(h_fs_SaveSize(&size, NULL, uid1) == RES_OK && h_fs_SaveSize(NULL, &journal, uid1) == RES_OK && h_fs_DeviceSaveSize(NULL, NULL) == RES_OK && h_fs_SaveSizeMax(NULL, NULL) == RES_OK, "save size: NULL output pointers are accepted");
+        unsetenv("DM_SAVE");
+        CHECK(h_fs_SaveSize(&size, &journal, uid1) == RES_OK && size == (62 << 20) && journal == (1 << 20), "save size: reads control.nacp cleanly when DM_SAVE is unset");
+        CHECK(h_fs_ExtendSave(uid1, 64 << 20, 1 << 20) == RES_FAIL && h_fs_ExtendDeviceSave(48 << 20, 4 << 20) == RES_FAIL, "extend save: fails when DM_SAVE is unset instead of returning RES_OK");
+        unsetenv("DM_CONTROL_NACP");
+    }
     char rom[1100], overlay[1100], rdata[1200], odata[1200], fn[1300], got[64];
     snprintf(rom, sizeof rom, "%s/rom", root); snprintf(overlay, sizeof overlay, "%s/overlay", root); snprintf(rdata, sizeof rdata, "%s/data", rom); snprintf(odata, sizeof odata, "%s/data", overlay);
     mkdir(rom, 0755); mkdir(overlay, 0755); mkdir(rdata, 0755); mkdir(odata, 0755);
@@ -177,6 +386,26 @@ int main(void) {
         CHECK(h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 3 && !strcmp(de[0].name, "a") && de[0].size == 5 && de[1].type == ENT_DIR && !strcmp(de[2].name, "c"), "lists a, b, c"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "the file filter hides directories"); h_fs_CloseDirectory(h);
         CHECK(h_fs_OpenDirectory(&h, "rom:/data/b", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0, "an empty directory"); h_fs_CloseDirectory(h);
+        {   // image directory handle streams via cursor without a snapshot: batched filtered reads, zeroed padding, and DirCount leaves cursor untouched
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_FILE) == RES_OK && !((dirh_t *)h)->snap && ((dirh_t *)h)->img, "image directory opens with a cursor and no snapshot");
+            memset(de, 0xaa, sizeof de);
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 0) == RES_OK && cnt == 0, "a 0-entry read returns 0 and leaves the cursor at the start");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "a") && de[0].type == ENT_FILE && de[0].size == 5, "first filtered 1-entry batch returns a");
+            int zero = 1; for (size_t i = 2; i < sizeof de[0].name; i++) zero &= !de[0].name[i];
+            for (size_t i = 0; i < sizeof de[0].pad0; i++) zero &= !de[0].pad0[i];
+            for (size_t i = 0; i < sizeof de[0].pad1; i++) zero &= !de[0].pad1[i];
+            CHECK(zero, "DirectoryEntry padding and name tail are zeroed");
+            CHECK(h_fs_DirCount(&cnt, h) == RES_OK && cnt == 2, "DirCount counts filtered files (2) mid-read");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "c") && de[0].type == ENT_FILE && de[0].size == 2, "second batch skips directory b and returns c (cursor untouched by DirCount)");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "third batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", DIRMODE_DIR) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 1, "dir-only filter counts 1");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 1 && !strcmp(de[0].name, "b") && de[0].type == ENT_DIR && de[0].size == 0, "dir-only batch returns b with size 0");
+            CHECK(h_fs_ReadDirectory(&cnt, de, h, 1) == RES_OK && cnt == 0, "dir-only second batch reaches the end");
+            h_fs_CloseDirectory(h);
+            CHECK(h_fs_OpenDirectory(&h, "rom:/data", 0) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 0 && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 0, "mode 0 counts and lists nothing");
+            h_fs_CloseDirectory(h);
+        }
         g_nmnt = 0;
         char ov[1100], ovd[1200]; snprintf(ov, sizeof ov, "%s/imgov", root); snprintf(ovd, sizeof ovd, "%s/data", ov); mkdir(ov, 0755); mkdir(ovd, 0755);
         snprintf(fn, sizeof fn, "%s/a", ovd); put(fn, "mod"); snprintf(fn, sizeof fn, "%s/new", ovd); put(fn, "added");
@@ -189,6 +418,19 @@ int main(void) {
         CHECK(read_fs("rom:\\data\\a", got, sizeof got) && !strcmp(got, "mod") && read_fs("rom:\\data\\c", got, sizeof got) && !strcmp(got, "xy"), "backslash paths reach the overlay folder and the image");
         h = 0; cnt = -1; CHECK(h_fs_OpenDirectory(&h, "rom:\\data", DIRMODE_DIR | DIRMODE_FILE) == RES_OK && h_fs_DirCount(&cnt, h) == RES_OK && cnt == 4, "and list the merged directory (%lld)", (long long)cnt); h_fs_CloseDirectory(h);
         unsetenv("DM_ROMFS_OVERLAY"); g_nmnt = 0;
+        {   // another program's RomFS by its index (Super Mario Bros. Wonder's Switch 2 program mounts its Switch 1 program's, index 0): romfs_programs/<index>.img beside DM_ROMFS
+            char pd[1100], pd2[1100]; snprintf(pd, sizeof pd, "%s/romfs_programs", root); snprintf(pd2, sizeof pd2, "%s/progs", root); mkdir(pd, 0755); mkdir(pd2, 0755);
+            int own = (int)(DM_GAME_PROGRAM_ID & 0xfff), other = own == 0 ? 1 : 0;
+            memcpy(img + 32, "HELLO", 5); snprintf(fn, sizeof fn, "%s/%d.img", pd, other); f = fopen(fn, "wb"); fwrite(img, 1, sizeof img, f); fclose(f); memcpy(img + 32, "hello", 5);
+            CHECK(h_fs_MountRomIdx("content", other, NULL, 0) == RES_OK && read_fs("content:/data/a", got, sizeof got) && !strcmp(got, "HELLO"), "MountRom with another program's index mounts that program's image (got %s)", got);
+            char own_image[1200]; snprintf(own_image, sizeof own_image, "%s/%d.img", pd, own); CHECK(!link(fn, own_image), "stage a stale image at the current index");
+            CHECK(h_fs_MountRomIdx("own", own, NULL, 0) == RES_OK && read_fs("own:/data/a", got, sizeof got) && !strcmp(got, "hello"), "the current index uses DM_ROMFS even when a stale sibling image exists (got %s)", got);
+            int missing = own == 2 ? 3 : 2;
+            CHECK(h_fs_MountRomIdx("fallback", missing, NULL, 0) == RES_OK && read_fs("fallback:/data/a", got, sizeof got) && !strcmp(got, "hello"), "an index with no image falls back to the current RomFS (got %s)", got);
+            snprintf(fn, sizeof fn, "%s/%d.img", pd2, other); CHECK(!link(ip, fn), "stage a program image elsewhere"); setenv("DM_ROMFS_PROGRAMS", pd2, 1);
+            CHECK(h_fs_MountRomIdx("content2", other, NULL, 0) == RES_OK && read_fs("content2:/data/a", got, sizeof got) && !strcmp(got, "hello"), "DM_ROMFS_PROGRAMS names the folder (the iOS app's, when its RomFS is in Documents)");
+            unsetenv("DM_ROMFS_PROGRAMS"); g_nmnt = 0;
+        }
         snprintf(fn, sizeof fn, "%s/2.img", root); CHECK(!link(ip, fn), "stage a DLC image"); setenv("DM_AOC_DIR", root, 1);
         size_t cache = 0;
         CHECK(h_fs_QueryAocCache(&cache, 2) == RES_OK && cache == 176, "DLC image reports Horizon table size (176, got %zu)", cache);
@@ -203,9 +445,10 @@ int main(void) {
             h_fs_Unmount("AVC");
             CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello") && g_nmnt == before + 2,
                   "the first add-on again takes its entry back (%d entries for two add-ons)", g_nmnt - before);
-            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "a name still in use keeps its target, as before");
+            CHECK(h_fs_MountAoc("AVC", 3, NULL, 0) == RES_PATH_EXISTS && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "another add-on under a name still in use is refused, as on Horizon");
+            CHECK(h_fs_MountAoc("AVC", 2, NULL, 0) == RES_OK && read_fs("AVC:/data/a", got, sizeof got) && !strcmp(got, "hello"), "the same add-on again under a name in use is harmless");
             CHECK(h_fs_MountRom("rom", NULL, 0) == RES_OK, "mount the RomFS"); h_fs_Unmount("rom");
-            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every mount but an add-on's");
+            CHECK(h_fs_IsMounted("rom") && read_fs("rom:/data/c", got, sizeof got) && !strcmp(got, "xy"), "Unmount leaves the RomFS mounted, as every non-releasable mount");
         }
         unsetenv("DM_AOC_DIR"); g_nmnt = 0;
         {   // a file written as read from a damaged NSP (nx_extract --allow-damaged) still reads, and the mount counts it and the first open names it once
@@ -319,6 +562,21 @@ int main(void) {
         h = 0; CHECK(h_fs_OpenDirectory(&h, "save:\\dir", DIRMODE_FILE) == RES_OK && h_fs_ReadDirectory(&cnt, de, h, 4) == RES_OK && cnt == 1 && !strcmp(de[0].name, "g"), "the directory lists g, not a name with backslashes (%s)", cnt ? de[0].name : "-"); h_fs_CloseDirectory(h);
     }
 
+    printf("⑦b a rename between two mounts is refused before either is touched, as Horizon refuses it (ResultRenameToOtherFileSystem)\n");
+    {   char rod[1100], tmpd[1100], q[1200]; int32_t t = -1;
+        snprintf(rod, sizeof rod, "%s/rodir", root); mkdir(rod, 0755); snprintf(tmpd, sizeof tmpd, "%s/tmpst", root); mkdir(tmpd, 0755);
+        CHECK(mount("rodir", rod, 1) == RES_OK && mount("tmpst", tmpd, 0) == RES_OK && mount_ex("dsave", save, 0, 1) == RES_OK && g_mnt[g_nmnt - 1].txn_root == g_mnt[0].txn_root,
+              "mount a read-only folder, a writable one and a second name for the save (one transaction)");
+        CHECK(h_fs_RenameFile("save:/dir/g", "rodir:/g") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir/g") == RES_OK, "a file into the read-only mount is refused, and stays");
+        snprintf(q, sizeof q, "%s/g", rod); CHECK(access(q, F_OK) != 0, "nothing is written into the read-only folder");
+        CHECK(h_fs_RenameDir("save:/dir", "tmpst:/dir") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "save:/dir") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/dir") != RES_OK,
+              "a directory into another writable mount is refused, and stays");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "save:/dir/h") == RES_RENAME_OTHER_FS && h_fs_GetEntryType(&t, "dsave:/dir/g") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") != RES_OK,
+              "between two names of one save too: two mounts on Horizon");
+        CHECK(h_fs_RenameFile("dsave:/dir/g", "dsave:/dir/h") == RES_OK && h_fs_GetEntryType(&t, "save:/dir/h") == RES_OK, "on one mount the rename is made");
+        CHECK(h_fs_CreateFile("tmpst:/a", 0) == RES_OK && h_fs_RenameFile("tmpst:/a", "tmpst:/b") == RES_OK && h_fs_GetEntryType(&t, "tmpst:/b") == RES_OK, "and on a plain writable mount");
+    }
+
     printf("⑧ a save folder that cannot clone, and symlinks in recursive deletes\n");
     {   g_nmnt = 0; g_clone_enotsup = 1; int nf1 = g_nfail;
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && g_mnt[0].ro && g_nfail == nf1 + 1, "clonefile ENOTSUP: the committed save mounts read-only and the front end is told once");
@@ -384,7 +642,7 @@ int main(void) {
               && h_fs_DeleteDirRec("vtapi:/VoiceText/vt") == RES_OK && h_fs_CleanDirRec("vtapi:/VoiceText") == RES_OK && h_fs_DeleteDir("vtapi:/VoiceText") == RES_OK && g_vt_calls == calls + 5,
               "RenameFile, DeleteFile and the directory deletes on the RAM disk are the SDK's");
         calls = g_vt_calls;
-        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") != RES_OK && g_vt_calls == calls, "a rename between the SDK's mount and the host's fails and reaches neither");
+        CHECK(h_fs_RenameFile("vtapi:/VoiceText/vt/vtpath.ini", "save:/vtpath.ini") == RES_RENAME_OTHER_FS && g_vt_calls == calls, "a rename between the SDK's mount and the host's is refused as two mounts and reaches neither");
         calls = g_vt_calls; g_vt_mount_asks = 0;
         CHECK(h_fs_CreateFile("save:/vt", 0) == RES_OK && write_save("save:/vt", "x") == RES_OK && read_fs("save:/vt", b, sizeof b) && h_fs_GetEntryType(&et, "save:/vt") == RES_OK && g_vt_calls == calls && !g_vt_mount_asks,
               "the host's own mounts never ask the SDK");
@@ -428,6 +686,37 @@ int main(void) {
         CHECK(h_fs_MountSave("save", NULL) == RES_OK && h_fs_OpenFile(&h, "save:/savedata0.bin", MODE_READ) != RES_OK, "an erased file stays erased at the next mount");
         CHECK(read_fs("save:/both.bin", got, sizeof got) && !strcmp(got, "new") && read_fs("save:/m/a", got, sizeof got) && !strcmp(got, "ma"), "a second mount changes nothing else");
 #undef OLD
+        g_nmnt = 0;
+    }
+
+    printf("⑩ stale writable handles rejected after rollback\n");
+    {   char s1[1100], s2[1100], f1[1200], f2[1200];
+        snprintf(s1, sizeof s1, "%s/stale1", root); snprintf(s2, sizeof s2, "%s/stale2", root);
+        mkdir(s1, 0755); mkdir(s2, 0755);
+        unsetenv("DM_TEST_FS_FAIL"); unsetenv("DM_TEST_FS_FAILAT");
+        setenv("DM_SAVE", s1, 1); g_nmnt = 0;
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK && mount_ex("save2", s2, 0, 1) == RES_OK, "mount two independent transactional saves");
+        CHECK(h_fs_CreateFile("save:/stale", 0) == RES_OK && write_save("save:/stale", "orig") == RES_OK && h_fs_Commit("save") == RES_OK, "commit original bytes to save:/stale");
+        CHECK(h_fs_CreateFile("save2:/peer", 0) == RES_OK && write_save("save2:/peer", "peer0") == RES_OK && h_fs_Commit("save2") == RES_OK, "commit original bytes to save2:/peer");
+        uint64_t h = 0, h2 = 0, h_new = 0;
+        CHECK(h_fs_OpenFile(&h, "save:/stale", MODE_WRITE) == RES_OK, "open writable handle on save:/stale");
+        CHECK(h_fs_OpenFile(&h2, "save2:/peer", MODE_WRITE) == RES_OK, "open writable handle on unaffected save2:/peer");
+        g_mode = 1; g_calls = 0;
+        CHECK(h_fs_WriteFile(h, 0, "bad", 3, NULL) == RES_FAIL, "injected zero-byte write fails and taints save");
+        g_mode = 0;
+        CHECK(h_fs_Commit("save") == RES_FAIL, "commit rolls back save while handle h remains open");
+        snprintf(f1, sizeof f1, "%s/stale", s1); snprintf(f2, sizeof f2, "%s/peer", s2);
+        CHECK(same(f1, "orig"), "committed save:/stale remains orig after rollback");
+        CHECK(h_fs_WriteFile(h, 0, "after", 5, NULL) == RES_FAIL, "WriteFile rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h, 1) == RES_FAIL, "SetFileSize rejects stale handle after rollback");
+        CHECK(h_fs_SetFileSize(h2, 5) == RES_OK && h_fs_WriteFile(h2, 0, "peer1", 5, NULL) == RES_OK, "unaffected second transaction handle still writes and resizes");
+        h_fs_CloseFile(h2);
+        CHECK(h_fs_Commit("save2") == RES_OK && same(f2, "peer1"), "unaffected second transaction commits peer1");
+        h_fs_CloseFile(h);
+        CHECK(h_fs_OpenFile(&h_new, "save:/stale", MODE_WRITE) == RES_OK, "close and reopen save:/stale (FD reuse)");
+        CHECK(h_fs_SetFileSize(h_new, 8) == RES_OK && h_fs_WriteFile(h_new, 0, "replaced", 8, NULL) == RES_OK, "reopened handle writes replacement bytes");
+        h_fs_CloseFile(h_new);
+        CHECK(h_fs_Commit("save") == RES_OK && same(f1, "replaced"), "commit succeeds and on-disk save:/stale equals replaced");
         g_nmnt = 0;
     }
 

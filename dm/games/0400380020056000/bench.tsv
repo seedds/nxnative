@@ -1,0 +1,3 @@
+# Use the same local saves/slosher-hub fixture as smoke.tsv, with the Slosher equipped at the hub spawn and the default camera.
+# Pass --save <NSP folder>/saves/slosher-hub; each run uses a copy.
+slosher-hub	f1200:ZL+ZR~f12,f2100:ZR~f3*120/120,f2130:ZL~f60*120/120	180	90	Repeated Slosher attacks and ink refills from a fixed hub save.

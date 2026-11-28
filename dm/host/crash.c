@@ -215,7 +215,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         dm_gfx_addr_note(a, note, sizeof note);
         if (note[0]) fprintf(stderr, "[dm] x%d %#llx:%s\n", i, (unsigned long long)a, note);
     }
-    // DM_CRASH_PEEK="sp+0x248*,x22-0x20": 0x100 bytes at each address, given as sp or a register plus or minus an offset, a trailing * reading the pointer stored there first
+    // DM_CRASH_PEEK="sp+0x248*,x22-0x20,main+0x3b73818*+0x8*": 0x100 bytes at each address, given as sp, a register or a module's base, then offsets (+ or -) and * (read the pointer stored there) in any order
     // (PRAGMATA's render function keeps its current draw item at sp + 0x248: the item and what it points at tell where a bad pointer came from); with what the graphics layer knows of it
     if (getenv("DM_CRASH_PEEK")) {
         char spec[512]; snprintf(spec, sizeof spec, "%s", getenv("DM_CRASH_PEEK"));
@@ -223,9 +223,17 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
             uint64_t a = 0; char *p = tok;
             if (!strncmp(p, "sp", 2)) { a = uc->uc_mcontext->__ss.__sp; p += 2; }
             else if (*p == 'x') { long r = strtol(p + 1, &p, 10); if (r < 0 || r > 28) continue; a = uc->uc_mcontext->__ss.__x[r]; }
-            else continue;
-            if (*p == '+' || *p == '-') { long long d = strtoll(p, &p, 0); a += (uint64_t)d; }
-            if (*p == '*') { uint64_t v = 0; vm_size_t got = 0; if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)&v, &got) != KERN_SUCCESS || got != 8) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; } a = v; }
+            else {   // a module's base, as "main+0x3b73818*": a game's heap and stack addresses change from run to run, its modules' globals stay put
+                int k = 0; while (k < g_nmod && strncmp(p, g_mod[k].name, strlen(g_mod[k].name))) k++;
+                if (k == g_nmod || p[strlen(g_mod[k].name)] != '+') continue;
+                a = (uint64_t)(uintptr_t)g_mod[k].base; p += strlen(g_mod[k].name);
+            }
+            int ok = 1;   // offsets and dereferences in turn: "main+0x3b73818*+0x8*" is the word 8 bytes into the object that global points at
+            while (ok && (*p == '+' || *p == '-' || *p == '*')) {
+                if (*p == '*') { uint64_t v = 0; vm_size_t got = 0; if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, 8, (vm_address_t)&v, &got) != KERN_SUCCESS || got != 8) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); ok = 0; } else { a = v; p++; } }
+                else { long long d = strtoll(p, &p, 0); a += (uint64_t)d; }
+            }
+            if (!ok) continue;
             uint64_t w[32]; vm_size_t got = 0; char note[512]; note[0] = 0;
             if (vm_read_overwrite(mach_task_self(), (vm_address_t)a, sizeof w, (vm_address_t)w, &got) != KERN_SUCCESS || got != sizeof w) { fprintf(stderr, "[dm] peek %s: %#llx unreadable\n", tok, (unsigned long long)a); continue; }
             dm_gfx_addr_note(a, note, sizeof note);

@@ -227,6 +227,42 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   and gameplay validation.
 - The supplied DLC is a licence-only NSP, with no data to extract.
 
+## Frame pacing
+
+- **Resolved: present snapshots hold 30 fps.** The swap chain is 2 textures at
+  interval 1 (`WindowInitialize swap chain 2 textures, interval 1`), so the game
+  gets a texture back only once the display link has taken the previous present.
+  Three hitch dumps had `RenderWorker` parked in `nvnWindowAcquireTexture` ->
+  `mtl_present_wait` for 50-64 ms on frames whose GPU work was 13-18 ms, with
+  main and both job threads queued behind it: a frame that missed a tick waited
+  a whole extra one
+  ([the mechanism](../../../docs/reference/frame-rate.md#present-snapshots-the-games-swapchain-texture-free-at-once)).
+  `present_snap on` copies each present at once, so the swapchain texture frees
+  immediately. Over 143,100 frames (80 minutes, varied play) every one of 481
+  timing windows reads 33.33 ms p50, where before the change 30,000-frame blocks
+  ran at 42.8 dropped per 300. The wait moves to the ring's own acquire, 2.69 ms
+  per frame (p95 2.97, max 3.17), and no dump fell in the acquire path again.
+- **Current: about 70 render encoders a frame draw nothing.** Over 246 profiled
+  frames (`DM_NVN_GPUPROF=every:600`, `dm/tools/gpuprof.py`) the frame holds 339
+  passes and 12.27 ms, of which the `0x0 0c` shape - no attachments, no draws -
+  is 70.4 passes and 1.33 ms, 10.9 % of GPU time, 18.9 us each; the 160
+  compute/copy encoders add 1.21 ms at 7.5 us each and roughly half of those
+  encode neither a copy nor a dispatch. They come in a strict cycle of one copy,
+  one empty compute encoder and one empty render pass, all reporting the same
+  host pass number, so they are not the game's own draw passes. Creating them
+  also costs on the CPU: of the 13 hitch dumps that caught a busy thread, 3 were
+  in `FPMTLMetricsServiceInternal metalAddEncoder:` and 1 in `AGX`
+  `beginRenderPass` -> `DataBufferAllocator::newCommand`, all four under the same
+  guest render call. The guest call that produces them is not yet named; a
+  `DM_NVN_PASSDUMP` run is needed, and its own timings are worthless because it
+  writes from the render thread through stdio.
+- 128 long frames in 143,100 (one every ~37 s, median 61.6 ms) survive the
+  snapshot change. Only 5 involve a pipeline build (worst 52.4 ms at frame
+  120,384) and 6 a texture upload; 117 are neither. Besides the encoder
+  creation above, the dumps caught our own `pool_find` -> `pidx_sort` ->
+  `_qsort` under `bind_vbufs`, and `pkg_edges_take` -> `tex_mtl_` blocked in
+  `malloc`.
+
 ## Threads
 
 - **Current: the picture stops while audio plays** ([issue #1250](https://github.com/seedds/nxnative/issues/1250)):
@@ -249,7 +285,8 @@ existing [per-depth-mode entry-point mechanism](../../../docs/reference/shaders.
   is unimplemented. The enable setter is ignored and the dilation setter
   reports `[RED] NVN unimplemented function called`. Its visual contribution
   has not been isolated; the diagnostic has not been suppressed.
-- Outdoor exploration and battles have not been validated yet.
+- Outdoor exploration, battles, an event and a Poké Center battle play on the
+  Mac; the overworld past the opening area is not validated.
 - iPhone gameplay, device memory and touch controls are untested. Audio runs
   through both Wwise output queues on the Mac without sustained underruns;
   listening on the iPhone is pending.

@@ -230,6 +230,7 @@ static void rx_commit(int cur, DmCommitFB *own, uint64_t ubc) {
             for (void (^b)(id<MTL4CommitFeedback>) in ((DmCommitFB *)fbs[(NSUInteger)i])->blocks) b((id<MTL4CommitFeedback>)part); }
     }];
     pthread_mutex_lock(&g_res_commit_mu);
+    uint64_t at = commit_now(); for (id fb in fbs) if (fb != NSNull.null) gpu_tag_commit(fb, at);
     uint64_t elapsed = q4_commit_elapsed(buffers, (NSUInteger)nb, o);
     rx_mark_locked();
     pthread_mutex_unlock(&g_res_commit_mu);
@@ -558,6 +559,7 @@ static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: REC_CMT_NOW /
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
+    gpu_tag_commit(fb, commit_now());
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
     rx_mark();
     q4_commit_slow(elapsed, "rec_commit (main command buffer)");

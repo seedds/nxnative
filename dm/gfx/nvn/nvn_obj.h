@@ -320,6 +320,10 @@ void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acq
 int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check matching mtl_present_wait_texture (for nvnSyncWait with timeout 0)
 void mtl_present_flush(void);                              // Wait until all enqueued presents have been processed
 void mtl_present_test_stall(uint64_t ns);                  // Unit test: extra pause in ns before each present on the present thread
+#ifdef __OBJC__
+@protocol MTLSharedEvent;
+void mtl_present_test_hold(id<MTLSharedEvent> ev, uint64_t v);   // Unit test: each present's drawable wait first waits on the GPU for ev to reach v (nil: no wait)
+#endif
 int mtl_display_hz(void);                                   // Maximum refresh rate of the screen (Hz) when there is a window, 0 without a window
 void mtl_set_tex_pool_n(int n);                            // Texture descriptor pool capacity: texture IDs outside the pool are treated as 'empty slots' (read 0)
 void mtl_set_samp_pool_n(int n);                           // Sampler descriptor pool capacity: sampler IDs outside the pool are treated as empty slots too
@@ -330,6 +334,7 @@ double mtl_gpu_ms(uint64_t f);
 void mtl_ab_gpu(uint64_t f, double gpu_ms, double frame_ms);   // DM_AB phases (nvn_mtl.m)
 void xv_test_counts(int *dc, int *viol);
 int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1);   // The frame's earliest GPUStart / latest GPUEnd (mach absolute time, ns); returns 0 if not all complete or there is no GPU time
+double mtl_gpu_queue_ms(uint64_t f);   // From the frame's first commit to g_q4 to its first GPUStart (ms); -1 until all complete, or with no commit time
 int mtl_gpu_done(uint64_t f, uint64_t *t1);   // 1 when all of frame f's command buffers completed (latest GPUEnd in *t1, 0 if none had a time), 0 while running, -1 if no record
 void mtl_stats(uint64_t *passes, uint64_t *draws);
 void mtl_args_stats(uint64_t *enc, uint64_t *reuse, uint64_t *patch);
@@ -350,6 +355,7 @@ int mtl_link_rate(void);   // the display link's rate: 120, 60 or 30 Hz
 void mtl_link_mode_set(int mode);   // the display link's pacing mode (DM_PRESENT_LINK's values), applied at the next present
 double mtl_presented_time(uint64_t n);
 int mtl_link_tick(uint64_t n, double *target, double *lead_ms, int *ticks, double *gap_ms);   // the display-link tick that took the n-th present (0 = none: no display link, or not taken yet)
+int mtl_present_queue_ms(uint64_t n, double *ms);   // from the n-th present's commit to its command buffer's GPU start (0 = not known yet)
 int mtl_link_stalled(void);   // the display link is silent (background, occluded window, a stall) and queued frames are dropped instead of shown
 int mtl_snap_on(void); uint64_t mtl_snap_acquire_wait(void); int mtl_snap_acquire_wait_timeout(uint64_t timeout_ns, uint64_t *waited_ns); int mtl_snap_acquire_ready(void); int mtl_present_screen_ready(void);   // present snapshots (DM_PRESENT_SNAP): on, acquire's wait for ring capacity (returns ns spent pacing / 0 on timeout), and non-blocking readiness checks
    // Actual presentation time (seconds) of the n-th present (counted from 1); 0 = not ready, −1 = dropped

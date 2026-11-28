@@ -12,6 +12,7 @@ typedef struct {
     pthread_mutex_t mutex;
     nvn_present_time presented[NVN_PRESENT_HISTORY_CAP];
     nvn_link_time link[NVN_PRESENT_HISTORY_CAP];
+    nvn_present_time queued[NVN_PRESENT_HISTORY_CAP];   // t: ms from the present command buffer's commit to its GPU start
 } nvn_present_history;
 #define NVN_PRESENT_HISTORY_INIT {.mutex = PTHREAD_MUTEX_INITIALIZER}
 
@@ -47,5 +48,23 @@ static inline int nvn_link_history_get(nvn_present_history *h, uint64_t n, nvn_l
     pthread_mutex_unlock(&h->mutex);
     if (e.n != n) return 0;
     *out = e;
+    return 1;
+}
+
+static inline void nvn_queue_history_put(nvn_present_history *h, uint64_t n, double ms) {
+    if (!n) return;
+    pthread_mutex_lock(&h->mutex);
+    nvn_present_time *e = &h->queued[n % NVN_PRESENT_HISTORY_CAP];
+    if (n >= e->n) *e = (nvn_present_time){n, ms};
+    pthread_mutex_unlock(&h->mutex);
+}
+
+static inline int nvn_queue_history_get(nvn_present_history *h, uint64_t n, double *ms) {
+    if (!n) return 0;
+    pthread_mutex_lock(&h->mutex);
+    nvn_present_time e = h->queued[n % NVN_PRESENT_HISTORY_CAP];
+    pthread_mutex_unlock(&h->mutex);
+    if (e.n != n) return 0;
+    *ms = e.t;
     return 1;
 }

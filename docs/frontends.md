@@ -115,6 +115,28 @@ Cheats are files, not settings: the host (`dm/host/hle_cheats.c`) reads Atmosph√
 - **The iPhone.** The engine is compiled into the iOS host too (without safe mode), with the same folder rule, but the iOS app sets neither `DM_CHEATS` nor `DM_ROOT`, so cheats are off there unless `Documents/env.txt` names a folder with `DM_CHEATS`; even then they write data only, never code (the app's code pages are signed). Giving the iOS app a default, `Documents/cheats`, is the natural next step once a front end wants to manage cheats on a device; it is not in this change.
 - **Carrying a file to another build.** `scripts/cheat_anchor.py` imports a cheat file into a version-independent source and compiles it for any build of the game ([the rewriter reference](reference/rewriter.md#cheats-carried-across-game-updates)). A front end need not know about it: the compiled `<build ID>.txt` is an ordinary cheat file, and its `.meta.tsv` makes the panel richer.
 
+## Controls
+
+The player's controls are a text file the host reads at the game's start (`dm/host/controls.h`): a controller's buttons sent as other buttons, the Mac keyboard's map, and the mouse as a stick. A front end writes the file; the host never writes it.
+
+- **Where.** `DM_CONTROLS=<file>[:<file>‚Ä¶]`, read in order, later lines winning; else `<DM_ROOT>/controls.txt`. A Mac app's launcher passes `~/Library/Application Support/nxnative/controls.txt` (every game) and then `~/Library/Application Support/nxnative/<title ID>/controls.txt` (this game), so a game's file changes only what it names. The iPhone app reads `Documents/controls.txt`. A missing file changes nothing; a line the host does not understand is logged as a `[RED] controls:` line and skipped.
+- **Lines.** One setting per line, `#` starts a comment:
+
+| Line | Meaning |
+|---|---|
+| `pad <button>=<buttons>` | A controller's button sends these instead (names joined with `+`, or `none`). By position: a Nintendo pad's labels, another pad's right, bottom, top and left face buttons are A, B, X and Y. Every controller and player, Joy-Con rail buttons included |
+| `pad swap_sticks=1` | The two sticks trade places |
+| `key <code>=<actions>` | The macOS key code (`kVK_*`, 0 to 127) does these; `none` unbinds it |
+| `key clear` | Forget the built-in keyboard map; the lines after it are the whole map |
+| `mouse=<off\|right\|left>` | A click in the picture captures the pointer and its movement is that stick; Escape or leaving the window gives it back. `off`, the default, keeps the mouse the touch screen |
+| `mouse_speed=<n>` | 0.1 to 10, 1 by default |
+| `mouse_invert_y=1` | Moving the mouse up tilts the stick down |
+| `mouse_button <left\|right\|middle>=<actions>` | What the buttons do while the pointer is captured (defaults: ZR, ZL, RS) |
+
+- **Names.** Buttons: `A B X Y L R ZL ZR LS RS Plus Minus Left Up Right Down` and the rail buttons `LSL LSR RSL RSR`. Keys and mouse buttons also take the stick directions `LLeft LUp LRight LDown RLeft RUp RRight RDown` and `Shake`. Case does not matter.
+- **The built-in keyboard map** is the one in [Playing on the Mac](playing.md#on-the-mac): WASD, the arrows (with Shift, the right stick, while an arrow keeps its built-in action), J K U I, Q E Z C, F G, Return, Tab and Space.
+- **Joy-Cons held sideways** need no line: a Joy-Con 2 of a pair becomes a player of its own when its SL and SR are held ([Pairs and singles](playing.md#switch-2-controllers-mac)).
+
 ## An app that hosts the engine
 
 An app that links the host and the front end's game view into its own process (a launcher holding several games, say) has these hooks in `dm/host/front.h`. nxnative's own apps do not use them, so its tests and regression runs do not cover them. Each one is unset by default, and a hook must be set before the game starts.

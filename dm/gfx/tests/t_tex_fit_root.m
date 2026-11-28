@@ -65,6 +65,70 @@ static void cube_views(id<MTLLibrary> library) {
     CHECK(ca_c && ca_c.textureType == MTLTextureTypeCube, "a cube array in a cube slot: its first cube");
     read_args(rd_c, ca_c, dirs[5], sizeof dirs[5], v); CHECK(same(v, 1, 5, plain), "the first cube's last face through the cube view");
 }
+// An ID marked gone (its memory pool finalized, or mtl_reg_tex_gone) lets go of every view it caches, as a full unregister does: the type-compatible view (tex_fit) and the pool
+// table's view (pool_fit) as well as the primary one, through the deferred release behind the open submission's fence (PR #923). Each case watches those two views themselves
+// (weak references; their parent, the root, the serial table holds): alive and reading right until the submission completes, gone after. Registering the same data again keeps
+// the views (mtl_reg_tex), so a gone case followed by one must not leave them; the unregister case is the control
+enum { RT_TID = NTID };
+static void rt_settle(void) {
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
+    @autoreleasepool { mtl_drain(); dispatch_sync(g_feedback_q, ^{}); defer_drain(); }
+}
+static void retire_views(id<MTLComputePipelineState> pipeline, id<MTLTexture> root) {
+    static const char *names[] = {"unregister", "descriptor gone", "pool gone", "descriptor gone, then the same registration"};
+    const int swapped[4] = {2, 1, 0, 3}; float px[4];
+    for (int mode = 0; mode < 4; mode++) {
+        char what[160];
+        pool_t pool = {.magic = MAGIC('P', 'O', 'O', 'L')};
+        tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = nvn_new_serial(), .pool = &pool};
+        t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D_ARRAY, .format = NVN_FORMAT_RGBA8, .width = W, .height = W, .depth = LAYERS, .levels = LEVELS, .samples = 1};
+        nvn_tex_layout(&t.d, &t.L);
+        view_t v = {.set_levels = 1, .base_level = 1, .nlevels = 2, .set_layers = 1, .min_layer = 2, .nlayers = 2, .set_swizzle = 1,
+                    .swz = {MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed, MTLTextureSwizzleAlpha}};
+        int tid = RT_TID + mode;
+        __weak id<MTLTexture> w_alt = nil, w_palt = nil;
+        mtl_tex_init(&t); serial_put(t.serial, root); mtl_reg_tex(tid, &t, &v);
+        mtl_sub_begin();
+        @autoreleasepool {
+            uint64_t rid = 0;
+            os_unfair_lock_lock(&g_rmu);
+            id<MTLTexture> primary = tex_by_id(tid), alt = tex_fit(tid, primary, MTLTextureType2D, &rid);
+            uint64_t prid = pool_fit(tid, primary, MTLTextureType2D);
+            id<MTLTexture> palt = (__bridge id<MTLTexture>)g_treg[tid].palt[0];
+            os_unfair_lock_unlock(&g_rmu);
+            snprintf(what, sizeof what, "%s: the registered view, its type-compatible view and its pool table view are views of the root", names[mode]);
+            CHECK(primary && primary.parentTexture == root && alt && alt != primary && alt.parentTexture == root && prid && palt && palt.parentTexture == root, what);
+            w_alt = alt; w_palt = palt;
+            if (alt) { read2d(pipeline, alt, 1, px); snprintf(what, sizeof what, "%s: the type-compatible view reads level 2, layer 2, swizzled", names[mode]); CHECK(same(px, 2, 2, swapped), what); }
+            if (mode == 0) mtl_reg_tex(tid, NULL, NULL);
+            else if (mode == 2) mtl_alias_drop_pool(&pool);
+            else mtl_reg_tex_gone(tid);
+            if (mode == 3) mtl_reg_tex(tid, &t, &v);
+        }
+        @autoreleasepool {
+            defer_drain();   // the open submission's fence has not passed
+            snprintf(what, sizeof what, "%s: both views live until the submission that may read them completes", names[mode]);
+            CHECK(w_alt != nil && w_palt != nil, what);
+            id<MTLTexture> alt = w_alt;
+            if (alt) { read2d(pipeline, alt, 0, px); snprintf(what, sizeof what, "%s: the retired type-compatible view still reads level 1, layer 2", names[mode]); CHECK(same(px, 1, 2, swapped), what); }
+        }
+        rt_settle();
+        @autoreleasepool { snprintf(what, sizeof what, "%s: both views released once the submission completed", names[mode]); CHECK(w_alt == nil && w_palt == nil, what); }
+        mtl_sub_begin();
+        @autoreleasepool {
+            if (mode == 3) {   // registered again: the lookups make the views anew
+                uint64_t rid = 0;
+                os_unfair_lock_lock(&g_rmu);
+                id<MTLTexture> primary = tex_by_id(tid), alt = tex_fit(tid, primary, MTLTextureType2D, &rid);
+                os_unfair_lock_unlock(&g_rmu);
+                CHECK(alt && alt.parentTexture == root, "registered again: a new type-compatible view");
+                if (alt) { read2d(pipeline, alt, 0, px); CHECK(same(px, 1, 2, swapped), "registered again: the new view reads level 1, layer 2"); }
+            }
+            mtl_reg_tex(tid, NULL, NULL); mtl_tex_release(&t);
+        }
+        rt_settle();
+    }
+}
 int main(void) { @autoreleasepool {
     mtl_init(); NSError *error = nil;
     NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -95,5 +159,6 @@ int main(void) { @autoreleasepool {
     read2d(pipeline, fit, 0, v); CHECK(same(v, 1, 2, swapped), "level 0 of the fitted view is level 1, layer 2, swizzled");
     read2d(pipeline, fit, 1, v); CHECK(same(v, 2, 2, swapped), "level 1 of the fitted view is level 2, layer 2, swizzled");
     cube_views(library);
+    retire_views(pipeline, root);
     printf("tex_fit views from the root: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

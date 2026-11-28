@@ -41,7 +41,9 @@ fps_target	60
 mem_reserve	0x140000000
 mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0xA0000000
+# Switch hardware pool with a 2.5 GB StandardAllocator cap (docs/reference/memory.md, The heap check's 1 GB pool picked a game's low graphics)
+app_pool	0xCD500000
+stdalloc_cap	0xA0000000
 
 # ---- Shader split (shader_split.py; Unity Shader objects, read by unityfs.py) ----
 # engine built-ins (data.unity3d, Resources/unity default resources) go to engine, the Addressables bundles to assets

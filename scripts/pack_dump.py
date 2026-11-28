@@ -13,24 +13,23 @@
 #   extract/v<version>/ExeFS/   the newest version's code modules (APFS clones, or copies on another volume)
 #   extract/v<version>/RomFS.img   its RomFS as one image (dm/tools/romfs_image.py: the host's DM_ROMFS, the IPA's romfs.img)
 #   aoc/<index>.img   each DLC's RomFS (index = DLC title ID − base title ID − 0x1000), the host's DM_AOC_DIR
-# A dump has no control data, so there is no control.nacp or icon.jpg beside them, as there is after nx_extract.
+#   extract/v<version>/control.nacp, icon.jpg   from an extracted Control NCA (control/control.nacp, control/icon_*.dat; an Ounce 0400 program prefers control/Acd_1/), or loose adjacent files, when present
 # The title ID is the program ID in main.npdm. A repeat run keeps code modules that are the same and an image whose source tree, packer and image are unchanged (romfs_image.py --reuse).
 # Usage: pack_dump.py <dump folder> [--version N] [--work-dir DIR]   (exit 1 on error)
-import argparse, filecmp, shutil, struct, subprocess, sys
+import argparse, filecmp, shutil, subprocess, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
-import romfs_image
+import nacp as _nacp, npdm as _npdm, romfs_image
+
+ICON_LANGS = tuple(name.replace(' ', '') for _, name in _nacp.LANGUAGES)   # Nintendo's Control NCA icon_<Language>.dat names, in NACP language order (matches nx_extract)
 
 
 class Error(Exception): pass
 
 
 def program_id(npdm):   # the ACI0 program ID of main.npdm
-    d = npdm.read_bytes()
-    if d[:4] != b'META': raise Error(f'{npdm}: not an NPDM')
-    off, size = struct.unpack_from('<II', d, 0x70)
-    if d[off:off + 4] != b'ACI0' or size < 0x18: raise Error(f'{npdm}: no ACI0 section')
-    return struct.unpack_from('<Q', d, off + 0x10)[0]
+    try: return _npdm.program_id(npdm.read_bytes())
+    except _npdm.Error as e: raise Error(f'{npdm}: {e}') from None
 
 
 def clone(src, dst):   # an APFS clone on the same volume, else a copy
@@ -95,10 +94,42 @@ def scan(dump):
     return app, vers, dlc
 
 
-def pack_version(src, app, out, say=print):   # one version's folder (base/ or updates/<version>/) → out/ExeFS and out/RomFS.img
+def pick_icon(directory):   # Control NCA localized JPEG in NACP language order (American English, British English, …), else first sorted icon_*.dat
+    for lang in ICON_LANGS:
+        p = directory / f'icon_{lang}.dat'
+        if p.is_file(): return p
+    return next((p for p in sorted(directory.glob('icon_*.dat')) if p.is_file()), None)
+
+
+def control_sources(src):
+    """Extracted Control NCA files inside a chosen version directory (src), with loose src/{control.nacp,icon.jpg} fallback.
+    An Ounce (0400) program prefers control/Acd_1/ over control/; other programs ignore Acd_1/. Never walks above src."""
+    ctrl = src / 'control'
+    try: ounce = program_id(src / 'exefs/main.npdm') >> 56 == 0x04
+    except (OSError, Error): ounce = False
+    acd = ctrl / 'Acd_1'
+    dirs = (acd, ctrl) if ounce and acd.is_dir() else (ctrl,)
+    nacp_src = next((p for p in (*(d / 'control.nacp' for d in dirs), src / 'control.nacp') if p.is_file()), None)
+    icon_src = next((p for d in dirs if (p := pick_icon(d)) is not None), None)
+    if icon_src is None and (src / 'icon.jpg').is_file(): icon_src = src / 'icon.jpg'
+    return {'control.nacp': nacp_src, 'icon.jpg': icon_src}
+
+
+def copy_control(src, out):   # map extracted Control NCA metadata to nx_extract's layout (out/{control.nacp,icon.jpg}), clearing stale outputs
+    for name, source in control_sources(src).items():
+        dest = out / name
+        if source is None: dest.unlink(missing_ok=True); continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.is_file() and not dest.is_symlink() and filecmp.cmp(source, dest, shallow=False): continue
+        dest.unlink(missing_ok=True)
+        clone(source, dest)
+
+
+def pack_version(src, app, out, say=print):   # one version's folder (base/ or updates/<version>/) → out/ExeFS, out/RomFS.img and control metadata
     if not (src / 'exefs/main').is_file() or not (src / 'exefs/main.npdm').is_file() or not (src / 'romfs').is_dir(): raise Error(f'{src}: no exefs/main, exefs/main.npdm and romfs')
     if (pid := program_id(src / 'exefs/main.npdm')) != app: raise Error(f'{src}: program ID {pid:016X}, the base is {app:016X}')
     exefs(src / 'exefs', out / 'ExeFS')
+    copy_control(src, out)
     pack(src / 'romfs', out / 'RomFS.img', say)
 
 

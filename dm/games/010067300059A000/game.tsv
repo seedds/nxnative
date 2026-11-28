@@ -38,5 +38,12 @@ shader_note	Mario + Rabbids Kingdom Battle shaders
 
 # The game sets NVN depth mode near=0 before loading its shaders.
 depth_mode	zero
+
+# ---- Frame rate ----
+# Snowdrop's default cap comes from the NVN present interval. Use the host's display pacing.
+fps_target	60
+present_interval	display
+
+# ---- Input ----
 # Movement and camera use both sticks.
 pad_layout	full

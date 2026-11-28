@@ -1,0 +1,43 @@
+# Game profile of METAL GEAR SOLID: Peace Walker - Master Collection Version (Switch, update v131072 = 1.3.0): program 0, the Unity launcher, of one game of two programs.
+# Unity 6000.1.2f1 IL2CPP with FMOD and NintendoSDK_movie (subsdk0) on NVN, SDK 19.3.11. Launches program 1 (010099801C4FA001, Peace Walker HD Edition) via oe::ExecuteProgram.
+
+# ---- Identity ----
+title_id	010099801C4FA000
+program_id	010099801C4FA000
+
+# ---- App ----
+name	METAL GEAR SOLID: Peace Walker - Master Collection Version
+ipa	MetalGearSolidPeaceWalkerMasterCollectionVersion.ipa
+app_category	public.app-category.games
+
+# ---- Programs ----
+# One game of two programs, as on the cartridge: this launcher starts Peace Walker HD Edition (program 1) with oe::ExecuteProgram and a 74-byte command-line launch parameter.
+programs	1=010099801C4FA001
+
+# ---- Versions ----
+build	v131072	1.3.0	main=2db2a0871a5c5104952b87d44fde2015	subsdk0=bda3d43bac6b09f2d7ea324437c728a3	sdk=df7a3960c74c3a4803f826c587153252
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/sharedassets0.assets.resS
+zip_store	.assets:.bundle:.dat:.ress:.metallib
+
+# ---- Memory ----
+# the NPDM declares 16 MB of system resource (virtual address memory) and main never sets a heap: a 5 GB block with a 4.375 GB alias region, where the game maps its memory itself
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# nvnDeviceSetDepthMode with near = 0: the pipeline bases made before the game runs are made for that mode
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	METAL GEAR SOLID: Peace Walker - Master Collection Version shaders

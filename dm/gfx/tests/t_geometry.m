@@ -68,7 +68,7 @@ static void capture_indices(void) {
 static void cpu_read_proofs(void) {
     // Independent hazards from each production tracker, including its unknown
     // cases. Fake addresses are queried only; no CPU/GPU memory is dereferenced.
-    const uint64_t address=0x40000000;pend_reset();memset(g_gw,0,sizeof g_gw);g_gw_all=0;state_reset();
+    const uint64_t address=0x40000000;pend_reset();memset(g_gwx,0,sizeof g_gwx);g_gw_all=0;state_reset();
     EXPECT("clean CPU range",0,geo_cpu_hazard(address,64));
     for(int kind=1;kind<=3;kind++) {
         pend_reset();pend_add(address+16,16,kind);
@@ -85,7 +85,7 @@ static void cpu_read_proofs(void) {
     pend_reset();gw_put(address,address+64,g_done+1,g_done);
     EXPECT("previous submission live write",1,geo_cpu_hazard(address,64));
     EXPECT("unrelated previous live write",0,geo_cpu_hazard(address+4096,64));
-    memset(g_gw,0,sizeof g_gw);gw_put(address,address+64,g_done,g_done);
+    memset(g_gwx,0,sizeof g_gwx);gw_put(address,address+64,g_done,g_done);
     EXPECT("completed previous write",0,geo_cpu_hazard(address,64));
     g_gw_all=g_done+1;EXPECT("previous write overflow",1,geo_cpu_hazard(address,64));g_gw_all=0;
     EXPECT("CPU range overflow",1,geo_cpu_hazard(UINT64_MAX-3,8));
@@ -100,10 +100,10 @@ static void cpu_read_proofs(void) {
     sbw_note(address,64,SBW_GPU);EXPECT("converted stream current GPU write",1,geo_conversion_hazard(vs));
     pend_reset();gw_put(address,address+64,g_done+1,g_done);
     EXPECT("converted stream prior GPU write",1,geo_conversion_hazard(vs));
-    memset(g_gw,0,sizeof g_gw);S.attr[0].stream=1;S.vbuf[1]=(NVNbufferRange){address+4096,64};pend_add(address,64,2);
+    memset(g_gwx,0,sizeof g_gwx);S.attr[0].stream=1;S.vbuf[1]=(NVNbufferRange){address+4096,64};pend_add(address,64,2);
     EXPECT("conversion checks its actual stream",0,geo_conversion_hazard(vs));
     pend_reset();g_sbw_over=1;EXPECT("converted stream unknown GPU write",1,geo_conversion_hazard(vs));
-    pend_reset();memset(g_gw,0,sizeof g_gw);state_reset();
+    pend_reset();memset(g_gwx,0,sizeof g_gwx);state_reset();
 }
 static void index_cache_contract(void) {
     if(!geo_ix_on())return;
@@ -136,7 +136,7 @@ static void pack_test(void) {
         nvn_geo_pack_job j={b.gpuAddress,b.gpuAddress+512,b.gpuAddress+1024,3,8,t==0?7:t==1?6:1,100,b.gpuAddress+3072};
         memcpy((char*)b.contents+2048,&j,sizeof j);
         mtl_sub_begin();
-        for(int i=0;i<3;i++) { id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL); enc_c_pso(en,p[i]);enc_c_args(en,b.gpuAddress+2048,0);
+        for(int i=0;i<3;i++) { id<MTL4ComputeCommandEncoder> en=enc_c_begin(); enc_c_pso(en,p[i]);enc_c_args(en,b.gpuAddress+2048,0);
             enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(i==1?128:64,1,1));enc_c_end(en); }
         finish();
         uint32_t *args=(uint32_t*)((char*)b.contents+1024);
@@ -161,7 +161,7 @@ static void pack_test(void) {
         unsigned expected=n<=capacity?(unsigned)n:capacity-capacity%width;
         nvn_geo_pack_job j={large.gpuAddress,large.gpuAddress+16384,large.gpuAddress+65536,GROUPS,STRIDE,t==0?7:t==1?6:1,capacity,large.gpuAddress+73728};
         memcpy((char*)large.contents+81920,&j,sizeof j);mtl_sub_begin();
-        for(int i=0;i<3;i++) {id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);enc_c_pso(en,p[i]);enc_c_args(en,large.gpuAddress+81920,0);
+        for(int i=0;i<3;i++) {id<MTL4ComputeCommandEncoder> en=enc_c_begin();enc_c_pso(en,p[i]);enc_c_args(en,large.gpuAddress+81920,0);
             enc_c_dispatch(en,MTLSizeMake(i==1?1:(GROUPS+63)/64,1,1),MTLSizeMake(i==1?128:64,1,1));enc_c_end(en);}
         finish();uint32_t *args=(uint32_t*)((char*)large.contents+65536),*dst=(uint32_t*)((char*)large.contents+16384);
         EXPECT("blocked scan count and capacity",expected,args[0]);
@@ -186,7 +186,7 @@ static void fast_pack_test(void) {
         }
         unsigned capacity=limited?37:(unsigned)n+11,expected=MIN((unsigned)n,capacity-capacity%width);
         nvn_geo_pack_job job={b.gpuAddress,b.gpuAddress+32768,b.gpuAddress+98304,groups,8,topology,capacity,b.gpuAddress+100352};
-        memcpy((char*)b.contents+102400,&job,sizeof job);mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,small);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
+        memcpy((char*)b.contents+102400,&job,sizeof job);mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,small);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
         uint32_t *dst=(uint32_t*)((char*)b.contents+32768),*args=(uint32_t*)((char*)b.contents+98304);
         EXPECT("fused count includes complete primitives only",expected,args[0]);EXPECT("fused order matches CPU assembly",0,memcmp(dst,reference,expected*4));
         EXPECT("fused output bound sentinel",0xcccccccc,dst[expected]);EXPECT("fused indirect instance count",1,args[1]);
@@ -199,7 +199,7 @@ static void fast_pack_test(void) {
         memset(big.contents,0xcc,big.length);uint32_t *tot=(uint32_t*)big.contents+GROUPS;uint32_t reference[BLOCKS],sum=0;
         for(unsigned k=0;k<BLOCKS;k++){reference[k]=sum;tot[k]=(k%17)*(kind+1);sum+=tot[k];}
         nvn_geo_pack_job job={0,0,b.gpuAddress+98304,GROUPS,8,kind==0?1:kind==1?6:7,limited?37:sum+7,big.gpuAddress};memcpy((char*)b.contents+102400,&job,sizeof job);
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+102400,0);enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(128,1,1));enc_c_end(ce);finish();
         EXPECT("parallel chunk prefix matches literal CPU scan",0,memcmp(tot,reference,sizeof reference));
         EXPECT("parallel scan bound sentinel",0xcccccccc,tot[BLOCKS]);unsigned w=kind+1;EXPECT("parallel scan indirect count",limited?37-37%w:sum,*(uint32_t*)((char*)b.contents+98304));
     }
@@ -228,7 +228,7 @@ static void pack_dependency_test(uint32_t groups) {
             memset(b.contents,0xcc,b.length);
             nvn_geo_pack_job job={b.gpuAddress,b.gpuAddress+packed_off,b.gpuAddress+args_off,groups,8,topology[t],capacity,b.gpuAddress+count_off};
             memcpy((char*)b.contents+job_off,&job,sizeof job);uint64_t emit[]={b.gpuAddress,groups};memcpy((char*)b.contents+emit_off,emit,sizeof emit);
-            mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,producer);enc_c_args(ce,b.gpuAddress+emit_off,0);
+            mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,producer);enc_c_args(ce,b.gpuAddress+emit_off,0);
             enc_c_dispatch(ce,MTLSizeMake((groups+63)/64,1,1),MTLSizeMake(64,1,1));
             geo_pack_encode(ce,pack,b.gpuAddress+job_off,groups);enc_c_end(ce);finish();
             uint32_t *raw=b.contents,*packed=(uint32_t*)((char*)b.contents+packed_off),*counts=(uint32_t*)((char*)b.contents+count_off),*args=(uint32_t*)((char*)b.contents+args_off);
@@ -253,7 +253,7 @@ static void scan_edges(void) {
         uint32_t blocks=sizes[sz],groups=blocks*64,sum=0;memset(b.contents,0xcc,b.length);uint32_t *counts=b.contents;
         for(uint32_t g=0;g<blocks;g++){want[g]=sum;counts[groups+g]=g%5?g%4:0;sum+=counts[groups+g];}
         nvn_geo_pack_job job={0,0,b.gpuAddress+524288,groups,0,7,37,b.gpuAddress};memcpy((char*)b.contents+524544,&job,sizeof job);
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+524544,0);
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+524544,0);
         enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(threads[nt],1,1));enc_c_end(ce);finish();
         uint32_t *args=(uint32_t*)((char*)b.contents+524288);
         EXPECT("scan edge complete offsets",0,memcmp(counts+groups,want,(size_t)blocks*4));
@@ -263,7 +263,7 @@ static void scan_edges(void) {
     // Large invalid totals must not wrap back into the writable output range.
     memset(b.contents,0xcc,b.length);uint32_t *counts=b.contents;counts[192]=UINT32_MAX-5;counts[193]=10;counts[194]=100;
     nvn_geo_pack_job job={0,0,b.gpuAddress+524288,192,0,7,64,b.gpuAddress};memcpy((char*)b.contents+524544,&job,sizeof job);
-    mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin(NULL);enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+524544,0);
+    mtl_sub_begin();id<MTL4ComputeCommandEncoder> ce=enc_c_begin();enc_c_pso(ce,scan);enc_c_args(ce,b.gpuAddress+524544,0);
     enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(256,1,1));enc_c_end(ce);finish();
     uint32_t *args=(uint32_t*)((char*)b.contents+524288);
     EXPECT("overflow prefix first",0,counts[192]);EXPECT("overflow prefix second",UINT32_MAX-5,counts[193]);EXPECT("overflow prefix saturates",UINT32_MAX,counts[194]);
@@ -273,7 +273,7 @@ static void scan_edges(void) {
     id<MTLComputePipelineState> write=[g_dev newComputePipelineStateWithFunction:[lib newFunctionWithName:@"geo_pack_write"] error:&error];if(!write)abort();
     uint32_t *raw=(uint32_t*)((char*)b.contents+4096);raw[0]=0;raw[1]=1;raw[2]=2;counts[0]=UINT32_MAX-1;counts[1]=0;
     job=(nvn_geo_pack_job){b.gpuAddress+4096,b.gpuAddress+8192,b.gpuAddress+524288,1,3,7,8,b.gpuAddress};memcpy((char*)b.contents+524544,&job,sizeof job);
-    mtl_sub_begin();ce=enc_c_begin(NULL);enc_c_pso(ce,write);enc_c_args(ce,b.gpuAddress+524544,0);
+    mtl_sub_begin();ce=enc_c_begin();enc_c_pso(ce,write);enc_c_args(ce,b.gpuAddress+524544,0);
     enc_c_dispatch(ce,MTLSizeMake(1,1,1),MTLSizeMake(64,1,1));enc_c_end(ce);finish();
     uint32_t *output=(uint32_t*)((char*)b.contents+8192);for(int i=0;i<9;i++)EXPECT("overflow offset never writes output",0xcccccccc,output[i]);
 }
@@ -298,7 +298,7 @@ static void passthrough_bounds(NSArray *layouts) {
         id<MTLComputePipelineState> emit=[g_dev newComputePipelineStateWithFunction:[emitlib newFunctionWithName:@"emit"] error:&error];if(!emit)abort();
         memset(b.contents,0xcc,b.length);uint64_t emitargs[]={b.gpuAddress,b.gpuAddress+16384};memcpy((char*)b.contents+28672,emitargs,sizeof emitargs);
         nvn_geo_pack_job job={b.gpuAddress,b.gpuAddress+4096,b.gpuAddress+8192,groups,stride,topology,100,b.gpuAddress+12288};memcpy((char*)b.contents+28928,&job,sizeof job);
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);enc_c_pso(en,emit);enc_c_args(en,b.gpuAddress+28672,0);
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin();enc_c_pso(en,emit);enc_c_args(en,b.gpuAddress+28672,0);
         enc_c_dispatch(en,MTLSizeMake(groups,1,1),MTLSizeMake(1,1,1));
         geo_pack_encode(en,pack,b.gpuAddress+28928,groups);enc_c_end(en);finish();
         uint32_t *raw=b.contents,*output=(uint32_t*)((char*)b.contents+16384),*indices=(uint32_t*)((char*)b.contents+4096),*args=(uint32_t*)((char*)b.contents+8192);
@@ -339,7 +339,7 @@ static void storage_buffers(void) {
     S.ssbo[2][2]=(p_bind_buf){.stage=2,.index=2,.addr=(uint64_t)(data+4096),.size=64};
     S.ssbo[5][0]=(p_bind_buf){.stage=5,.index=0,.addr=(uint64_t)(data+8192),.size=99};
     NSError *e=nil;id<MTLComputePipelineState> ps=[g_dev newComputePipelineStateWithFunction:s->fn error:&e];if(!ps)abort();
-    mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,ps);
+    mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin();args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,ps);
     EXPECT("geometry storage write tracked",1,sbw_hits((uint64_t)(data+4096),(uint64_t)(data+4096)+24));
     enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));enc_c_end(en);finish();
     uint64_t row0=0,row2=0;uint32_t *out=(uint32_t*)(data+4096);memcpy(&row0,out,8);memcpy(&row2,out+3,8);
@@ -386,7 +386,7 @@ static void passthrough_kernels(const char *directory) {
         g_geo_bind[3]=b.gpuAddress+24576;g_geo_bind[4]=b.gpuAddress+24832;
         nvn_geo_pack_job job={g_geo_bind[2],b.gpuAddress+50176,b.gpuAddress+53248,groups,index_stride,[layout[@"output"] unsignedIntValue],100,b.gpuAddress+53504};
         memcpy((char*)b.contents+54016,&job,sizeof job);
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,pipeline);
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin();args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,pipeline);
         enc_c_dispatch(en,MTLSizeMake(1,instances,1),MTLSizeMake(32,1,1));
         geo_pack_encode(en,pack,b.gpuAddress+54016,groups);enc_c_end(en);finish();
         float *out=(float*)((char*)b.contents+32768);uint32_t *raw=(uint32_t*)((char*)b.contents+49152),*packed=(uint32_t*)((char*)b.contents+50176),*args=(uint32_t*)((char*)b.contents+53248);
@@ -469,15 +469,15 @@ static void replay(int mode) {
         // Hold a previous submission live until this draw reaches its hazard
         // check; a completed prior write correctly needs no second wait.
         gate=[g_dev newSharedEvent];rec_drain();[g_q4 waitForEvent:gate value:1];
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);enc_c_pso(en,writer);
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin();enc_c_pso(en,writer);
         uint64_t gpu,offset;void *buffer;mtl_gpu_addr((uint64_t)(commands+8192),16,&buffer,&offset,&gpu);enc_c_args(en,gpu,0);
         enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));enc_c_end(en);sbw_note((uint64_t)(commands+8192),16,SBW_GPU);
         mtl_sub_commit();rec_drain();
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,500000000),dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{gate.signaledValue=1;});
     }
-    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();uint64_t waits=g_mdi_v;
+    state_reset();memset(&R,0,sizeof R);mtl_sub_begin();uint64_t waits=g_mdi_waits;
     if(mode==8) {
-        id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);enc_c_pso(en,writer);
+        id<MTL4ComputeCommandEncoder> en=enc_c_begin();enc_c_pso(en,writer);
         uint64_t gpu,offset;void *buffer;mtl_gpu_addr((uint64_t)(commands+8192),16,&buffer,&offset,&gpu);enc_c_args(en,gpu,0);
         enc_c_dispatch(en,MTLSizeMake(1,1,1),MTLSizeMake(1,1,1));enc_c_end(en);sbw_note((uint64_t)(commands+8192),16,SBW_GPU);
     }
@@ -485,7 +485,7 @@ static void replay(int mode) {
     if(mode==15)g_pend_over=1;
     mtl_exec(commands);
     char wait_name[80];snprintf(wait_name,sizeof wait_name,"geometry CPU snapshot wait mode %d",mode);
-    EXPECT(wait_name,mode==7||mode==8||mode==9||mode==13||mode>=14,g_mdi_v-waits);
+    EXPECT(wait_name,mode==7||mode==8||mode==9||mode==13||mode>=14,g_mdi_waits-waits);
     if(conversion) {
         float first=-1;for(int i=0;i<64;i++)if(g_vconv[i].serial==g_sub_serial&&g_vconv[i].addr==(uint64_t)(commands+24576))
             for(NvArena *a in g_sub_arenas)if(g_vconv[i].gpu>=a->gpu&&g_vconv[i].gpu+4<=a->gpu+a->buf.length)memcpy(&first,(char*)a->buf.contents+g_vconv[i].gpu-a->gpu,4);
@@ -665,7 +665,7 @@ static void translated(const char *directory) {
         uint32_t *map=(uint32_t*)((char*)b.contents+8448);for(int v=0;v<vertices;v++)map[v]=v;
         state_reset();S.ubo[2][0]=(p_bind_buf){.stage=2,.index=0,.addr=(uint64_t)uniforms,.size=65536};
         g_geo_bind[0]=b.gpuAddress;g_geo_bind[1]=b.gpuAddress+12288;g_geo_bind[2]=b.gpuAddress+16384;g_geo_bind[3]=b.gpuAddress+8192;g_geo_bind[4]=b.gpuAddress+8448;
-        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin(NULL);args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,ps);enc_c_dispatch(en,MTLSizeMake(1,2,1),MTLSizeMake(32,1,1));enc_c_end(en);finish();
+        mtl_sub_begin();id<MTL4ComputeCommandEncoder> en=enc_c_begin();args_dirty_all();encode_args(en,s,2,0);enc_c_pso(en,ps);enc_c_dispatch(en,MTLSizeMake(1,2,1),MTLSizeMake(32,1,1));enc_c_end(en);finish();
         float *out=(float*)((char*)b.contents+12288);uint32_t *ix=(uint32_t*)((char*)b.contents+16384);
         for(int group=0;group<4;group++) {
             for(unsigned v=0;v<s->geo_vertices;v++) {

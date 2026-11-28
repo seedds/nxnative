@@ -28,7 +28,20 @@ namespace Ryujinx.Graphics.Shader.Translation
             return DecodeShader(address, gpuAccessor, options);
         }
 
-        private static TranslatorContext DecodeShader(ulong address, IGpuAccessor gpuAccessor, TranslationOptions options)
+        // Native bindings must start at RayTracingProgram.ReservedBindings.
+        // The input image contains original modules; metadata-planned MOVs are
+        // interpreted by emission, never applied as speculative binary patches.
+        public static TranslatorContext CreateRayTracingContext(IGpuAccessor gpuAccessor, TranslationOptions options, RayTracingProgram program)
+        {
+            ArgumentNullException.ThrowIfNull(program);
+            if (!options.Flags.HasFlag(TranslationFlags.Compute | TranslationFlags.Ampere) ||
+                options.TargetLanguage != TargetLanguage.Spirv || !gpuAccessor.QueryRawGlobalMemory() ||
+                options.Flags.HasFlag(TranslationFlags.MetalUniformBounds) || !program.Entries.Any(e => e.Address == 0))
+                throw new ArgumentException("Ray tracing requires an Ampere compute image, SPIR-V, flat global memory and an entry at address0.");
+            return DecodeShader(0, gpuAccessor, options, program);
+        }
+
+        private static TranslatorContext DecodeShader(ulong address, IGpuAccessor gpuAccessor, TranslationOptions options, RayTracingProgram rayTracingProgram = null)
         {
             int localMemorySize;
             ShaderDefinitions definitions;
@@ -39,9 +52,11 @@ namespace Ryujinx.Graphics.Shader.Translation
             if (options.Flags.HasFlag(TranslationFlags.Compute))
             {
                 definitions = CreateComputeDefinitions(gpuAccessor);
-                localMemorySize = gpuAccessor.QueryComputeLocalMemorySize();
+                localMemorySize = rayTracingProgram?.LocalMemoryBytes ?? gpuAccessor.QueryComputeLocalMemorySize();
 
-                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address) : Decoder.Decode(definitions, gpuAccessor, address);
+                program = ampere ? Decoder.DecodeAmpere(definitions, gpuAccessor, address,
+                    rayTracingProgram?.Entries.Select(e => e.Address).ToArray(), rayTracingProgram != null) : Decoder.Decode(definitions, gpuAccessor, address);
+                if (rayTracingProgram != null) RayTracingControlFlow.ValidateDecoded(program, rayTracingProgram);
             }
             else
             {
@@ -70,7 +85,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             int size = (int)maxEndAddress + (options.Flags.HasFlag(TranslationFlags.Compute) ? 0 : headerSize);
 
-            return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program);
+            return new TranslatorContext(address, size, localMemorySize, definitions, gpuAccessor, options, program, rayTracingProgram);
         }
 
         private static ShaderDefinitions CreateComputeDefinitions(IGpuAccessor gpuAccessor)
@@ -162,6 +177,14 @@ namespace Ryujinx.Graphics.Shader.Translation
                 FunctionMatch.RunPass(program);
             }
 
+            bool rayTracing = translatorContext.RayTracingProgram != null;
+            if (rayTracing)
+            {
+                DecodedFunction driver = new(ulong.MaxValue);
+                driver.SetBlocks([]);
+                program.AddFunctionAndSetId(driver);
+            }
+
             foreach (DecodedFunction function in program.Where(x => !x.IsCompilerGenerated).OrderBy(x => x.Address))
             {
                 program.AddFunctionAndSetId(function);
@@ -171,7 +194,13 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             for (int index = 0; index < functions.Length; index++)
             {
-                EmitterContext context = new(translatorContext, resourceManager, program, vertexAsCompute, index != 0);
+                if (rayTracing && index == 0)
+                {
+                    functions[0] = new FunctionCode(RayTracingDriver.Emit(translatorContext.RayTracingProgram,
+                        translatorContext.Continuations, program));
+                    continue;
+                }
+                EmitterContext context = new(translatorContext, resourceManager, program, vertexAsCompute, rayTracing || index != 0);
 
                 if (initializeOutputs && index == 0)
                 {
@@ -198,6 +227,7 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
 
                 functions[index] = new(context.GetOperations());
+                if (rayTracing) translatorContext.Continuations.RecordInputs(function.Address, functions[index].Code, translatorContext.RayTracingProgram);
             }
 
             return functions;

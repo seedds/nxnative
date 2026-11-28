@@ -2,6 +2,7 @@
 """Camelot's archive reader (dm/gfx/tools/cra.py) on synthetic data: the file table and the code that locates it, the scramble and its checksum, NARC members and the packing kinds.
 The real archive's 8,671 files passing the game's own checksums is the check of the key and the variants; this keeps the layouts from drifting without the game's files."""
 import io, lz4.block, os, struct, sys, unittest, zlib
+from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import cra
 
@@ -172,6 +173,24 @@ class Members(unittest.TestCase):
         self.assertEqual(cra.narc_members(narc([b'abc', b'', b'0123456789abcdefg'])), [b'abc', b'', b'0123456789abcdefg'])
         with self.assertRaises(cra.Error): cra.narc_members(b'SARC' + bytes(32))
         with self.assertRaises(cra.Error): cra.narc_members(narc([b'abc'])[:40])
+
+    def test_malformed_members(self):
+        text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40
+        lz4d = b'\x94\0\0\0' + struct.pack('<I', len(text)) + lz4.block.compress(text, store_size=False)
+        with self.assertRaisesRegex(cra.Error, 'an LZ4 member'): cra.undo(lz4d[:-5])
+        with mock.patch.object(lz4.block, 'decompress', side_effect=AssertionError('must reject before allocation')):
+            with self.assertRaisesRegex(cra.Error, 'would expand to 4294967295'): cra.undo(b'\x94\0\0\0\xff\xff\xff\xff\0\0\0\0')
+            with self.assertRaisesRegex(cra.Error, 'of 0 bytes that would expand to 1'): cra.undo(b'\x94\0\0\0\x01\0\0\0')
+        with self.assertRaisesRegex(cra.Error, 'zstd member header cut'): cra.undo(b'Z\0\0\0')
+        with self.assertRaisesRegex(cra.Error, 'a zstd member'): cra.undo(b'Z\0\0\0' + bytes(4) + cra.zstd_mod().compress(text)[:-4])
+        with self.assertRaisesRegex(cra.Error, 'MMMM header cut'): cra.undo(b'MMMM\0\0')
+        with self.assertRaisesRegex(cra.Error, 'MMMM table of 9 chunks'): cra.undo(b'MMMM' + struct.pack('<II', 0, 9))
+        with self.assertRaisesRegex(cra.Error, 'MMMM chunk 0 past the end'): cra.undo(b'MMMM' + struct.pack('<III', 0, 1, 64) + bytes(4))
+        nested = b'plain'
+        for _ in range(cra.MMMM_DEPTH + 1):
+            nested = b'MMMM' + struct.pack('<III', len(nested), 1, len(nested)) + nested
+        with self.assertRaisesRegex(cra.Error, 'MMMM chunks nested too deeply'): cra.undo(nested)
+        with self.assertRaisesRegex(cra.Error, 'LZ stream cut inside a token'): cra.undo(b'\x60\0\0\0\x01')
 
     def test_kinds(self):
         text = b'BNSH\0\0\0\0 shaders shaders shaders shaders ' * 40

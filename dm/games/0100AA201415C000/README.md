@@ -8,7 +8,7 @@ The Pixel Remaster, update 1.2.0_5 (v393216) over the base game. Unity 2020.3.37
 |---|---|
 | `sys_resource 0x1000000` | The NPDM declares 16 MB of system resource, enabling virtual address memory |
 | `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | The 5 GB guest layout, with 4.38 GB available for alias regions on iOS |
-| `app_pool 0x80000000` | A 2 GB application pool leaves room beside StandardAllocator's reservation for Unity's other address regions; the survey's 3.21 GB pool exceeded the iOS alias region in gameplay |
+| `app_pool 0xCD500000`, `stdalloc_cap 0x80000000` | A 2 GB application pool leaves room beside StandardAllocator's reservation for Unity's other address regions; the survey's 3.21 GB pool exceeded the iOS alias region in gameplay |
 | `depth_mode zero` | The game calls `nvnDeviceSetDepthMode` with near = 0; offline pipeline bases must use that convention |
 
 There are no game-specific patches, frame-rate overrides or graphics switches. The existing function-matched SDK rules reduce the address-region node area and align large regions to 2 MB ([SDK address-region rules](../../../docs/reference/memory.md#the-sdks-address-region-node-area)). Its `sdk` build is shared with [Chained Echoes](../0100C510166F0000/README.md).
@@ -53,3 +53,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 ## Found on this game
 
 - The existing [SDK address-region rules](../../../docs/reference/memory.md#the-sdks-address-region-node-area) apply without a new implementation or a build-address table.
+
+## Open
+
+- The profile was migrated from `app_pool 0x80000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x80000000` (2 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.

@@ -146,7 +146,8 @@ static void sv_voice_render(sv_rnd *r, sv_voice *v) {
     float vol = rdf(v->p + 0x20), pitch = rdf(v->p + 0x1c), g[6][MIXBUF];
     for (int c = 0; c < nch; c++) {
         uint32_t id = rd32(v->p + 0x140 + 4 * c);
-        const uint8_t *cr = (int)id < r->ncr ? r->cr + (size_t)id * CR_IN : NULL;
+        // NOLINTNEXTLINE(clang-analyzer-core.NullPointerArithm): sv_grow sets ncr above 0 only with cr allocated. Unsigned: an id of 2^31 or more is no resource, not one before the array
+        const uint8_t *cr = id < (uint32_t)r->ncr ? r->cr + (size_t)id * CR_IN : NULL;
         for (int j = 0; j < dn; j++) g[c][j] = cr && cr[0x64] ? rdf(cr + 4 + 4 * j) * vol : 0;
     }
     double step = (double)rd32(v->p + 0xc) * pitch / r->rate;
@@ -341,6 +342,7 @@ static void sv_to_48k(sv_rnd *r, int16_t *dst) {   // a renderer below 48 kHz (3
     for (int k = 0; k < n; k++, pos += step) {
         int i = (int)pos; float f = (float)(pos - i);
         for (int c = 0; c < 2; c++) {
+            // NOLINTNEXTLINE(clang-analyzer-security.ArrayBound): OpenAudioRenderer takes 1 to FRAME_MAX samples, and pos stays below samples here, so 0 <= i - 1 < samples
             float a = i == 0 ? r->up_last[c] : r->frame[2 * (i - 1) + c], b = r->frame[2 * (i < r->samples ? i : r->samples - 1) + c];
             dst[2 * k + c] = (int16_t)lrintf(a + (b - a) * f);
         }

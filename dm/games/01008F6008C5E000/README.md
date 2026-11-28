@@ -34,6 +34,14 @@ No `patches.py`.
 - The base NSP extracts cleanly: 24 RomFS files, 6,369.2 MB, with the same
   layout as Scarlet's (`arc/data.trpfs` is the `romfs_marker`). The supplied
   DLC is a licence-only NSP, as for Scarlet.
+- **Resolved lookup failure; base hash cause open:** [PR #2701](https://github.com/seedds/nxnative/pull/2701)
+  reports a Rev 4 base whose ExeFS hash check fails when read alone, although
+  its 4.0.0 update supplies readable code. The reporter verified that the
+  [conditional build ID lookup](../../../docs/reference/packing.md#an-unreadable-unused-base-stops-discovery-after-a-readable-update)
+  gets past the survey on a Mac15,6 (M3 Pro), macOS 26.7.3, in a fork based
+  on an earlier main. The package failure was not independently reproduced;
+  neither damage nor a sparse base has been established. This is survey
+  validation, not gameplay validation of Rev 4 or 4.0.0.
 - Shaders: 30,142 (14,999 vertex, 15,057 pixel, 86 compute; 40 in `main`),
   the same as Scarlet's. The split's tables (`shader_map.tsv`,
   `shader_facts.tsv`, `shader_pairs.tsv`, `pso_pairs.tsv`) have the same data
@@ -104,5 +112,6 @@ No `patches.py`.
 
 The other findings are Scarlet's ([Found on this game](../0100A3D008C5C000/README.md#found-on-this-game)).
 
+- [An unreadable unused base stops discovery after a readable update](../../../docs/reference/packing.md#an-unreadable-unused-base-stops-discovery-after-a-readable-update): the optional build ID probe is no longer fatal after a successful update read (resolved; [package evidence](#files-and-shaders)).
 - [Bluetooth LE at boot](../../../docs/reference/services.md#bluetooth-le-at-boot): 3.0.1 (`v720896`, a derived profile) calls `nn::bluetooth::InitializeBle` a second after boot and aborted without the `bt` service; the host answers the BLE calls offline (resolved).
 - [A recording that runs short before it writes into the game's memory](../../../docs/reference/nvn-objects.md#a-recording-that-runs-short-before-it-writes-into-the-games-memory): from 0d103787 the host stopped at the 1 GB cap of lent command memory at frame 1,939 ([PR #2713](https://github.com/seedds/nxnative/pull/2713), which found the cause; resolved).

@@ -40,11 +40,34 @@ class ReadImage(unittest.TestCase):
         actual = sorted((p.relative_to(self.src).as_posix(), p.is_dir(), p.stat().st_size if p.is_file() else 0) for p in self.src.rglob('*'))
         virtual = sorted((p.relative_to(self.virtual).as_posix(), p.is_dir(), p.stat().st_size if p.is_file() else 0) for p in self.virtual.rglob('*'))
         self.assertEqual(virtual, actual)
+        self.assertEqual([p.relative_to(self.virtual).as_posix() for p in sorted(self.virtual.rglob('*.vert'))],
+                         [p.relative_to(self.src).as_posix() for p in sorted(self.src.rglob('*.vert'))])
         self.assertFalse((self.virtual / 'missing').exists())
         with self.assertRaises(FileNotFoundError): (self.virtual / 'missing').read_bytes()
         with self.assertRaises(OSError): (self.virtual / 'data/archive').open('wb')
         with romfs.open(self.root / 'output', 'wb') as f: f.write(b'normal output')
         self.assertEqual((self.root / 'output').read_bytes(), b'normal output')
+
+    def test_scan_reuses_descriptors_and_closes_the_backing_on_error(self):
+        with patch.object(romfs._os, 'dup', wraps=romfs._os.dup) as duplicate:
+            with self.assertRaisesRegex(RuntimeError, 'stop scan'), romfs.reuse_descriptors([self.image]):
+                with romfs.open(self.image / 'a', 'rb') as a, romfs.open(self.image / 'data/archive', 'rb') as b:
+                    self.assertNotEqual(a.fileno(), b.fileno())
+                    self.assertEqual((a.read(), b.read()), (b'prefix!', self.data))
+                self.assertEqual(duplicate.call_count, 2)
+                backing = duplicate.call_args.args[0]
+                self.assertEqual([call.args[0] for call in duplicate.call_args_list], [backing, backing])
+                raise RuntimeError('stop scan')
+            with self.assertRaises(OSError): os.fstat(backing)
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'prefix!')
+            self.assertEqual(duplicate.call_count, 2)
+
+    def test_scan_does_not_use_a_replaced_images_backing_descriptor(self):
+        with romfs.reuse_descriptors([self.image]):
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'prefix!')
+            (self.src / 'a').write_bytes(b'replaced')
+            romfs_image.pack(self.src, self.image)
+            self.assertEqual((self.virtual / 'a').read_bytes(), b'replaced')
 
     def test_scan_entries_answer_from_the_index_the_scan_found(self):
         for parent in (self.image, self.image / 'data'):
@@ -94,7 +117,7 @@ class ReadImage(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('zstd'), 'zstd command required')
     def test_zstd_file_inside_an_image(self):
-        # Mario Wonder's .zs files: the zstd command cannot open a path inside the image, so unzs feeds it the bytes.
+        # Mario Wonder's .zs files are decompressed from the image entry's bytes.
         with patch.dict(os.environ, DM_GAME='010020D01AD24000'):
             import shader_split
         (self.src / 'data/table.byml.zs').write_bytes(subprocess.run(['zstd', '-c', '-q'], input=self.data, capture_output=True, check=True).stdout)
@@ -205,17 +228,23 @@ class ExtractImage(unittest.TestCase):
             root = Path(temporary); src = root / 'files'; (src / 'data/empty').mkdir(parents=True)
             data = b'\x00\x01\x02\xff' * (2 << 20)
             (src / 'data/large').write_bytes(data); (src / 'zero').touch()
+            (src / 'sample').write_bytes(b'archived DLC')
             project = root / 'fixture.csproj'
             project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>'
                                '<StartupObject>Fixture</StartupObject><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup><ItemGroup>'
                                f'<Compile Include="{REPO}/dm/tools/nx_extract/Program.cs" Link="Extractor.cs" />'
                                '<PackageReference Include="LibHac" Version="0.19.0" /></ItemGroup></Project>')
-            (root / 'Fixture.cs').write_text('using System.Reflection; using LibHac.FsSystem; class Fixture { static void Main(string[] a) {'
+            (root / 'Fixture.cs').write_text('using System; using System.Reflection; using LibHac.Common; using LibHac.Fs; using LibHac.Fs.Fsa; '
+                'using LibHac.FsSystem; using LibHac.Tools.Fs; using LibHac.Tools.FsSystem.RomFs; class Fixture { static void Main(string[] a) {'
                 'var write = typeof(P).GetMethod("WriteImage", BindingFlags.NonPublic | BindingFlags.Static);'
-                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{(System.Func<LibHac.Fs.Fsa.IFileSystem>)(() => fs), a[1]});'
-                'write.Invoke(null, new object[]{null, a[2]}); }}')
-            image, empty = root / 'RomFS.img', root / 'empty.img'
-            result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(image), str(empty)], capture_output=True, text=True, timeout=120)
+                'using var fs = new LocalFileSystem(a[0]); write.Invoke(null, new object[]{(Func<IFileSystem>)(() => fs), a[1]});'
+                'write.Invoke(null, new object[]{null, a[2]});'
+                'using var file = new UniqueRef<IFile>(); fs.OpenFile(ref file.Ref, "/sample".ToU8Span(), OpenMode.Read).ThrowIfFailure();'
+                'var builder = new RomFsBuilder(); builder.AddFile("/D:/sample", file.Get);'
+                'using var archive = new RomFsFileSystem(builder.Build());'
+                'write.Invoke(null, new object[]{(Func<IFileSystem>)(() => archive), a[3]}); }}')
+            image, empty, dlc = root / 'RomFS.img', root / 'empty.img', root / 'dlc.img'
+            result = subprocess.run(['dotnet', 'run', '--project', str(project), '--', str(src), str(image), str(empty), str(dlc)], capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             shutil.rmtree(src)
             virtual = romfs.Path(image)
@@ -223,6 +252,7 @@ class ExtractImage(unittest.TestCase):
             self.assertEqual((virtual / 'data/large').read_bytes(), data)
             self.assertTrue((virtual / 'data/empty').is_dir()); self.assertEqual((virtual / 'zero').read_bytes(), b'')
             self.assertEqual(list(romfs.Path(empty).iterdir()), [])
+            self.assertEqual((romfs.Path(dlc) / 'D:/sample').read_bytes(), b'archived DLC')
             self.assertFalse((root / 'RomFS').exists()); self.assertFalse(Path(str(image) + '.part').exists())
 
 

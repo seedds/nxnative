@@ -162,20 +162,22 @@ int main(void) { @autoreleasepool {
     id<MTLBuffer> b5 = table(0);
     CHECK(entry(b5, 12) == dummy(b5) && !g_treg[12].stand && entry(b5, 15) == dummy(b5) && !g_treg[15].stand, "an emptied ID and one whose storage went hold the dummy");
 
-    // More registrations than a frame's share of stand-ins: the rest hold the dummy until the next submission, which writes theirs into the table in place
+    // More registrations than a frame's share of stand-ins: the rest hold the dummy until the next submission, which forks the table via copy-on-write so an in-flight buffer stays untouched
     for (int i = 0; i < MANY; i++) mtl_reg_tex(100 + i, &t[7], NULL);
     uint64_t made = g_stand_made; atomic_fetch_add(&g_cur_frame, 1);
     id<MTLBuffer> b6 = table(0);
     int with = 0; for (int i = 0; i < MANY; i++) with += entry(b6, 100 + i) != dummy(b6);
     if (on) {
         CHECK(g_stand_made == made + STAND_FRAME && g_stand_todo_n == MANY - STAND_FRAME, "a frame makes its share of stand-ins, and the rest wait");
-        // (b6's entries are written in place below, so the count is taken before)
         CHECK(with == STAND_FRAME, "the rest hold the dummy for now");
         atomic_fetch_add(&g_cur_frame, 1);
+        uint64_t pgen = g_psnap_gen;
         mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan(); os_unfair_lock_unlock(&g_rmu);   // as the next submission's first pool draw does, before it asks for the table
-        int all = 1; for (int i = 0; i < MANY; i++) all &= g_treg[100 + i].stand && entry(b6, 100 + i) == g_treg[100 + i].stand_rid;
+        id<MTLBuffer> b7 = snap()->buf;
+        int all = 1; for (int i = 0; i < MANY; i++) all &= g_treg[100 + i].stand && entry(b7, 100 + i) == g_treg[100 + i].stand_rid;
+        int kept = 0; for (int i = 0; i < MANY; i++) kept += entry(b6, 100 + i) != dummy(b6);
         CHECK(all && !g_stand_todo_n && g_stand_made == made + MANY, "the next frame makes the rest");
-        CHECK(snap()->buf == b6, "written into the table in place: the same buffer");
+        CHECK(b7 != b6 && kept == STAND_FRAME && g_psnap_gen > pgen, "written via copy-on-write: new buffer holds the stand-ins and the old buffer stays untouched");
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
         CHECK(level_is(stand(100 + MANY - 1), 0, 16 * 16 * 4, 64, 0x82), "and they hold the texture's levels");
     } else CHECK(!with && !g_stand_made, "DM_NVN_POOL_STANDIN=0: the dummy");

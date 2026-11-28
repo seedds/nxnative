@@ -17,6 +17,7 @@ void mtl_pool_add(const void *mem, uint64_t size);
 void mtl_pool_addressed(const void *mem, uint64_t size);   // the game holds a GPU address in this range, so raw global memory may reach it
 void mtl_pool_del(const void *mem);
 void mtl_pool_replace(const void *const *del, int ndel, const void *const *add, const uint64_t *size, int nadd);   // in one step for every lookup (a sparse pool's runs, hle_nvn.c vrun_set)
+void mtl_sparse_alias_delta(int delta);   // active sparse virtual pools with mapped runs (resource_vis MTL4VisibilityOptionResourceAlias)
 void dm_gfx_addr_note(uint64_t a, char *note, size_t n);   // what the graphics layer knows of an address (the crash dump, red lines)
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
@@ -41,6 +42,7 @@ void mtl_sub_begin(void);
 void mtl_sub_ready(uint64_t guest_ns);   // the guest ns the submission being encoded was ready to run: its submit, or a wait it held for passing (counter timestamps: sub_place)
 void mtl_queue_activate(uint64_t serial);              // submit lock held: restore this queue's persistent GPU state
 void mtl_queue_forget(uint64_t serial);                // finalize: discard its state, including guest object pointers
+void mtl_dlss_forget(uint64_t serial);                 // nvnDlssNetworkFinalize: retire the network's cached MetalFX scalers on the replay thread
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n);               // Buffer copy in GPU ordering
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v);   // Write the event value after completion (0 write / 1 add)
 void mtl_sub_counter(uint64_t addr, uint32_t type);                       // Write the counter record after completion
@@ -48,16 +50,29 @@ uint64_t mtl_sub_commit(void);
 
 uint64_t mtl_completed_fence(void);                 // Completed physical submissions, including CPU-visible post effects
 uint64_t mtl_last_fence(void);                       // Fence value of the most recent submit (0 = never submitted)
+enum { POOL_STATS = 14 };
+void mtl_pool_stats(uint64_t s[POOL_STATS]);              // the pool tables' counts for the power line (nvn_mtl.m mtl_pool_stats)
 int mtl_wait(uint64_t fence, uint64_t timeout_ns);   // Returns 1 when the GPU has completed up to fence, 0 on timeout
 int mtl_wait_acq(uint64_t fence, uint64_t timeout_ns);   // the same for a sync WindowAcquireTexture handed out (its own line in the wait ledger, DM_NVN_WAITS)
 void mtl_finish(void);                               // Wait for all submitted commands to complete
 void mtl_drain(void);                                // Wait for all commands on the queue (including presents) to complete: submit an empty command buffer and wait for it
+void mtl_set_present_suspended(int on);              // Stop admitting display work while the graphics gate is closed
+void mtl_drop_queued_presents(void);                 // Release queued frames without waiting for the GPU
+void mtl_suspend_drain(void);                        // Wait for existing work only, on the suspend worker
 void mtl_arch_save(int wait_ms, int ending);         // The pipeline archive's unwritten captures, written now even during the prewarm (going to the background, quitting); ending: the process ends after waiting up to wait_ms
 enum { MTL_QUIT_ARCH_MS = 10000 };   // what quitting gives the archive's write (atexit; the graceful exit: dm.h DM_QUIT_ARCH_MS, the same): a file of 900 bases took 1.8-4 s on Macs
 void mtl_warm_stop(void);   // the process is ending: the pipeline prewarm takes no more lines, and what it has not built is left to the next start (no compiles beside the archive's write)
 // External producers (the Vulkan layer, dm/gfx/vk): the shared Metal device; a serial for one of their textures; present it once their event reaches ev_val (ticket for mtl_present_wait)
 void *mtl_device(void);
 void *mtl_device_classic(void);   // the same for a layer that draws only on classic queues: a device without Metal 4 (a virtual Mac) starts too, and its presents are dropped
+void *mtl_nvn_event(void);
+void mtl_wait_gl_event(void *event, uint64_t value);
+void *dm_gl_event(void);
+void *dm_gl_retain_texture_2d(uint32_t name);
+void *dm_gl_sync_publish(uint64_t serial, int from_nvn);
+int dm_gl_sync_serial(const void *sync, uint64_t *serial, int *from_nvn);
+int dm_gl_wait_serial(uint64_t serial, uint64_t timeout_ns);
+int mtl_depth_bounds_hw(void);   // the depth bounds test is enabled (DM_NVN_DEPTH_BOUNDS != 0) and the GPU supports it (Apple10 and later), asked once with one log line
 uint64_t mtl_ext_tex(void *tex);
 // The producer is done with one (a swap chain destroyed, a window surface replaced) and has waited for its presents' tickets (mtl_present_wait): the serial goes now, and the
 // texture leaves the residency set and the present path's references once every present committed so far has completed on the GPU. Each mtl_ext_tex takes one of these
@@ -65,5 +80,8 @@ void mtl_ext_tex_release(uint64_t serial);
 uint64_t mtl_present_ext(uint64_t serial, double period, void *ev, uint64_t ev_val, const int crop[4]);   // crop: x, y, w, h of the texture to show (NULL = all of it)
 void mtl_present_layer(uint32_t w, uint32_t h);   // a sized vi layer (hle_vi.c): the picture's shape instead of the display's 16:9
 void mtl_present_screen(uint32_t w, uint32_t h);   // a screen taller than 16:9 (loader.c, DM_SCREEN_ASPECT): the picture's shape for a texture of that shape
+void mtl_set_fstep_fine(int on);                   // late frames at a 30 fps cap's hold 2 are shown on the 60 Hz link at frame latency 2 (hle_nvn.c fstep_tick)
 void mtl_present_wait(uint64_t ticket);   // as in nvn_obj.h: wait until that present has been handed to the GPU
+int mtl_present_texture_ready(uint64_t ticket, uint64_t copy);   // non-blocking readiness check (copy == 0 checks ticket only)
+int mtl_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);   // bounded ticket wait: 1 ready, 0 timed out
 void mtl_present_wait_texture(uint64_t ticket, uint64_t copy);   // the next acquire of a presented texture, or a queue finish: with a snapshot (copy, from mtl_present) its copy has run on the GPU, else as mtl_present_wait

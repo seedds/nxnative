@@ -10,7 +10,7 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 |---|---|---|
 | Node area cut 1 GB → 62 MB, and 2 MB alignment for regions of 4 MB and more (SDK 20's) | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `d9add76f…` | StandardAllocator's region (more than 1 GB) aborted in `nninitStartup`; see [Memory](#memory) |
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM declares 16 MB of system resource (virtual address memory) |
-| 5 GB block with a 2 GB pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x80000000` | `game.tsv` | Engage's 5 GB block (4.375 GB alias region). The heap check's 1 GB pool ran the game's malloc dry at the first loading screen |
+| 5 GB block with a 2 GB pool: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x80000000` | `game.tsv` | Engage's 5 GB block (4.375 GB alias region). The heap check's 1 GB pool ran the game's malloc dry at the first loading screen |
 | `pad_layout full` | `game.tsv` | the 3D gamepad layout: the map cursor moves with the D-pad |
 
 ## Frame rate
@@ -57,3 +57,7 @@ On the Mac: the boot, the Bink opening movie, the title, Nell's introduction, a 
 - **The heap check's 1 GB pool is too small here**: [dm/games/README.md, Adding a game](../README.md#adding-a-game).
 - **A called recording recorded over before its caller is submitted** (the rendering plugin's three command buffers): [A called recording recorded over before its caller is submitted](../../../docs/reference/nvn-objects.md#a-called-recording-recorded-over-before-its-caller-is-submitted).
 - The spin-wait search's store rule takes one wider loop in its `main`: [development.md, Power](../../../docs/development.md#power).
+
+## Open
+
+- The profile was migrated from `app_pool 0x80000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x80000000` (2 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.

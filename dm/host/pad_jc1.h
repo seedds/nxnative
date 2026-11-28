@@ -44,6 +44,25 @@ static inline void jc1_output_report(uint8_t out[JC1_REPORT_LEN], uint8_t counte
     out[10] = sub;
     if (arg && n) memcpy(out + 11, arg, n > 38 ? 38 : n);
 }
+// The console's handshake at connection, one subcommand a step, for any controller of this protocol (Joy-Cons, pad_jc1_mac.h; a Pro Controller clone read as raw HID,
+// pad_hid_mac.h): device info, standard full mode, EnableIMU, the vibration, the factory IMU calibration read, the stick calibrations (factory, then the user's). The order
+// matters (report mode before the sensor), and the controller drops a subcommand that comes too soon: the console sends them 60 ms apart, then the player lights (jc1_led_pattern).
+// Fills out with step's report and returns its subcommand; 0 past the last step
+enum { JC1_HANDSHAKE_SUBS = 7 };
+static inline uint8_t jc1_handshake_report(int step, uint8_t counter, uint8_t out[JC1_REPORT_LEN]) {
+    static const uint8_t sub[JC1_HANDSHAKE_SUBS] = {JC1_SUB_DEVICE_INFO, JC1_SUB_INPUT_MODE, JC1_SUB_ENABLE_IMU, JC1_SUB_VIBRATION, JC1_SUB_SPI_READ, JC1_SUB_SPI_READ, JC1_SUB_SPI_READ};
+    static const uint32_t spi_at[3] = {JC1_SPI_IMU_CAL, PAD_PRO_SPI_FACTORY, PAD_PRO_SPI_USER};
+    static const uint8_t spi_len[3] = {JC1_IMU_CAL_LEN, PAD_PRO_SPI_FACTORY_LEN, PAD_PRO_SPI_USER_LEN};
+    if (step < 0 || step >= JC1_HANDSHAKE_SUBS) return 0;
+    uint8_t arg[5] = {0}; size_t n = 0;
+    if (step == 1) { arg[0] = JC1_INPUT_MODE_FULL; n = 1; }
+    else if (step == 2 || step == 3) { arg[0] = 1; n = 1; }
+    else if (step >= 4) { uint32_t a = spi_at[step - 4]; arg[0] = a & 0xff; arg[1] = a >> 8 & 0xff; arg[2] = a >> 16 & 0xff; arg[3] = a >> 24 & 0xff; arg[4] = spi_len[step - 4]; n = 5; }
+    jc1_output_report(out, counter, sub[step], arg, n);
+    return sub[step];
+}
+// The subcommand a report 0x21 acknowledges (ack bit set at 13, the subcommand at 14), or -1: not such a reply
+static inline int jc1_reply_sub(const uint8_t *r, size_t len) { return len >= 15 && r[0] == 0x21 && (r[13] & 0x80) ? r[14] : -1; }
 
 // SPI 0x6020 is the IMU's factory calibration: accel origin, accel coeff, gyro origin, gyro coeff, three int16
 // each (little endian). The reverse-engineering notes' scales are 4 / (coeff - origin) G per count and
@@ -309,9 +328,10 @@ static inline void jc1_rumble_encode(const dm_vibration *v, uint8_t out[4]) {
 }
 static inline int jc1_vibration_on(const dm_vibration *v) { return jc1_amp_code(v->amplitude_low) || jc1_amp_code(v->amplitude_high); }
 enum { JC1_RUMBLE_LEN = 10 };
-static inline void jc1_rumble_report(uint8_t out[JC1_RUMBLE_LEN], uint8_t counter, const uint8_t sample[4]) {
+// left, right: each actuator's sample (a Joy-Con plays its own half, so it gets its sample twice; a Pro Controller plays both)
+static inline void jc1_rumble_report(uint8_t out[JC1_RUMBLE_LEN], uint8_t counter, const uint8_t left[4], const uint8_t right[4]) {
     out[0] = 0x10; out[1] = (uint8_t)(counter & 0x0f);
-    memcpy(out + 2, sample, 4); memcpy(out + 6, sample, 4);
+    memcpy(out + 2, left, 4); memcpy(out + 6, right, 4);
 }
 // What one Joy-Con plays of its player's two motors (m[0] the left handle, m[1] the right): its own side's in a pair, the stronger of the two in each band when it is alone (it is the
 // whole controller then), as the Switch 2 transport's s2_rumble_pick

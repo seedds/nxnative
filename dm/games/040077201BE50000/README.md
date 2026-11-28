@@ -24,7 +24,7 @@ There is no game-specific patch, and only v458752's build row: the base game, v0
 
 ## Shaders
 
-27,568 in [`shader_map.tsv`](shader_map.tsv): 13,078 pixel, 8,092 compute, 6,322 vertex, 76 geometry. All of them translate. A build takes about 25 minutes on an M4 Pro and 33 GB. See [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives).
+27,568 in `shader_map.tsv`: 13,078 pixel, 8,092 compute, 6,322 vertex, 76 geometry. All of them translate. A build takes about 25 minutes on an M4 Pro and 33 GB. See [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives).
 
 ## The picture
 
@@ -38,6 +38,7 @@ Moving objects get their ambient light from eight values per object in a storage
 
 ## Found on this game
 
+- [Compute loops that outlive the process](../../../docs/reference/shaders.md#compute-loops-that-outlive-the-process): containment of the particle simulation's runaway; its failing loop/input remains open.
 - [Compute dispatches that wait for each other](../../../docs/reference/frame-rate.md#compute-dispatches-that-wait-for-each-other): its particle systems.
 - [PMAP records in phx's PDAT archives](../../../docs/reference/shaders.md#pmap-records-in-phxs-pdat-archives): its shaders, and a loose NDSR file.
 - [A guard band cull in every vertex shader (0x80d)](../../../docs/reference/shaders.md#a-guard-band-cull-in-every-vertex-shader-0x80d).

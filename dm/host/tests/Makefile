@@ -95,6 +95,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_front_role
 	$(B)/t_front_present
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
+	$(B)/t_fs_archive
 	$(B)/t_nro
 	$(B)/t_symbols
 	$(B)/t_gates
@@ -155,6 +156,10 @@ $(B)/t_cheats_os.o: ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Dnow_ns=hle_os_real_now_ns -I.. $(GINC) -c $< -o $@
 $(B)/t_cheats: t_cheats.c $(B)/t_cheats_os.o ../hle_cheats.c ../code_write.h ../dm.h ../dm_input.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_cheats.c $(B)/t_cheats_os.o
+# archive members of mod folders (hle_fs.c vf_open, arh1.h): a synthetic ARH1 index and archive with overlay folders
+run: $(B)/t_fs_archive
+$(B)/t_fs_archive: t_fs_archive.c t_fs_stub.c ../hle_fs.c ../arh1.h ../hle_account_users.c ../account_users.h ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_archive.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 .PHONY: cheats
 cheats: $(B)/t_cheats
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats

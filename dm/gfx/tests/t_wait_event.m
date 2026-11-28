@@ -11,7 +11,7 @@
 static _Atomic int pause_clear;
 static dispatch_semaphore_t copy_paused, resume_copy;
 static int copy_fields(uint32_t op,uint8_t *payload,uint32_t size,const cap_ops *ops,void *ctx) {
-    if(op==OP_CLEAR_BUF && atomic_exchange(&pause_clear,0)) {
+    if(op==OP_SIGNAL_EVENT && atomic_exchange(&pause_clear,0)) {
         dispatch_semaphore_signal(copy_paused);
         if(dispatch_semaphore_wait(resume_copy,dispatch_time(DISPATCH_TIME_NOW,10000000000ll))) abort();
     }
@@ -429,6 +429,7 @@ static void streamed_queue_order(void) {
     begin_cmd(0);
     P(nvnCommandBufferCopyBufferToBuffer)(&commands[0],source_addr,result_addr,4,0);
     P(nvnCommandBufferFenceSync)(&commands[0],&prefix,NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE,0);
+    P(nvnCommandBufferSignalEvent)(&commands[0],&event,NVN_EVENT_SIGNAL_MODE_WRITE,NVN_EVENT_SIGNAL_LOCATION_BOTTOM,0,0);
     P(nvnCommandBufferClearBuffer)(&commands[0],result_addr,4,after);
     NVNcommandHandle first=P(nvnCommandBufferEndRecording)(&commands[0]);
     begin_cmd(1);

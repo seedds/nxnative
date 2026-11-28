@@ -110,6 +110,7 @@ Each step below stopped the boot before its fix:
 
 ## Found on this game
 
+- [Queue flattening and command recording copied records one by one](../../../docs/reference/frame-rate.md#queue-flattening-and-command-recording-copied-records-one-by-one): bulk-copied plain ops, direct compact-record expansion, pooled `NQ_COMMANDS` buffers, leaner command recording, and 2,048-op encode-thread blocks (split from [PR #3344](https://github.com/seedds/nxnative/pull/3344)).
 - [Running-write hash collisions and page-set overflow taint conditional renders](../../../docs/reference/rendering.md#running-write-hash-collisions-and-page-set-overflow-taint-conditional-renders): random or sustained black 3D frames behind the HUD in wide views, the Freezer / Hilltop / Canyon layers, and the 3D overview map ([issue #2699](https://github.com/seedds/nxnative/issues/2699), [PR #3185](https://github.com/seedds/nxnative/pull/3185)).
 - [Half-float pair atomics in storage memory](../../../docs/reference/shaders.md#half-float-pair-atomics-in-storage-memory): the muck normal pass (`be71d8f78b52e62f`, `e5f7ed151822e560`) adds face normals with RED.ADD.F16x2, which the translator dropped. The normals stayed zero and melting muck in Layer 1400 drew black blots with a white bloom halo. Resolved.
 - [A display link tried again after a rescue stays silent](../../../docs/reference/frame-rate.md#a-display-link-tried-again-after-a-rescue-stays-silent): a 135 ms frame at each try of a link that stayed silent in fullscreen ([PR #3150](https://github.com/seedds/nxnative/pull/3150)).

@@ -1331,6 +1331,47 @@ int main(void) {
         printf("(compact records: %d cases, %d smaller, %zu bytes saved)\n", cases, smaller, saved);
         EXPECT("compact records expand to the canonical ones, in no more bytes", 0, bad);
         EXPECT("compact records are smaller in most cases", 1, smaller >= 35);
+        // Mixed plain, compact, op >= 64 (OP_DEPTH_BOUNDS), and special (OP_SIGNAL_EVENT) records through nq_flatten match nvn_rec_linear byte for byte,
+        // and NQ_COMMANDS buffer pooling reuses buffers across submissions without retaining > NQ_BPOOL_MAX allocations.
+        {
+            static uint32_t ev_w[16] __attribute__((aligned(4096)));
+            NVNmemoryPoolBuilder eb; NVNmemoryPool ep; P(nvnMemoryPoolBuilderSetDefaults)(&eb); P(nvnMemoryPoolBuilderSetStorage)(&eb, ev_w, sizeof ev_w); P(nvnMemoryPoolInitialize)(&ep, &eb);
+            NVNeventBuilder evb; NVNevent ev; P(nvnEventBuilderSetDefaults)(&evb); P(nvnEventBuilderSetStorage)(&evb, &ep, 0); P(nvnEventInitialize)(&ev, &evb);
+            g_rec_compact = 1;
+            P(nvnCommandBufferAddCommandMemory)(&ce, &mp, 0, sizeof m); P(nvnCommandBufferBeginRecording)(&ce);
+            P(nvnCommandBufferSetScissor)(&ce, 0, 0, 1280, 720);                         // compact
+            P(nvnCommandBufferSetDepthBounds)(&ce, 1, 0.1f, 0.9f);                      // plain op 64 (>= 64)
+            P(nvnCommandBufferSetLineWidth)(&ce, 2.0f);                                 // plain op < 64
+            P(nvnCommandBufferBindUniformBuffer)(&ce, NVN_SHADER_STAGE_FRAGMENT, 2, 0x30000, 0x100); // compact OPC_UBO
+            P(nvnCommandBufferBindColorState)(&ce, &cs);                                // compact OPC_STATE
+            P(nvnCommandBufferSignalEvent)(&ce, &ev, NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 7); // special
+            P(nvnCommandBufferDrawElementsBaseVertex)(&ce, NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_SHORT, 12, 0x10000, 3); // compact OPC_DRAW_IDX
+            P(nvnCommandBufferSetDepthClamp)(&ce, 1);                                   // plain op < 64
+            NVNcommandHandle hm = P(nvnCommandBufferEndRecording)(&ce);
+            size_t ln = 0; uint8_t *lin = nvn_rec_linear(hm, &ln);
+            nq_job j = {0}; j.objects.klen = 16;
+            nq_flatten(&j, (const uint8_t *)(uintptr_t)hm); nq_end(&j);
+            int flat_ok = j.staged_first && j.staged_first == j.staged_last && j.staged_first->kind == NQ_COMMANDS &&
+                          j.staged_first->length == ln && !memcmp(j.staged_first->bytes, lin, ln) && j.staged_first->signal_count == 1;
+            EXPECT("nq_flatten matches nvn_rec_linear on mixed plain/compact/op64/special records", 1, flat_ok);
+            uint8_t *buf = j.staged_first->bytes; size_t cap = j.staged_first->capacity;
+            pthread_mutex_lock(&nq_mu);
+            nq_buf_give_locked(buf, cap);
+            int pool_has = g_nq_bpool_n > 0 && g_nq_bpool_n <= NQ_BPOOL_N;
+            pthread_mutex_unlock(&nq_mu);
+            nq_node reuse = {0}; nq_buf_take(&reuse);
+            EXPECT("nq_buf_give_locked / nq_buf_take reuses pooled NQ_COMMANDS buffer", 1, pool_has && reuse.bytes != NULL && reuse.capacity >= 4096);
+            pthread_mutex_lock(&nq_mu);
+            nq_buf_give_locked(reuse.bytes, reuse.capacity);
+            int before_big = g_nq_bpool_n;
+            uint8_t *huge = malloc(16);
+            nq_buf_give_locked(huge, NQ_BPOOL_MAX + 4096);   // freed, not pooled
+            int after_big = g_nq_bpool_n;
+            pthread_mutex_unlock(&nq_mu);
+            EXPECT("nq_buf_give_locked does not pool buffers over NQ_BPOOL_MAX", before_big, after_big);
+            free(j.staged_first->signals); free(j.staged_first); free(j.objects.keys); free(j.objects.vals); free(lin);
+            P(nvnEventFinalize)(&ev); P(nvnMemoryPoolFinalize)(&ep);
+        }
         P(nvnCommandBufferFinalize)(&ce); P(nvnMemoryPoolFinalize)(&mp);
     }
     // 5b''. Host segment sizes (hostseg_size), as Super Mario Odyssey grants 512 bytes from an empty pool before recording: such a grant gets a HOSTSEG_SMALL segment; a recording

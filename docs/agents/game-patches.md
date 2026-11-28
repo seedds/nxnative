@@ -52,6 +52,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `engine` | Unity's constant-buffer table locked on the shared device | race | blocked: the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match) | checked: probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap | 1 | [Ori and the Will of the Wisps](../../dm/games/01008DD013200000/README.md) | Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race |
 | `build` → `game` | 60 fps frame step on 1.3.0 (the same stub at its known addresses) | frame rate | blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them) | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted |
 | `build` → `game` | cutscene fade scheduling uses the sequence frame rate | frame rate | blocked: the scheduler has no unwind entry in 1.1.1, which the function matcher needs | checked: 1.1.1 disassembly and post-Porquillon runtime trace of the fade trigger, sequence rate and opacity | 1 | [Pikmin 4](../../dm/games/0100B7C00933A000/README.md) | the title's fade scheduler compares sequence-frame positions after converting seconds with the engine frame rate |
+| `build` → `game` | native tall-screen Unity render targets and world camera | rendering | blocked: not function-matched; a new game version must be checked independently | judgement | 1 | [Star Ocean: The Second Story R](../../dm/games/010065301A2E0000/README.md) | the exact Switch resolution, allocation, and Cinemachine call sites are specific to this game build |
 | `build` → `game` | screen shape: the sizes, the view, the layouts' projection and their edge widgets (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 1 | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md) | the output size is the host's, but where the game takes its sizes, its cameras and its layouts are this build's code |
 | `game` → `engine` | Snowdrop three-pool allocator: 12 GB of ranges → 4 GB | address space | blocked: only this game has been checked with the older initializer and this allocation split | checked: unique function and original bytes on 1.0 and 1.05; pool use measured on the Mac, 2026-10-31 | 1 | [South Park: The Fractured But Whole](../../dm/games/01008F2005154000/README.md) | the older initializer holds the pool bounds in separate immediates; its complete function moves between game builds. The 4 GB size works around the iPhone's address-space limit |
 | `build` → `game` | 60 fps intervals and dynamic-resolution constants | frame rate | kept: 1.0.3 (v131072) is the newest update of both releases and likely their last: a function match would serve no other build; the rewriter would also need matched rules that write fixups and declare capabilities, a new mechanism (2026-11-09) | checked: both releases' mains, where the host's rows for them were found; the global main's sites mapped into ASTRAL CHAIN and Bayonetta 1-3 (2026-11-09) | 2 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](../../dm/games/010056B015FE8000/README.md); [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](../../dm/games/0100B8E016F76000/README.md) | the game's own constants; the Asian release's function is the global one's 0x13c0 further on, so one function-matched rule could serve both releases. No PlatinumGames sibling shares the code: none of its sites has an exact match in ASTRAL CHAIN or Bayonetta 1-3 (nso_fnmap, 2026-11-09) |
@@ -97,6 +98,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Pokémon: Let's Go, Pikachu!](#pokémon-lets-go-pikachu) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [South Park: The Fractured But Whole](#south-park-the-fractured-but-whole) | 0 | 0 | 0 | 1 | 0 | `game` → `engine` |
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
+| [Star Ocean: The Second Story R](#star-ocean-the-second-story-r) | 0 | 0 | 74 | 0 | 0 | `build` → `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
@@ -589,6 +591,94 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 - **function-matched** (`main` of builds without CUTS): South Park 60 fps target: 1 function, 1 cut
 
+### Star Ocean: The Second Story R
+
+[Star Ocean: The Second Story R](../../dm/games/010065301A2E0000/README.md), `010065301A2E0000`, [patches.py](../../dm/games/010065301A2E0000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: not function-matched; a new game version must be checked independently, judgement: native tall-screen Unity render targets and world camera. The exact Switch resolution, allocation, and Cinemachine call sites are specific to this game build
+
+- **1.1.0 `main`** `d214ba64…` ([patches.py:1036](../../dm/games/010065301A2E0000/patches.py#L1036))
+  <details><summary>74 frame-step sites</summary>
+
+  - frame step `+0x6e00ec`: Unity initial handheld screen size height follows the display shape
+  - frame step `+0x6e04e0`: Unity Switch ScreenManager: keep requested taller height
+  - frame step `+0x766818`: NVN swapchain depth/stencil size height follows the display shape
+  - frame step `+0x767b38`: Unity handheld display height height follows the display shape
+  - frame step `+0x767bd8`: Unity console display height height follows the display shape
+  - frame step `+0x767bf4`: Unity console display height height follows the display shape
+  - frame step `+0x77b79c`: NVN swapchain storage size height follows the display shape
+  - frame step `+0x77ba28`: NVN swapchain texture size height follows the display shape
+  - frame step `+0x17367e8`: Tall UI: extend the tracked title and Fin backdrops
+  - frame step `+0x1981e00`: Cinemachine: keep orthographic horizontal extent
+  - frame step `+0x1981e10`: Cinemachine: keep horizontal FOV on the tall screen
+  - frame step `+0x1f4dcc8`: Fin: track the star field Image on sprite assignment
+  - frame step `+0x1f4e1b0`: Fin: clear the star field Image on close
+  - frame step `+0x1f56038`: tall HUD: Fish Collector backdrop and patterned edge chrome
+  - frame step `+0x1f562f0`: Fish Collector: capture into a private tall RenderTexture
+  - frame step `+0x1f56634`: Fish Collector: retire its private capture when the menu closes
+  - frame step `+0x1f57464`: tall HUD: shared footer
+  - frame step `+0x1f5c178`: tall HUD: Game Over black backdrop
+  - frame step `+0x2028948`: UIFadeComponent: size the fade rectangle to the taller screen
+  - frame step `+0x203c59c`: tall HUD: tutorial dimming backdrop
+  - frame step `+0x2156514`: tall HUD: Camp tint and decorative edge anchors
+  - frame step `+0x21576b8`: Camp: capture into a private tall RenderTexture
+  - frame step `+0x215baa8`: Camp: retire its private capture when the menu closes
+  - frame step `+0x2169130`: Unity Screen.SetResolution height follows the display shape
+  - frame step `+0x2169140`: Unity Screen.SetResolution height follows the display shape
+  - frame step `+0x2169254`: Unity Screen.SetResolution height follows the display shape
+  - frame step `+0x216926c`: Unity Screen.SetResolution height follows the display shape
+  - frame step `+0x21b4a44`: tall HUD: battle tactics drop-down
+  - frame step `+0x21dd1b0`: tall HUD: fishing bait dialog matte
+  - frame step `+0x21dfe70`: tall HUD: fishing result side gradient
+  - frame step `+0x21e8e40`: tall HUD: Pickpocketing selector matte
+  - frame step `+0x21eacb0`: tall HUD: field HUD
+  - frame step `+0x228ca94`: Title Achievements: extend decorative chrome
+  - frame step `+0x228cb90`: Title Achievements: restore decorative chrome
+  - frame step `+0x229e730`: tall HUD: battle results side gradients
+  - frame step `+0x22c2a70`: tall HUD: Current Location map backdrop and edge anchors
+  - frame step `+0x22c48b8`: Owned tall targets: preserve the full camera image in the blur capture
+  - frame step `+0x2328ce0`: Bunny Race betting: capture into a private tall RenderTexture
+  - frame step `+0x2329ea0`: Bunny Race Hide: retire its private capture
+  - frame step `+0x232a06c`: Bunny Race ForceHide: retire its private capture
+  - frame step `+0x232e27c`: tall HUD: Bunny Race betting backdrop and edge chrome
+  - frame step `+0x2333074`: tall HUD: Coliseum registration matte
+  - frame step `+0x233ac94`: tall HUD: Cooking Master ingredient picker backdrop and edge chrome
+  - frame step `+0x233b020`: Cooking Master ingredients: capture into a private tall RenderTexture
+  - frame step `+0x233b58c`: Cooking Master Hide: retire its private capture
+  - frame step `+0x233b6d4`: Cooking Master ForceHide: retire its private capture
+  - frame step `+0x238aba4`: tall HUD: Camp crafting result skip hint
+  - frame step `+0x23caf44`: tall HUD: battle party status, tactics, pause gradient and chain banner
+  - frame step `+0x2409a50`: tall HUD: Camp equipment effects dialog matte
+  - frame step `+0x24a1040`: Title Settings: extend decorative chrome
+  - frame step `+0x24a11a0`: Title Settings: restore decorative chrome
+  - frame step `+0x24ec208`: tall HUD: Quest backdrop and patterned edge chrome
+  - frame step `+0x24ec454`: Quest: capture into a private tall RenderTexture
+  - frame step `+0x24ec6e0`: Quest: retire its private capture when the menu closes
+  - frame step `+0x24f3024`: Save/Load: extend title, field, or Clear Save chrome
+  - frame step `+0x24f30cc`: Field Save/Load: capture into a private tall RenderTexture
+  - frame step `+0x24f3344`: Save/Load: restore shared chrome
+  - frame step `+0x24f3348`: Field Save/Load: retire its private capture
+  - frame step `+0x258ad8c`: tall HUD: Shop backdrop and patterned edge chrome
+  - frame step `+0x258b27c`: Shop: capture into a private tall RenderTexture
+  - frame step `+0x258b81c`: Shop: retire its private capture when the menu closes
+  - frame step `+0x25e4c74`: tall HUD: inventory, equipment and assist dialog mattes
+  - frame step `+0x26042fc`: tall HUD: shared system dialog mattes
+  - frame step `+0x2605f40`: tall HUD: Ending replay confirmation matte
+  - frame step `+0x26074a8`: tall HUD: Ending Collection page backdrop and edge chrome
+  - frame step `+0x2613a74`: tall HUD: dialogue and battle operation hints
+  - frame step `+0x2615a60`: tall HUD: dialogue portraits
+  - frame step `+0x265bb64`: tall HUD: title scene backing, submenu decor and New Game portraits
+  - frame step `+0x265bd90`: Title: track only the title background transform
+  - frame step `+0x265c720`: Title: clear the title background reference on close
+  - frame step `+0x275daf4`: tall HUD: Conversation Log tint and patterned edge chrome
+  - frame step `+0x276c560`: tall HUD: event information article matte
+  - frame step `+0x276d64c`: tall HUD: conversation choice matte
+  - frame step `+0x293e61c`: tall HUD: Camp item picture backing and grid
+
+  </details>
+
+  - launcher capabilities: SCREEN_ASPECT
+
 ### Super Mario 3D All-Stars: Super Mario Sunshine
 
 [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md), `010049900F546002`, [patches.py](../../dm/games/010049900F546002/patches.py).
@@ -838,7 +928,7 @@ Profile keys (`game.tsv`) whose value changes what the host does, set away from 
 | `vconv_range on` | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | `game` → `host`, gap | the same vertices as the whole range, for less work; DM_NVN_VCONV_CHECK checks it: a default for every game after `regress.py check` on the games |
 | `fps_hold off` | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), [Paper Mario: The Thousand-Year Door](../../dm/games/0100ECD018EBE000/README.md) | `game`, at goal | the game's pacing |
 | `perf_mode boost` | [Big Brain Academy: Brain vs. Brain](../../dm/games/0100620012D6E000/README.md), [Rhythm Heaven Groove](../../dm/games/0100D9F01D474000/README.md) | `game`, at goal | a combination a Switch 1 never reports: a choice per game |
-| `screen_aspect on` | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game`, at goal | the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code |
+| `screen_aspect on` | [Animal Crossing: New Horizons](../../dm/games/01006F8002326000/README.md), [Star Ocean: The Second Story R](../../dm/games/010065301A2E0000/README.md), [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | `game`, at goal | the output size is the host's, but the stubs that follow it (projections, layout panes, screen copies) are this build's code |
 | `stdalloc_cap 0x60000000` | [Persona 5 Tactica](../../dm/games/010087701B092000/README.md), [Sea of Stars](../../dm/games/01008C0016544000/README.md), [Sonic Superstars](../../dm/games/01008F701C074000/README.md), [Star Ocean: The Second Story R](../../dm/games/010065301A2E0000/README.md) | `game`, at goal | what the regions after it need, measured by the NSP script's region check, or 1 GB from its heap check; the host's cap is the default |
 | `alloc_big_align on` | [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md), [13 Sentinels: Aegis Rim (Asia)](../../dm/games/01008D7016438000/README.md), [13 Sentinels: Aegis Rim (Japan)](../../dm/games/010045C014650000/README.md), [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md), [Unicorn Overlord (Asia)](../../dm/games/010054B01AD92000/README.md) | `game` → `host`, gap | the cause is a memory pool's GPU address, big-page aligned on hardware and the CPU address here: pool GPU addresses aligned as hardware does, or this alignment for every game |
 | `stdalloc_cap 0x80000000` | [A Little to the Left](../../dm/games/0100354017668000/README.md), [Ace Angler: Fishing Spirits](../../dm/games/01007C50132C8000/README.md), [Advance Wars 1+2: Re-Boot Camp](../../dm/games/0100300012F2A000/README.md), [FINAL FANTASY V](../../dm/games/0100AA201415C000/README.md), [Pokémon Brilliant Diamond](../../dm/games/0100000011D90000/README.md) | `game`, at goal | what the regions after it need, measured by the NSP script's region check, or 1 GB from its heap check; the host's cap is the default |

@@ -27,3 +27,30 @@ Modules: `main`, `subsdk0` and `sdk`. Other versions are not validated.
 - M5 Max, macOS 27.2 (profile with the depth fix): the bundled archive opened from a clean local cache, found 16 of 16 probed pair bases and skipped the full first-launch rebuild. The packed host loaded the copied Sacred Forest save. It still builds individual pipelines for states absent from the offline archive.
 - M5 Max, macOS 27.2 (earlier build, before the archive depth fix): from a fresh save, choose Claude, advance through the Milokeenia briefing, approach the blue panel and proceed into the ruins, activate the device and reach the Sacred Forest. Clear the battle tutorial and first fight, then continue to Claude's post-battle dialogue with Rena. About 30 fps in the last measured frame window (p50 33.38 ms, p95 34.10 ms). A separate run loaded a local copy of Rena's Lv. 3 Sacred Forest autosave, moved and opened the menu; the original save was not connected.
 - iPhone Duo, iOS 27 (profile tested at `d8d68385`): the signed Xcode device build passed the old startup fault and loaded the Sacred Forest autosave, with the local and iCloud copies already in sync. Ran through 3,900 frames, including movement and opening and closing the camp menu; the last 300 frames had p50 33.27 ms and p95 34.68 ms. No save changed. No IPA was exported; game data was already installed separately. A longer playthrough, a fresh iCloud download and iPad were not checked.
+
+## Screen shape (1.1.0)
+
+Use the launcher’s **Picture shape** setting. Select **MacBook (16:10)**
+on Mac or **iPhone Duo screen (1.43:1)** for the unfolded phone. The shared
+setting requests 1920×1200 or 1920×1344, respectively; choose **16:9 (Switch)**
+for the original layout. iOS also offers the existing **Match screen** option, which chooses once at
+startup. This patch does not add Mac display auto-detection or change the
+frame rate.
+
+The [build-gated hooks](patches.py) use the requested height for Unity’s
+screen manager and for both NVN color and depth targets. They preserve
+the horizontal field of view and show more above and below, rather than
+stretching or cropping the whole picture. They extend scene fades,
+matte layers and window backdrops to the edges, and move selected HUD and
+menu controls with their anchors. The Guide Map also extends both left-side
+dimming layers to the top and bottom, leaving the map viewport and list size
+unchanged. The prerecorded intro retains its
+authored 16:9 framing. All hooks leave the 16:9 path in place.
+
+The patch works with the original game image and neither requires nor
+supplies portrait overlays. Portrait art without extra image data retains
+its original cutoff. The existing memory cap, offline pipeline depth
+mode, and frame-rate settings are unchanged. The contributor briefly tested
+MacBook (16:10) and iPhone Duo on a combined build with the same tall-screen
+hooks. The optional Modern Status extension is not included; the stock
+portrait can end above the bottom of the taller picture.

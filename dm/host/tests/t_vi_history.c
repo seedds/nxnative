@@ -2,6 +2,7 @@
 // frame the present queue handed on with a present tick (one the Mac dropped too: a Switch shows every frame it is handed), 1 for one still queued, the frame numbers of GetLatestFrameNumber.
 // Unreal's RHI takes the first status-2 entry as its latest flip (Minecraft Dungeons II main+0x142b0b0), so the newest shown frame has to come first. Without a Metal presented time,
 // a frame with a pacer grid is shown at the vsync a display would give it (the first grid tick at or after its present and its GPU work's end, latched once reached), not first-seen time.
+// Also nn::vi::QueryDisplayHdrStatus and QueryDisplayHdrPaperWhite from the present's answer
 #include "../../gfx/hle_vi.c"
 #include <assert.h>
 
@@ -14,6 +15,9 @@ void mtl_present_progress(uint64_t *q, uint64_t *d) { *q = g_in; *d = g_done; }
 double mtl_presented_time(uint64_t n) { return n < 64 ? g_pt[n] : 0; }
 int mtl_gpu_done(uint64_t f, uint64_t *t1) { if (f >= 64) return -1; *t1 = g_gde[f]; return g_gd[f]; }
 void mtl_present_layer(uint32_t w, uint32_t h) { (void)w; (void)h; }
+static int g_hdr_on, g_hdr_req; static uint16_t g_hdr_peak;   // the present's HDR answer (nvn_mtl.m mtl_hdr_vi) and DM_HDR (mtl_hdr_requested): SDR and off until set
+int mtl_hdr_vi(uint16_t *peak) { *peak = g_hdr_on ? g_hdr_peak : 0; return g_hdr_on; }
+int mtl_hdr_requested(void) { return g_hdr_req; }
 uint64_t guest_ns(void) { return g_gns; }
 uint64_t now_ns(void) { return g_hns; }
 int dm_sdk_ounce(void) { return 0; }
@@ -130,5 +134,13 @@ int main(void) {
     assert(fi[0][1] == 22 && fi[0][0] == 2 && fi[0][3] == ticks(g_gns));
 
     puts("vi frame history: count query 8, newest first, shown once handed on with its own physical ticket, presented, first-seen or latched virtual-vsync tick, dropped frames shown, queued ones not");
+    // QueryDisplayHdrStatus as the SDK's DefaultDisplay::QueryHdrStatus fills it (the flag is format == 1, the peak a u16 in nits); paper white 203 nits
+    uint8_t on = 9; uint32_t fmt = 9; uint16_t peak = 9, white = 0;
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 0 && fmt == 0 && peak == 0);   // the present's SDR answer
+    g_hdr_req = 2; g_hdr_on = 1; g_hdr_peak = 3120;
+    assert(h_vi_HdrStatus(&on, &fmt, &peak, NULL) == RES_OK && on == 1 && fmt == 1 && peak == 3120);   // Game's HDR on an EDR screen: HDR output at the screen's peak
+    assert(h_vi_HdrStatus(NULL, NULL, NULL, NULL) == RES_OK);   // null outputs are skipped
+    assert(h_vi_PaperWhite(&white, NULL) == RES_OK && white == 203);
+    puts("vi HDR status: SDR by default; format 1, on and the peak for Game's HDR on an EDR screen; paper white 203 nits");
     return 0;
 }

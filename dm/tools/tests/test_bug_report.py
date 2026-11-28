@@ -401,6 +401,62 @@ class BugReport(unittest.TestCase):
         self.assertIn('crash/gpuEvent-dmhost-other.ips', b.files)
         self.assertIn('not matched to this game', report)
 
+    def _put_compiler(self, folder, name, responsible, age_s=60, coalition='com.apple.Terminal'):
+        # what macOS writes when MTLCompilerService crashes (issue #2911: EXC_BAD_ACCESS in setReg, a mesh pipeline of the host): a one-line header, then the body naming the
+        # process the service compiled for and the coalition of the app that launched it
+        p = folder / name
+        p.write_text('{"app_name":"MTLCompilerService","bug_type":"309","name":"MTLCompilerService"}\n'
+                     '{\n  "procName" : "MTLCompilerService",\n  "parentProc" : "launchd",\n  "coalitionName" : "%s",\n  "responsibleProc" : "%s",\n'
+                     '  "exception" : {"type":"EXC_BAD_ACCESS"},\n  "threads" : [{"frames":[{"symbol":"setReg"}]}]\n}\n' % (coalition, responsible))
+        t = time.time() - age_s; os.utime(p, (t, t)); return p
+
+    def test_compiler_reports_of_the_host_during_its_runs(self):
+        self._set_run_log(f'{TID}.log', 600, 10)
+        user_d, mine, other_app = self.home / 'Library/Logs/DiagnosticReports', f'org.nxnative.{TID.lower()}', 'org.nxnative.0100000000010000'
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-174859.ips', 'dmhost', age_s=300)
+        self._put_compiler(self.system, 'MTLCompilerService-2026-11-16-174900.ips', 'dmhost', age_s=200)
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-174900.ips', 'dmhost', age_s=250)            # same name in both folders: the newer once
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-174901.ips', 'Xcode', age_s=100)             # compiling for another process
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-170000.ips', 'dmhost', age_s=3600)           # a terminal's host before this game's run: another game's
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-150000.ips', 'dmhost', age_s=7200, coalition=mine)   # this app's coalition: this game's, outside the windows
+        self._put_compiler(user_d, 'MTLCompilerService-2026-11-16-174902.ips', 'dmhost', age_s=90, coalition=other_app)   # another packed game's, inside the window
+        self._put_compiler(user_d, 'MTLCompilerService-2026-10-01-000000.ips', 'dmhost', age_s=30 * 86400)    # older than 7 days
+        (user_d / 'MTLCompilerService-link.ips').symlink_to(user_d / 'MTLCompilerService-2026-11-16-174859.ips')
+        b, report = br.collect(br.resolve(str(self.app)), home=str(self.home), system_reports=str(self.system))
+        crash = {n for n in b.files if n.startswith('crash/MTLCompilerService')}
+        self.assertEqual(crash, {'crash/MTLCompilerService-2026-11-16-174859.ips', 'crash/MTLCompilerService-2026-11-16-174900.ips', 'crash/MTLCompilerService-2026-11-16-150000.ips'})
+        self.assertIn('setReg', b.files['crash/MTLCompilerService-2026-11-16-174859.ips'])
+        self.assertIn("Metal compiler crash reports: 1 from outside this game's last two Mac app runs and its build left out", report)
+        self.assertNotIn('not matched to this game', report)
+        # Capped at COMPILER_MAX, the newest first, with how many more were left out: one run can leave dozens of the same fault (#2911 attached 16)
+        for i in range(8): self._put_compiler(user_d, f'MTLCompilerService-cap-{i:02d}.ips', 'dmhost', age_s=20 + i)
+        comp, outside, more = br.compiler_reports(str(self.home), ['dmhost'], str(self.system), windows=br.run_windows(str(self.home), TID), bundle_id=mine)
+        self.assertEqual([p.name for p, _ in comp], [f'MTLCompilerService-cap-{i:02d}.ips' for i in range(5)])
+        self.assertEqual((outside, more), (1, 6))   # the earlier run's report; 8 + 3 kept, 5 taken
+        b, report = br.collect(br.resolve(str(self.app)), home=str(self.home), system_reports=str(self.system))
+        self.assertIn('Metal compiler crash reports: 6 more of these runs left out (the newest 5 taken)', report)
+        # No Mac app log and no build: those of the last 7 days, this app's coalition matched and the others marked as not matched
+        (self.home / f'Library/Logs/nxnative/{TID}.log').unlink()
+        comp, outside, more = br.compiler_reports(str(self.home), ['dmhost'], str(self.system), bundle_id=mine)
+        self.assertEqual(outside, 0); self.assertEqual(len(comp), 5)
+        self.assertTrue(all(not ok for _, ok in comp))
+        mine_only = [p for p in user_d.iterdir() if p.name.startswith('MTLCompilerService') and p.name != 'MTLCompilerService-2026-11-16-150000.ips']
+        for p in mine_only: p.unlink()
+        comp, _, _ = br.compiler_reports(str(self.home), ['dmhost'], str(self.system), bundle_id=mine)
+        self.assertEqual({(p.name, ok) for p, ok in comp}, {('MTLCompilerService-2026-11-16-150000.ips', True), ('MTLCompilerService-2026-11-16-174900.ips', False)})
+
+    def test_compiler_reports_of_the_nsp_scripts_build(self):
+        # The NSP script's Mac pipeline prebuild compiles through the host outside any Mac app run (#2825, #2911: logs/pso_prewarm_mac.log): its step logs are windows too
+        self._set_run_log(f'{TID}.log', 600, 10)
+        logs = self.nsp / f'{TID}_build' / 'logs'; logs.mkdir(parents=True, exist_ok=True)
+        log = logs / 'pso_prewarm_mac.log'; log.write_text('pipeline prebuild\n'); now = time.time()
+        os.utime(log, (now - 5000, now - 5000)); os.utime(log, (now - 4000, now - 4000))
+        self._put_compiler(self.home / 'Library/Logs/DiagnosticReports', 'MTLCompilerService-prebuild.ips', 'dmhost', age_s=4500)
+        self._put_compiler(self.home / 'Library/Logs/DiagnosticReports', 'MTLCompilerService-between.ips', 'dmhost', age_s=2000)
+        b, report = br.collect(br.resolve(str(self.nsp)), home=str(self.home), system_reports=str(self.system))
+        self.assertIn('crash/MTLCompilerService-prebuild.ips', b.files)
+        self.assertNotIn('crash/MTLCompilerService-between.ips', b.files)
+
     def test_exit_codes(self):
         self.assertEqual(self.run_main('/nonexistent/thing')[0], 2)
         self.assertEqual(self.run_main(str(self.root))[0], 2)

@@ -23,6 +23,8 @@ TOTAL_CAP = 20 * 1024 * 1024    # the zip's text content, before compression
 FILE_CAP = 4 * 1024 * 1024      # one file: longer ones keep the first and last half of this
 CRASH_MAX, CRASH_DAYS = 3, 7
 GPU_EVENT_MAX = 10
+COMPILER_MAX = 5               # Metal compiler crash reports: one run can leave dozens of the same fault
+COMPILER_HEAD = 1 << 16         # bytes of a compiler crash report read for the process it compiled for (responsibleProc sits within its first 2 KB)
 GPU_EVENT_MARGIN = 120          # seconds after a log's last line in which macOS may still write the run's report
 SYSTEM_REPORTS = '/Library/Logs/DiagnosticReports'
 
@@ -37,6 +39,7 @@ ALLOWED = (
     'the file given with --ios-log (a text file other than .keys)',
     '~/Library/Logs/DiagnosticReports/ crash reports (.ips, .crash) of dmhost or the app, the newest 3 of the last 7 days',
     '/Library/Logs/DiagnosticReports/ and ~/Library/Logs/DiagnosticReports/ GPU fault reports (gpuEvent-<process>-*.ips) of dmhost or the app written during this game\'s last two Mac app runs (with no Mac app log, of the last 7 days, marked as not matched), the newest 10',
+    '/Library/Logs/DiagnosticReports/ and ~/Library/Logs/DiagnosticReports/ Metal compiler crash reports (MTLCompilerService-*.ips) whose responsible process is dmhost or the app: those of this app\'s coalition, and of a host run another way during this game\'s last two Mac app runs or its build\'s step logs (with neither, of the last 7 days, marked as not matched), the newest 5',
     'Info.plist of the app (a few keys, or of a matching Mac .app directly in the NSP folder for its commit and shader chain stamps), game.tsv of the profile (name and build rows), dm/gfx/nvn/dmsh_chain.h, the names of the b-<V> folders in the app\'s Contents/Resources/msl/ or the build\'s shader/, shader/cache/ and shader/ios/',
 )
 
@@ -260,6 +263,58 @@ def gpu_event_reports(home, names, system=None, now=None, windows=()):
     return [p for _, p in kept[:GPU_EVENT_MAX]], len(items) - len(kept)
 
 
+RESPONSIBLE = re.compile(r'"responsibleProc"\s*:\s*"([^"]*)"')
+COALITION = re.compile(r'"coalitionName"\s*:\s*"([^"]*)"')
+
+
+def compiler_reports(home, names, system=None, now=None, windows=(), bundle_id=None):
+    """the reports macOS writes when its Metal compiler service crashes compiling for the host (MTLCompilerService-*.ips, from the system's folder and the user's, of the last
+    CRASH_DAYS days). The service is a process of its own, so its report is named after it; the body's responsibleProc names the process it compiled for and coalitionName the
+    app that launched it. A report whose coalition is this app (bundle_id) is this game's; one of another packed app (org.nxnative.*) is not; one of the host run another way (a
+    terminal's coalition) counts when written during one of windows, or with no windows at all, of the last CRASH_DAYS days, not matched.
+    Returns ([(path, matched)] the newest COMPILER_MAX, how many the windows left out, how many past the cap)"""
+    now = datetime.datetime.now().timestamp() if now is None else now
+    system = SYSTEM_REPORTS if system is None else system
+    want = {n for n in names if n}
+    if not want: return [], 0, 0
+    mine = (bundle_id or '').lower()
+    by_name = {}
+    for d in (Path(system), Path(home) / 'Library/Logs/DiagnosticReports'):
+        try: entries = list(d.iterdir())
+        except OSError: continue
+        for p in entries:
+            if p.suffix != '.ips' or not p.name.startswith('MTLCompilerService'): continue
+            try: st = p.lstat()
+            except OSError: continue
+            if not stat.S_ISREG(st.st_mode) or now - st.st_mtime > CRASH_DAYS * 86400: continue
+            try:
+                with open(p, 'rb') as f: head = f.read(COMPILER_HEAD).decode('utf-8', 'replace')
+            except OSError: continue
+            m, c = RESPONSIBLE.search(head), COALITION.search(head)
+            if not m or m.group(1) not in want: continue   # another process's compile (Xcode, a browser)
+            coal = c.group(1).lower() if c else ''
+            if coal.startswith('org.nxnative.') and coal != mine: continue   # another packed game's host
+            prev = by_name.get(p.name)
+            if prev is None or st.st_mtime > prev[0]: by_name[p.name] = (st.st_mtime, p, bool(mine) and coal == mine)
+    items = list(by_name.values())
+    if windows: kept = [(mt, p, True) for mt, p, own in items if own or any(a <= mt <= b for a, b in windows)]
+    else: kept = [(mt, p, own) for mt, p, own in items]
+    kept.sort(key=lambda x: x[0], reverse=True)
+    return [(p, ok) for _, p, ok in kept[:COMPILER_MAX]], len(items) - len(kept), max(0, len(kept) - COMPILER_MAX)
+
+
+def build_windows(build):
+    """(start, end) of the NSP script's step logs in build/logs: its Mac pipeline prebuild (pso_prewarm_mac.log) compiles through the host outside any Mac app run"""
+    out = []
+    try: logs = [p for p in (Path(build) / 'logs').iterdir() if p.suffix == '.log' and p.is_file() and not p.is_symlink()] if build else []
+    except OSError: return out
+    for p in logs:
+        try: st = p.stat()
+        except OSError: continue
+        out.append((min(getattr(st, 'st_birthtime', st.st_mtime), st.st_mtime), st.st_mtime + GPU_EVENT_MARGIN))
+    return out
+
+
 def log_provenance(text):
     """(commit, chain) from the last host startup line ("[dm] build: commit …, shader chain …") in a collected log, or (None, None)"""
     if not text: return None, None
@@ -318,12 +373,16 @@ def collect(target, ios_log=None, home=None, total_cap=TOTAL_CAP, file_cap=FILE_
         b.notes.append('NSP script logs: skipped, no NSP folder given')
     exe = [e for e in (plist.get('CFBundleExecutable'), 'dmhost') if e]
     cr = crash_reports(home, exe)
-    if not cr: b.notes.append('Crash reports: none of dmhost or the app in the last 7 days')
+    if not cr: b.notes.append('Crash reports of dmhost or the app itself: none in the last 7 days')
     for p in cr: b.add_file(f'crash/{p.name}', p, f'crash report {p.name}')
     windows = run_windows(home, tid)
     gpu, other = gpu_event_reports(home, exe, system_reports, windows=windows)
     for p in gpu: b.add_file(f'crash/{p.name}', p, f'GPU fault report {p.name}' + ('' if windows else ' (not matched to this game: it has no Mac app log)'))
     if other: b.notes.append(f"GPU fault reports: {other} from outside this game's last two Mac app runs left out")
+    comp, other, more = compiler_reports(home, exe, system_reports, windows=windows + build_windows(build), bundle_id=bundle_id)
+    for p, ok in comp: b.add_file(f'crash/{p.name}', p, f'Metal compiler crash report {p.name}' + ('' if ok else ' (not matched to this game: it has no Mac app or build log)'))
+    if other: b.notes.append(f"Metal compiler crash reports: {other} from outside this game's last two Mac app runs and its build left out")
+    if more: b.notes.append(f'Metal compiler crash reports: {more} more of these runs left out (the newest {COMPILER_MAX} taken)')
 
     # settings
     prefs = read_prefs(bundle_id)

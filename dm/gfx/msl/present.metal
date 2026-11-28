@@ -2,7 +2,7 @@
 // the drawable's:
 //   fs           an 8-bit window into an 8-bit drawable: the stored colour bytes, alpha 1 (the SDR present)
 //   fs_hdr_itm   an 8-bit window into the RGBA16Float EDR drawable: sRGB decode, then BT.2446 Method A, a target luminance never below SDR's, applied in ICtCp (1.0 = the screen's SDR white)
-//   fs_pq_linear a PQ (BT.2100) window into the EDR drawable: PQ decode, divided by the paper white vi reports, so that white is EDR 1.0, BT.2020 to BT.709, clipped at 0
+//   fs_pq_linear a PQ (BT.2100) window into the EDR drawable: PQ decode, divided by the paper white vi reports, so that white is EDR 1.0, BT.2020 to BT.709 (extended: no clip)
 //   fs_pq_to_sdr a PQ window into an 8-bit drawable or capture: PQ decode, / paper white, BT.2020 to BT.709, clipped to 1, sRGB encode
 // The inverse tone map and the PQ curves are ported from mtld3d (unix/unix/src/metal/present.msl); P_SDR follows BT.2446's formula for 100 nits (mtld3d's 5.4395 is 87 nits)
 #include <metal_stdlib>
@@ -107,7 +107,7 @@ static float bt2446_a(float y_sdr, float4 u) {
 // Where Method A is darker than SDR (L_HDR below about 1000), each pixel takes a smooth maximum of both luminances in ln luminance, max(a, b) + k h^2 / 4 with
 // h = max(k - |a - b|, 0) / k and width k = min(ITM_SMOOTH, L_HDR / W - 1): never below either curve, its slope continuous where they cross, and the SDR picture itself at a
 // headroom of 1. The new luminance scales the pixel's I, Ct and Cp (taken at W nits a unit) by one ratio, PQ(Y_out) / PQ(Y x W), which keeps its ICtCp hue angle; a strong
-// primary can leave the gamut and is clipped at 0. The matrices assume BT.709 primaries, shown in the screen's colour space as the SDR present shows its bytes. Alpha is 1:
+// primary can leave the gamut and is clipped at 0. The matrices assume BT.709 primaries, which the layer's colour space (the SDR layer's, extended and linear) shows as the SDR present shows its bytes. Alpha is 1:
 // the Switch's scan-out ignores the window's alpha. The numbers behind ITM_SMOOTH and the ranges: docs/reference/rendering.md, HDR output
 constant float ITM_SMOOTH = 0.12f;   // ln luminance: under the smallest gap of Method A over SDR at L_HDR 1000 for an 8-bit grey code (0.134 at code 1; wider above 1000)
 fragment float4 fs_hdr_itm(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
@@ -120,10 +120,10 @@ fragment float4 fs_hdr_itm(V in [[stage_in]], texture2d<float> t [[texture(0)]],
     float3 ictcp = M_LMS_PQ_TO_ICTCP * pq_oetf(M_BT709_TO_LMS * (lin * w));
     return float4(max(M_LMS_TO_BT709 * pq_eotf(M_ICTCP_TO_LMS_PQ * (ictcp * r)), 0.0f) / w, 1);
 }
-// The PQ window in linear BT.709 values, which the layer (the screen's own colour space, as for fs_hdr_itm) shows in the panel's primaries: the same look as the SDR present and
-// the inverse tone map, which show 8-bit values that way. A colour outside BT.709 is clipped at 0
+// The PQ window in linear BT.709 values, which the layer (the SDR layer's colour space extended and linear, as for fs_hdr_itm) shows as the SDR present shows its bytes. A colour
+// outside BT.709 keeps its negative values, which the extended colour space shows as the colour the game drew
 fragment float4 fs_pq_linear(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
-    return float4(max(M_BT2020_TO_BT709 * (pq_eotf(src_sample(in, t, s, c).rgb) / c.pq.x), 0.0f), 1);
+    return float4(M_BT2020_TO_BT709 * (pq_eotf(src_sample(in, t, s, c).rgb) / c.pq.x), 1);
 }
 fragment float4 fs_pq_to_sdr(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant Crop& c [[buffer(0)]]) {
     return float4(srgb_oetf(saturate(M_BT2020_TO_BT709 * (pq_eotf(src_sample(in, t, s, c).rgb) / c.pq.x))), 1);

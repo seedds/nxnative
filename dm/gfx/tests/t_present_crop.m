@@ -111,8 +111,8 @@ static void hdr_checks(void) {
     // PQ: the paper white vi reports (203 nits, code 594) is 1.0 on the linear route and the SDR route's white
     hdr_present(pqw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("PQ 594 on the linear route: 1.0 (paper white)",0.99958,v[0],0.002);EXPECTF("  green",0.99958,v[1],0.002);
     hdr_present(pqw,MTLPixelFormatBGRA8Unorm,4,v);EXPECTF("PQ 594 on the SDR route: white",255,v[0],1);EXPECTF("  blue",255,v[2],1);
-    // BT.2020 primaries: a BT.709 colour stored in BT.2020 comes back as itself on both routes: the linear route writes BT.709 values too, which the layer (the screen's own colour
-    // space, as for the inverse tone map) shows in the panel's primaries, the look of the SDR present. The codes' own rounding gives (0.5005, 0.2504, 0.1244)
+    // BT.2020 primaries: a BT.709 colour stored in BT.2020 comes back as itself on both routes: the linear route writes BT.709 values too, which the layer (the SDR layer's colour
+    // space extended and linear, as for the inverse tone map) shows as the SDR present shows its bytes. The codes' own rounding gives (0.5005, 0.2504, 0.1244)
     uint32_t c2020=rgb10a2(499,458,398);id<MTLTexture> cw=hdr_src(MTLPixelFormatRGB10A2Unorm,4,4,&c2020,4);
     hdr_present(cw,MTLPixelFormatBGRA8Unorm,4,v);EXPECTF("BT.2020 (0.401, 0.266, 0.142) on the SDR route: BT.709 red code",187.6,v[0],1.5);EXPECTF("  green",137.1,v[1],1.5);EXPECTF("  blue",98.9,v[2],1.5);
     hdr_present(cw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("the same on the linear route: BT.709 red",0.5005,v[0],0.004);EXPECTF("  green",0.2504,v[1],0.003);EXPECTF("  blue",0.1244,v[2],0.002);
@@ -129,7 +129,7 @@ static void hdr_checks(void) {
     }
     uint32_t red=rgb10a2(594,0,0);id<MTLTexture> rw=hdr_src(MTLPixelFormatRGB10A2Unorm,4,4,&red,4);
     hdr_present(rw,MTLPixelFormatBGRA8Unorm,4,v);EXPECT("BT.2020 red outside BT.709 on the SDR route: clipped to red",1,v[0]>=254&&v[1]<=1&&v[2]<=1);
-    hdr_present(rw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  on the linear route: BT.709 red 1.66, above SDR white",1.6598,v[0],0.006);EXPECT("  green and blue clipped at 0",1,v[1]==0&&v[2]==0);
+    hdr_present(rw,MTLPixelFormatRGBA16Float,4,v);EXPECTF("  on the linear route: BT.709 red 1.66, above SDR white",1.6598,v[0],0.006);EXPECTF("  green kept below 0 (outside BT.709; the extended layer shows it)",-0.1245,v[1],0.003);EXPECTF("  blue kept below 0",-0.0181,v[2],0.002);
     // The inverse tone map of an 8-bit window: exact greys and white from a 16-bit source (the same route), then an 8-bit window. Output in SDR-white units (EDR, 1.0 = 203 nits)
     uint16_t grey16[4]={30235,30235,30235,65535},white16[4]={65535,65535,65535,65535};   // sRGB 0.461356: linear 0.18
     id<MTLTexture> gw=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,grey16,8),ww=hdr_src(MTLPixelFormatRGBA16Unorm,4,4,white16,8);

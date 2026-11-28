@@ -23457,11 +23457,11 @@ void mtl_present_test_stall(uint64_t ns) { g_present_stall_ns = ns; }
 //   PQ window      -> 8-bit drawable: ROUTE_PQ_SDR (an SDR screen, screenshots)                           -> RGBA16Float: ROUTE_PQ_LINEAR, linear BT.709 with paper white at 1.0
 // A PQ window is a 10-bit one (RGB10A2, BGR10A2) that the game queued while vi's last answer to it was HDR output (mtl_hdr_vi): Ocarina of Time recreates its window as RGB10A2
 // (NVN 0x3d) and writes PQ BT.2100 there once vi reports HDR, and an 8-bit one again when it reports SDR. A 10-bit window queued after an SDR answer is taken as 8-bit values.
-// The layer (front_layer_hdr): RGBA16Float with extended range content and no EDR metadata, so the system applies no tone map and clips at the screen's headroom, in the screen's
-// own colour space, extended and linear, for both HDR routes. The SDR layer has no colour space, so its sRGB bytes reach the panel as they are and show in the panel's primaries
-// (Display P3 on an XDR screen: more saturated than sRGB); both HDR routes write BT.709 values into the screen's space, which keeps that look. A PQ window is converted from BT.2020
-// to BT.709 first: Ocarina of Time's PQ window decodes to its SDR window's bytes within 0.3 codes, and none of it lies outside BT.709, so the clip at 0 costs it nothing. Tagged
-// BT.2020 it would be shown as authored, less saturated than the other modes. Not a PQ layer (RGB10A2 with ITUR_2100_PQ): there EDR 1.0 is fixed at 100 nits and the output scale is
+// The layer (front_layer_hdr): RGBA16Float with extended range content and no EDR metadata, so the system applies no tone map and clips at the screen's headroom, in the SDR
+// layer's colour space, extended and linear, for both HDR routes. The SDR layer is BGRA8Unorm, to which Core Animation gives kCGColorSpaceSRGB (macOS 27.2.1, measured), so its sRGB
+// bytes are colour-matched to the screen; both HDR routes write BT.709 values into kCGColorSpaceExtendedLinearSRGB, which shows them as the SDR layer shows its bytes. A PQ window is
+// converted from BT.2020 to BT.709 and keeps the negative values of a colour outside BT.709 (Mario Kart World, Donkey Kong Bananza), which that extended colour space shows as drawn;
+// clipped at 0, as before, about 2 % of Mario Kart World's title frame moved by a ΔE_ITP above 10 (docs/reference/rendering.md, HDR output). Not a PQ layer (RGB10A2 with ITUR_2100_PQ): there EDR 1.0 is fixed at 100 nits and the output scale is
 // ignored for normalized formats (CAEDRMetadata.h), so the paper white vi reports could not be the screen's SDR white. EDR 1.0 is that paper white, MTL_HDR_PAPER_WHITE: vi's peak is
 // the screen's headroom x 203 nits, so the game's own tone map targets the range the screen has now
 enum { ROUTE_COPY, ROUTE_ITM, ROUTE_PQ_LINEAR, ROUTE_PQ_SDR, ROUTE_N };
@@ -23611,7 +23611,7 @@ static void hdr_layer_update(MTLPixelFormat src) {
     if (route != route_was && route >= 0) MLOG("HDR: the window (format %lu) takes %s", (unsigned long)src, route == ROUTE_PQ_LINEAR ? "the PQ route (PQ decode, BT.2020 to BT.709)" : "the BT.2446 inverse tone map");
     route_was = route;
     if (want == asked || !again) return;
-    MLOG("HDR: the layer %s (window format %lu)", want == HDR_LAYER_HDR ? "RGBA16Float, extended range, the screen's primaries linear" : "BGRA8, SDR", (unsigned long)src);
+    MLOG("HDR: the layer %s (window format %lu)", want == HDR_LAYER_HDR ? "RGBA16Float, extended range, the SDR layer's colour space linear" : "BGRA8, SDR", (unsigned long)src);
     asked = want; front_layer_hdr(want);
 }
 // The present's pipelines, by drawable format and route, made once each and kept (several threads present or capture: the present thread, the display link's, screenshots and

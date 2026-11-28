@@ -16272,7 +16272,7 @@ static int prog_border(NvProg *pr) { __unsafe_unretained NvShader *vs = pr->sh[0
 // or the registered IDs have changed: into a new buffer, as commands already encoded hold the old one. The read bitmap's address stays 0: the translator marks no read of a table (dmsh_reflect.py
 // pool_arrays). Caller holds g_rmu, as for pool_gpu
 #define HTAB_SNAPS 64
-typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, sgen, pass, sub, addr; int npend; uint8_t *copy; uint64_t *ser; uint32_t bytes, cap, n; int samp, dtt, dpf, tb, sb, c2s; } htab_snap;   // ser: each element's texture serial, for fb_texu_reads; sub, npend: the submission and its queued writes (g_npend) when the handles were last read
+typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, sgen, pass, sub, addr, bsub; int npend; uint8_t *copy, *cpu_head; uint64_t *ser; uint32_t bytes, cap, n; int samp, dtt, dpf, tb, sb, c2s; } htab_snap;   // ser: each element's texture serial, for fb_texu_reads; sub, npend: the submission and its queued writes (g_npend) when the handles were last read
 // A write queued since the table's handles were last read lands on [a, b) (or cannot be told). Only the writes since are scanned (pend_since), so games that update another uniform block before
 // every draw keep the table without reading it again
 static int htab_written(const htab_snap *p, uint64_t a, uint64_t b) {
@@ -16290,6 +16290,8 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     enum { SAMP_FROM_UBO_HANDLES = -2 };
     int c2s = samp && b->soff && b->sreg == DMSH_SREG_C2 ? sampu_id(stage, b, 0) : SAMP_FROM_UBO_HANDLES;
     htab_snap *p = NULL, *free_ = NULL;
+    // A table is written into the submission's frame arena (arena_take), which is recycled once that submission completes: one from an earlier submission is dropped, not reused
+    static uint64_t swept; if (swept != g_sub_serial) { swept = g_sub_serial; for (int i = 0; i < HTAB_SNAPS; i++) if (g_htab[i].buf && g_htab[i].bsub != g_sub_serial) g_htab[i].buf = nil; }
     for (int i = 0; i < HTAB_SNAPS && !p; i++) { htab_snap *q = &g_htab[i];
         if (!q->buf) { if (!free_) free_ = q; }
         else if (q->addr == addr && q->samp == samp && q->dtt == b->dtt && q->dpf == b->dpf && q->tb == S.tex_base && q->sb == S.samp_base && q->c2s == c2s) p = q; }
@@ -16301,7 +16303,7 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
         if (!samp) { const uint32_t *hw = (const uint32_t *)now; for (uint32_t k = 0; k < p->n; k++) { int tid = ubo_tex_id(hw[k * 2]); if (tid >= 0 && tid < g_ntreg) g_treg[tid].used = g_tu_now; } }
         p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; g_htab_last = p; *out = p->buf; return p->gpu; }
     uint64_t t0 = mach_absolute_time();
-    if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; if (p->buf) defer_obj_release(p->buf); uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }
+    if (!p) { p = free_ ? free_ : &g_htab[g_htab_next++ % HTAB_SNAPS]; p->buf = nil; uint8_t *keep = p->copy; uint64_t *ks = p->ser; uint32_t cap = p->cap; *p = (htab_snap){0}; p->copy = keep; p->ser = ks; p->cap = cap; }
     uint32_t n = 0; const uint32_t *w = (const uint32_t *)now;
     for (uint32_t k = bytes / 8; k > 0 && !n; k--) if (w[(k - 1) * 2]) n = k;
     uint64_t dummy = samp ? dummy_samp_rid() : (dummy_tex(b->dtt, b->dpf) ? g_dummy_tex_rid[b->dtt % DMY_NT][b->dpf & 3] : 0);
@@ -16320,15 +16322,15 @@ static uint64_t htab_gpu(int stage, const nvn_rbind *b, __unsafe_unretained id<M
     memcpy(p->copy, now, bytes);
     // Registrations come many times a frame and rarely touch a table: the same elements keep the buffer, and argument blocks that hold it
     size_t metadata = !samp && b->dtt == MTLTextureTypeTextureBuffer ? 4 * (size_t)(n + 1) : 0;
-    if (p->buf && p->n == n && !memcmp((uint8_t *)p->buf.contents + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1))
-        && (!metadata || !memcmp((uint8_t *)p->buf.contents + DMSH_POOL_HEAD + 8 * (size_t)(n + 1), lead, metadata))) { p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->bytes = bytes; g_htab_last = p; *out = p->buf; return p->gpu; }
-    id<MTLBuffer> buf = [g_dev newBufferWithLength:DMSH_POOL_HEAD + 8 * (size_t)(n + 1) + metadata options:MTLResourceStorageModeShared];
-    uint8_t *c = buf.contents; *(uint32_t *)c = n; memcpy(c + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1));
+    if (p->buf && p->n == n && !memcmp(p->cpu_head + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1))
+        && (!metadata || !memcmp(p->cpu_head + DMSH_POOL_HEAD + 8 * (size_t)(n + 1), lead, metadata))) { p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->bytes = bytes; g_htab_last = p; *out = p->buf; return p->gpu; }
+    // Into the submission's frame arena, not a buffer of its own: Hogwarts Legacy builds about 1,800 small tables a second (5-18 handles, a material's uniform block per draw), and a
+    // new MTLBuffer each, with its residency add, held its replay thread at 80% and frames at 240 ms while a spell's particles drew
+    __strong id<MTLBuffer> buf; size_t tbytes = DMSH_POOL_HEAD + 8 * (size_t)(n + 1) + metadata; arena_at at = arena_take(tbytes, &buf);
+    uint8_t *c = at.cpu; memset(c, 0, DMSH_POOL_HEAD); *(uint32_t *)c = n; memcpy(c + DMSH_POOL_HEAD, e, 8 * (size_t)(n + 1));
     *(uint32_t *)(void *)(c + DMSH_POOL_BIAS) = metadata ? DMSH_POOL_HEAD + 8u * (n + 1) : 0;
     if (metadata) memcpy(c + DMSH_POOL_HEAD + 8 * (size_t)(n + 1), lead, metadata);
-    res_add(buf);
-    if (p->buf) defer_obj_release(p->buf);
-    p->buf = buf; p->gpu = buf.gpuAddress; p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->addr = addr; p->bytes = bytes; p->n = n; p->samp = samp; p->dtt = b->dtt; p->dpf = b->dpf; p->tb = S.tex_base; p->sb = S.samp_base; p->c2s = c2s;
+    p->buf = buf; p->gpu = at.gpu; p->bsub = g_sub_serial; p->cpu_head = c; p->reg = rg; p->sgen = sg; p->pass = g_pass.serial; p->sub = g_sub_serial; p->npend = g_npend; p->addr = addr; p->bytes = bytes; p->n = n; p->samp = samp; p->dtt = b->dtt; p->dpf = b->dpf; p->tb = S.tex_base; p->sb = S.samp_base; p->c2s = c2s;
     g_psnap_gen++;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     double ms = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6; g_stat_htab_ms += ms;

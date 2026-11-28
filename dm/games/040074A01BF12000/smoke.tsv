@@ -1,0 +1,11 @@
+# Boot smoke route for scripts/regress.py (docs/development.md, The regression harness): key <TAB> value
+# The bench save that continues into the Banana-Mining Site (bench/saves/s1): A at the title, Continue, a hint; DK then stands in the level
+# Measured 2026-11-21 (full mode, M6): first frame 2-4 s, 59 fps, 4,500 frames by 80 s
+save	bench/saves/s1
+keys	22:A~0.2,27:A~0.2,32:A~0.2,37:A~0.2
+secs	80
+quick	60
+reach	2400@60
+window	50	25
+shots	55,75
+hang	20

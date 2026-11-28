@@ -22,6 +22,7 @@ extern char **environ;
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 UIViewController *front_ios_root(void);
+UIInterfaceOrientationMask dm_rotation_vc_mask(void);   // front_ios.m: every orientation under auto, a lock under Rotation (DM_ROTATION)
 UIInterfaceOrientationMask front_ios_app_orientations(void);   // front_ios.m: the orientations Rotation allows (DM_ROTATION)
 void front_ios_focus_event(int ev);
 
@@ -285,6 +286,8 @@ int front_ios_boot_ok(void) { return g_boot_ok; }
     self.window.rootViewController = front_ios_root();
     [self.window makeKeyAndVisible];
 }
+// The phone launch plist stays landscape; on iOS 27 the scene permits the orientations used by the game and launcher: all four under Rotation auto, the lock the player chose otherwise.
+- (UIInterfaceOrientationMask)supportedInterfaceOrientationsForWindowScene:(UIWindowScene *)ws API_AVAILABLE(ios(27.0)) { (void)ws; return dm_rotation_vc_mask(); }
 - (void)sceneWillResignActive:(UIScene *)s { front_ios_focus_event(0); }
 - (void)sceneDidEnterBackground:(UIScene *)s { front_ios_focus_event(1); }
 - (void)sceneWillEnterForeground:(UIScene *)s { front_ios_focus_event(2); }

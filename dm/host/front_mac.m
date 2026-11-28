@@ -1826,6 +1826,23 @@ void front_run(void (*guest)(void)) {
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
+        // DM_SCREEN=<n or part of a name>: the screen the window opens on (and goes fullscreen on), by its index in NSScreen.screens or a case-insensitive part of its
+        // localizedName. Unset, macOS places it, which for a process another one starts (scripts/bench.py, regress.py) is the screen the user is working on, not the one
+        // asked for. After the move the layer takes the new screen's backing scale and the drawable its size in pixels: a window moved from a Retina screen to a
+        // non-Retina one (or back) kept the first screen's scale until the next resize, so the picture was drawn at twice or half the pixels it shows
+        const char *screen_env = getenv("DM_SCREEN");
+        if (screen_env && *screen_env) {
+            NSString *want = @(screen_env); NSArray<NSScreen *> *all = NSScreen.screens; NSScreen *pick = nil;
+            NSInteger idx = want.integerValue; BOOL num = [want rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location == NSNotFound;
+            if (num && idx >= 0 && idx < (NSInteger)all.count) pick = all[idx];
+            for (NSScreen *s in all) if (!pick && [s.localizedName rangeOfString:want options:NSCaseInsensitiveSearch].location != NSNotFound) pick = s;
+            if (pick) {
+                NSRect vf = pick.visibleFrame, wf = win.frame;
+                [win setFrameOrigin:NSMakePoint(NSMidX(vf) - wf.size.width / 2, NSMidY(vf) - wf.size.height / 2)];
+                g_layer.contentsScale = win.backingScaleFactor; [(DmGameView *)v fitDrawable];
+                LOG("front end: window on screen '%s' at scale %.0f (DM_SCREEN)", pick.localizedName.UTF8String, win.backingScaleFactor);
+            } else LOG("front end: DM_SCREEN=%s names no screen; macOS places the window", screen_env);
+        }
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         layer_opaque_sync(win.screen ?: NSScreen.mainScreen, want_fs);

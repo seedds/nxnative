@@ -69,6 +69,33 @@ int nvn_deswz_gpu_encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> src, ui
     return 0;
 }
 
+typedef struct {
+    uint64_t src_off, dst_off, base, pitch;
+    uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2;
+} deswz_params;
+_Static_assert(sizeof(deswz_params) == 64, "deswizzle parameter cell size");
+
+static void deswz_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+        id<MTLComputePipelineState> pipeline, id<MTLBuffer> params, size_t params_off,
+        id<MTLBuffer> src, id<MTLBuffer> dst, const deswz_params *p) {
+    memcpy((uint8_t *)params.contents + params_off, p, sizeof *p);
+    [enc setArgumentTable:table];
+    [enc setComputePipelineState:pipeline];
+    [table setAddress:src.gpuAddress atIndex:0];
+    [table setAddress:dst.gpuAddress atIndex:1];
+    [table setAddress:params.gpuAddress + params_off atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake((p->row_bytes + 63u) >> 6, (p->rows + 7u) >> 3, p->slices)
+          threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+}
+
+void nvn_deswz_gpu_sparse_region_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+        id<MTLBuffer> params, size_t params_off, id<MTLBuffer> pages, uint64_t va, uint64_t base,
+        id<MTLBuffer> dst, uint64_t dst_off, uint32_t row, uint32_t rows, uint32_t depth,
+        unsigned th, unsigned td, unsigned columns, unsigned gob_order) {
+    deswz_params p = {va, dst_off, base, row, row, rows, depth, th, td, columns, gob_order};
+    deswz_encode_m4(enc, table, g_nvn_deswz_sparse, params, params_off, pages, dst, &p);
+}
+
 int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
                             id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off, int sparse,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
@@ -80,17 +107,9 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
     unsigned th, td;
     if (nvn_deswizzle_geom(d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &bpb) || dst_pitch < row_bytes) return -1;
     if (sparse && ((src_off | base) & 15)) return -1;
-    struct { uint64_t src_off, dst_off, base, pitch; uint32_t row_bytes, rows, slices, th, td, gobs_x, gob2; } p = {
+    deswz_params p = {
         src_off, dst_off, base, dst_pitch, row_bytes, rows, slices, th, td, MAX(nvn_tex_level_gobs(d, level), (row_bytes + 63u) >> 6), (uint32_t)nvn_gob_order(d)   // GOB columns as laid out (nvn_tex_level_gobs)
     };
-    memcpy((uint8_t *)params.contents + params_off, &p, sizeof p);
-    [enc setArgumentTable:table];
-    [enc setComputePipelineState:pipeline];
-    [table setAddress:src.gpuAddress atIndex:0];
-    [table setAddress:dst.gpuAddress atIndex:1];
-    [table setAddress:params.gpuAddress + params_off atIndex:2];
-    NSUInteger gobs_x = (row_bytes + 63u) >> 6;
-    NSUInteger gobs_y = (rows + 7u) >> 3;
-    [enc dispatchThreadgroups:MTLSizeMake(gobs_x, gobs_y, slices) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    deswz_encode_m4(enc, table, pipeline, params, params_off, src, dst, &p);
     return 0;
 }

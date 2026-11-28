@@ -4885,6 +4885,48 @@ static int tex_cpu_wait(const tex_t *t) {
     if (!g_cb && (gw_live(lo, hi) || nvn_sparse_gen())) { mtl_finish_gpu_at(WS_UPALLOC); return 1; }
     return 0;
 }
+typedef struct {
+    uint64_t base, stride;
+    uint32_t row, rows, depth, chunk;
+    unsigned th, td, columns;
+} up_volume;
+
+static up_volume up_volume_plan(const tex_t *t, size_t limit) {
+    up_volume v = {0};
+    uint32_t bpb;
+    if (nvn_deswizzle_geom(&t->d, 0, 0, &v.row, &v.rows, &v.depth, &v.base, &v.th, &v.td, &bpb)
+        || !v.row || !v.rows || (v.base & 15)) return (up_volume){0};
+    unsigned step = 1u << v.td;
+    size_t image = (size_t)v.row * v.rows;
+    v.columns = MAX(nvn_tex_level_gobs(&t->d, 0), (v.row + 63u) >> 6);
+    v.stride = (512ull << (v.th + v.td)) * v.columns * ((v.rows + (8u << v.th) - 1) >> (3 + v.th));
+    if (!v.stride || v.base > t->L.size || (v.depth + step - 1) / step > (t->L.size - v.base) / v.stride)
+        return (up_volume){0};
+    // Local Z in the kernel can restart at zero only at a guest depth-block boundary.
+    v.chunk = (uint32_t)(limit / image / step) * step;
+    if (v.chunk >= v.depth) v.chunk = 0;
+    return v;
+}
+
+static void up_volume_encode(const tex_t *t, const up_volume *v, id<MTLBuffer> pages, id<MTLBuffer> scratch,
+                             size_t off, id<MTLTexture> dst) {
+    size_t image = (size_t)v->row * v->rows;
+    MTL4VisibilityOptions vis = resource_vis();
+    for (unsigned z = 0; z < v->depth; z += v->chunk) {
+        unsigned count = MIN(v->chunk, v->depth - z);
+        size_t param_off;
+        id<MTLBuffer> params = up_param_alloc(&param_off);
+        nvn_deswz_gpu_sparse_region_m4(g_up_ce, g_up_ct, params, param_off, pages, (uintptr_t)t->mem,
+            v->base + (z >> v->td) * v->stride, scratch, off, v->row, v->rows, count,
+            v->th, v->td, v->columns, nvn_gob_order(&t->d));
+        [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageBlit visibilityOptions:vis];
+        enc_b_copy_buffer_texture(g_up_ce, scratch, off, v->row, image, MTLSizeMake(dst.width, dst.height, count),
+                                  dst, 0, 0, MTLOriginMake(0, 0, z));
+        if (z + count < v->depth)
+            [g_up_ce barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:vis];
+    }
+}
+
 static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture> reuse, MTLTextureUsage keep, id<MTLTexture> prev, const void *span, uint64_t since, unsigned *taken) {
     MTLTextureDescriptor *d = tex_desc(t, 1);
     if (!d) return nil;
@@ -4958,8 +5000,17 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
                 [g_up_ce barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             }
         }
+        // Reuse one span in GPU order. The ordinary upload still owns
+        // the page table, source buffers, destination and completion.
+        up_volume volume = {0};
+        const size_t limit = UP_BLOCK_SIZE, threshold = 2 * UP_BLOCK_SIZE;
+        if (total >= threshold && spt && d.mipmapLevelCount == 1 && !need
+            && t->d.target == NVN_TEXTURE_TARGET_3D && d.sampleCount == 1
+            && (t->d.format == 0x42 || t->d.format == 0x50))
+            volume = up_volume_plan(t, limit);
         size_t stg_off;
-        id<MTLBuffer> stg = up_alloc(total ? total : 16, &stg_off);
+        size_t bytes = volume.chunk ? (size_t)volume.row * volume.rows * volume.chunk : total;
+        id<MTLBuffer> stg = up_alloc(bytes ? bytes : 16, &stg_off);
         if (spt) {   // up_alloc may have flushed the batch that holds the buffers the page table names: the table again, in this batch (a page it no longer reaches reads as 0)
             if (g_up_seq != src_batch) sp_pages_gpu(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, spt, 0);
             id<MTLBuffer> table = [g_dev newBufferWithBytes:spt length:(NSUInteger)spn * sizeof *spt options:MTLResourceStorageModeShared];
@@ -4975,6 +5026,12 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         if (upsrc && g_up_seq != src_batch) {
             upsrc = up_big_src((uint64_t)t->mem, t->L.size, &mo, 0);
             mb = (__bridge void *)upsrc;   // if the new buffer was refused, fall back to the CPU instead of using the old batch's address
+        }
+        if (volume.chunk && g_up_ce && mb) {
+            up_volume_encode(t, &volume, (__bridge id<MTLBuffer>)mb, stg, stg_off, mt);
+            [g_up_texs addObject:mt];
+            if (!g_cb) up_flush();
+            return mt;
         }
         size_t off = 0; int enc_ok = g_up_ce != nil && mb != NULL, nb0 = g_nup_blits;
         for (unsigned l = 0; enc_ok && l < d.mipmapLevelCount; l++) {

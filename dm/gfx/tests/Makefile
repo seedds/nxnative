@@ -1095,3 +1095,10 @@ t_scan_cache: t_scan_cache.m $(MTL_T_DEP)
 .PHONY: check_t_scan_cache
 check_t_scan_cache: t_scan_cache
 	MTL_DEBUG_LAYER=1 ./t_scan_cache
+
+t_bounded_volume_upload: t_bounded_volume_upload.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+.PHONY: check_t_bounded_volume_upload
+check_t_bounded_volume_upload: t_bounded_volume_upload
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_bounded_volume_upload
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_bounded_volume_upload

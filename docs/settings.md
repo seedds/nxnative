@@ -248,6 +248,12 @@ Turn off **Show this window at launch** to start the game at once with your choi
 
 **Window** or **Fullscreen**: how the game's window opens. ⌃⌘F or the green button changes it while you play. In an `env.txt`: `DM_FULLSCREEN=1` or `0`.
 
+### Apple Vision Pro
+
+Choose **Window › Show on Apple Vision Pro** while the game runs: the game also appears on a large screen in front of you in an Apple Vision Pro near this Mac, in 3D: the Mac draws a picture for each eye from the game's own depth, so the scene opens behind the screen like a window. The Vision Pro asks you to accept the connection. The game's window stays open on the Mac and must stay visible, since it still paces the game; controllers and the keyboard work as before. Hold the Digital Crown to recenter the screen; press it, or choose the menu item again, to close it while the game goes on on the Mac.
+
+The game's HUD floats in front of the scene. A game drawn through Vulkan or OpenGL, or a 2D game, stays flat. `DM_IMMERSIVE=1` in an `env.txt` opens it at launch. It needs macOS 26 and visionOS 26. Tested on a Mac and a physical Apple Vision Pro.
+
 ### Cloud saves folder
 
 **Choose a folder…** picks the iCloud Drive folder the game's save is synced through, the one the iPhone app chose in its launcher's **Cloud saves**, or the game's own folder inside it, named after its title ID ([Cloud saves](#cloud-saves)); **Turn off** stops it. Off by default. macOS may ask once whether the app may open iCloud Drive; if the game log says `this app may not open iCloud Drive`, allow it in System Settings › Privacy & Security › Files and Folders. In an `env.txt`: `DM_SAVE_SYNC=<folder>`, or `DM_SAVE_SYNC=icloud` for iCloud Drive › nxnative Saves; the window then shows it fixed.

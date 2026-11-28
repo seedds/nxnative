@@ -423,6 +423,7 @@ static void pad_set(int p, uint64_t m, int32_t lx, int32_t ly, int32_t rx, int32
     dm_pad_set_player(p, m, lx, ly, rx, ry);
 }
 static void hq_poll(void);
+static void shot_take(void);   // a screenshot of the next frame (Capture button, Window → Take Screenshot)
 static home_quit g_hq;   // the Home button's hold and quit prompt (home_quit.h): while the prompt is open the controllers' input goes to it, not to the game
 static int g_press_to_join;   // DM_PAD_PRESS_TO_JOIN=1, below pad_read
 static int pad_join(const void *owner, const char *name);
@@ -469,11 +470,13 @@ static void pad_read(GCExtendedGamepad *g) {
     }
     pad_set(p, m, st[0], st[1], st[2], st[3]);
 }
-// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture has no function in the host, Home quits when it is held (hq_poll).
+// Home and Capture: without this macOS takes them as system gestures (Home opens the Games app). Capture takes a screenshot (shot_take), Home quits when it is held (hq_poll).
 // macOS 27 respects the claim when the Home button setting for apps lets the app decide (hq_log_setting names it in the log)
 static void pad_keep_system_buttons(GCController *c) {
     for (NSString *b in @[GCInputButtonHome, GCInputButtonShare]) c.physicalInputProfile.buttons[b].preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.buttonHome.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; (void)down; if (g_input_on) hq_poll(); };
+    GCControllerButtonInput *share = c.physicalInputProfile.buttons[GCInputButtonShare];
+    share.pressedChangedHandler = ^(GCControllerButtonInput *b, float v, BOOL down) { (void)b; (void)v; if (down && g_input_on) dispatch_async(dispatch_get_main_queue(), ^{ shot_take(); }); };
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 // Player lights of player p (pad_apple.h), and a log line when it has a player
@@ -1260,6 +1263,54 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
 }
 @end
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
+// Screenshots (photo mode): Window → Take Screenshot (⌘⇧S) or a controller's Capture / Share button saves the next presented frame at the game's own resolution, before the
+// window's scaling, as a PNG in <Application Support>/nxnative/<title ID>/Screenshots/. The
+// graphics side writes it on its present thread (dm_gfx_shot_at); a short flash and a label confirm it, views made only while they show
+static NSView *g_shot_toast;
+static NSString *shot_dir(void) {
+    return [NSHomeDirectory() stringByAppendingFormat:@"/Library/Application Support/nxnative/%016llX/Screenshots", (unsigned long long)DM_GAME_PROGRAM_ID];
+}
+static void shot_toast(NSString *text, int flash) {
+    NSView *cv = g_win.contentView; if (!cv) return;
+    if (flash) {
+        NSView *f = [[NSView alloc] initWithFrame:cv.bounds]; f.wantsLayer = YES; f.layer.backgroundColor = NSColor.whiteColor.CGColor; f.alphaValue = 0.55;
+        f.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; [cv addSubview:f];
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *c) { c.duration = 0.35; f.animator.alphaValue = 0; } completionHandler:^{ [f removeFromSuperview]; }];
+    }
+    [g_shot_toast removeFromSuperview];
+    CGFloat k = hq_scale(cv.bounds.size);
+    NSTextField *t = hq_label(text, 15 * k, NSFontWeightSemibold, NSColor.whiteColor, 0);
+    NSImageView *icon = hq_glyph(@"camera.fill", @"camera", 15 * k, NSColor.whiteColor);
+    NSStackView *row = [NSStackView stackViewWithViews:@[icon, t]]; row.spacing = 8 * k; row.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *pill = [NSView new]; pill.wantsLayer = YES; pill.layer.cornerRadius = 20 * k; pill.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.7].CGColor;
+    pill.translatesAutoresizingMaskIntoConstraints = NO; [pill addSubview:row]; [cv addSubview:pill];
+    [NSLayoutConstraint activateConstraints:@[[row.leadingAnchor constraintEqualToAnchor:pill.leadingAnchor constant:16 * k], [row.trailingAnchor constraintEqualToAnchor:pill.trailingAnchor constant:-16 * k],
+        [row.centerYAnchor constraintEqualToAnchor:pill.centerYAnchor], [pill.heightAnchor constraintEqualToConstant:40 * k],
+        [pill.leadingAnchor constraintEqualToAnchor:cv.leadingAnchor constant:16 * k], [pill.bottomAnchor constraintEqualToAnchor:cv.bottomAnchor constant:-16 * k]]];
+    g_shot_toast = pill; hq_fade(pill, 1);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ if (g_shot_toast == pill) { hq_fade(pill, 0); g_shot_toast = nil; } });
+}
+static void shot_take(void) {
+    NSString *dir = shot_dir();
+    if (![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil]) { shot_toast(@"Screenshot not saved: no folder", 0); return; }
+    NSDateFormatter *df = [NSDateFormatter new]; df.dateFormat = @"yyyy-MM-dd 'at' HH.mm.ss"; df.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    NSString *path = [dir stringByAppendingFormat:@"/%@.png", [df stringFromDate:NSDate.date]];
+    dm_gfx_shot_at(0, path.fileSystemRepresentation);
+    LOG("front end: screenshot → %s", path.fileSystemRepresentation);
+    shot_toast(@"Saving screenshot…", 1);
+    // the present thread writes it at the next frame; a game that has stopped presenting never does
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        shot_toast([NSFileManager.defaultManager fileExistsAtPath:path] ? @"Screenshot saved" : @"Screenshot not saved", 0); });
+}
+@interface DmShotTarget : NSObject @end
+@implementation DmShotTarget
+- (void)takeScreenshot:(NSMenuItem *)it { (void)it; shot_take(); }
+- (void)showScreenshots:(NSMenuItem *)it {
+    (void)it; NSString *dir = shot_dir(); [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:dir]];
+}
+@end
+static DmShotTarget *g_shot_target;
 
 @implementation DmCheatsPanel {
     NSPanel *_panel;              // created once in show, kept for the process's lifetime
@@ -1983,6 +2034,11 @@ void front_run(void (*guest)(void)) {
         stickMotion.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
         stickMotion.state = dm_stick_motion_enabled() ? NSControlStateValueOn : NSControlStateValueOff;
         [[bar insertItemWithTitle:@"Controls" action:nil keyEquivalent:@"" atIndex:bar.numberOfItems - 1] setSubmenu:controls];
+        g_shot_target = [DmShotTarget new];
+        [wm addItem:NSMenuItem.separatorItem];
+        NSMenuItem *ts = [wm addItemWithTitle:@"Take Screenshot" action:@selector(takeScreenshot:) keyEquivalent:@"s"];
+        ts.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift; ts.target = g_shot_target;
+        [wm addItemWithTitle:@"Show Screenshots" action:@selector(showScreenshots:) keyEquivalent:@""].target = g_shot_target;
         NSApp.mainMenu = bar;
         if (want_fs) {
             g_fs_asked = CACurrentMediaTime(); g_fs_starting = 1;   // front_screen_settling: the display link waits for fullscreen

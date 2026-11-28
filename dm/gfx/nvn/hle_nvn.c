@@ -1610,6 +1610,7 @@ NVN(nvnCommandBufferSetRenderTargets, void, NVNcommandBuffer *c, int n, const NV
     const NVNtexture *dt, const NVNtextureView *dv) {
     if (n < 0 || n > 8) { LOG("[RED] SetRenderTargets count %d", n); n = n < 0 ? 0 : 8; }
     p_set_rt *r = REC_SNAP(c, OP_SET_RT, p_set_rt, n + 1); r->n = n;
+    if (n > 0 && ct && ct[0]) { extern __thread int dm_vp_rt[2]; dm_vp_rt[0] = (int)CTX(ct[0])->d.width; dm_vp_rt[1] = (int)CTX(ct[0])->d.height; }   // DM_VP_TRACE: the target's size
     for (int i = 0; i < n; i++) { r->color[i] = ct ? tex_snap(r, SNAP_OFF(p_set_rt), i, ct[i], (uint64_t)__builtin_return_address(0)) : NULL; copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL); }
     r->depth = tex_snap(r, SNAP_OFF(p_set_rt), n, dt, (uint64_t)__builtin_return_address(0)); copy_view(&r->dview, &r->has_dview, dv);
     for (int i = 0; i < n; i++) if (r->color[i]) mtl_tex_gpu_written(r->color[i]);
@@ -1638,8 +1639,13 @@ static int slots_bound(const char *what, int st, int first, int n, int slots) {
     if (k != n) { static _Atomic int red; if (red++ < 16) LOG("[RED] %s stage %d first=%d n=%d: the host keeps %d slots a stage (%d resource stages), %d bound", what, st, first, n, slots, NVN_RESOURCE_STAGES, k); }
     return k;
 }
+__thread int dm_vp_rt[2];
 NVN(nvnCommandBufferSetViewports, void, NVNcommandBuffer *c, int first, int n, const float *v) {
     if (slots_fit(0, first, n, 16) != n) { LOG("[RED] SetViewports first=%d n=%d", first, n); return; }
+    static int vpt = -1; if (vpt < 0) vpt = getenv("DM_VP_TRACE") != NULL;
+    if (vpt && n > 0 && v[1] != 0) { static int seen; if (seen++ < 40) { module_t *m = NULL; void *ra = NULL;   // which game code sets a negative-y viewport: the first game return address up the frame chain
+        for (void **fp = __builtin_frame_address(0); fp && !m && (uint64_t)fp > 0x1000; fp = (void **)fp[0]) { ra = fp[1]; m = module_of(ra); }
+        LOG("[nvn] viewport %.0f,%.0f %.0fx%.0f on a %dx%d target from %s+%#llx", v[0], v[1], v[2], v[3], dm_vp_rt[0], dm_vp_rt[1], m ? m->name : "?", m ? (unsigned long long)((uint64_t)ra - (uint64_t)m->base) : 0ULL); } }
     if (g_rec_compact && first >= 0) { uint8_t *q = crec(c, OPC_VIEWPORTS, (uint32_t)first | (uint32_t)n << 8 | (uint32_t)(((dev_t_ *)CB(c)->dev)->origin + 1) << 16, 16 * (size_t)n); memcpy(q, v, 16 * (size_t)n); return; }
     p_viewports *r = REC(c, OP_VIEWPORTS, p_viewports); r->first = first; r->n = n;
     for (int i = 0; i < n; i++) memcpy(r->v[i], v + 4 * i, 16);
@@ -2203,7 +2209,8 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
 }
 NVN(nvnWindowSetCrop, void, NVNwindow *w, int x, int y, int ww, int hh) {
     win_t *o = (win_t *)w; int v[4] = {x, y, ww, hh};
-    if (memcmp(o->crop, v, sizeof v)) LOG("[nvn] WindowCrop %d,%d %dx%d", x, y, ww, hh);
+    if (memcmp(o->crop, v, sizeof v)) { module_t *m = module_of(__builtin_return_address(0));
+        LOG("[nvn] WindowCrop %d,%d %dx%d (from %s+%#llx)", x, y, ww, hh, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL); }
     memcpy(o->crop, v, sizeof v);
 }
 NVN(nvnWindowGetCrop, void, const NVNwindow *w, NVNrectangle *r) {   // Bayonetta 3 reads it back every few frames; before any SetCrop it is the whole first texture, as NVN starts it
@@ -2746,6 +2753,10 @@ static void tsummary(uint64_t frame) {
     { static uint64_t pic; uint64_t ic = atomic_load(&g_itv_changes);   // the game's own pacing at work: a game that drops to its half rate and back does it here
       if (ic != pic) LOG("[nvn] present interval up to frame %llu: the game changed it %llu times (%llu since the start)", frame, (unsigned long long)(ic - pic), (unsigned long long)ic); pic = ic; }
     { void mtl_pso_line(char *, size_t); char pl[1024]; mtl_pso_line(pl, sizeof pl); LOG("[nvn] pipelines up to frame %llu: %s", frame, pl); }
+    { extern uint8_t *dm_fps_state; float r; if (dm_fps_state) { memcpy(&r, dm_fps_state + 0x58, 4);   // the screen shape's stubs (a profile's patches.py screen_shape): their counters
+        if (r > 0) { uint32_t c[16], w, b; memcpy(c, dm_fps_state + 0x130, sizeof c); memcpy(&w, dm_fps_state + 0x124, 4); memcpy(&b, dm_fps_state + 0x120, 4);
+            LOG("[nvn] screen shape %.4f up to frame %llu: %u set to the screen's ratio, %u built; sites %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", r, frame, w, b,
+                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]); } } }
     double tgt = 1000.0 / (atomic_load(&g_fs_fine) ? 30 : mtl_fps_target());   // milliseconds one frame should take: 16.7 at 60 fps, 33.3 when the game itself asks for 30 or at a 30 cap whose late frames the 60 Hz link shows (the over-time / dropped-frame counts below use it)
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // frame interval gets its own line (M1 baseline): number of frames longer than one frame period in this window and p99
       if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > tgt;

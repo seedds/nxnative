@@ -516,7 +516,12 @@ void dm_fps_state_apply(void) {
         char *end; float a = strtof(as, &end);
         if (end == as || *end || !(a >= 1.3f && a < 1.77f)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 to 1.77; keeping 16:9", as);
         else {
-            uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3; float lf = (float)lh;
+            uint32_t oh = (uint32_t)(1920.0f / a / 48.0f + 0.5f) * 48, lh = oh * 2 / 3;
+            // DM_SCREEN_UI=band: the 2D keeps its 16:9 layout (1280x720), which the band stubs put in a 16:9 band across the screen's width (Mario Kart World: with
+            // DM_SCREEN_FOV=off the 3D keeps 16:9's vertical angle, and the 2D laid out for the taller screen put the map and corner widgets past the 3D's sides)
+            uint32_t lhs = lh;   // the screen's own layout height: the HUD's edge rule below moves widgets by it even when the 2D keeps its 16:9 layout
+            const char *ui = getenv("DM_SCREEN_UI"); if (ui && !strcmp(ui, "band")) lh = 720;
+            float lf = (float)lh;
             memcpy(dm_fps_state + 0x48, &oh, 4); memcpy(dm_fps_state + 0x4c, &lh, 4); memcpy(dm_fps_state + 0x50, &lf, 4);
             extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(1920, oh);   // the picture's shape for a texture that follows it (nvn_mtl.m present_shape)
             const char *ms = getenv("DM_SCREEN_ASPECT_SITES"); uint32_t mask = ms ? (uint32_t)strtoul(ms, NULL, 0) : 0xffffffffu;   // the stubs of the game's own conversions, one bit each (+0x54)
@@ -536,7 +541,7 @@ void dm_fps_state_apply(void) {
             // matrices are computed. Only panes as wide and as tall as the screen are stretched: a width of 0 stretched the inventory's half-width side panel past its top
             // and bottom bars). DM_SCREEN_HUD=<edge>,<listed>,<full-screen width>,<full-screen height>[,<tallest>]
             // overrides them for trials
-            float anc[7] = {(float)lh / 2 - 360.0f, (float)lh / 720.0f, 280.0f, 100.0f, 1270.0f, 710.0f, 1300.0f};
+            float anc[7] = {(float)lhs / 2 - 360.0f, (float)lhs / 720.0f, 280.0f, 100.0f, 1270.0f, 710.0f, 1300.0f};
             const char *hv = getenv("DM_SCREEN_HUD");
             if (hv && sscanf(hv, "%f,%f,%f,%f,%f", &anc[2], &anc[3], &anc[4], &anc[5], &anc[6]) < 4) LOG("[RED] DM_SCREEN_HUD=%s: <edge>,<listed>,<full width>,<full height>[,<tallest>]; keeping the rest", hv);
             memcpy(dm_fps_state + 0x80, anc, sizeof anc);

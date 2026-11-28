@@ -129,7 +129,8 @@ static void fill(cv_dec *d, int decoded) {
             b->w = (uint16_t)im->d_w; b->h = (uint16_t)im->d_h; b->ts = ts; b->eos = eos;
             if (b->pool && b->pidx < b->pool->count) { pool_native_write(b->pool, b->pidx, im); if (b->pool->img[b->pidx]) vpx_img_free(b->pool->img[b->pidx]); b->pool->img[b->pidx] = im; } else vpx_img_free(im);
             if (!d->pictures++) LOG("[codec] %s decoder %u: first picture %ux%u into buffer %u", k_cv_name[d->codec], d->id, b->w, b->h, i);
-            dm_movie_picture(d, "nn::codec", ts, 0);   // the frame step follows its rate (hle_movie.c); its times are in ns
+            if (b->w >= 1280) dm_movie_picture(d, "nn::codec", ts, 0);   // the frame step follows its rate (hle_movie.c); its times are in ns. Full-screen movies only: Mario Kart World
+                                                                         // loops a 640x360 60-picture video on screens in its courses, and following it held races at 60 fps (a third of the frames late on an A20 Pro)
             if (decoded) d->st.late++;
         } else { b->w = b->h = 0; b->ts = 0; b->eos = 1; d->eos_pending = 0; }
         if (b->eos) LOG("[codec] %s decoder %u: end of stream after %llu pictures", k_cv_name[d->codec], d->id, (unsigned long long)d->pictures);

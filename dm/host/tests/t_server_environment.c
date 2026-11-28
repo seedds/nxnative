@@ -28,7 +28,11 @@ long dm_sk_recvfrom(int fd, void *d, unsigned long n, int f, void *a, unsigned *
 long dm_sk_sendto(int fd, const void *d, unsigned long n, int f, const void *a, unsigned an) { (void)fd; (void)d; (void)n; (void)f; (void)a; (void)an; unexpected++; return -1; }
 int dm_sk_poll(void *fds, uint64_t n, int ms) { (void)fds; (void)n; (void)ms; unexpected++; return -1; }
 int dm_sk_select(int n, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) { (void)n; (void)r; (void)w; (void)e; (void)tv; unexpected++; return -1; }
-int dm_sk_errno(void) { unexpected++; return 0; }
+int dm_sk_listen(int fd, int n) { (void)fd; (void)n; unexpected++; return -1; }
+int dm_sk_accept(int fd, void *a, unsigned *n) { (void)fd; (void)a; (void)n; unexpected++; return -1; }
+int dm_net_enabled(void) { return 0; }   // offline: the Accept / Listen overloads answer -1 themselves
+int dm_sk_last_errno(void) { unexpected++; return 0; }
+long dm_sk_ret(long r) { return r; }   // offline it only passes the result on
 extern const struct mach_header_64 _mh_execute_header;
 #define CHECK(c, msg) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", msg); } } while (0)
 static void *hook(const char *name) {

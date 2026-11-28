@@ -204,6 +204,8 @@ def header_one(g):
         sys.exit(f'{g.id}: tex_copy_staging takes a main build ID and an aligned return address offset: {stage_copy}')
     tdu = g.get('tex_dirty_upload', 'off')   # with tex_flush_upload: a registered texture the CPU writes after init without any flush is uploaded too (dirty pages, hle_nvn.c nvn_ft_written): on / off
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
+    trp = g.get('tex_row_pad', 'off')   # a buffer→image copy's staging rows are align(bpr,256) bytes apart even when the VkBuffer's size does not prove it (hle_vk.m C_COPYB2I): on / off
+    if trp not in ('on', 'off'): sys.exit(f'{g.id}: tex_row_pad must be on or off: {trp}')
     tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
@@ -271,6 +273,7 @@ def header_one(g):
          f'#define DM_GAME_TEX_COPY_STAGING_PC {sc[2] if sc else 0}',
          f'#define DM_GAME_SHADER_KEY_SKIP_OFF {sko:#x}', f'#define DM_GAME_SHADER_KEY_SKIP_LEN {skl:#x}',
          f'#define DM_GAME_TEX_DIRTY_UPLOAD {int(tdu == "on")}',
+         f'#define DM_GAME_TEX_ROW_PAD {int(trp == "on")}',   # a buffer→image copy's staging rows are align(bpr,256) apart when the buffer's size does not prove it (hle_vk.m C_COPYB2I)
          f'#define DM_GAME_TEX_DYN_SLOTS {int(tds == "on")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',

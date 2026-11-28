@@ -2692,14 +2692,62 @@ static void replay_ops(rs_t *s, VkCommandBuffer cb) {
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i];
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
-                    NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes, bpi = bpr * ((ih + f->bh - 1) / f->bh);
+                    NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes;   // the row pitch the game declares
+                    // A Switch staging buffer pads every row to a 256-byte pitch while the game still declares bufferRowLength = 0 (tight), and the
+                    // VkBuffer's own size is the only thing that says so. Two slice layouts are proved by that size, and only two, each times the
+                    // copy's layer count (a 3D image's extent depth): A, the padding sits between the rows and the last row of a slice is tight, so a
+                    // slice is apitch*(rows-1)+bpr; B, every row of every slice is padded to apitch, so a slice is apitch*rows. slice_full - need_pad =
+                    // apitch-bpr > 0 because pads, and nlay >= 1, so slice_full*nlay > need_pad*nlay: one buffer cannot be the exact total of both,
+                    // and neither can be the exact total of a tight copy (bpr*rows*nlay, smaller than both when apitch > bpr). A size that matches
+                    // nothing proves nothing and keeps the declared pitch. A shared, sub-allocated upload buffer is larger than the rows it holds and
+                    // so matches nothing, which is what leaves the declared pitch alone for the common engine shape.
+                    NSUInteger apitch = (bpr + 255) & ~(NSUInteger)255;
+                    uint32_t rows = (ih + f->bh - 1) / f->bh;
+                    VkDeviceSize avail = r->bufferOffset <= x->src->size ? x->src->size - r->bufferOffset : 0;   // the VkBuffer's bytes past the copy's offset
                     int is3d = im->type == VK_IMAGE_TYPE_3D;
+                    uint32_t nlay = is3d ? (r->imageExtent.depth ? r->imageExtent.depth : 1) : (r->imageSubresource.layerCount ? r->imageSubresource.layerCount : 1);
+                    VkDeviceSize need_pad = (VkDeviceSize)apitch * (rows - 1) + bpr;   // layout A: one slice, its last row tight
+                    VkDeviceSize slice_full = (VkDeviceSize)apitch * rows;            // layout B: one slice, every row padded
+                    int pads = r->bufferRowLength == 0 && apitch > bpr && rows > 1;
+                    int exactA = pads && avail == need_pad * nlay;
+                    int exactB = pads && avail == slice_full * nlay;
+                    // The key keeps the old guess for the one case the sizes cannot settle: a single-layer 2D copy whose buffer is bigger than either
+                    // padded total (a staging block shared with other data). Off for every title, on only for one measured to pad a shared block.
+                    int padded = exactA || exactB ||
+                                 (pads && DM_GAME_TEX_ROW_PAD && r->imageSubresource.layerCount <= 1 && !is3d && avail >= need_pad);
+                    NSUInteger pitch = padded ? apitch : bpr;   // bytes actually read per row from the staging buffer
+                    NSUInteger bpi = padded ? (NSUInteger)(exactB ? slice_full : need_pad) : (NSUInteger)bpr * rows;   // bytes per slice/layer actually read
+                    const char *layout = exactB ? "B" : exactA ? "A" : padded ? "amb" : "tight";   // which identity proved the pitch; amb = the key's, not proved
+                    // DM_VK_PITCHDBG=1: one line per copy that the pitch rule can have got wrong — a narrow row under 256 bytes, any 3D copy and any
+                    // multi-layer one (a volume's block is narrow rows, and a narrow-row gate alone would hide it) — with the buffer's readable bytes,
+                    // the bytes a tight layout needs and the bytes a padded one needs, so a padded staging buffer is told from a tight one to the byte.
+                    if (bpr < 256 || is3d || r->imageSubresource.layerCount > 1) {
+                        static int nd = -1; if (nd < 0) nd = getenv("DM_VK_PITCHDBG") != NULL;
+                        VkDeviceSize tight = (VkDeviceSize)bpr * rows * nlay, ptot = need_pad * nlay;
+                        if (nd) VLOG("[NARROW] dst=%ux%u vkfmt=%d level=%u layer=%u lc=%u depth=%u extent=%ux%u rl=%u ih=%u bpr=%llu apitch=%llu rows=%u nlay=%u avail=%llu tight=%llu paddedtot=%llu pitch=%llu bpi=%llu padded=%d bufsize=%llu off=%llu layout=%s",
+                                     im->w, im->h, (int)im->fmt, r->imageSubresource.mipLevel, r->imageSubresource.baseArrayLayer, r->imageSubresource.layerCount,
+                                     r->imageExtent.depth, r->imageExtent.width, r->imageExtent.height, rl, ih, (unsigned long long)bpr, (unsigned long long)apitch, rows, nlay,
+                                     (unsigned long long)avail, (unsigned long long)tight, (unsigned long long)ptot,
+                                     (unsigned long long)pitch, (unsigned long long)bpi, padded, (unsigned long long)x->src->size, (unsigned long long)r->bufferOffset, layout);
+                    }
                     MTLBlitOption opt = f->kind == K_DS ? (r->imageSubresource.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil) : MTLBlitOptionNone;
-                    for (uint32_t l = 0; l < (is3d ? 1 : r->imageSubresource.layerCount); l++)
-                        [be copyFromBuffer:sb sourceOffset:x->src->off + r->bufferOffset + l * bpi sourceBytesPerRow:bpr sourceBytesPerImage:is3d || im->layers > 1 ? bpi : 0
-                                sourceSize:MTLSizeMake(r->imageExtent.width, r->imageExtent.height, is3d ? r->imageExtent.depth : 1) toTexture:im->tex
-                          destinationSlice:is3d ? 0 : r->imageSubresource.baseArrayLayer + l destinationLevel:r->imageSubresource.mipLevel
-                         destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, is3d ? r->imageOffset.z : 0) options:opt];
+                    // Metal requires sourceBytesPerImage to cover a whole pitch*rows slice, and a layout-A slice is shorter (its last row is tight). The
+                    // slice offset is this loop's own arithmetic either way, so report the covering size; a volume whose slices really are a layout-A stride
+                    // is then blitted one depth slice at a time, so Metal never steps slices at the size it was told.
+                    NSUInteger cover = pitch * rows, bytes = bpi > cover ? bpi : cover;
+                    if (is3d && bpi < bytes) {
+                        for (uint32_t z = 0; z < r->imageExtent.depth; z++)
+                            [be copyFromBuffer:sb sourceOffset:x->src->off + r->bufferOffset + (VkDeviceSize)z * bpi sourceBytesPerRow:pitch sourceBytesPerImage:bytes
+                                    sourceSize:MTLSizeMake(r->imageExtent.width, r->imageExtent.height, 1) toTexture:im->tex
+                              destinationSlice:0 destinationLevel:r->imageSubresource.mipLevel
+                             destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, r->imageOffset.z + (int32_t)z) options:opt];
+                    } else {
+                        for (uint32_t l = 0; l < (is3d ? 1 : r->imageSubresource.layerCount); l++)
+                            [be copyFromBuffer:sb sourceOffset:x->src->off + r->bufferOffset + l * bpi sourceBytesPerRow:pitch sourceBytesPerImage:is3d || im->layers > 1 ? bytes : 0
+                                    sourceSize:MTLSizeMake(r->imageExtent.width, r->imageExtent.height, is3d ? r->imageExtent.depth : 1) toTexture:im->tex
+                              destinationSlice:is3d ? 0 : r->imageSubresource.baseArrayLayer + l destinationLevel:r->imageSubresource.mipLevel
+                             destinationOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, is3d ? r->imageOffset.z : 0) options:opt];
+                    }
                 }
                 g_n_copy += x->n;
                 break;

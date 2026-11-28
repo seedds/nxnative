@@ -105,6 +105,8 @@ SWITCH_BINDING = [
      'why': 'unified memory semantics; off by default because a flushed range could cover an image a shader writes: tracking GPU writes would make it safe for every game'}),
     ('tex_dirty_upload', '', {'what': 'CPU-written textures uploaded without a flush', 'now': 'game', 'goal': 'host', 'purpose': 'rendering',
      'why': 'as tex_flush_upload, for pools the CPU writes without a flush'}),
+    ('tex_row_pad', '', {'what': "a shared staging block's rows read padded", 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the title's own encoder pads a staging block it shares with other data, which no buffer size can prove: a copy whose buffer proves a layout needs no key, so the key covers only the title measured to need it"}),
     ('tex_copy_staging', '', {'what': 'record-time copy of CPU staging bytes at one verified buffer-to-texture upload site', 'now': 'build', 'goal': 'host', 'purpose': 'rendering',
      'why': 'a main build ID and return address identify one CPU upload site because NVN also supports GPU-written buffer-to-texture copies; tracking GPU-written ranges would make staging capture general'}),
     ('tex_dyn_slots', '', {'what': "buffer-texture handles indexed through c2's tables", 'now': 'game', 'goal': 'host', 'purpose': 'shaders',

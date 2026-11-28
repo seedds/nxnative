@@ -1008,6 +1008,13 @@ def gust_gz(d):
         o += n
     return None
 
+def ktgl_zl(d):
+    """Team Ninja's .ZL_ files (Marvel Ultimate Alliance 3: 5,470 of them; the stage packages STAGE/*/*.pktf.ZL_ hold 405 GLSLC outputs, the terrain's among them): a u32 inflated
+    length, then gust_gz's chunks (a u32 stored length and one zlib stream each) up to a zero length. → the inflated data, or None when d is not in that form or its length disagrees"""
+    if len(d) < 9 or d[8] != 0x78: return None
+    z = gust_gz(memoryview(d)[4:])
+    return z if z is not None and len(z) == struct.unpack_from('<I', d, 0)[0] else None
+
 def kt_shaders(d, label, out):
     """Three Houses' KTGL keeps its shaders in SPKG packages (patch*/nx/shader/*.spkg, and 132 entries of DATA1.bin), each holding G2S containers ('_S2G3000', as in Age of Calamity) of GLSLC outputs,
     and in '_SPK4100' packages without G2S (DATA1.bin entry 549, the post effects: 27 outputs); map and model archives in DATA1.bin carry packages of their own. So every inflated file or entry is
@@ -5378,7 +5385,8 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if d[:3] == b'\x1f\x8b\x08':   # standard gzip: Skyward Sword HD's Shaders.arc.gz wraps paired GLSLC outputs
         d = ungzip(d, '/' + rel); head = d[:16]   # later format probes inspect decoded bytes, not the gzip timestamp
-    if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z   # Gust's chunked zlib (gust_gz)
+    if head[4:5] == b'\x78' and path.endswith('.gz') and (z := gust_gz(d)) is not None: d = z; head = d[:16]   # Gust's chunked zlib (gust_gz)
+    if head[8:9] == b'\x78' and path.upper().endswith('.ZL_') and (z := ktgl_zl(d)) is not None: d = z; head = d[:16]   # Team Ninja's sized chunked zlib (ktgl_zl)
     if is_shadercache_nx(d):   # BioShock Remastered / BioShock 2 Remastered RomFS shader cache: zlib blocks joined, then NVN records (shadercache_nx)
         found = shadercache_nx(d, '/' + rel, need=False)
         if found: return rel, uniq_keys(found), var_pairs(found), trees

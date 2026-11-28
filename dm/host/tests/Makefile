@@ -34,6 +34,7 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_audio_spsc
 	$(B)/t_audio_stats
 	$(B)/t_fpslock
+	$(B)/t_thr_census
 	$(B)/t_uecvar
 	$(B)/t_ue_heap_span
 	$(B)/t_audren_work
@@ -252,6 +253,9 @@ $(B)/t_dualsense_mic: t_dualsense_mic.c ../dualsense_mic_mac.c ../dualsense_mic.
 dualsense-mic: $(B)/t_dualsense_mic
 	$(B)/t_dualsense_mic
 run: dualsense-mic
+run: $(B)/t_thr_census
+$(B)/t_thr_census: t_thr_census.c ../thr_census.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -o $@ t_thr_census.c
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c

@@ -1,0 +1,29 @@
+# DRAGON BALL FighterZ, Switch update 01.50 (v1703936), Unreal Engine 4.19.1, SDK 4.5.0, NVN.
+
+title_id	0100A250097F0000
+program_id	0100A250097F0000
+
+name	DRAGON BALL FighterZ
+ipa	DragonBallFighterZ.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+build	v1703936	01.50	main=39adb54619956c8e93d3a37777f32ece	subsdk0=303578054faefc2198114b62e408c498	sdk=e01ad5381c948c4ec3b0bb210b08d5c8
+package	v1703936
+shader_versions	v1703936
+
+modules	main subsdk0 sdk
+romfs_marker	RED/Content/Paks/pakchunk0-Switch.pak
+zip_store	.mp4:.pak:.metallib
+
+# The NPDM declares no system resource. The game opens a 3.14 GiB heap in this 4 GiB layout.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# The game sets near-zero depth. Use main0_z for its prebuilt pipelines.
+depth_mode	zero
+shader_groups	GlobalShaderCache=global #Engine/=engine #RED/=game
+shader_note	DRAGON BALL FighterZ shaders

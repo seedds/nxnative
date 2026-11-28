@@ -358,13 +358,21 @@ static void nq_enqueue(nq_queue *q,nq_job *j) { if(q->last) q->last->next=j; els
 void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     pthread_once(&nq_once,nq_start); nq_job *j=calloc(1,sizeof *j); if(!j) die("queue job allocation failed"); j->receipt=nq_new();
     j->objects.klen=16; j->frame=dm_nvn_frame_count(); j->submitted=guest_ns();
-    // No scheduler lock while copying descriptors or resolving shader libraries.
-    dm_host_mutex_lock(&g_sub_mu); void *pool=objc_autoreleasePoolPush(); dm_host_work++; mtl_prepare(); dm_host_work--; nq_cost cost=nq_cost_begin();
-    int stream=mtl_sub_stream_on();
+    // No scheduler lock while copying descriptors or resolving shader libraries. A streamed submission takes no submission lock either once the first submission's prepare
+    // step is done: the queue replay thread holds it for the whole translation of each node (nq_worker), and the game's thread, which took it only to queue the job, waited
+    // for each one the replay had in hand. Ocarina of Time submits 22-30 times a frame: its main thread spent 16% of its time in that wait on a Mac (12% inside this
+    // function), and on an iPhone, where the replay took 11-24 ms a frame, the frame was the main thread's work plus the replay's instead of the longer of the two
+    // (OoT-30 C-4). Nothing of the copy needs the lock: a streamed job pins its programs by serial without resolving them (nq_snapshot_object), the pins have their own
+    // locks, and the job is queued in order under nq_mu. The whole-submission path (DM_NVN_SUB_STREAM=0, frame capture) still copies under the lock
+    int stream=mtl_sub_stream_on(), locked=!stream || !mtl_prepared();
+    if(locked) dm_host_mutex_lock(&g_sub_mu);
+    void *pool=objc_autoreleasePoolPush();
+    if(locked) { dm_host_work++; mtl_prepare(); dm_host_work--; }
+    nq_cost cost=nq_cost_begin();
     if(stream) {
         j->open=1;
         pthread_mutex_lock(&nq_mu); nq_enqueue(nq_get(q),j); pthread_mutex_unlock(&nq_mu);
-        pthread_mutex_unlock(&g_sub_mu);
+        if(locked) { pthread_mutex_unlock(&g_sub_mu); locked=0; }
     }
     for(int i=0;i<count;i++) nq_flatten(j,(const uint8_t *)(uintptr_t)handles[i]); nq_end(j);
     nq_cost_end(cost); objc_autoreleasePoolPop(pool);
@@ -373,7 +381,7 @@ void nvn_queue_submit(queue_t *q,int count,const uint64_t *handles) {
     if(stream) { j->open=0; pthread_cond_broadcast(&nq_cv); }
     else nq_enqueue(nq_get(q),j);
     pthread_mutex_unlock(&nq_mu);
-    if(!stream) pthread_mutex_unlock(&g_sub_mu);
+    if(locked) pthread_mutex_unlock(&g_sub_mu);
 }
 // The window retains this logical receipt until it reacquires or finalizes that image.
 // Only replay turns it into a physical display ticket; present never waits on the guest thread.

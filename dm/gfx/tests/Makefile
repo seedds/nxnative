@@ -970,13 +970,20 @@ t_wait_event: t_wait_event.m $(MTL_T_DEP)
 t_queue_lifetime: t_queue_lifetime.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 
-.PHONY: check_t_wait_event check_t_queue_lifetime
+# Under ASan: a streamed submission's descriptor copies run without the submission lock, and a program pinned that way once fell through to the texture copy (a heap overread)
+t_queue_lifetime_asan: t_queue_lifetime.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -fobjc-arc -o $@ t_queue_lifetime.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+
+.PHONY: check_t_wait_event check_t_queue_lifetime check_t_queue_lifetime_asan
 check_t_wait_event: t_wait_event
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 check_t_queue_lifetime: t_queue_lifetime
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
+check_t_queue_lifetime_asan: t_queue_lifetime_asan
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./$<
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./$<
 
 t_render_enable_queue: t_render_enable_queue.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_render_enable_queue.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)

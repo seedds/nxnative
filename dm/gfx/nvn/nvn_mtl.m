@@ -2148,6 +2148,7 @@ void mtl_prepare(void) {
         guest_clock_freeze_for(3, 0);
     }
 }
+int mtl_prepared(void) { return __atomic_load_n(&g_warm_started, __ATOMIC_ACQUIRE) || !prepare_on(); }
 static void sub_cut_begin(void); static void ts_sub_begin(void), ts_boundary(void); static int ts_on(void);
 static void tu_tick(void);
 static void gmem_commit_patch(void);   // the raw pool table words of the arguments encoded so far follow the pools (gmem_slot_note)
@@ -8938,11 +8939,13 @@ static uint8_t prog_stage_mask(const prog_t *p) {
     if (ser) smc[h] = (smc_ent){ser, gen, m};
     return m;
 }
-// The submit thread reads the switch under g_sub_mu and latches it for the job.
+// The submit thread reads the switch once per submission and latches it for the job. A streamed submission takes no submission lock once the prepare step is done
+// (nvn_queue.inc nvn_queue_submit), so the switch is set up once, whichever thread submits first
+static int g_sub_stream_mode;
+static void sub_stream_init(void) { g_sub_stream_mode = getenv("DM_NVN_CAPTURE") ? 0 : sw_mode("DM_NVN_SUB_STREAM", 1); }
 int mtl_sub_stream_on(void) {
-    static int mode = -1;
-    if (mode < 0) mode = getenv("DM_NVN_CAPTURE") ? 0 : sw_mode("DM_NVN_SUB_STREAM", 1);
-    return sw_on(mode);
+    static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, sub_stream_init);
+    return sw_on(g_sub_stream_mode);
 }
 // A submitted descriptor and a queue binding pin the program by its serial (own_prog_pin; mtl_prog_release and mtl_prog_unpin are nvn_owner.m's)
 // Replay can resolve a program from the owned serial and shader keys.

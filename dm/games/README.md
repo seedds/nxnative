@@ -181,6 +181,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Minecraft for Nintendo Switch](0100D71004694000/README.md) | `0100D71004694000` | 1.26.62 | 20.5.14 | RenderDragon, FMOD | Vulkan | — |
 | [Monster Hunter Rise](0100B04011742000/README.md) | `0100B04011742000` | 16.0.2 | 11.4.3 | Capcom's RE Engine | NVN | 60 fps target |
 | [Monster Train 2](010051701FB46000/README.md) | `010051701FB46000` | 1.1.1 | 18.3.5 | Unity 2022.3.54f1 IL2CPP | NVN | [60 fps mode](010051701FB46000/README.md#frame-rate) |
+| [Mortal Kombat 1](01006560184E6000/README.md) | `01006560184E6000` | 1.29.0 | 15.3.2 | NetherRealm's Unreal Engine, Havok, Wwise | NVN | — |
 | [Mortal Kombat 11](0100F2200C984000/README.md) | `0100F2200C984000` | 1.0.26 | 9.3.1 | NetherRealm's Unreal Engine 3, Wwise, Havok | NVN | — |
 | [NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Burst](01006BB00800A000/README.md) | `01006BB00800A000` | 1.0.1 | 4.4.0 | CyberConnect2, CRIWARE | NVN | [60 fps in Mac VS Battle](01006BB00800A000/README.md#frame-rate) |
 | [NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS](0100D2D0190A4000/README.md) | `0100D2D0190A4000` | 1.7.1 | 14.3.0 | CyberConnect2, CRIWARE | NVN + OpenGL ES | [60 fps target](0100D2D0190A4000/README.md#frame-rate) |

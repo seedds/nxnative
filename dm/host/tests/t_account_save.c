@@ -69,9 +69,10 @@ int main(int argc, char **argv) {
     assert(h_fs_MountSave("p1", &k_uid) == RES_OK);
     assert(g_mnt[0].txn_root != g_mnt[1].txn_root && g_mnt[1].txn_root == g_mnt[2].txn_root);
     Uid unknown = user_uid(7);
-    assert(!h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &unknown) && !h_fs_SaveExists(&unknown));
-    assert(h_fs_MountSave("unknown", &unknown) != RES_OK && h_fs_MountSaveRO("unknown", DM_GAME_PROGRAM_ID, &unknown) != RES_OK);
-    assert(h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &u2) && h_fs_SaveExists(&u2) && h_fs_SaveExists(&k_uid));
+    assert(!h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &unknown) && !h_fs_SaveExisting(0, &unknown) && !h_fs_SaveExists(&unknown));
+    assert(h_fs_MountSave("unknown", &unknown) != RES_OK && h_fs_MountSaveRO("unknown", DM_GAME_PROGRAM_ID, &unknown) != RES_OK && h_fs_MountSaveRO("unknown0", 0, &unknown) != RES_OK);
+    assert(h_fs_SaveExisting(DM_GAME_PROGRAM_ID, &u2) && h_fs_SaveExisting(0, &u2) && h_fs_SaveExisting(0, &k_uid) && h_fs_SaveExists(&u2) && h_fs_SaveExists(&k_uid));
+    assert(!h_fs_SaveExisting(DM_GAME_PROGRAM_ID ^ 0x1000, &u2));
     if (!strcmp(argv[1], "--seed")) {
         assert(h_fs_CreateFile("p1:/hero", 0) == RES_OK && h_fs_CreateFile("p2:/hero", 0) == RES_OK);
         assert(write_user("p1:/hero", "first-A") == RES_OK && write_user("p2:/hero", "first-B") == RES_OK);
@@ -79,7 +80,9 @@ int main(int argc, char **argv) {
         assert(write_user("p1:/hero", "next-A") == RES_OK && write_user("p2:/hero", "next-B") == RES_OK);
         assert(h_fs_Commit("p1") == RES_OK);
         assert(h_fs_MountSaveRO("ro2", DM_GAME_PROGRAM_ID, &u2) == RES_OK); expect_user("ro2:/hero", "first-B");
-        assert(h_fs_Commit("alias2") == RES_OK); expect_user("ro2:/hero", "next-B");
+        assert(h_fs_MountSaveRO("ro2zero", 0, &u2) == RES_OK); expect_user("ro2zero:/hero", "first-B");
+        assert(h_fs_Commit("alias2") == RES_OK); expect_user("ro2:/hero", "next-B"); expect_user("ro2zero:/hero", "next-B");
+        assert(h_fs_CreateFile("ro2zero:/nope", 0) != RES_OK);
         // Warm negative lookup on ro2, then create/rename/delete + commit through the writable alias.
         uint64_t tmp_h = 0; int32_t tmp_t = -1;
         assert(h_fs_OpenFile(&tmp_h, "ro2:/fresh", MODE_READ) == RES_PATH_NOT_FOUND);

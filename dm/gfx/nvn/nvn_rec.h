@@ -156,7 +156,7 @@ static int g_rx_after, g_rx_want_stamp;   // the last record was a held submissi
 static uint64_t g_rx_ubc;   // the newest uniform shadow the held submissions read (ubc_wait at the commit)
 static struct { uint64_t v; _Atomic uint64_t *p; } g_rx_post[2 * RX_PEND_MAX + 4]; static id g_rx_post_ev[2 * RX_PEND_MAX + 4]; static int g_rx_npost;   // the signals (an event) and notes that followed held commits: made after the real one, in order
 static _Atomic int g_rx_fly, g_rx_held, g_rx_drain, g_rx_busy_hold;   // main command buffers committed and not reported back (DM_NVN_SUB_IDLE_FB); commits are held (rec_drain waits for them); rec_drain callers waiting; tests: synthetic in-flight commits
-static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark); highest fence a blocking waiter needs committed (rec_wake_for_fence)
+static id<MTLSharedEvent> g_rx_ev; static _Atomic uint64_t g_rx_seq, g_rx_need_fence;   // signalled with ++g_rx_seq after every commit on g_q4 (rx_mark_locked); highest fence a blocking waiter needs committed (rec_wake_for_fence)
 static uint64_t g_rx_merged, g_rx_cbs; static int g_rx_last_nb;   // submissions / segments held and committed with a later one; commit calls of main command buffers; command buffers in the last one
 static int sw_mode(const char *name, int dflt); static inline int sw_on(int m);
 static int rx_merge_on(void) {
@@ -175,11 +175,6 @@ static void rx_mark_locked(void) {   // after a commit on g_q4, under g_res_comm
     uint64_t s = atomic_load_explicit(&g_rx_seq, memory_order_relaxed) + 1;
     atomic_store_explicit(&g_rx_seq, s, memory_order_release);
     [g_q4 signalEvent:ev value:s];
-}
-static void rx_mark(void) {
-    pthread_mutex_lock(&g_res_commit_mu);
-    rx_mark_locked();
-    pthread_mutex_unlock(&g_res_commit_mu);
 }
 static uint64_t rx_inflight(void) {   // commits on g_q4 not yet completed by the GPU (plus any test hold)
     static int fbm = -1; if (fbm < 0) fbm = sw_mode("DM_NVN_SUB_IDLE_FB", 0);
@@ -559,9 +554,12 @@ static void rec_commit(id cb, DmCommitFB *fb, int end) {   // end: REC_CMT_NOW /
     if ([cb isKindOfClass:[DmRecCB class]]) { rec_t *r = rec_put(RO_COMMIT, 1); r->a[0] = rec_obj(fb); r->a[2] = ubc_head(); r->a[5] = (uint64_t)end; return; }
     ubc_wait(ubc_head());
     id<MTL4CommandBuffer> buffers[] = {cb}; MTL4CommitOptions *o = commit_opts(fb);
+    // Under g_res_commit_mu as the encode thread's commits: nothing lands between a present's copy and its signal (nvn_mtl.m present_copy), which the present would wait for too
+    pthread_mutex_lock(&g_res_commit_mu);
     gpu_tag_commit(fb, commit_now());
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit (main command buffer)");
 }
 // An upload batch: its place in the queue is after what is recorded so far (it reads no uniform shadow)
@@ -572,8 +570,10 @@ static void rec_commit_upload(id cb, MTL4CommitOptions *o) {
         return;
     }
     id<MTL4CommandBuffer> buffers[] = {cb};
+    pthread_mutex_lock(&g_res_commit_mu);   // as rec_commit's
     uint64_t elapsed = q4_commit_elapsed(buffers, 1, o);
-    rx_mark();
+    rx_mark_locked();
+    pthread_mutex_unlock(&g_res_commit_mu);
     q4_commit_slow(elapsed, "rec_commit_upload (upload batch)");
 }
 // A queue operation (a sparse texture's mapping update, nvn_mtl.m sparse_*): on the encoding thread in its place among the recorded commits, so it reaches the queue before the upload batch

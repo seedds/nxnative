@@ -92,6 +92,7 @@ t_mtl_init: t_mtl_init.m $(MTL_T_DEP)
 .PHONY: check_t_mtl_init
 check_t_mtl_init: t_mtl_init
 	./t_mtl_init
+	DM_PRESENT_QUEUE=1 ./t_mtl_init
 	DM_TEST_NO_METAL4=1 ./t_mtl_init
 t_nvn: t_nvn.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 	clang $(CFLAGS) -DDM_TEST_NVN_SDK -fobjc-arc -o $@ t_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
@@ -362,8 +363,32 @@ t_present_probes: t_present_probes.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_probes.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_probes
 check_t_present_probes: t_present_probes
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_present_probes
-	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=0 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_probes
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_probes
+t_present_queue: t_present_queue.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_queue.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_queue
+check_t_present_queue: t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_queue
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_queue snap
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_queue snap
+t_present_copy: t_present_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_copy.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_copy
+check_t_present_copy: t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_copy
+t_present_hdr_copy: t_present_hdr_copy.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_present_hdr_copy.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_present_hdr_copy
+check_t_present_hdr_copy: t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=1 ./t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 DM_PRESENT_QUEUE=1 ./t_present_hdr_copy
+	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 DM_PRESENT_QUEUE=0 ./t_present_hdr_copy
 # A GPU whose access macOS revoked (DM_TEST_GPU_LOST, set by the test): the front end told once, the game's waits released, presents stopped
 t_gpu_lost: t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gpu_lost.m t_gpu_lost_front.c $(MTL_T_SRC) $(FW)
@@ -644,7 +669,7 @@ t_res_cb: t_res_cb.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_cb.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_res_cb
 check_t_res_cb: t_res_cb
-	@set -e; for enc in 0 1; do DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_res_cb; done
+	@set -e; for enc in 0 1; do for pq in 0 1; do DM_NVN_ENC_THREAD=$$enc DM_PRESENT_QUEUE=$$pq MTL_DEBUG_LAYER=1 ./t_res_cb; done; done
 t_upload_src: t_upload_src.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_upload_src

@@ -3,7 +3,8 @@
 // (the last run) leave the dispatch to the shader. Runs under any profile: the named shader is the profile's first upscaler (DM_GAME_UPSCALER_KEYS), and a profile with
 // none swaps no shader; the MetalFX draw itself (up_mfx_encode) does not look at the key. The colour (up_mfx_color) comes from synthetic code holding the curves' constants: a variant with sRGB input
 // comes out decoded to linear, one whose code squares its result keeping the sign (square-rooted input) comes out squared, through the scaler's own input even where the game's texture could
-// go straight, and one whose output stays encoded, or whose code says nothing of its colour, is left to its shader. The scaler comes after the work before it and the next draw pass after the scaler
+// go straight, an HMMA network with no curve keeps its display encoding when input or output is UNORM (Star Fox RGBA16F→RGBA8_SRGB, Xenoblade DE RGBA8Unorm→RGBA8Unorm), and float→float,
+// non-HMMA helpers, multi-texture shaders and other shapes are left to their shader. The scaler comes after the work before it and the next draw pass after the scaler
 // (mfx_order): a slow pass that ends with no barrier writes the input just before each dispatch, and a draw pass copies the image just after it (the Makefile's
 // DM_NVN_BARRIER=game run makes that pass skip its consumer barrier unless the scaler cleared the relaxed end)
 #include "../nvn/nvn_mtl.m"
@@ -63,6 +64,25 @@ static int matches_r11(id<MTLTexture> t, const float rgb[3]) {
     for (int k = 0; k < 3; k++) if (!(fabs(sum[k] / n - rgb[k]) <= fmax(0.005, 0.015 * fabs(rgb[k])))) { fprintf(stderr, "channel %d: mean %g, expected %g\n", k, sum[k] / n, rgb[k]); return 0; }
     return 1;
 }
+// Raw stored 8-bit RGBA bytes of an RGBA8Unorm or RGBA8Unorm_sRGB texture (blit reads raw bytes without sRGB conversion)
+static int matches_u8(id<MTLTexture> t, const float inside[4], MTLRegion region, const float outside[4]) {
+    NSUInteger n = t.width * t.height; id<MTLBuffer> b = [g_dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
+    if (!b) { fprintf(stderr, "readback buffer did not allocate\n"); return 0; }
+    id<MTLCommandBuffer> cb = q_cb(); id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+    [e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(t.width, t.height, 1) toBuffer:b destinationOffset:0 destinationBytesPerRow:t.width * 4 destinationBytesPerImage:n * 4];
+    [e endEncoding]; [cb commit]; [cb waitUntilCompleted];
+    const uint8_t *p = b.contents;
+    for (NSUInteger i = 0; i < n; i++) {
+        NSUInteger x = i % t.width, y = i / t.width;
+        const float *want = x >= region.origin.x && x < region.origin.x + region.size.width &&
+                            y >= region.origin.y && y < region.origin.y + region.size.height ? inside : outside;
+        for (int c = 0; c < 4; c++) if (!(fabsf(p[4 * i + c] / 255.0f - want[c]) <= 0.02f)) {
+            fprintf(stderr, "u8 texel %lu,%lu channel %d: %g (byte %u), expected %g\n", (unsigned long)x, (unsigned long)y, c, p[4 * i + c] / 255.0f, p[4 * i + c], want[c]);
+            return 0;
+        }
+    }
+    return 1;
+}
 // Code holding each constant 12 times, among others: the shape of a real variant's curves
 static int color_of(const float *f32, int n32, const float *f16, int n16) {
     uint8_t code[4096]; size_t o = 0;
@@ -104,7 +124,9 @@ int main(void) { @autoreleasepool {
     CHECK(color_of(NULL, 0, (const float[4]){0.040435791015625f, 2.3984375f, 0.07745361328125f, enc16[0]}, 4) == UP_COLOR_KEEP, "a half float encode must not read as encoded input: the shader runs");
     CHECK(up_mfx_color(rare, sizeof rare) == UP_COLOR_KEEP, "a constant used once is chance, not a curve");
     // Square-rooted input, linear output (Ocarina of Time's agl_ndsr_vr.pck FMUL, agl_ndsr_vr_light.pck HMUL2): x * |x| from 8 times, no power, no constant of a curve
-    const uint64_t ex2[1][2] = {{0x308, 2ull << 10}}, lg2[1][2] = {{0x308, 3ull << 10}}, sqrt_[1][2] = {{0x308, 8ull << 10}}, rcp[1][2] = {{0x308, 4ull << 10}};
+    const uint64_t ex2[1][2] = {{0x308, 2ull << 10}}, lg2[1][2] = {{0x308, 3ull << 10}}, rsq[1][2] = {{0x308, 5ull << 10}}, sqrt_[1][2] = {{0x308, 8ull << 10}}, rcp[1][2] = {{0x308, 4ull << 10}};
+    const uint64_t hmma[1][2] = {{0x23c, 0}}, hmma_rcp[2][2] = {{0x23c, 0}, {0x308, 4ull << 10}}, hmma_sqrt[2][2] = {{0x23c, 0}, {0x308, 8ull << 10}};
+    const uint64_t hmma_rsq[2][2] = {{0x23c, 0}, {0x308, 5ull << 10}}, hmma_ex2[2][2] = {{0x23c, 0}, {0x308, 2ull << 10}}, hmma_lg2[2][2] = {{0x23c, 0}, {0x308, 3ull << 10}};
     const float k1292[1] = {12.92f};
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_ROOT, "FMUL x, |x| 8 times: square-rooted input, linear output");
     CHECK(color_of_squares(0x232, 1, 0, 32, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_ROOT, "HMUL2 |x|, x on the same lanes: square-rooted input, linear output");
@@ -119,6 +141,26 @@ int main(void) { @autoreleasepool {
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, NULL, 0, k1292, 1) == UP_COLOR_KEEP, "squares beside a curve's constant alone (12.92 in floats): the shader runs");
     CHECK(color_of_squares(0x220, 0, 1, 8, 10, 0, ex2, 1, enc, 2) == UP_COLOR_KEEP, "squares, then an encode (Ocarina of Time's 12 encoding variants): the output stays encoded, the shader runs");
     CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, sqrt_, 1, NULL, 0) == UP_COLOR_KEEP, "no curve and no square (a pre-pass that square-roots): nothing says its colour, the shader runs");
+    // Same display encoding in and out (Star Fox's ddc729bcdb4c8df9, Xenoblade DE's f809de4b7aab2c96): HMMA network with no curve, no power/sqrt/rsq, no self-multiply
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, hmma, 1, NULL, 0) == UP_COLOR_SAME, "HMMA network with no curve, power, sqrt or square: same encoding in and out");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, hmma_rcp, 2, NULL, 0) == UP_COLOR_SAME, "HMMA network with MUFU.RCP only: still same encoding in and out");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, rcp, 1, NULL, 0) == UP_COLOR_KEEP, "no HMMA with MUFU.RCP only (Ocarina VR pre-pass d17eefaff4f0bc23): kept");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, NULL, 0, NULL, 0) == UP_COLOR_KEEP, "no HMMA and no curve (NDVE movie helper c2fc2ddd604c25e7): kept");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, hmma_sqrt, 2, NULL, 0) == UP_COLOR_KEEP && color_of_squares(0x220, 0, 0, 0, 10, 0, hmma_rsq, 2, NULL, 0) == UP_COLOR_KEEP &&
+          color_of_squares(0x220, 0, 0, 0, 10, 0, hmma_ex2, 2, NULL, 0) == UP_COLOR_KEEP && color_of_squares(0x220, 0, 0, 0, 10, 0, hmma_lg2, 2, NULL, 0) == UP_COLOR_KEEP &&
+          color_of_squares(0x220, 0, 0, 0, 10, 0, rsq, 1, NULL, 0) == UP_COLOR_KEEP, "HMMA network with MUFU SQRT/RSQ/EX2/LG2: not plain, kept");
+    CHECK(color_of_squares(0x220, 0, 0, 1, 10, 0, hmma, 1, NULL, 0) == UP_COLOR_KEEP && color_of_squares(0x232, 0, 0, 1, 10, 0, hmma, 1, NULL, 0) == UP_COLOR_KEEP,
+          "HMMA network with a single FMUL/HMUL2 self-multiply: not plain, kept");
+    CHECK(color_of_squares(0x220, 0, 0, 0, 10, 0, hmma, 1, k1292, 1) == UP_COLOR_KEEP, "HMMA network with an f32 curve constant: not plain, kept");
+    { uint8_t h1[256] = {0}; uint64_t hl = 0x23c; memcpy(h1, &hl, 8); float c1 = 2.4f; memcpy(h1 + 32, &c1, 4);
+      CHECK(up_mfx_color(h1, sizeof h1) == UP_COLOR_KEEP, "HMMA network with a single f32 curve constant: kept");
+      uint8_t h2[256] = {0}; memcpy(h2, &hl, 8); __fp16 ch = 0.040435791015625f; memcpy(h2 + 32, &ch, 2);
+      CHECK(up_mfx_color(h2, sizeof h2) == UP_COLOR_SAME, "HMMA network with one chance f16 2-byte match (Fast Fusion / Xenoblade): still same encoding");
+      uint8_t h3[512] = {0}; memcpy(h3, &hl, 8); __fp16 ch2 = 2.3984375f; for (int i = 0; i < 8; i++) memcpy(h3 + 32 + 16 * i, &ch2, 2);
+      CHECK(up_mfx_color(h3, sizeof h3) == UP_COLOR_KEEP, "HMMA network with 8 hits of one f16 curve constant: partial curve, kept"); }
+    { NvShader *two_tex = upscaler("4f41ccf24f163e0d_b"); two_tex->rf.nb = 3;
+      two_tex->rf.b[2] = (nvn_rbind){.kind = NVN_RB_TEX, .dtt = MTLTextureType2D, .dpf = NVN_DPF_FLOAT, .reg = 3};
+      CHECK(!up_mfx_1tex_1img(two_tex, NULL, NULL), "a 2-texture shader (NDVE resampler 4f41ccf24f163e0d) fails the 1-texture 1-image check"); }
     const char *up = getenv("DM_UPSCALER"); int on = up && !strcmp(up, "metalfx");
     tex_t in = texture(77, 960, 540, NVN_FORMAT_RGBA16F), out = texture(78, 1920, 1080, NVN_FORMAT_RGBA16F), same = texture(79, 960, 540, NVN_FORMAT_RGBA16F);
     out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; same.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
@@ -235,6 +277,51 @@ int main(void) { @autoreleasepool {
         CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the square-rooted RGBA16F submission completes");
         CHECK(g_up_mfx_straight[0] == s_in && g_up_mfx_straight[1] == s_out + 1, "a square-rooted whole RGBA16F input still goes through the squaring copy; the output straight");
         CHECK(matches(written, squared, MTLRegionMake2D(0, 0, 1920, 1080), black), "the square-rooted RGBA16F input comes out squared into linear colour");
+        // Same display encoding in and out (UP_COLOR_SAME): Star Fox's RGBA16F → RGBA8_SRGB image (viewed as RGBA8Unorm by img_binding), Xenoblade DE's RGBA8Unorm → RGBA8Unorm,
+        // a cropped subrectangle, and rejection of float → float and sRGB-sampled input
+        named->up_color = UP_COLOR_SAME;
+        tex_t u8_in = texture(85, 960, 540, NVN_FORMAT_RGBA8), u8_out = texture(86, 1920, 1080, NVN_FORMAT_RGBA8);
+        tex_t srgb_in = texture(87, 960, 540, NVN_FORMAT_RGBA8_SRGB), srgb_out = texture(88, 1920, 1080, NVN_FORMAT_RGBA8_SRGB);
+        u8_out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE; srgb_out.d.flags |= NVN_TEXTURE_FLAGS_IMAGE;
+        mtl_tex_init(&u8_in); mtl_tex_init(&u8_out); mtl_tex_init(&srgb_in); mtl_tex_init(&srgb_out);
+        mtl_reg_tex(708, &u8_in, NULL); mtl_reg_image(709, &u8_out, NULL); mtl_reg_tex(710, &srgb_in, NULL); mtl_reg_image(711, &srgb_out, NULL);
+        fill(tex_mtl(&in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3]));
+        fill(tex_mtl(&u8_in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3]));
+        fill(tex_mtl(&srgb_in), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3]));
+        // Star Fox: RGBA16F holding sRGB-encoded [0, 1] → RGBA8_SRGB image (raw bytes kept, neither decoded nor double-encoded)
+        fill(tex_mtl(&srgb_out), MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 701; S.img[5][1] = 711;
+        mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "UP_COLOR_SAME takes RGBA16F → RGBA8_SRGB image (Star Fox)");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the Star Fox RGBA16F → RGBA8_SRGB submission completes");
+        CHECK(matches_u8(tex_mtl(&srgb_out), colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "Star Fox's RGBA8_SRGB image keeps raw encoded bytes, neither decoded nor double-encoded");
+        // Star Fox cropped subrectangle through scratch (mode 2 must not attach an sRGB view to scratch)
+        fill(tex_mtl(&srgb_out), MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {7, 3, 959, 539, 13, 9, 1899, 1059}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 704; S.img[5][1] = 711;
+        fill(tex_mtl(&packed), MTLClearColorMake(colour[0], colour[1], colour[2], colour[3]));
+        mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "UP_COLOR_SAME takes a cropped subrectangle into RGBA8_SRGB image");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the cropped UP_COLOR_SAME submission completes");
+        CHECK(matches_u8(tex_mtl(&srgb_out), colour, MTLRegionMake2D(13, 9, 1900, 1060), black), "cropped UP_COLOR_SAME keeps raw encoded bytes in its destination rectangle only");
+        // Xenoblade DE: RGBA8Unorm → RGBA8Unorm (same encoding, straight when usages allow)
+        fill(tex_mtl(&u8_out), MTLClearColorMake(0, 0, 0, 1));
+        { const uint32_t r[8] = {0, 0, 959, 539, 0, 0, 1919, 1079}; memcpy(S.push[1], r, sizeof r); } S.tex[5][0] = 708; S.img[5][1] = 709;
+        mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "UP_COLOR_SAME takes RGBA8Unorm → RGBA8Unorm (Xenoblade DE)");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the Xenoblade DE RGBA8Unorm submission completes");
+        CHECK(matches_u8(tex_mtl(&u8_out), colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "RGBA8Unorm → RGBA8Unorm keeps its encoding unchanged");
+        // Same sizes as UP_COLOR_SRGB (mode 1) with RGBA8Unorm → RGBA16F: mode 2 keeps encoding where mode 1 decoded it
+        fill(written, MTLClearColorMake(0, 0, 0, 1)); S.tex[5][0] = 708; S.img[5][1] = 702; mtl_sub_begin();
+        CHECK(up_mfx_encode(named), "UP_COLOR_SAME takes RGBA8Unorm → RGBA16F");
+        CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull) && !mtl_last_commit_error(), "the RGBA8Unorm → RGBA16F submission completes");
+        CHECK(matches(written, colour, MTLRegionMake2D(0, 0, 1920, 1080), black), "RGBA8Unorm → RGBA16F keeps its encoding (mode 2 does not share mode 1's sRGB view)");
+        // Unverified float → float and hardware-decoded sRGB input stay on the game's shader
+        { uint64_t kept_same = g_up_mfx_kept;
+          S.tex[5][0] = 701; S.img[5][1] = 702; mtl_sub_begin();
+          CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept_same + 1, "UP_COLOR_SAME rejects float → float (RGBA16F → RGBA16F)");
+          S.tex[5][0] = 710; S.img[5][1] = 709;
+          CHECK(!up_mfx_encode(named) && g_up_mfx_kept == kept_same + 2, "UP_COLOR_SAME rejects sRGB-sampled input (RGBA8_SRGB → RGBA8Unorm)");
+          mtl_wait(mtl_sub_commit(), 5000000000ull); }
         named->up_color = UP_COLOR_LINEAR;
         NvShader *encoded_out = upscaler(key); encoded_out->up_color = UP_COLOR_KEEP;
         CHECK(!up_mfx_wanted(encoded_out), "a named shader whose output stays encoded is left to its shader");

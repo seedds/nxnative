@@ -8,8 +8,10 @@
 #import <AVFAudio/AVFAudio.h>
 #else
 #import <AppKit/AppKit.h>
+#import <GameController/GCSyntheticDeviceKeys.h>
 #import <IOKit/IOKitLib.h>
 #import <IOKit/hid/IOHIDDevice.h>
+#include "pad_jc1.h"
 #endif
 #include <math.h>
 #include <pthread.h>
@@ -45,10 +47,11 @@ static BOOL phoneSupported;
 static float gain = 1;
 static pthread_mutex_t routeLock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned errors;
-static NSTimeInterval now(void) {
+static uint64_t now_ns(void) {
     struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-    return t.tv_sec + t.tv_nsec / 1e9;
+    return (uint64_t)t.tv_sec * NSEC_PER_SEC + (uint64_t)t.tv_nsec;
 }
+static NSTimeInterval now(void) { return (double)now_ns() / 1e9; }
 // A plain player cannot loop, and one stopped in the middle of an event leaves an Xbox controller's motors running at its level after the engine and the
 // process are gone (gamecontrollerd, macOS 27.0.1; only power-cycling the controller stopped them). So plain players play pulses that end on their own:
 // each one PULSE long, the next scheduled where the last ends while the effect lasts; a stop silences them and waits for the last one to end
@@ -161,8 +164,8 @@ static void report(NSError *e, NSString *target, const char *stage) {
 }
 - (void)engineFailed:(NSError *)error stage:(const char *)stage {
     [self failed:error stage:stage];
-    // Only an engine that cannot be made or started moves a split route to the default locality;
-    // a player or parameter failure (a service reset, say) is retried on the same handle.
+    // A handle engine that cannot be made or started may fall back to the default locality.
+    // Other failures, and Joy-Cons whose localities must stay separate, retry the same actuator.
     if (self.fallback) self.fallback(self.retryAfter);
 }
 - (BOOL)startEngine {
@@ -218,7 +221,7 @@ static void report(NSError *e, NSString *target, const char *stage) {
                 [self halt]; self.engine = nil;
                 // Without advanced players, the engines of the left and right handles override each other on an Xbox Wireless Controller instead of
                 // adding up: with both playing, the handle motors were not felt, while one engine for both handles was. A route with no merge
-                // (one engine, or a DualSense's handles) keeps its channels
+                // (one engine, a DualSense's handles, or separate Joy-Cons) keeps its channels
                 if (self.merge) { dm_haptics_clear(self.player); self.merge(); return; }
                 self.simple = YES;
                 if (![self startEngine]) return;
@@ -279,12 +282,15 @@ static void ds4_send(int p) {
 }
 // As the emulators feed SDL: the strong motor follows the low band and the weak one the high band, mostly from the left and the right motor
 // respectively, linearly. The combined level of the Core Haptics route (dm_haptics_level) would run both motors on either band.
+static void erm_mix(const dm_haptic_state *s, uint8_t out[2]) {
+    const dm_vibration *l = &s->motor[0], *r = &s->motor[1];
+    out[0] = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
+    out[1] = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+}
 static void ds4_apply(dm_haptic_state s) {
     ds4_out *o = &ds4[s.player];
     if (!o->dev) return;
-    const dm_vibration *l = &s.motor[0], *r = &s.motor[1];
-    o->motor[0] = (uint8_t)lrintf(controller_level((0.85f * l->amplitude_low + 0.15f * r->amplitude_low) * gain) * 255);
-    o->motor[1] = (uint8_t)lrintf(controller_level((0.15f * l->amplitude_high + 0.85f * r->amplitude_high) * gain) * 255);
+    erm_mix(&s, o->motor);
     if (o->motor[0] == o->sent[0] && o->motor[1] == o->sent[1]) return;
     ds4_send(s.player);
 }
@@ -303,29 +309,266 @@ static void ds4_release(int p) {
     if (o->dev && (o->sent[0] || o->sent[1]) && !o->motor[0] && !o->motor[1]) ds4_send(self.player);
 }
 @end
-// The first DualShock 4 device no other player drives, opened for player p. The registry is asked at each connect: an IOHIDManager that is never scheduled
-// keeps the devices of the moment its matching was set, so a controller turned on later found none and stayed on Core Haptics, and one that came back got
-// its dead device. A scheduled one would depend on its arrival callback running before GameController's connect; the registry has the device by then
-static BOOL ds4_take(int p) {
+// A Switch Pro Controller, or a controller that presents itself as one (Nintendo 057E / 2009: genuine Pro Controller, 8BitDo, GameSir Nova, XTRE041), is driven
+// through its own HD rumble report 0x10 (pad_jc1.h), as SDL's hidapi driver and pad_jc1_mac.h / pad_hid_mac.h send it. Core Haptics without advanced players merges
+// both handles onto one engine and collapses both frequency bands into one intensity and sharpness, and on Switch-mode clones gamecontrollerd's output stays silent
+// (PR #2607, issue #2804, PR #2787). Output reports are padded to 49 bytes over Bluetooth (JC1_REPORT_LEN) and 64 bytes over USB, after subcommand 0x48 enables
+// vibration on connect. Changes are paced to PRO_MIN_NS with peak-hold (jc1_rumble_hold) so 5 ms pulses are not dropped and Bluetooth is not flooded at 200 Hz, and
+// an active level is refreshed every PRO_REFRESH_NS.
+#define PRO_MIN_NS     15000000ull
+#define PRO_REFRESH_NS 30000000ull
+typedef struct {
+    IOHIDDeviceRef dev;
+    uint64_t id, gen, last, due;   // id: its registry entry; gen: cancels stale dispatch_after ticks; last/due: CLOCK_MONOTONIC ns
+    size_t len;                    // 49 over Bluetooth (JC1_REPORT_LEN), 64 over USB
+    jc1_rumble_hold hold;          // peak-hold across the pacing interval (pad_jc1.h)
+    uint8_t sent[8], counter;
+    BOOL armed, bluetooth;
+} pro_out;
+static pro_out pro[DM_PLAYERS];
+static void pro_encode_side(const dm_vibration *v, uint8_t out[4]) {
+    if (!jc1_vibration_on(v)) { memcpy(out, jc1_neutral_rumble, 4); return; }
+    jc1_rumble_encode(v, out);
+}
+static void pro_want(const pro_out *o, dm_vibration out[2]) {
+    for (int k = 0; k < 2; k++) out[k] = jc1_vibration_on(&o->hold.peak[k]) ? o->hold.peak[k] : o->hold.cur[k];
+}
+static BOOL pro_send(int p, const uint8_t data[8]) {
+    pro_out *o = &pro[p]; uint8_t r[64] = {0};
+    jc1_rumble_report(r, o->counter++, data, data + 4);
+    IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, (CFIndex)o->len);
+    o->last = now_ns();
+    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: Pro Controller rumble report: IOReturn 0x%x\n", e); return NO; }
+    memcpy(o->sent, data, 8);
+    return YES;
+}
+static void pro_step(int p);
+static void pro_arm(int p, uint64_t t, uint64_t target) {
+    pro_out *o = &pro[p];
+    if (o->armed && o->due <= target) return;
+    uint64_t gen = ++o->gen; o->armed = YES; o->due = target;
+    int64_t wait = target > t ? (int64_t)(target - t) : 0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, wait), queue, ^{
+        if (pro[p].gen != gen) return;
+        pro[p].armed = NO;
+        pro_step(p);
+    });
+}
+static void pro_step(int p) {
+    pro_out *o = &pro[p];
+    if (!o->dev) return;
+    dm_vibration m[2]; uint8_t data[8];
+    pro_want(o, m);
+    pro_encode_side(&m[0], data); pro_encode_side(&m[1], data + 4);
+    BOOL on = jc1_vibration_on(&m[0]) || jc1_vibration_on(&m[1]);
+    BOOL dirty = memcmp(data, o->sent, 8) != 0;
+    if (!on && !dirty) return;
+    uint64_t t = now_ns(), need = dirty ? PRO_MIN_NS : PRO_REFRESH_NS;
+    if (!o->last || t >= o->last + need) {
+        BOOL ok = pro_send(p, data);
+        t = o->last;
+        o->hold.peak[0] = o->hold.peak[1] = (dm_vibration){0};
+        if (!ok && !on) return;
+        pro_want(o, m);
+        pro_encode_side(&m[0], data); pro_encode_side(&m[1], data + 4);
+        on = jc1_vibration_on(&m[0]) || jc1_vibration_on(&m[1]);
+        dirty = memcmp(data, o->sent, 8) != 0;
+        if (!on && !dirty) return;
+        need = dirty ? PRO_MIN_NS : PRO_REFRESH_NS;
+    }
+    pro_arm(p, t, o->last + need);
+}
+static void pro_apply(dm_haptic_state s) {
+    pro_out *o = &pro[s.player];
+    if (!o->dev) return;
+    dm_vibration m[2];
+    for (int i = 0; i < 2; i++) {
+        m[i] = s.motor[i];
+        m[i].amplitude_low = controller_level(m[i].amplitude_low * gain);
+        m[i].amplitude_high = controller_level(m[i].amplitude_high * gain);
+    }
+    jc1_rumble_set(&o->hold, m);
+    pro_step(s.player);
+}
+static void pro_release(int p) {
+    pro_out *o = &pro[p];
+    uint64_t gen = o->gen + 1;
+    o->gen = gen; o->armed = NO;
+    if (o->dev) {
+        if (memcmp(o->sent, jc1_neutral_rumble, 8)) pro_send(p, jc1_neutral_rumble);
+        IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev);
+    }
+    *o = (pro_out){0};
+    o->gen = gen;
+}
+@interface DmProChannel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (pro_apply)
+@end
+@implementation DmProChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+- (void)stop {
+    pro_out *o = &pro[self.player];
+    o->hold.cur[self.motor] = o->hold.peak[self.motor] = (dm_vibration){0};
+    if (jc1_vibration_on(&o->hold.cur[0]) || jc1_vibration_on(&o->hold.cur[1]) ||
+        jc1_vibration_on(&o->hold.peak[0]) || jc1_vibration_on(&o->hold.peak[1])) return;
+    o->gen++; o->armed = NO;
+    if (o->dev && memcmp(o->sent, jc1_neutral_rumble, 8)) pro_send(self.player, jc1_neutral_rumble);
+}
+@end
+// An 8BitDo Ultimate 2 Wireless in its own mode (2DC8:6012, firmware 1.03 and later): GameController lists it with no haptics localities ("localities none,
+// 0 channels"), so Core Haptics cannot drive it. Its two rotating motors take output report 0x05 ({0x05, low motor, high motor, 0, 0}), as SDL's hidapi
+// 8BitDo driver sends it. Changes are paced to ABITDO_MIN_NS with peak-hold across the pacing interval so 5 ms pulses are not dropped and Bluetooth LE is
+// not flooded at 200 Hz, an active level is refreshed every ABITDO_REFRESH_NS, and a normal stop sends ABITDO_STOPS zero reports so a lost BLE stop does not
+// leave the motors running. Uses the same linear erm_mix (DM_RUMBLE_GAIN, DM_RUMBLE_MIN) as the DualShock 4 route; only controllers with no localities of
+// their own take it.
+#define ABITDO_MIN_NS     20000000ull
+#define ABITDO_REFRESH_NS 50000000ull
+enum { ABITDO_STOPS = 3 };
+typedef struct {
+    IOHIDDeviceRef dev;
+    uint64_t id, gen, last, due;   // id: its registry entry; gen: cancels stale dispatch_after ticks; last/due: CLOCK_MONOTONIC ns
+    uint8_t cur[2], peak[2], sent[2];
+    int stops;                     // zero reports still to send on a normal transition to silence
+    BOOL armed;
+} abitdo_out;
+static abitdo_out abitdo[DM_PLAYERS];
+static void abitdo_want(const abitdo_out *o, uint8_t out[2]) {
+    for (int i = 0; i < 2; i++) out[i] = o->peak[i] ? o->peak[i] : o->cur[i];
+}
+static BOOL abitdo_send(int p, const uint8_t m[2]) {
+    abitdo_out *o = &abitdo[p]; const uint8_t r[5] = {0x05, m[0], m[1], 0, 0};
+    IOReturn e = IOHIDDeviceSetReport(o->dev, kIOHIDReportTypeOutput, r[0], r, sizeof r);
+    o->last = now_ns();
+    if (e != kIOReturnSuccess) { if (++errors <= 8 || errors % 64 == 0) fprintf(stderr, "[RED] haptics: 8BitDo output report 0x05: IOReturn 0x%x\n", e); return NO; }
+    o->sent[0] = m[0]; o->sent[1] = m[1];
+    return YES;
+}
+static void abitdo_step(int p);
+static void abitdo_arm(int p, uint64_t t, uint64_t target) {
+    abitdo_out *o = &abitdo[p];
+    if (o->armed && o->due <= target) return;
+    uint64_t gen = ++o->gen; o->armed = YES; o->due = target;
+    int64_t wait = target > t ? (int64_t)(target - t) : 0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, wait), queue, ^{
+        if (abitdo[p].gen != gen) return;
+        abitdo[p].armed = NO;
+        abitdo_step(p);
+    });
+}
+static void abitdo_step(int p) {
+    abitdo_out *o = &abitdo[p];
+    if (!o->dev) return;
+    uint8_t m[2];
+    abitdo_want(o, m);
+    BOOL on = m[0] || m[1], dirty = m[0] != o->sent[0] || m[1] != o->sent[1], stopping = !on && (dirty || o->stops > 0);
+    if (!on && !stopping) return;
+    uint64_t t = now_ns(), need = (dirty || stopping) ? ABITDO_MIN_NS : ABITDO_REFRESH_NS;
+    if (!o->last || t >= o->last + need) {
+        BOOL ok = abitdo_send(p, m);
+        t = o->last;
+        o->peak[0] = o->peak[1] = 0;
+        if (ok) { if (on) o->stops = ABITDO_STOPS; else if (o->stops > 0) o->stops--; }
+        else if (!on) { o->stops = 0; return; }
+        abitdo_want(o, m);
+        on = m[0] || m[1]; dirty = m[0] != o->sent[0] || m[1] != o->sent[1]; stopping = !on && (dirty || o->stops > 0);
+        if (!on && !stopping) return;
+        need = (dirty || stopping) ? ABITDO_MIN_NS : ABITDO_REFRESH_NS;
+    }
+    abitdo_arm(p, t, o->last + need);
+}
+static void abitdo_apply(dm_haptic_state s) {
+    abitdo_out *o = &abitdo[s.player];
+    if (!o->dev) return;
+    uint8_t m[2];
+    erm_mix(&s, m);
+    for (int i = 0; i < 2; i++) {
+        o->cur[i] = m[i];
+        if (m[i] > o->peak[i]) o->peak[i] = m[i];
+    }
+    abitdo_step(s.player);
+}
+static void abitdo_release(int p) {
+    abitdo_out *o = &abitdo[p];
+    uint64_t gen = o->gen + 1;
+    o->gen = gen; o->armed = NO;
+    if (o->dev) {
+        if (o->sent[0] || o->sent[1]) { const uint8_t z[2] = {0, 0}; abitdo_send(p, z); }
+        IOHIDDeviceClose(o->dev, kIOHIDOptionsTypeNone); CFRelease(o->dev);
+    }
+    *o = (abitdo_out){0};
+    o->gen = gen;
+}
+@interface DmAbitdoChannel : DmRumbleChannel   // one per motor; the route takes both motors' values at once (abitdo_apply)
+@end
+@implementation DmAbitdoChannel
+- (void)apply:(dm_haptic_level)level { (void)level; }
+- (void)stop {
+    abitdo_out *o = &abitdo[self.player];
+    o->cur[self.motor] = o->peak[self.motor] = 0;
+    if (o->cur[0] || o->cur[1] || o->peak[0] || o->peak[1]) return;
+    o->gen++; o->armed = NO; o->stops = 0;
+    if (o->dev && (o->sent[0] || o->sent[1])) { const uint8_t z[2] = {0, 0}; abitdo_send(self.player, z); }
+}
+@end
+// The first non-synthetic HID device of the vendor, with one of the products, that no other player drives (ds4[] / pro[]: taken), opened for player p. The registry
+// is asked at each connect: an IOHIDManager that is never scheduled keeps the devices of the moment its matching was set, so a controller turned on later found none
+// and stayed on Core Haptics, and one that came back got its dead device. A scheduled one would depend on its arrival callback running before GameController's connect;
+// the registry has the device by then. accept may refuse an opened device (it is then closed and the next one tried)
+static IOHIDDeviceRef hid_take(int vendor, const int *pids, int npids, BOOL (^taken)(uint64_t id), BOOL (^accept)(IOHIDDeviceRef dev), uint64_t *taken_id) {
     CFMutableDictionaryRef match = IOServiceMatching(kIOHIDDeviceKey); io_iterator_t it = 0;
-    if (!match) return NO;
-    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@0x054C);
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NO;   // takes match
-    BOOL found = NO;
+    if (!match) return NULL;
+    CFDictionarySetValue(match, CFSTR(kIOHIDVendorIDKey), (__bridge CFNumberRef)@(vendor));
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match, &it) != KERN_SUCCESS) return NULL;   // takes match
+    IOHIDDeviceRef found = NULL;
     for (io_service_t s; !found && (s = IOIteratorNext(it)); IOObjectRelease(s)) {
-        uint64_t id = 0; BOOL taken = NO;   // GameController does not name a controller's HID device: two connecting together may get each other's
-        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS) continue;
-        for (int q = 0; q < DM_PLAYERS; q++) taken |= q != p && ds4[q].dev && ds4[q].id == id;
-        IOHIDDeviceRef dev = taken ? NULL : IOHIDDeviceCreate(kCFAllocatorDefault, s);
+        uint64_t id = 0;   // GameController does not name a controller's HID device: two connecting together may get each other's
+        if (IORegistryEntryGetRegistryEntryID(s, &id) != KERN_SUCCESS || taken(id)) continue;
+        IOHIDDeviceRef dev = IOHIDDeviceCreate(kCFAllocatorDefault, s);
         if (!dev) continue;
-        int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue];
-        if ((pid == 0x05C4 || pid == 0x09CC || pid == 0x0BA0) && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {   // DualShock 4 v1, v2, the USB wireless adapter
-            ds4[p].dev = dev; ds4[p].id = id; found = YES;
-            ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
-        } else CFRelease(dev);
+        BOOL synthetic = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue;
+        int pid = [(__bridge NSNumber *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey)) intValue]; BOOL want = NO;
+        for (int i = 0; i < npids; i++) want |= pid == pids[i];
+        if (!synthetic && want && IOHIDDeviceOpen(dev, kIOHIDOptionsTypeNone) == kIOReturnSuccess) {
+            if (!accept || accept(dev)) { found = dev; *taken_id = id; continue; }
+            IOHIDDeviceClose(dev, kIOHIDOptionsTypeNone);
+        }
+        CFRelease(dev);
     }
     IOObjectRelease(it);
     return found;
+}
+// Only a controller GameController calls a Pro Controller, and only while a live non-synthetic 057E:2009 HID device accepts subcommand 0x48 (enable vibration):
+// after a long Bluetooth disconnect IOKit can keep a second entry of the pad whose output fails (MACH_SEND_INVALID_DEST, #2237), so this picks the live one
+static BOOL pro_route(int p, GCController *controller) {
+    if (![controller.productCategory isEqualToString:@"Switch Pro Controller"]) return NO;
+    static const int pids[] = {0x2009};
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x057E, pids, 1, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && pro[q].dev && pro[q].id == i) return YES; return NO; },
+                                  ^BOOL(IOHIDDeviceRef d) {
+                                      BOOL bt = [(__bridge NSString *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+                                      uint8_t r[64] = {0}, on = 1;
+                                      jc1_output_report(r, 0, JC1_SUB_VIBRATION, &on, 1);
+                                      return IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, r[0], r, (CFIndex)(bt ? JC1_REPORT_LEN : 64)) == kIOReturnSuccess;
+                                  }, &id);
+    if (!dev) return NO;
+    pro_out *o = &pro[p];
+    o->dev = dev; o->id = id; o->gen++; o->counter = 1;
+    o->bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+    o->len = o->bluetooth ? JC1_REPORT_LEN : 64;
+    memcpy(o->sent, jc1_neutral_rumble, 8);
+    for (int m = 0; m < 2; m++) { DmProChannel *c = [DmProChannel new]; c.player = p; c.motor = m; c.target = @"Pro Controller report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the Pro Controller rumble report (%s)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
+            [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport");
+    return YES;
+}
+// The first free DualShock 4 device, opened for player p
+static BOOL ds4_take(int p) {
+    static const int pids[] = {0x05C4, 0x09CC, 0x0BA0};   // DualShock 4 v1, v2, the USB wireless adapter
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x054C, pids, 3, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && ds4[q].dev && ds4[q].id == i) return YES; return NO; }, nil, &id);
+    if (!dev) return NO;
+    ds4[p].dev = dev; ds4[p].id = id;
+    ds4[p].bluetooth = [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) isEqualToString:@"Bluetooth"];
+    return YES;
 }
 // Only a controller GameController calls a DualShock 4, and only while such a HID device is free
 static BOOL ds4_route(int p, GCController *controller) {
@@ -333,6 +576,29 @@ static BOOL ds4_route(int p, GCController *controller) {
     for (int m = 0; m < 2; m++) { DmDs4Channel *c = [DmDs4Channel new]; c.player = p; c.motor = m; c.target = @"DualShock 4 report"; [channels[p] addObject:c]; }
     fprintf(stderr, "haptics: player %d controller %s, rumble through the DualShock 4 effects report (%s, product 0x%04x)\n", p + 1, controller.vendorName.UTF8String ?: "unknown",
             ds4[p].bluetooth ? "Bluetooth" : "USB", [(__bridge NSNumber *)IOHIDDeviceGetProperty(ds4[p].dev, CFSTR(kIOHIDProductIDKey)) intValue]);
+    return YES;
+}
+// Only a controller with no haptics of its own whose name says 8BitDo, while a free live non-synthetic 2DC8:6012 gamepad/joystick HID device accepts output
+// report 0x05: probing a zero report skips dead Bluetooth entries (#2237) and firmware that lacks report 0x05
+static BOOL abitdo_route(int p, GCController *controller) {
+    if (!controller.vendorName || controller.haptics.supportedLocalities.count ||
+        [controller.vendorName rangeOfString:@"8BitDo" options:NSCaseInsensitiveSearch].location == NSNotFound) return NO;
+    static const int pids[] = {0x6012};
+    uint64_t id = 0;
+    IOHIDDeviceRef dev = hid_take(0x2DC8, pids, 1, ^BOOL(uint64_t i) { for (int q = 0; q < DM_PLAYERS; q++) if (q != p && abitdo[q].dev && abitdo[q].id == i) return YES; return NO; },
+                                  ^BOOL(IOHIDDeviceRef d) {
+                                      int page = [(__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsagePageKey)) intValue];
+                                      int usage = [(__bridge NSNumber *)IOHIDDeviceGetProperty(d, CFSTR(kIOHIDPrimaryUsageKey)) intValue];
+                                      if (page != 1 || (usage != 4 && usage != 5)) return NO;
+                                      const uint8_t z[5] = {0x05, 0, 0, 0, 0};
+                                      return IOHIDDeviceSetReport(d, kIOHIDReportTypeOutput, z[0], z, sizeof z) == kIOReturnSuccess;
+                                  }, &id);
+    if (!dev) return NO;
+    abitdo_out *o = &abitdo[p];
+    o->dev = dev; o->id = id; o->gen++;
+    for (int m = 0; m < 2; m++) { DmAbitdoChannel *c = [DmAbitdoChannel new]; c.player = p; c.motor = m; c.target = @"8BitDo report"; [channels[p] addObject:c]; }
+    fprintf(stderr, "haptics: player %d controller %s, rumble through the 8BitDo output report 0x05 (%s)\n", p + 1, controller.vendorName.UTF8String,
+            [(__bridge NSString *)IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey)) UTF8String] ?: "unknown transport");
     return YES;
 }
 #endif
@@ -350,6 +616,8 @@ static void apply(dm_haptic_state s) {
         NSArray<DmRumbleChannel *> *out = channels[s.player];
 #if !TARGET_OS_IPHONE
         if ([out.firstObject isKindOfClass:DmDs4Channel.class]) { ds4_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmProChannel.class]) { pro_apply(s); return; }
+        if ([out.firstObject isKindOfClass:DmAbitdoChannel.class]) { abitdo_apply(s); return; }
 #endif
         for (NSUInteger i = 0; i < out.count; i++) {
             if (s.epoch != dm_haptics_epoch(s.player)) break;   // a failed channel may replace this route
@@ -367,24 +635,33 @@ static void default_controller(int p, GCDeviceHaptics *h, NSTimeInterval retryAf
     add_engine(p, -1, @"controller default", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityDefault]; });
     channels[p].lastObject.retryAfter = retryAfter;
 }
+static GCHapticsLocality const kJoyConLeftLocality = (GCHapticsLocality)@"JoyCon (L)";
+static GCHapticsLocality const kJoyConRightLocality = (GCHapticsLocality)@"JoyCon (R)";
+
 static void configure(int p, GCController *controller) {
     for (DmRumbleChannel *c in channels[p]) [c stop];
     channels[p] = [NSMutableArray new];
+#if !TARGET_OS_IPHONE
+    ds4_release(p); pro_release(p); abitdo_release(p);
+#endif
     if (sinks[p]) { sink_silence(p); dm_haptics_route(p, 1); return; }
 #if !TARGET_OS_IPHONE
-    ds4_release(p);
-    if (controller && ds4_route(p, controller)) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
+    if (controller && (ds4_route(p, controller) || pro_route(p, controller) || abitdo_route(p, controller))) { dm_haptics_route(p, 1); return; }   // the report first, as SDL drives it
 #endif
     if (controller) {
         GCDeviceHaptics *h = controller.haptics;
         NSSet *localities = h.supportedLocalities;
-        if ([localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle]) {
-            add_engine(p, 0, @"controller left handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityLeftHandle]; });
-            add_engine(p, 1, @"controller right handle", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:GCHapticsLocalityRightHandle]; });
-            // Advertised handle localities can still fail to start. Fall back to the standard
-            // controller engine, once, rather than keeping two unusable helper connections.
+        BOOL handles = [localities containsObject:GCHapticsLocalityLeftHandle] && [localities containsObject:GCHapticsLocalityRightHandle];
+        BOOL joycons = !handles && [localities containsObject:kJoyConLeftLocality] && [localities containsObject:kJoyConRightLocality];
+        if (handles || joycons) {
+            GCHapticsLocality leftLoc = handles ? GCHapticsLocalityLeftHandle : kJoyConLeftLocality;
+            GCHapticsLocality rightLoc = handles ? GCHapticsLocalityRightHandle : kJoyConRightLocality;
+            add_engine(p, 0, handles ? @"controller left handle" : @"controller left Joy-Con", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:leftLoc]; });
+            add_engine(p, 1, handles ? @"controller right handle" : @"controller right Joy-Con", ^CHHapticEngine *(NSError **e) { (void)e; return [h createEngineWithLocality:rightLoc]; });
+            // Advertised handle localities can still fail to start. Fall back to the standard controller engine once.
+            // Joy-Cons can belong to different npads: Default mixes their motors, so a failed channel must retry its own locality.
             __weak NSArray *route = channels[p];
-            for (DmRumbleChannel *c in channels[p]) c.fallback = ^(NSTimeInterval retryAfter) {
+            if (handles) for (DmRumbleChannel *c in channels[p]) c.fallback = ^(NSTimeInterval retryAfter) {
                 if (!route || channels[p] != route) return;
                 for (DmRumbleChannel *old in channels[p]) [old stop];
                 channels[p] = [NSMutableArray new];
@@ -392,9 +669,10 @@ static void configure(int p, GCController *controller) {
                 dm_haptics_route(p, 1);
                 fprintf(stderr, "haptics: player %d retrying with the default controller locality\n", p + 1);
             };
-            // A server without advanced players gets one engine for both handles (see applyLevel), except for a DualSense: plain players on its
-            // left and right handle engines are felt apart (PR #986: Bluetooth, macOS 26.7.1), so each handle keeps its engine and its own level
-            if (![controller.productCategory isEqualToString:GCProductCategoryDualSense]) for (DmRumbleChannel *c in channels[p]) c.merge = ^{
+            // A server without advanced players gets one engine for both handles (see applyLevel), except for a DualSense or paired Joy-Cons:
+            // plain players on the DualSense's handle engines are felt apart (PR #986), and JoyCon (L) / JoyCon (R) are two separate Bluetooth
+            // controllers whose motors are routed per npad when split into JoyLeft and JoyRight
+            if (handles && ![controller.productCategory isEqualToString:GCProductCategoryDualSense]) for (DmRumbleChannel *c in channels[p]) c.merge = ^{
                 if (!route || channels[p] != route) return;
                 for (DmRumbleChannel *old in channels[p]) [old stop];
                 channels[p] = [NSMutableArray new];

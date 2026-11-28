@@ -160,3 +160,9 @@ int dm_audio_route(void);             // cached route, initialized on the callin
 enum { DM_AUDIO_SINK_CHANNELS = 8 };
 void *dm_pcmout_open_sink(void);
 void dm_audio_device_changed(void);   // signal the game's bound output-device notifications (hle_audren.c)
+
+// DM_NET=1: real sockets (hle_net.c). The guest descriptor is a host descriptor; offline, the calls are the BSD service's own (hle_net.h).
+// DM_NET_PEERS lists the unicast peers a broadcast-style send is replicated to (the Tailscale path); DM_NET_PROBE overrides the route probe.
+int dm_net_online(void);
+uint32_t dm_net_own_ip(void);   // the interface unicast leaves through (0 = unknown)
+void dm_net_ipconfig(uint32_t *ip, uint32_t *mask, uint32_t *gw, uint32_t *d0, uint32_t *d1);   // nifm's IpConfigInfo

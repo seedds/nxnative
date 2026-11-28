@@ -1334,7 +1334,7 @@ static int geo_run_walk(id<MTL4RenderCommandEncoder> re) {
         geo_capture_one(re, &g_geo_run[n]);
         n++;
     }
-    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd;
+    S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; fbc_gen_bump(); g_vbuf_ubd_clean = 0;
     return n;
 }
 static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, uint32_t primitive_base);
@@ -1380,7 +1380,7 @@ static __attribute__((noinline)) void geo_draw_compute(__unsafe_unretained NvPro
         if (g_geo_split_compute) { enc_c_end(ce); ce = nil; }
         packs += g_geo_run[i].emits != 0 && !g_geo_run[i].direct_count;
     }
-    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; }
+    if (n > 1) { S = s0; R = r0; g_pso_dirty = pd; g_dss_dirty = dd; fbc_gen_bump(); g_vbuf_ubd_clean = 0; }
     int legacy = geo_pack_legacy(), small = 0;
     for (int i = 0; i < n; i++) if (!legacy && g_geo_run[i].emits && !g_geo_run[i].direct_count && g_geo_run[i].groups <= 1024) small++;
     if (small) {

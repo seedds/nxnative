@@ -5,6 +5,9 @@
 // 1 / the target's size, set by an inline update (Splatoon Raiders' ink stamps), on an RG8 attachment sampled through (red, green, zero, one): the tile read fills the missing
 // channels as a sample does.
 #include "../nvn/nvn_mtl.m"
+// This white-box test mutates S.tex/S.img/rf.b/R.rt directly without state_op or OP_SET_RT;
+// bump g_fbc_gen around fb_prepare here (t_scan_cache.m covers the live cache and invalidations).
+#define fb_prepare(pr) (fbc_gen_bump(), fb_prepare(pr))
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;

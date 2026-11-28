@@ -1088,3 +1088,10 @@ t_cpuprof: t_cpuprof.m $(MTL_T_DEP)
 check_t_cpuprof: t_cpuprof
 	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=0 ./t_cpuprof
 	MTL_DEBUG_LAYER=1 DM_NVN_CPUPROF=1 DM_NVN_ENC_THREAD=1 ./t_cpuprof
+
+# Per-shader negative caches for fb_prepare, fb_depth_rule, ubd_conflict_textures, ubd_conflict_sh, and ubd_conflict
+t_scan_cache: t_scan_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_scan_cache.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_scan_cache
+check_t_scan_cache: t_scan_cache
+	MTL_DEBUG_LAYER=1 ./t_scan_cache

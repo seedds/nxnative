@@ -2715,7 +2715,6 @@ static inline unsigned ubd_pf_slot(uint64_t pg) { return (unsigned)((pg * 0x9E37
 enum { UBD_BM_SHIFT = 21 };   // pages in the window
 static const uint64_t UBD_BM_BASE = 0x7000000000ull;
 static uint64_t g_ubd_bm[(1u << UBD_BM_SHIFT) / 64];
-static inline int ubd_bm_in(uint64_t lo, uint64_t hi) { return lo >= UBD_BM_BASE && ((hi - 1 - UBD_BM_BASE) >> 12) < (1u << UBD_BM_SHIFT); }
 static void ubd_pf_add(uint64_t lo, uint64_t hi) {
     if (lo < g_ubd_env_lo) g_ubd_env_lo = lo; if (hi > g_ubd_env_hi) g_ubd_env_hi = hi;
     if (((hi - 1) >> 12) - (lo >> 12) > 16) { g_ubd_wide = 1; return; }
@@ -2727,7 +2726,13 @@ static void ubd_pf_add(uint64_t lo, uint64_t hi) {
 static inline int ubd_pf_hit(uint64_t lo, uint64_t hi) {
     if (hi <= g_ubd_env_lo || lo >= g_ubd_env_hi) return 0;
     if (g_ubd_wide || ((hi - 1) >> 12) - (lo >> 12) > 16) return 1;
-    if (ubd_bm_in(lo, hi)) { for (uint64_t pg = (lo - UBD_BM_BASE) >> 12; pg <= (hi - 1 - UBD_BM_BASE) >> 12; pg++) if (g_ubd_bm[pg >> 6] >> (pg & 63) & 1) return 1; return 0; }
+    if (lo >= UBD_BM_BASE && hi > lo) {
+        uint64_t p0 = (lo - UBD_BM_BASE) >> 12, p1 = (hi - 1 - UBD_BM_BASE) >> 12;
+        if (p1 < (1u << UBD_BM_SHIFT)) {
+            for (uint64_t pg = p0; pg <= p1; pg++) if (g_ubd_bm[pg >> 6] >> (pg & 63) & 1) return 1;
+            return 0;
+        }
+    }
     for (uint64_t pg = lo >> 12; pg <= (hi - 1) >> 12; pg++) { unsigned k = ubd_pf_slot(pg);
         while (g_ubd_pf[k]) { if (g_ubd_pf[k] == pg + 1) return 1; k = (k + 1) & (UBD_PF - 1); } }
     return 0;
@@ -2752,6 +2757,8 @@ static int ubd_covers_scan(uint64_t lo, uint64_t hi) {
 // 29,000 times a frame in Breath of the Wild, and consecutive draws bind mostly the same ranges between two updates: the scans of the list (up to 160 updates kept across passes) and its
 // page filter were about 8% of the submit thread's cycles. A small table remembers the last answers per range. DM_NVN_UBD_MEMO=0 always scans (diagnostic)
 static uint64_t g_ubd_ver = 1;
+static uint64_t g_ubd_hitn;   // incremented on nonzero ubd_hits (ubd_conflict_sh caches clean only when every lookup returned 0)
+static uint64_t g_vbuf_ubd_ver; static uint16_t g_vbuf_ubd_clean;   // vertex stream slots (bit s) proven outside g_ubd for g_vbuf_ubd_ver
 typedef struct { uint64_t lo, hi, ver, shadow; int8_t hits, covers; } ubd_memo_ent;   // shadow: ubd_shadow's GPU address (frame arena, kept until the submission ends, when the list is landed), 0 = not made
 enum { UBD_MEMO = 512 };
 static ubd_memo_ent g_ubd_memo[UBD_MEMO];
@@ -2765,8 +2772,11 @@ static inline ubd_memo_ent *ubd_memo(uint64_t lo, uint64_t hi) {
 }
 static int ubd_hits(uint64_t lo, uint64_t hi) {
     if (hi <= lo || !ubd_pf_hit(lo, hi)) return 0;   // the page filter answers most lookups (vertex and index buffers, other pools) without the table
-    if (!ubd_memo_on()) return ubd_hits_scan(lo, hi);
-    ubd_memo_ent *m = ubd_memo(lo, hi); if (m->hits < 0) m->hits = (int8_t)ubd_hits_scan(lo, hi); return m->hits;
+    int r;
+    if (!ubd_memo_on()) r = ubd_hits_scan(lo, hi);
+    else { ubd_memo_ent *m = ubd_memo(lo, hi); if (m->hits < 0) m->hits = (int8_t)ubd_hits_scan(lo, hi); r = m->hits != 0; }
+    g_ubd_hitn += (uint64_t)r;
+    return r;
 }
 static int ubd_covers(uint64_t lo, uint64_t hi) {
     if (hi <= lo) return 1;
@@ -8324,6 +8334,11 @@ static void shmap_read(void) {
     int gs_loc, lay_loc; char gs_comp, lay_comp;   // a slice-writing geometry shader (no function: the layer comes from input gs_loc.gs_comp) / a vertex shader with layer entry points writing output lay_loc.lay_comp (dmsh_build.py gs_slice, vs_layer_entry); -1 = none
     uint8_t buf_n, buf_idx[NVN_REFL_MAXB];   // and those that read a buffer or a handle out of one (sh_buf_list), made with tex_idx
     uint8_t tex_n, tex_idx[NVN_REFL_MAXB]; int lists_nb;   // rf.b's bindings that name a texture or an image, in order (sh_tex_list; lists_nb: the rf.nb it was made for + 1, 0 = not made)
+    uint8_t ubd_nu, ubd_ix[23];   // rf.b indices that read a uniform slot (ubd_conflict_ubo); 0 unbuilt, 1..24 = n + 1, 0xff overflow (full stage scan)
+    uint64_t ubdt_agen, ubdt_fgen;   // per-shader negative cache for ubd_conflict_textures (no bound buffer texture at g_args_gen[st] and g_fbc_gen)
+    uint64_t ubsc_ver, ubsc_agen, ubsc_ugen, ubsc_fgen; uint8_t ubsc_use_env;   // per-shader negative cache for ubd_conflict_sh (no deferred-update hit at g_ubd_ver)
+    uint64_t fbd_agen, fbd_fgen, fbd_dser;   // per-shader negative cache for fb_depth_rule (no depth-attachment read at g_args_gen[1], g_fbc_gen, R.rt.depth->serial)
+    uint64_t fb_c_pass, fb_c_setrt, fb_c_agen, fb_c_fgen, fb_c_spass; uint8_t fb_c_cmask, fb_c_has_depth;   // per-shader negative fast path for fb_prepare within an open pass
     uint64_t cbs_seen; uint32_t cbs_runs;   // the command buffer that listed this shader last, and how many have (cbs_note)
     // The argument buffer encoded last time, borrowed from its arena: valid only while ab_pass is the current pass. Keeping it here strongly would pin retired arenas for shaders no longer drawn.
     uint8_t ab_cbuf_only;   // 0 not decided, 1: its only bindings read through a uniform buffer are plain CBUF slots (args_cbuf_only), so a block can be patched when only those changed; 2 not
@@ -9111,6 +9126,11 @@ static int g_treg_sub_transient_any;
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
 static inline uint64_t tid_ser(int tid) { return tid >= 0 && tid < (1 << 20) ? atomic_load_explicit(&g_tser[tid], memory_order_relaxed) : 0; }
+// Generation bumped whenever a texture ID's registration metadata changes (mtl_reg_tex / treg_gone) or S/R is reset, switched, or restored outside state_op.
+// Readers snapshot it before scanning (acquire) and stamp negative caches with the pre-scan value so concurrent registrations (release) always invalidate.
+static _Atomic uint64_t g_fbc_gen = 1;
+static inline uint64_t fbc_gen_load(void) { return atomic_load_explicit(&g_fbc_gen, memory_order_acquire); }
+static inline void fbc_gen_bump(void) { atomic_fetch_add_explicit(&g_fbc_gen, 1, memory_order_release); }
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview: sampler ID → MTLSamplerState (retained)
 static void **g_sview_w; static uint64_t *g_srid_w; static float (*g_sbk)[4];   // a sampler's twin for a border colour Metal lacks (retained, NULL = none) and the shader's factors k (see nvn_border.h)
 static _Atomic int g_border_any;   // a sampler needing corrections has been registered (sticky). Set before its lazy Metal creation, so its very first draw keeps the corrections
@@ -9476,8 +9496,10 @@ void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail, uint64_t *co
 // registration makes them again. It released only the primary view, and the image view when there was one: the type-compatible view (tex_fit) and the pool tables' views (pool_fit)
 // kept their texture, a pool-backed one the whole pool buffer, until the ID was registered with other data (PR #923; registering the same data keeps the views)
 static void treg_gone(treg_t *r) {
-    if (!r->gone) { reg_bump((int)(r - g_treg), 0); bcp_idx((int)(r - g_treg), &r->t, 0); ua_reg_idx((int)(r - g_treg), &r->t, 0); }   // its pool table entries become the dummy: the tables take the ID again (pool_gpu); no pair side while its storage is gone
+    int was = r->gone;
+    if (!was) { reg_bump((int)(r - g_treg), 0); bcp_idx((int)(r - g_treg), &r->t, 0); ua_reg_idx((int)(r - g_treg), &r->t, 0); }   // its pool table entries become the dummy: the tables take the ID again (pool_gpu); no pair side while its storage is gone
     r->gone = 1;
+    if (!was) fbc_gen_bump();
     treg_drop_views(r);
     treg_drop_stand(r);
 }
@@ -9577,6 +9599,7 @@ void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
         g_treg_sp[g_ntreg_sp++] = id_; rr->sp = 1;
     }
     if (!same && id_ < (1 << 20)) atomic_store_explicit(&g_tser[id_], t ? t->serial : 0, memory_order_release);
+    if (!same || was_gone) fbc_gen_bump();
     os_unfair_lock_unlock(&g_rmu);
     {   // DM_NVN_TREG_ID=n logs every registration of texture ID n: what it holds from then on, and when (the frame being recorded)
         static int want = -2; if (want == -2) { const char *e = getenv("DM_NVN_TREG_ID"); want = e ? atoi(e) : -1; }
@@ -10314,17 +10337,28 @@ static uint64_t c2_handle(int stage, unsigned b) {
 // hold, patched when only the uniform one moved (encode_args_). A flag cleared by whichever shader wrote the stage's block last told the next shader on that stage nothing: another shader
 // of the stage could write in between, clear it, and leave the first one's block from before the change looking current (PR #2249)
 static uint64_t g_args_seq = NVN_RESOURCE_STAGES, g_args_gen[NVN_RESOURCE_STAGES] = {1, 2, 3, 4, 5, 6, 7}, g_args_ugen[NVN_RESOURCE_STAGES];   // the starting numbers differ per stage: a block is never current on a stage it was not written for
+static uint64_t g_args_ubd_ugen[NVN_RESOURCE_STAGES], g_ubo_sgen[NVN_RESOURCE_STAGES][16];   // g_args_ubd_ugen: bumped only when a UBO change can overlap [g_ubd_env_lo, g_ubd_env_hi); g_ubo_sgen: per-slot last change seq
 static uint64_t g_args_wrote[NVN_RESOURCE_STAGES];   // g_args_seq when the stage last wrote a block: a stage changed since then needs no new number (ubd_dirty)
 static inline void args_dirty(int st) { g_args_gen[st] = ++g_args_seq; }
 static inline void args_dirty_ubo(int st) { g_args_ugen[st] = ++g_args_seq; }
-static inline void args_dirty_all(void) { for (int st = 0; st < NVN_RESOURCE_STAGES; st++) args_dirty(st); }
+static inline void args_dirty_ubo_reg(int st, int reg) { uint64_t seq = ++g_args_seq; g_args_ugen[st] = seq; g_ubo_sgen[st][reg] = seq; }
+static inline void args_dirty_all(void) { for (int st = 0; st < NVN_RESOURCE_STAGES; st++) { args_dirty(st); g_args_ubd_ugen[st] = g_args_seq; } }
 static inline int args_changed(int st) { return g_args_gen[st] > g_args_wrote[st] || g_args_ugen[st] > g_args_wrote[st]; }   // a binding of the stage changed since it last wrote a block
 // A deferred inline update changes what the draws after it read through the uniform bindings it overlaps (they get a shadow): the argument blocks of those stages are written again.
 // Only those: marking every stage made each later draw encode all of its blocks again, which with the updates kept across passes cost about 1.5 ms a frame in Breath of the Wild.
 // Only the uniform slots change, so it marks them as a binding change does (args_dirty_ubo): a block whose shader reads its uniforms only as uniforms is patched (encode_args_)
 static void ubd_dirty(uint64_t lo, uint64_t hi) {
-    for (int st = 0; st < NVN_RESOURCE_STAGES; st++) { if (args_changed(st)) continue;
-        for (int r = 0; r < 16; r++) { const p_bind_buf *u = &S.ubo[st][r]; if (u->addr && lo < u->addr + u->size && u->addr < hi) { args_dirty_ubo(st); break; } } }
+    for (int st = 0; st < NVN_RESOURCE_STAGES; st++) {
+        uint64_t seq = 0;
+        for (int r = 0; r < 16; r++) {
+            const p_bind_buf *u = &S.ubo[st][r];
+            uint64_t sz = u->size ? u->size : 1ull;
+            if (u->addr && (sz > UINT64_MAX - u->addr || (lo < u->addr + sz && u->addr < hi))) {
+                if (!seq) { seq = ++g_args_seq; g_args_ugen[st] = seq; g_args_ubd_ugen[st] = seq; }
+                g_ubo_sgen[st][r] = seq;
+            }
+        }
+    }
 }
 // NVN permits byte-aligned vertex streams; Metal drops the low two address bits. Keep an aligned copy in the submission arena.
 // A CPU copy is safe only without GPU writers (including earlier submissions and sparse aliases). Otherwise copy on the GPU before
@@ -10677,7 +10711,7 @@ static void state_reset(void) {
     g_rc_skip=0;
     g_state_inited = 1;
     memset(&S, 0, sizeof S);
-    g_pso_dirty = g_dss_dirty = 1;
+    g_pso_dirty = g_dss_dirty = 1; fbc_gen_bump(); g_vbuf_ubd_clean = 0;
     for (int i = 0; i < 8; i++) S.blend[i] = (blend_st){i, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD};
     S.color = (color_st){0, NVN_LOGIC_OP_COPY, NVN_ALPHA_FUNC_ALWAYS}; S.chmask.mask = 0xffffffffu;
     S.poly = (poly_st){NVN_FACE_NONE, NVN_FRONT_FACE_CCW, NVN_POLYGON_MODE_FILL, 0};
@@ -10750,14 +10784,14 @@ void mtl_queue_activate(uint64_t serial) {   // caller holds the submission lock
         q->serial = serial; q->next = g_queue_states; g_queue_states = q;
         state_reset(); memset(&R, 0, sizeof R);
     }
-    g_active_queue = q; g_pso_dirty = g_dss_dirty = 1; args_dirty_all();
+    g_active_queue = q; g_pso_dirty = g_dss_dirty = 1; args_dirty_all(); fbc_gen_bump(); g_vbuf_ubd_clean = 0;
 }
 void mtl_queue_forget(uint64_t serial) {   // caller holds the submission lock
     queue_state **p = &g_queue_states;
     while (*p && (*p)->serial != serial) p = &(*p)->next;
     if (!*p) return;
     queue_state *q = *p; *p = q->next;
-    if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); }
+    if (g_active_queue == q) { g_active_queue = NULL; state_reset(); memset(&R, 0, sizeof R); args_dirty_all(); fbc_gen_bump(); g_vbuf_ubd_clean = 0; }
     for(int i=0;i<7;i++) if(q->programs[i].serial) mtl_prog_unpin(&q->programs[i]);
     for(int i=0;i<9;i++) mtl_tex_unpin(q->rt_pins[i]);
     free(q);
@@ -17497,8 +17531,15 @@ static int state_op(uint32_t op, const void *a) {
         }
         case OP_BIND_VATTR: { const p_bind_vattr *b = a; if (S.nattr != b->n || memcmp(S.attr, b->st, 4 * b->n)) { memcpy(S.attr, b->st, 4 * b->n); S.nattr = b->n; g_pso_dirty = 1; } break; }
         case OP_BIND_VSTREAM: { const p_bind_vstream *b = a; if (S.nstream != b->n || memcmp(S.stream, b->st, 8 * b->n)) { memcpy(S.stream, b->st, 8 * b->n); S.nstream = b->n; g_pso_dirty = 1; } break; }
-        case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); memcpy(&S.vbuf[b->first], b->r, sizeof *b->r * b->n); break; }
-        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (resource_range_fits(b->stage, b->index, 1, 16)) { S.ubo_set[b->stage] |= (uint16_t)(1u << b->index); if (memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; args_dirty_ubo(b->stage); } } break; }   // see encode_args_: a block whose other slots still hold is patched
+        case OP_BIND_VBUF: case OP_BIND_VBUF1: { p_bind_vbuf tmp; const p_bind_vbuf *b = vbuf_rec(op, a, &tmp); memcpy(&S.vbuf[b->first], b->r, sizeof *b->r * b->n);
+            if (g_vbuf_ubd_ver == g_ubd_ver) {
+                for (int k = 0; k < b->n; k++) { int s_ = b->first + k; if ((unsigned)s_ >= 16) continue;
+                    uint64_t va = b->r[k].address, vsz = b->r[k].size;
+                    int clean = !va || !vsz || (vsz <= UINT64_MAX - va && (va + vsz <= g_ubd_env_lo || va >= g_ubd_env_hi));
+                    if (clean) g_vbuf_ubd_clean |= (uint16_t)(1u << s_); else g_vbuf_ubd_clean &= (uint16_t)~(1u << s_); }
+            }
+            break; }
+        case OP_BIND_UBO: case OP_BIND_UBO_SMALL: { p_bind_buf tmp; const p_bind_buf *b = bind_buf_rec(op, a, &tmp); if (resource_range_fits(b->stage, b->index, 1, 16)) { S.ubo_set[b->stage] |= (uint16_t)(1u << b->index); if (memcmp(&S.ubo[b->stage][b->index], b, sizeof *b)) { S.ubo[b->stage][b->index] = *b; args_dirty_ubo_reg(b->stage, b->index); uint64_t sz = b->size ? b->size : 1ull; if (g_nubd > 0 && b->addr && (sz > UINT64_MAX - b->addr || (b->addr + sz > g_ubd_env_lo && b->addr < g_ubd_env_hi))) g_args_ubd_ugen[b->stage] = g_args_seq; } } break; }   // see encode_args_: a block whose other slots still hold is patched
         case OP_BIND_SSBO: { const p_bind_buf *b = a; if (resource_range_fits(b->stage, b->index, 1, 16) && memcmp(&S.ssbo[b->stage][b->index], b, sizeof *b)) { S.ssbo[b->stage][b->index] = *b; args_dirty(b->stage); } break; }
         case OP_BIND_TEX: case OP_BIND_TEX1: { p_bind_handles t1; const p_bind_handles *b = bind_rec(op, a, &t1);
             if (b->n < 0 || b->n > 32) {   // the recorder never writes more than 32 (bind_handles): the record was overwritten after it was recorded
@@ -18816,8 +18857,10 @@ static int fb_depth_snap(NvShader *fs, const nvn_rbind *b, int tid, uint64_t ser
 }
 // The depth rule (above) for a draw whose pass has a depth attachment; dsw holds the planes written by this draw. Run before the colour attachments' snapshots and tile reads, which need the pass
 // this decides on
-static void fb_depth_rule(NvShader *fs, uint32_t dsw) {
-    uint64_t dser = R.rt.depth->serial; int slot[4], stid[4], ns = 0;
+static void fb_depth_rule(__unsafe_unretained NvShader *fs, uint32_t dsw) {
+    uint64_t dser = R.rt.depth->serial, fgen = fbc_gen_load();
+    if (!fs->rf.bindless && dser && fs->fbd_dser == dser && fs->fbd_agen == g_args_gen[1] && fs->fbd_fgen == fgen) return;
+    int slot[4], stid[4], ns = 0;
     uint32_t direct = fs->rf.bindless ? fb_texu_reads(fs, dser, R.rt.n > 0) : 0;
     uint32_t slot_planes[4];
     const uint8_t *texs; int ntexs = sh_tex_list(fs, &texs);
@@ -18831,7 +18874,11 @@ static void fb_depth_rule(NvShader *fs, uint32_t dsw) {
         if (!image && ns < 4) { slot[ns] = i; stid[ns] = tid; slot_planes[ns++] = planes; }
         else direct |= planes;
     }
-    if (!ns && !direct) return;
+    if (!ns && !direct) {
+        if (!fs->rf.bindless && dser) { fs->fbd_dser = dser; fs->fbd_agen = g_args_gen[1]; fs->fbd_fgen = fgen; }
+        return;
+    }
+    fs->fbd_dser = 0;
     if (!fb_depth_on()) { g_fb_dread |= FB_DS_BOTH; return; }
     for (int q = 0; q < ns; q++) {
         if (!(slot_planes[q] & dsw) || !fb_depth_snap(fs, &fs->rf.b[slot[q]], stid[q], dser)) direct |= slot_planes[q];
@@ -19046,8 +19093,55 @@ static id<MTLTexture> fb_view(int tid, uint64_t ser, id<MTLTexture> base, id<MTL
     if (v) { os_unfair_lock_lock(&g_rmu); if (tid >= 0 && tid < g_ntreg && g_treg[tid].ok && !g_treg[tid].gone && g_treg[tid].t.serial == ser) vc_put(base, g_treg[tid].t.pool, &k, v); os_unfair_lock_unlock(&g_rmu); }
     return v;
 }
+// Most draws sample none of the pass's attachments; keep that negative finding across draws while the fragment shader, its bindings (g_args_gen[1]), texture registrations (g_fbc_gen) and targets stay unchanged.
+static struct {
+    const NvShader *fs;
+    uint64_t agen, fgen, pass, setrt_n, dser, cser[8];
+    int n;
+    uint32_t cmask;
+} g_fbsc;
+static inline int fbc_rt_same(uint64_t fgen) {
+    if (g_fbsc.fgen == fgen && g_fbsc.pass == g_pass.serial && g_fbsc.setrt_n == g_setrt_n && g_setrt_n) return 1;
+    if (R.rt.n != g_fbsc.n || (R.rt.depth ? R.rt.depth->serial : UINT64_MAX) != g_fbsc.dser) return 0;
+    for (int k = 0; k < R.rt.n && k < 8; k++) if ((R.rt.color[k] ? R.rt.color[k]->serial : UINT64_MAX) != g_fbsc.cser[k]) return 0;
+    return 1;
+}
+static void fbc_keep(__unsafe_unretained NvShader *fs, uint64_t fgen, uint32_t cmask) {
+    g_fbsc.fs = fs; g_fbsc.agen = g_args_gen[1]; g_fbsc.fgen = fgen;
+    g_fbsc.pass = g_pass.serial; g_fbsc.setrt_n = g_setrt_n;
+    g_fbsc.n = R.rt.n; g_fbsc.cmask = cmask; g_fbsc.dser = R.rt.depth ? R.rt.depth->serial : UINT64_MAX;
+    for (int k = 0; k < R.rt.n && k < 8; k++) g_fbsc.cser[k] = R.rt.color[k] ? R.rt.color[k]->serial : UINT64_MAX;
+}
 // Called before the draw opens its render pass: if a snapshot is needed, end the current render pass, copy the snapshot (or reuse a valid one) and register the substitution (used by this draw's argument encoding)
-static void fb_prepare(NvProg *pr) {
+static __attribute__((noinline)) void fb_prepare_slow(__unsafe_unretained NvProg *pr);
+static inline __attribute__((always_inline)) void fb_prepare(__unsafe_unretained NvProg *pr) {
+    __unsafe_unretained NvShader *fs = pr ? pr->sh[1] : nil;
+    if (__builtin_expect(fs && g_enc &&
+        fs->fb_c_pass == g_pass.serial && fs->fb_c_setrt == g_setrt_n &&
+        fs->fb_c_agen == g_args_gen[1] && fs->fb_c_fgen == fbc_gen_load() &&
+        fs->fb_c_spass == g_fb_pass && g_fb_pass == g_stat_pass &&
+        !(g_fb_rmask | g_fb_dread | g_fb_rebind) &&
+        !(g_fb_pool_seq && g_fb_pool_seq == g_draw_seq), 1)) {
+        g_draw_seq++; g_fb_n = 0;
+        if (__builtin_expect((fs->fb_c_cmask & ~g_fb_wmask) != 0, 0)) {
+            uint32_t chm = S.chmask.mask;
+            chm = (chm | (chm >> 1)) & 0x55555555u; chm = (chm | (chm >> 2)) & 0x11111111u;
+            chm = (chm | (chm >> 3)) & 0x03030303u; chm = (chm | (chm >> 6)) & 0x000f000fu;
+            g_fb_wmask |= fs->fb_c_cmask & ((chm | (chm >> 12)) & 0xffu) & (fs->rf.color_known ? fs->rf.color_mask : 0xffu);
+        }
+        uint32_t dsw_want = (uint32_t)((S.ds.dt && S.ds.dw) ? FB_DS_DEPTH : 0) | (S.ds.st ? FB_DS_STENCIL : 0);
+        if (__builtin_expect(fs->fb_c_has_depth && (dsw_want & ~g_fb_dwrote) != 0, 0)) {
+            if (!(g_fb_dwrote & FB_DS_DEPTH) && S.ds.dt && S.ds.dw) g_fb_dwrote |= FB_DS_DEPTH;
+            if (!(g_fb_dwrote & FB_DS_STENCIL) && S.ds.st && (S.st_wmask[0] || S.st_wmask[1]) &&
+                (S.ds.fail_f != NVN_STENCIL_OP_KEEP || S.ds.zfail_f != NVN_STENCIL_OP_KEEP || S.ds.zpass_f != NVN_STENCIL_OP_KEEP ||
+                 S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP))
+                g_fb_dwrote |= FB_DS_STENCIL;
+        }
+        return;
+    }
+    fb_prepare_slow(pr);
+}
+static __attribute__((noinline)) void fb_prepare_slow(__unsafe_unretained NvProg *pr) {
     const int pool_was_active = g_fb_pool_seq && g_fb_pool_seq == g_draw_seq;
     g_draw_seq++; g_fb_n = 0;
     if (g_fb_rebind) { args_dirty_all(); g_fb_rebind = 0; }   // the previous draw had a substituted binding: re-encode with the original bindings this time
@@ -19061,10 +19155,17 @@ static void fb_prepare(NvProg *pr) {
             || S.ds.fail_b != NVN_STENCIL_OP_KEEP || S.ds.zfail_b != NVN_STENCIL_OP_KEEP || S.ds.zpass_b != NVN_STENCIL_OP_KEEP)) dsw |= FB_DS_STENCIL;
     }
     if (!fs) { if (pool_was_active) args_dirty(1); fb_ds_before_write(dsw); g_fb_dwrote |= dsw; return; }   // vertex-only draws can still write either plane
-    uint32_t wm = 0;   // the attachments this draw writes
-    for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k] && ((S.chmask.mask >> (4 * k)) & 0xf) && (fs->rf.color_known ? fs->rf.color_mask >> k & 1 : 1)) wm |= 1u << k;
-    if (g_enc && (wm & g_fb_rmask)) { g_fb_split++; rp_end(); fb_pass_sync(); }   // an earlier draw of this pass read an attachment this one writes: it must not see these writes
-    fb_ds_before_write(dsw);
+    uint64_t fgen = fbc_gen_load();
+    int rt_same = g_fbsc.fs && fbc_rt_same(fgen);
+    uint32_t rt_cmask;
+    if (rt_same) rt_cmask = g_fbsc.cmask;
+    else { rt_cmask = 0; for (int k = 0; k < R.rt.n && k < 8; k++) if (R.rt.color[k]) rt_cmask |= 1u << k; }
+    uint32_t chm = S.chmask.mask;
+    chm = (chm | (chm >> 1)) & 0x55555555u; chm = (chm | (chm >> 2)) & 0x11111111u;
+    chm = (chm | (chm >> 3)) & 0x03030303u; chm = (chm | (chm >> 6)) & 0x000f000fu;
+    uint32_t wm = rt_cmask & ((chm | (chm >> 12)) & 0xffu) & (fs->rf.color_known ? fs->rf.color_mask : 0xffu);
+    if (__builtin_expect(g_enc && (wm & g_fb_rmask), 0)) { g_fb_split++; rp_end(); fb_pass_sync(); }   // an earlier draw of this pass read an attachment this one writes: it must not see these writes
+    if (__builtin_expect(g_enc && (dsw & g_fb_dread), 0)) fb_ds_before_write(dsw);
     if (R.rt.depth) fb_depth_rule(fs, dsw);
     if (R.rt.n && R.rt.depth && g_fb_dread != FB_DS_BOTH) {
         if (fs->rf.pool && pool_ds_read(R.rt.depth)) {
@@ -19078,10 +19179,13 @@ static void fb_prepare(NvProg *pr) {
         if (fs->rf.dyn) g_fb_dread |= FB_DS_BOTH;
     }
     if (pool_was_active != (g_fb_pool_seq == g_draw_seq)) args_dirty(1);
-    uint64_t tile[4]; int ntile = fb_tile_plan(pr, wm, tile);
-    const uint8_t *texs; int ntexs = sh_tex_list(fs, &texs);
+    int fbc_hit = rt_same && g_fbsc.fs == fs && g_fbsc.agen == g_args_gen[1] && g_fbsc.fgen == fgen, fbc_keepable = 1;
+    // When fbc_hit is true, no binding of fs names any color attachment of R.rt, so fb_tile_plan cannot find a tile-read attachment either.
+    uint64_t tile[4]; int ntile = fbc_hit ? 0 : fb_tile_plan(pr, wm, tile);
+    const uint8_t *texs; int ntexs = fbc_hit ? 0 : sh_tex_list(fs, &texs);
     for (int ti = 0; ti < ntexs && g_fb_n < 4; ti++) {
         const nvn_rbind *b = &fs->rf.b[texs[ti]];
+        if (b->kind == NVN_RB_TEXU) fbc_keepable = 0;
         int image = b->kind == NVN_RB_IMG && !b->rw && !b->atom && b->reg < 32;
         // A texture named by one handle in a uniform buffer (TEXU): encode_args resolves it as below and substitutes the snapshot as it does a slot's (fb_snapshot_slot). FINAL FANTASY XII
         // THE ZODIAC AGE's limit-break echo (e40adef79f6f29b7, 6 draws a frame) samples the 1920x1080 layer it blends into through one: magenta strokes over the effect while only slots were
@@ -19092,6 +19196,7 @@ static void fb_prepare(NvProg *pr) {
         int tid = texu ? ubo_tex_id((uint32_t)handle) : bound_tex_id(handle); if (tid < 0) continue; uint64_t ser = tid_ser(tid); if (!ser) continue;
         if (R.rt.depth && R.rt.depth->serial == ser) continue;   // fb_depth_rule
         for (int k = 0; k < R.rt.n && k < 8 && g_fb_n < 4; k++) { if (!R.rt.color[k] || R.rt.color[k]->serial != ser) continue;
+            fbc_keepable = 0;
             if (!image && !texu && (tile[b->reg >> 6] >> (b->reg & 63) & 1)) { PD("N %llu same-pass feedback sampling: slot %d reads attachment %d ser=%llu from the tile", g_stat_pass + !g_enc, b->reg, k, (unsigned long long)ser); continue; }   // fb_tile_plan
             uint64_t aser; int lv, sl; rt_sub(&R.rt, k, &aser, &lv, &sl);
             os_unfair_lock_lock(&g_rmu);
@@ -19186,8 +19291,17 @@ static void fb_prepare(NvProg *pr) {
                      (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass + !g_enc, fs->key, texu ? "handle in uniform slot" : image ? "image slot" : "slot", b->reg, k, (unsigned long long)ser, (unsigned long)w, (unsigned long)h, (unsigned long)base.pixelFormat);
             PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d copied into a snapshot; this draw samples the snapshot", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl);
         } }
+    if (!fbc_hit) { if (fbc_keepable) fbc_keep(fs, fgen, rt_cmask); else g_fbsc.fs = NULL; }
     g_fb_wmask |= wm; g_fb_dwrote |= dsw;
     if (g_fb_n) { g_fb_seq = g_draw_seq; args_dirty_all(); g_fb_rebind = 1; }
+    if (!g_fb_rebind && !pool_was_active && g_fb_pool_seq != g_draw_seq && g_enc && g_fb_mode == 1 && !(g_fb_rmask | g_fb_dread) &&
+        g_fbsc.fs == fs && g_fbsc.pass == g_pass.serial && g_fbsc.setrt_n == g_setrt_n && g_setrt_n &&
+        g_fb_pass == g_stat_pass && !(fs->rf.pool || fs->rf.dyn) &&
+        (!R.rt.depth || (!fs->rf.bindless && R.rt.depth->serial && fs->fbd_dser == R.rt.depth->serial && fs->fbd_agen == g_args_gen[1] && fs->fbd_fgen == fgen))) {
+        fs->fb_c_pass = g_pass.serial; fs->fb_c_setrt = g_setrt_n;
+        fs->fb_c_agen = g_args_gen[1]; fs->fb_c_fgen = fgen; fs->fb_c_spass = g_fb_pass;
+        fs->fb_c_cmask = (uint8_t)rt_cmask; fs->fb_c_has_depth = R.rt.depth != NULL;
+    } else fs->fb_c_pass = 0;
     if (ntile) { g_fb_tseq = g_draw_seq; g_fb_tile_draws++;
         if (g_fb_tile_draws == 1 || g_fb_tile_draws == 1000 || g_fb_tile_draws % 100000 == 0)
             MLOG("same-pass feedback sampling: draw #%llu reads its attachments from the tile, %llu snapshots so far (frame %llu, shader %s, attachments %#x)", (unsigned long long)g_fb_tile_draws, (unsigned long long)g_fb_count,
@@ -19525,7 +19639,7 @@ static void fsm_plan(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) {
         if (state_op(h.op, a)) continue;
         break;
     }
-    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; fbc_gen_bump(); g_vbuf_ubd_clean = 0; prog_resolve();
     g_fsp_plan = fp; for (int i = 0; i < 8; i++) g_fsp_ps[i] = fps[i];
 }
 static void fsm_attach(MTL4RenderPassDescriptor *pd) {
@@ -19608,7 +19722,7 @@ static void fsm_run(id<MTL4RenderCommandEncoder> en) {
         if (h.op == OP_BARRIER || state_op(h.op, a)) continue;
         break;   // fsm_plan passed only state, targets, barriers and draws
     }
-    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = 1 | pso_dirty; g_dss_dirty = 1 | dss_dirty; prog_resolve();
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = 1 | pso_dirty; g_dss_dirty = 1 | dss_dirty; fbc_gen_bump(); g_vbuf_ubd_clean = 0; prog_resolve();
     g_fsp_n = fn; memcpy(g_fsp_layer, fl, sizeof fl); for (int i = 0; i < 8; i++) g_fsp_ps[i] = fps[i];
 }
 static void wide_run(const p_draw_idx *di) {
@@ -19670,67 +19784,145 @@ static void ubp_check(uint64_t lo, uint64_t hi, const uint8_t *sh) {
 // Whether this draw needs more from the inline updates deferred in the open pass than the uniform shadows give (see mtl_sub_update): a uniform binding they cover only in part whose rest
 // cannot be read from memory (ubp_get; a binding counts only as far as the shader can read it, cb_len), a bindless handle in such a part, or their data read as vertices, indices, indirect
 // arguments or a storage buffer. Then the pass ends first and the updates land before the draw, as before
-static int ubd_buffer_texture_hit(int tid) {   // caller holds g_rmu; metadata only, no texture creation inside an open pass
+static int ubd_buffer_texture_hit(int tid, int *is_tbuf) {   // caller holds g_rmu; metadata only, no texture creation inside an open pass
     if (tid < 0 || tid >= g_ntreg || !g_treg[tid].ok || g_treg[tid].gone) return 0;
     const tex_t *t = &g_treg[tid].t;
     if (t->d.target != NVN_TEXTURE_TARGET_BUFFER) return 0;
+    if (is_tbuf) *is_tbuf = 1;
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     uint64_t lo = (uint64_t)(uintptr_t)t->mem, n = (uint64_t)t->d.width * (uint64_t)bpb;
     return ubd_hits(lo, lo + n) || nvn_sparse_alias(lo, lo + n);
 }
-static int ubd_conflict_textures(NvShader *sh, int st) {
-    if (!g_nubd) return 0;
+static int ubd_conflict_textures(__unsafe_unretained NvShader *sh, int st) {
+    if (!g_nubd || (unsigned)st >= NVN_RESOURCE_STAGES) return 0;
+    uint64_t fgen = fbc_gen_load();
+    if (sh->ubdt_agen == g_args_gen[st] && sh->ubdt_fgen == fgen) return 0;
     const uint8_t *texs; int ntexs = sh_tex_list(sh, &texs);
-    if (!ntexs) return 0;   // no texture binding: nothing to look up, and no lock
-    int hit = 0;
+    if (!ntexs) { sh->ubdt_agen = g_args_gen[st]; sh->ubdt_fgen = fgen; return 0; }   // no texture binding: nothing to look up, and no lock
+    int hit = 0, keep = 1, is_tbuf = 0;
     os_unfair_lock_lock(&g_rmu);
     for (int ti = 0; ti < ntexs && !hit; ti++) {
         const nvn_rbind *b = &sh->rf.b[texs[ti]];
         switch (b->kind) {
-        case NVN_RB_TEXP: hit = b->f1d || b->dtt == MTLTextureTypeTextureBuffer; break;
-        case NVN_RB_TEXH: case NVN_RB_IMGP: hit = b->dtt == MTLTextureTypeTextureBuffer; break;   // selected on the GPU: any update may overlap
-        case NVN_RB_TEX: case NVN_RB_TBUF: hit = ubd_buffer_texture_hit(bound_tex_id(bound_tex(st, b->reg))); break;
+        case NVN_RB_TEXP: hit = b->f1d || b->dtt == MTLTextureTypeTextureBuffer; if (hit) keep = 0; break;
+        case NVN_RB_TEXH: case NVN_RB_IMGP: hit = b->dtt == MTLTextureTypeTextureBuffer; if (hit) keep = 0; break;   // selected on the GPU: any update may overlap
+        case NVN_RB_TEX: case NVN_RB_TBUF: hit = ubd_buffer_texture_hit(bound_tex_id(bound_tex(st, b->reg)), &is_tbuf); break;
         case NVN_RB_TEXU: case NVN_RB_TBUFU:
-            for (int k = 0; k < (b->n ? b->n : 1) && !hit; k++) hit = ubd_buffer_texture_hit(ubo_tex_id(b->n ? ubo_handle(st, b->reg, b->off + 8u * (unsigned)k) : ubo_bind_handle(st, b)));
+            keep = 0;
+            for (int k = 0; k < (b->n ? b->n : 1) && !hit; k++) hit = ubd_buffer_texture_hit(ubo_tex_id(b->n ? ubo_handle(st, b->reg, b->off + 8u * (unsigned)k) : ubo_bind_handle(st, b)), &is_tbuf);
             break;
-        case NVN_RB_IMG: hit = b->reg < 32 && ubd_buffer_texture_hit(bound_tex_id(bound_img(st, b->reg))); break;
-        case NVN_RB_IMGU: hit = ubd_buffer_texture_hit(ubo_tex_id(ubo_handle(st, b->reg, b->off))); break;
+        case NVN_RB_IMG: hit = b->reg < 32 && ubd_buffer_texture_hit(bound_tex_id(bound_img(st, b->reg)), &is_tbuf); break;
+        case NVN_RB_IMGU: keep = 0; hit = ubd_buffer_texture_hit(ubo_tex_id(ubo_handle(st, b->reg, b->off)), &is_tbuf); break;
         case NVN_RB_TEXD:
-            for (int k = 0; k < b->n && k < 128 && !hit; k++) hit = ubd_buffer_texture_hit(bound_tex_id(bound_handle(S.tex[st][k] ? S.tex[st][k] : S.tex[st][NVN_SEPTEX_SLOT0 + k])));
+            for (int k = 0; k < b->n && k < 128 && !hit; k++) hit = ubd_buffer_texture_hit(bound_tex_id(bound_handle(S.tex[st][k] ? S.tex[st][k] : S.tex[st][NVN_SEPTEX_SLOT0 + k])), &is_tbuf);
             break;
         case NVN_RB_TEXA:
-            for (int k = 0; k < b->n && !hit; k++) hit = ubd_buffer_texture_hit(bound_tex_id(c2_handle(st, b->off + 8u * (unsigned)k)));
+            keep = 0;
+            for (int k = 0; k < b->n && !hit; k++) hit = ubd_buffer_texture_hit(bound_tex_id(c2_handle(st, b->off + 8u * (unsigned)k)), &is_tbuf);
             break;
         default: break;
         }
     }
     os_unfair_lock_unlock(&g_rmu);
+    if (!hit && keep && !is_tbuf) { sh->ubdt_agen = g_args_gen[st]; sh->ubdt_fgen = fgen; }
+    else sh->ubdt_agen = 0;
     return hit;
 }
-static int ubd_conflict_sh(NvShader *sh, int st) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages)
-    if (ubd_conflict_textures(sh, st)) return 1;
-    const uint8_t *bufs; int nbufs = sh_buf_list(sh, &bufs);   // the other kinds (samplers, textures by slot, the host's own blocks) are nothing to this walk
-    for (int bi = 0; bi < nbufs; bi++) { const nvn_rbind *b = &sh->rf.b[bufs[bi]];
-        if (b->kind == NVN_RB_GMEM) { if (ubd_hits(0, UINT64_MAX)) return 1; continue; }   // reads any pool
-        if (b->reg >= 16) continue;
-        const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
-        if (!u->addr) continue;
-        if (b->kind == NVN_RB_CBUF) { uint64_t g, ul = cb_len(sh, b->reg, u->size); const uint8_t *c;
-            if (ubd_hits(u->addr, u->addr + ul) && !ubd_covers(u->addr, u->addr + ul)) {
-                if (!ubp_get(u->addr, u->addr + ul, &g, &c)) { g_ubp_refused++; return 1; }
-                if (ubp_check_on()) { ubp_check(u->addr, u->addr + ul, c); return 1; } } }
-        else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_IMGU || b->kind == NVN_RB_TBUFU) { uint64_t h = u->addr + (b->n ? 0 : b->off), n = b->n ? 8ull * b->n : b->kind == NVN_RB_SBUFU ? 8 : 4; uint64_t g; const uint8_t *c;   // an array: its handles at 8k
-            if (ubd_hits(h, h + n) && !ubd_covers(h, h + n) && !ubp_get(h, h + n, &g, &c)) { g_ubp_refused++; return 1; }
-            if (b->soff && b->sreg < 16) { uint64_t h2 = S.ubo[st][b->sreg].addr + (b->soff - 1u); if (ubd_hits(h2, h2 + 4) && !ubd_covers(h2, h2 + 4) && !ubp_get(h2, h2 + 4, &g, &c)) { g_ubp_refused++; return 1; } } }
-        else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; } }
+static inline __attribute__((always_inline)) int ubd_conflict_b(__unsafe_unretained NvShader *sh, int st, const nvn_rbind *b) {   // one binding of ubd_conflict_sh_
+    if (b->kind == NVN_RB_GMEM) { if (ubd_hits(0, UINT64_MAX)) return 1; return 0; }   // reads any pool
+    if (b->reg >= 16) return 0;
+    const p_bind_buf *u = b->kind == NVN_RB_SBUFP ? &S.ssbo[st][b->reg] : &S.ubo[st][b->reg];
+    if (!u->addr) return 0;
+    if (b->kind == NVN_RB_CBUF) { uint64_t g, ul = cb_len(sh, b->reg, u->size); const uint8_t *c;
+        if (ubd_hits(u->addr, u->addr + ul) && !ubd_covers(u->addr, u->addr + ul)) {
+            if (!ubp_get(u->addr, u->addr + ul, &g, &c)) { g_ubp_refused++; return 1; }
+            if (ubp_check_on()) { ubp_check(u->addr, u->addr + ul, c); return 1; } } }
+    else if (b->kind == NVN_RB_TEXU || b->kind == NVN_RB_SAMPU || b->kind == NVN_RB_SBUFU || b->kind == NVN_RB_IMGU || b->kind == NVN_RB_TBUFU) { uint64_t h = u->addr + (b->n ? 0 : b->off), n = b->n ? 8ull * b->n : b->kind == NVN_RB_SBUFU ? 8 : 4; uint64_t g; const uint8_t *c;   // an array: its handles at 8k
+        if (ubd_hits(h, h + n) && !ubd_covers(h, h + n) && !ubp_get(h, h + n, &g, &c)) { g_ubp_refused++; return 1; }
+        if (b->soff && b->sreg < 16) { uint64_t h2 = S.ubo[st][b->sreg].addr + (b->soff - 1u); if (ubd_hits(h2, h2 + 4) && !ubd_covers(h2, h2 + 4) && !ubp_get(h2, h2 + 4, &g, &c)) { g_ubp_refused++; return 1; } } }
+    else if (b->kind == NVN_RB_SBUFP || b->kind == NVN_RB_UBOP) { if (ubd_hits(u->addr, u->addr + (u->size ? u->size : 1))) return 1; }
     return 0;
 }
-static int ubd_conflict(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
-    for (int s_ = 0; s_ < 16; s_++) if (S.vbuf[s_].address && ubd_hits(S.vbuf[s_].address, S.vbuf[s_].address + S.vbuf[s_].size)) return 1;
+static int ubd_conflict_sh_(__unsafe_unretained NvShader *sh, int st) {
+    if (ubd_conflict_textures(sh, st)) return 1;
+    const uint8_t *bufs; int nbufs = sh_buf_list(sh, &bufs);   // the other kinds (samplers, textures by slot, the host's own blocks) are nothing to this walk
+    for (int bi = 0; bi < nbufs; bi++) if (ubd_conflict_b(sh, st, &sh->rf.b[bufs[bi]])) return 1;
+    return 0;
+}
+static int ubd_conflict_ubo(__unsafe_unretained NvShader *sh, int st, uint64_t kept_ugen) {   // only the bindings whose uniform slot changed since kept_ugen
+    if (!sh->ubd_nu) {
+        int n = 0;
+        for (int i = 0; i < sh->rf.nb && n <= (int)sizeof sh->ubd_ix; i++) {
+            const nvn_rbind *b = &sh->rf.b[i]; if (b->reg >= 16) continue;
+            int k = b->kind;
+            if (k == NVN_RB_CBUF || k == NVN_RB_UBOP || k == NVN_RB_TEXU || k == NVN_RB_SAMPU || k == NVN_RB_SBUFU || k == NVN_RB_IMGU || k == NVN_RB_TBUFU) {
+                if (n < (int)sizeof sh->ubd_ix) sh->ubd_ix[n] = (uint8_t)i;
+                n++;
+            }
+        }
+        sh->ubd_nu = n > (int)sizeof sh->ubd_ix ? 0xff : (uint8_t)(n + 1);
+        if (sh->ubd_nu == 0xff) return ubd_conflict_sh_(sh, st);
+    }
+    for (int j = 0; j < sh->ubd_nu - 1; j++) {
+        const nvn_rbind *b = &sh->rf.b[sh->ubd_ix[j]];
+        if (b->reg < 16 && g_ubo_sgen[st][b->reg] <= kept_ugen && (!b->soff || b->sreg >= 16 || g_ubo_sgen[st][b->sreg] <= kept_ugen)) continue;
+        if (ubd_conflict_b(sh, st, b)) return 1;
+    }
+    return 0;
+}
+static int ubd_conflict_sh(__unsafe_unretained NvShader *sh, int st) {   // one stage's bindings (encode_args binds the vertex, fragment and compute stages)
+    if ((unsigned)st >= NVN_RESOURCE_STAGES) return ubd_conflict_sh_(sh, st);
+    uint64_t fgen = fbc_gen_load();
+    if (sh->ubsc_ver == g_ubd_ver && sh->ubsc_agen == g_args_gen[st] && sh->ubsc_fgen == fgen) {
+        uint64_t cur_ugen = sh->ubsc_use_env ? g_args_ubd_ugen[st] : g_args_ugen[st];
+        if (sh->ubsc_ugen == cur_ugen) return 0;
+        if (sh->ubd_nu != 0xff) {
+            uint64_t h0 = g_ubd_hitn; int r = ubd_conflict_ubo(sh, st, sh->ubsc_ugen);
+            if (!r && g_ubd_hitn == h0) sh->ubsc_ugen = cur_ugen; else sh->ubsc_ver = 0;
+            return r;
+        }
+    }
+    uint64_t h0 = g_ubd_hitn; int r = ubd_conflict_sh_(sh, st);
+    if (!r && g_ubd_hitn == h0 && sh->ubdt_agen == g_args_gen[st] && sh->ubdt_fgen == fgen) {
+        int use_env = args_cbuf_only(sh);
+        sh->ubsc_agen = g_args_gen[st]; sh->ubsc_ver = g_ubd_ver; sh->ubsc_fgen = fgen; sh->ubsc_use_env = (uint8_t)use_env;
+        sh->ubsc_ugen = use_env ? g_args_ubd_ugen[st] : g_args_ugen[st];
+    } else sh->ubsc_ver = 0;
+    return r;
+}
+static __attribute__((noinline)) int ubd_conflict_slow(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (g_vbuf_ubd_ver != g_ubd_ver) { g_vbuf_ubd_clean = 0; g_vbuf_ubd_ver = g_ubd_ver; }
+    unsigned vm = pr && pr->sh[0] ? vs_streams(&pr->sh[0]->rf) : 0xffffu;
+    for (unsigned m = vm & ~(unsigned)g_vbuf_ubd_clean; m; m &= m - 1) {
+        int s_ = __builtin_ctz(m);
+        uint64_t va = S.vbuf[s_].address, vsz = S.vbuf[s_].size;
+        if (va && vsz && (vsz > UINT64_MAX - va || ubd_hits(va, va + vsz))) return 1;
+        g_vbuf_ubd_clean |= (uint16_t)(1u << s_);
+    }
     if (di && di->ibuf && ubd_hits(di->ibuf, di->ibuf + (uint64_t)di->count * 4)) return 1;
     uint64_t ind = dw ? dw->ind : di ? di->ind : 0; if (ind && ubd_hits(ind, ind + 32)) return 1;
     for (int st = 0; pr && st < 2; st++) if (pr->sh[st] && ubd_conflict_sh(pr->sh[st], st)) return 1;
     return 0;
+}
+static inline __attribute__((always_inline)) int ubd_conflict(__unsafe_unretained NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
+    if (__builtin_expect(pr && g_vbuf_ubd_ver == g_ubd_ver, 1)) {
+        __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
+        unsigned vm = vs ? vs_streams(&vs->rf) : 0xffffu;
+        if (__builtin_expect(!(vm & ~(unsigned)g_vbuf_ubd_clean), 1)) {
+            uint64_t ib = di ? di->ibuf : 0, ib_bytes = di ? (uint64_t)di->count * 4 : 0;
+            uint64_t ind = dw ? dw->ind : di ? di->ind : 0;
+            if (__builtin_expect((!ib || !ib_bytes || (ib_bytes <= UINT64_MAX - ib && (ib + ib_bytes <= g_ubd_env_lo || ib >= g_ubd_env_hi))) &&
+                                 (!ind || (32ull <= UINT64_MAX - ind && (ind + 32ull <= g_ubd_env_lo || ind >= g_ubd_env_hi))), 1)) {
+                uint64_t ver = g_ubd_ver, fgen = fbc_gen_load();
+                int vs_ok = !vs || (vs->ubsc_ver == ver && vs->ubsc_agen == g_args_gen[0] && vs->ubsc_fgen == fgen &&
+                                    vs->ubsc_ugen == (vs->ubsc_use_env ? g_args_ubd_ugen[0] : g_args_ugen[0]));
+                int fs_ok = !fs || (fs->ubsc_ver == ver && fs->ubsc_agen == g_args_gen[1] && fs->ubsc_fgen == fgen &&
+                                    fs->ubsc_ugen == (fs->ubsc_use_env ? g_args_ubd_ugen[1] : g_args_ugen[1]));
+                if (__builtin_expect(vs_ok && fs_ok, 1)) return 0;
+            }
+        }
+    }
+    return ubd_conflict_slow(pr, dw, di);
 }
 // The same for a dispatch: updates kept past their pass (DM_NVN_UB_LAZY) land before a dispatch that reads or writes their memory through a storage buffer or its indirect arguments, or reads a
 // part of a uniform binding the shadows cannot give (else they would land after it, at the next copy into the encoder it shares, dispatch_enc). Uniform reads they cover take shadows (encode_args)
@@ -20119,7 +20311,7 @@ static void cs_hoist_try(NvProg *pr0, const p_draw *dw0, const p_draw_idx *di0) 
         g_csh_stop[5]++; break;   // anything else may end the pass, write memory or depend on the order (copies, updates, clears, targets, queries)
     }
     if (cur.bad) g_csh_stop[6]++;
-    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty || moved; g_dss_dirty = dss_dirty || moved; prog_resolve();
+    memcpy(&S, &Ssave, sizeof S); args_dirty_all(); R = Rsave; g_pso_dirty = pso_dirty || moved; g_dss_dirty = dss_dirty || moved; fbc_gen_bump(); g_vbuf_ubd_clean = 0; prog_resolve();
     { static int once; if (moved && !once++) MLOG("compute dispatches moved ahead of the render pass they would split (DM_NVN_CS_HOIST): first case pass %llu, %d dispatches", g_stat_pass + 1, moved); }
 }
 void mtl_geomesh_stats(uint64_t *n, uint64_t *wait, uint64_t *run_draws, uint64_t *runs, uint64_t ends[5]) { *n = g_geo_mesh_n; *wait = g_geo_mesh_wait; *run_draws = g_mrun_draws; *runs = g_mrun_runs; memcpy(ends, g_mrun_ends, sizeof g_mrun_ends); }

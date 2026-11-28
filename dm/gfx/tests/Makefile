@@ -349,7 +349,7 @@ check_t_present_crop: t_present_crop
 	DM_PRESENT_SNAP=0 DM_NVN_ENC_THREAD=1 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=0 ./t_present_crop
 	DM_PRESENT_SNAP=1 DM_NVN_ENC_THREAD=1 ./t_present_crop
-t_present_rescue: t_present_rescue.m t_present_rescue_focus.c $(MTL_T_DEP)
+t_present_rescue: t_present_rescue.m t_present_rescue_focus.c ../../host/front_mac_present.h $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_present_rescue.m t_present_rescue_focus.c $(MTL_T_SRC) $(FW)
 .PHONY: check_t_present_rescue
 check_t_present_rescue: t_present_rescue

@@ -132,10 +132,11 @@ int front_screen_settling(void) {
 // the frame interval jumping between them. In fullscreen, a screen whose rate is not a multiple of the game's switches to the mode of the same size with the highest rate that is (144 → 120 Hz
 // for 60 and 30 fps), for this app only: macOS switches it back when the host quits, crashes included, and leaving fullscreen or that screen switches it back at once. A window keeps the
 // screen's rate, because the switch changes the whole screen for every app and most external screens go black for a second or more. A screen with no such mode keeps the virtual ticks.
-// A variable-refresh screen (ProMotion) in fullscreen switches to a fixed-rate mode of the same size at a multiple of the game's rate (120 → 60 Hz for 60 and 30 fps), though its own
-// rate is a multiple: there the display link at 60 Hz missed its targets (every present a 120 Hz refresh late and every other tick skipped, 40 fps on an M5 Pro at frame latency 2;
-// 1 → 2 → 3 vsync steps at latency 1, issue #347), and the fixed 60 Hz mode held 60.0 fps at latency 1 (docs/reference/frame-rate.md). A screen with no such mode keeps its rate, and
-// the 120 Hz link paces it (nvn_mtl.m link_vrr_120)
+// A variable-refresh screen (ProMotion) in fullscreen: the 60 Hz display link misses its targets there (every present a 120 Hz refresh late and every other tick skipped,
+// 40 fps on an M5 Pro at frame latency 2; 1 → 2 → 3 vsync steps at latency 1, issue #347). A screen the 120 Hz link paces automatically (nvn_mtl.m link_vrr_120) whose best
+// fixed-rate candidate is below 120 Hz (e.g. 120 Hz ProMotion → fixed 60 Hz) keeps its variable mode at 60 and 30 fps (front_mac_keep_vrr), avoiding both the fixed-60 Hz
+// link's extra refresh of latency and mid-gameplay mode switches; DM_SCREEN_MATCH=1 switches to fixed 60 Hz for comparison runs. A variable-refresh screen with a fixed-rate
+// mode at 120 Hz or higher (e.g. 240 → 120 Hz), one at another rate (e.g. 144 Hz), or one with DM_PRESENT_LINK=1 still switches to a fixed-rate mode (docs/reference/frame-rate.md)
 static NSWindow *g_win; static _Atomic int g_match_want;   // the game's window; the frame rate to match (0 = not known yet), written by the present thread only
 // A switch reconfigures every screen, and with several screens (a DisplayLink one among them) that moved the fullscreen window off the switched screen and back: each move
 // switched the screen back and then again, 18 times in a minute, until two of three screens lost their signal and the Dock and Finder stopped answering (LNPANDY/NX2Apple#1085).
@@ -270,11 +271,19 @@ static void screen_match_restore(int on_it, int undone) {   // main thread: the 
 }
 static void screen_match_apply(void);
 static void screen_match_once(void) {   // screen_match_apply's work, never entered twice at once
-    static int off = -1; if (off < 0) { const char *e = getenv("DM_SCREEN_MATCH"); off = e && !strcmp(e, "0"); if (off) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)"); }
+    static int match = -1;
+    if (match < 0) {
+        match = front_mac_screen_match_mode(getenv("DM_SCREEN_MATCH"));
+        if (match == FRONT_MAC_MATCH_OFF) LOG("front end: the screen keeps its refresh rate in fullscreen too (DM_SCREEN_MATCH=0)");
+        if (match == FRONT_MAC_MATCH_FIXED) LOG("front end: a variable-refresh screen goes to a fixed-rate mode in fullscreen too (DM_SCREEN_MATCH=1)");
+    }
+    int off = match == FRONT_MAC_MATCH_OFF;
     NSScreen *scr = g_win.screen; int want = g_match_want, full = (g_win.styleMask & NSWindowStyleMaskFullScreen) != 0;
     CGDirectDisplayID id = scr ? [scr.deviceDescription[@"NSScreenNumber"] unsignedIntValue] : kCGNullDirectDisplay;
     if (g_match_orig && (!full || id != g_match_id)) screen_match_restore(id == g_match_id, full);
     static int last_want;
+    static CGDirectDisplayID kept_id; static int kept_hz;
+    if (!full) { kept_id = kCGNullDirectDisplay; kept_hz = 0; }
     if (!full || want != last_want) {   // left fullscreen, or a new frame rate: the switches before do not count
         if (g_match_bounced && full) LOG("front end: the screen's rate is matched again for %d fps", want);
         last_want = want; g_match_undone = 0; g_match_bounces = 0; g_match_bounced = 0;
@@ -322,7 +331,12 @@ static void screen_match_once(void) {   // screen_match_apply's work, never ente
         if (vrr && (CGDisplayModeGetIODisplayModeID(m) == cur_id || (hz > 0 && fabs(r - hz) < 0.5))) continue;
         if (hz_multiple(r, want) && r > pick_hz) { pick = m; pick_hz = r; }
     }
-    if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);
+    if (front_mac_keep_vrr(match, vrr, want, (int)round(pick_hz), mtl_link_vrr_120_hz(g_screen_fps))) {
+        if (kept_id != id || kept_hz != g_screen_fps) {
+            kept_id = id; kept_hz = g_screen_fps;
+            LOG("front end: variable-refresh screen at %d Hz keeps its mode in fullscreen: the 120 Hz display link paces it (DM_SCREEN_MATCH=1 switches it to a fixed-rate mode)", (int)g_screen_fps);
+        }
+    } else if (!pick && vrr && (hz <= 0 || hz_multiple(hz, want))) LOG("front end: variable-refresh screen at %.0f Hz has no fixed-rate mode of this size at a multiple of %d Hz: it keeps its rate", hz, want);
     else if (!pick) LOG("front end: screen at %.0f Hz has no mode of this size at a multiple of %d Hz: frames are paced on the nearest refreshes", hz, want);
     else if ((g_match_bounces = g_match_undone > 0 && CACurrentMediaTime() - g_match_undone < MATCH_SETTLE_S ? g_match_bounces + 1 : 0) >= MATCH_BOUNCES) {
         g_match_bounced = 1;

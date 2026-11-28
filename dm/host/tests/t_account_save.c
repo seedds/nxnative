@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
         assert(h_fs_Commit("p1") == RES_OK && h_fs_Commit("p2") == RES_OK);
         assert(write_user("p1:/hero", "next-A") == RES_OK && write_user("p2:/hero", "next-B") == RES_OK);
         assert(h_fs_Commit("p1") == RES_OK);
-        assert(h_fs_MountSaveRO("ro2", DM_GAME_PROGRAM_ID, &u2) == RES_OK); expect_user("ro2:/hero", "first-B");
+        assert(h_fs_MountSaveRO("ro2", DM_GAME_PROGRAM_ID, &u2) == RES_OK); expect_user("ro2:/hero", "next-B");   // a second name for a save already mounted shares its transaction: it reads what p2 has written, committed or not
         assert(h_fs_Commit("alias2") == RES_OK); expect_user("ro2:/hero", "next-B");
         // Warm negative lookup on ro2, then create/rename/delete + commit through the writable alias.
         uint64_t tmp_h = 0; int32_t tmp_t = -1;
@@ -93,9 +93,9 @@ int main(int argc, char **argv) {
         expect_user("ro2:/renamed", "born-B");
         assert(h_fs_DeleteFile("p2:/renamed") == RES_OK && h_fs_Commit("p2") == RES_OK);
         assert(h_fs_OpenFile(&tmp_h, "ro2:/renamed", MODE_READ) == RES_PATH_NOT_FOUND);
-        assert(h_fs_CreateFile("ro2:/nope", 0) != RES_OK);
-        assert(h_fs_OpenFile(&tmp_h, "ro2:/hero", MODE_WRITE) != RES_OK);
-        assert(h_fs_DeleteFile("ro2:/hero") != RES_OK);
+        // A mount the guest asked for read-only is still a save mount: its writes and its Commit reach the same save as the writable name
+        assert(h_fs_CreateFile("ro2:/nope", 0) == RES_OK && write_user("ro2:/nope", "via-ro") == RES_OK);
+        assert(h_fs_Commit("ro2") == RES_OK); expect_user("p2:/nope", "via-ro");
         // Immutable RomFS lookup keeps using dir_index while rejecting wrong case.
         char romdir[1024], romfile[1100];
         snprintf(romdir, sizeof romdir, "%s.rom", argv[2]);

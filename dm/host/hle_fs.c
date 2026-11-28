@@ -1058,17 +1058,25 @@ HLE_FORCE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", "fsp-srv; extend sav
     return save_size_extend(0, user, size, journal);
 }
 HLE_FORCE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", "fsp-srv; the save directory is created at mount time", Result, h_fs_EnsureSave, const void *uid) { (void)uid; return RES_OK; }
+// An ApplicationId of 0 is not another program: the SDK's zero value means "the calling application", which a guest that is not an installed title (an
+// NRO a launcher runs, for one) names its own save data with. Both save-data calls that take one resolve it to this profile's program id; a non-zero id
+// keeps its meaning (another program's save data: the host has none)
+static uint64_t save_app_self(uint64_t app) { return app ? app : DM_GAME_PROGRAM_ID; }
 // Another application's save data (Tears of the Kingdom asks by application ID and would mount it read-only): the host keeps only this game's own save, which exists once mounted
-HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; only this game's own save data exists", int, h_fs_SaveExisting, uint64_t app, const void *uid) {
-    return app == DM_GAME_PROGRAM_ID && dm_account_user(uid) >= 0;
+HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; only this game's own save data exists (an application id of 0 is the calling application)", int, h_fs_SaveExisting, uint64_t app, const void *uid) {
+    return save_app_self(app) == DM_GAME_PROGRAM_ID && dm_account_user(uid) >= 0;
 }
 HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv; this game's own save data exists for registered users (returns bool)", int, h_fs_SaveExists, const void *uid) {
     return h_fs_SaveExisting(DM_GAME_PROGRAM_ID, uid);
 }
-// A read-only mount of an application's save data. Another program's: the host has none. This game's own: its committed account save, read-only, as Horizon mounts the save
-// data of that application and user (IsSaveDataExisting above says it exists, and on the console the system creates it at the first launch). Nintendo Switch Sports Resort mounts
-// its own save as SaveReadOnly at boot; refused, the game aborted at the first boot that found an account save (main+0x349d880 checks that the mount it reads from is named
-// SaveReadOnly, and calls the abort at main+0x3917260 otherwise), so every run after its first save stopped about 48 s in
+// A mount of an application's save data that asks for it read-only. Another program's: the host has none. This game's own: its save transaction, the same one
+// MountSaveData gives (IsSaveDataExisting above says it exists, and on the console the system creates it at the first launch). Nintendo Switch Sports Resort mounts
+// its own save as SaveReadOnly at boot; refused, the game aborted at the first boot that found an account save (main+0x349d880 checks that the mount it reads from
+// is named SaveReadOnly, and calls the abort at main+0x3917260 otherwise), so every run after its first save stopped about 48 s in
+// The name a guest gives a mount is not a promise about its writes. This game's own save has no second party for a read-only mount to protect: a title may mount
+// its save data read-only and then save through that mount (an SDL file device mounts "savedata" with MountSaveDataReadOnly and its engine writes and commits a
+// save slot through it), which a read-only mount loses every save of. So it is mounted write-transactional, like MountSaveData: the guest's writes land in the
+// work directory and Commit swaps them into the committed save. Before this, the mount read the committed directory and every write through it failed
 // Without a save folder it answers TargetNotFound, as before, and the game's own MountSaveData stops the run with the reason
 // The save sync of the first mount (save_sync.h). A save that a pull of the cloud's left half replaced and could not put back is not mounted: the game would play on, and
 // commit and send, a save that is neither this device's nor the cloud's. What this device's save is made of stays where the log's [save-sync] lines say, and the next
@@ -1076,20 +1084,20 @@ HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv; this gam
 static void save_sync_or_stop(const char *dd) {
     if (save_sync_mount(dd, DM_GAME_ID)) die("this game's save %s is not whole after a pull of the cloud's save that could not be undone: not mounted (the [save-sync] lines above say where this device's save is kept; the next start tries again)", dd);
 }
-static Result mount_own_save_ro(const char *name, int user) {
+static Result mount_own_save(const char *name, int user) {
     const char *d = getenv("DM_SAVE");
-    if (!d || !*d) { LOG("[RED] fs read-only mount of this game's save data %s: DM_SAVE is not set, answered as no save data", name); return 0x7d402u; }   // fs ResultTargetNotFound
+    if (!d || !*d) { LOG("[RED] fs mount of this game's save data %s: DM_SAVE is not set, answered as no save data", name); return 0x7d402u; }   // fs ResultTargetNotFound
     char dd[1024]; if (user_save_dir(dd, sizeof dd, d, user)) return RES_FAIL;
-    if (!user) save_sync_or_stop(dd);   // sync the primary account before reading its committed save
+    if (!user) save_sync_or_stop(dd);   // sync the primary account before cloning its work directory
     // A first launch has no committed save yet: an empty one, as the console's new save data. The folder is checked here, since mount_ex would stop on a missing one as on missing game files
     struct stat st;
-    if (mkdir(dd, 0755) && errno != EEXIST) { LOG("[RED] fs read-only mount of this game's save data %s: cannot create the save folder %s (errno=%d), answered as no save data", name, dd, errno); return 0x7d402u; }
-    if (stat(dd, &st) || !S_ISDIR(st.st_mode)) { LOG("[RED] fs read-only mount of this game's save data %s: the save folder %s is not a folder, answered as no save data", name, dd); return 0x7d402u; }
-    return mount_ex(name, dd, 1, 0);
+    if (mkdir(dd, 0755) && errno != EEXIST) { LOG("[RED] fs mount of this game's save data %s: cannot create the save folder %s (errno=%d), answered as no save data", name, dd, errno); return 0x7d402u; }
+    if (stat(dd, &st) || !S_ISDIR(st.st_mode)) { LOG("[RED] fs mount of this game's save data %s: the save folder %s is not a folder, answered as no save data", name, dd); return 0x7d402u; }
+    return mount_ex(name, dd, 0, 1);
 }
-HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own save data read-only (the committed save); another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
+HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv; this game's own save data, mounted write-transactional (a guest may save through the mount it named read-only); another program's: none", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) { dm_thread_service_request();
     int user = dm_account_user(uid);
-    if (app == DM_GAME_PROGRAM_ID) return user >= 0 ? mount_own_save_ro(name, user) : 0x7d402u;
+    if (save_app_self(app) == DM_GAME_PROGRAM_ID) return user >= 0 ? mount_own_save(name, user) : 0x7d402u;
     LOG("[RED] fs read-only mount of another program's save data %s: program %016llx, the host has none", name, (unsigned long long)app); return 0x7d402u;   // fs ResultTargetNotFound
 }
 const char *dm_save_title(void) { return DM_GAME_ID; }   // save_sync.h: the iPhone launcher names the cloud file with it before the game runs

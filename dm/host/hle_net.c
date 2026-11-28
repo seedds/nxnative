@@ -1,6 +1,8 @@
-// Network services stay offline. The BSD service additionally supplies process-local UDP and EventFd transports, which offline engines use for their own threads.
+// Network services stay offline by default. The BSD service additionally supplies process-local UDP and EventFd transports, which offline engines use for their own threads.
+// DM_NETWORK=lan (net_socket.h) puts the game's sockets on the host's own IPv4 TCP/UDP instead (hle_net_backend.c); EventFd stays this service's, and nifm reports the interface.
 #include "hle.h"
 #include "hle_net.h"
+#include "net_socket.h"
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -18,17 +20,24 @@ HLE_FORCE("_ZN2nn4nifm10InitializeEv", "connects to the nifm network management 
 // queries, 2,000 IPCs on the Switch but 0.1 ms here, so it cancelled and submitted again forever (1.17 billion queries a minute, a host core). Its stamp, now_ns() | 1, also read
 // as settled at once whenever the next query came within the same 42 ns clock tick (30% of Hades' submissions)
 static _Atomic int g_nifm_hold;   // queries the pending request still answers "on hold" (0 = none, or settled)
-HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "offline: the request is on hold for the first query, then settles as unavailable", void, h_nifm_Submit, void) { atomic_store(&g_nifm_hold, 1); }
-HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "offline: drops the pending request", void, h_nifm_Cancel, void) { atomic_store(&g_nifm_hold, 0); }
+static _Atomic int g_nifm_submitted;   // a request is pending; in network mode it settles as accepted when the host has an interface
+HLE_FORCE("_ZN2nn4nifm20SubmitNetworkRequestEv", "the request is on hold for the first query, then settles: unavailable offline, the interface's state in network mode", void, h_nifm_Submit, void) { atomic_store(&g_nifm_submitted, 1); atomic_store(&g_nifm_hold, 1); }
+HLE_FORCE("_ZN2nn4nifm20CancelNetworkRequestEv", "drops the pending request", void, h_nifm_Cancel, void) { atomic_store(&g_nifm_submitted, 0); atomic_store(&g_nifm_hold, 0); }
 HLE_FORCE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", "offline: on hold for the first query after the submission", int, h_nifm_OnHold, void) {
     int h = atomic_load(&g_nifm_hold);
     while (h > 0 && !atomic_compare_exchange_weak(&g_nifm_hold, &h, h - 1)) {}
     return h > 0;
 }
-HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable", int, h_nifm_Available, void) { return 0; }
+// Network mode answers from the host interface only once the submitted request has settled, so the on-hold sequence above stays the same in both modes
+static int nifm_available(void) { return dm_net_enabled() && atomic_load(&g_nifm_submitted) && !atomic_load(&g_nifm_hold) && !dm_net_ipconfig(NULL, NULL); }
+HLE_FORCE("_ZN2nn4nifm18IsNetworkAvailableEv", "offline: the network is always unavailable; network mode: the settled request and the host interface", int, h_nifm_Available, void) { return nifm_available(); }
 // Returns bool (`and w0, w0, #1`, Metroid Dread's sdk+0x336210): whether the system's network screen resolved the error
-HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "offline: not resolved, shows no system network screen", unsigned, h_nifm_HandleErr, void) { return 0; }
-HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP", Result, h_nifm_GetIp, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
+HLE_FORCE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", "not resolved offline, shows no system network screen; network mode: resolved when available", unsigned, h_nifm_HandleErr, void) { return (unsigned)nifm_available(); }
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEPNS_6socket6InAddrE", "offline: no IP; network mode: the host interface's IPv4 address", Result, h_nifm_GetIp, uint32_t *a) {
+    if (a) *a = 0;
+    uint32_t ip; if (!a || dm_net_ipconfig(&ip, NULL)) return RES_FAIL;
+    *a = ip; return RES_OK;
+}
 HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "offline: no proxy setting", Result, h_nifm_GetProxy, void *p) { (void)p; return RES_FAIL; }
 HLE_FORCE("nnsslInitialize", "connects to the ssl service; the network library's global init needs it to succeed, offline creates no session (cut)", Result, h_ssl_Initialize, void) { return RES_OK; }
 HLE_FORCE("nnsslFinalize", "pairs with nnsslInitialize (cut)", Result, h_ssl_Finalize, void) { return RES_OK; }
@@ -42,6 +51,9 @@ static __thread int t_skerr = SK_ENETDOWN;
 static int sk_error(int error) { t_skerr = error; return -1; }
 static int sk_fail(void) { return sk_error(SK_ENETDOWN); }
 int dm_sk_errno(void) { return t_skerr; }
+void dm_sk_set_errno(int error) { t_skerr = error; }
+// Network mode owns every descriptor from DM_NET_FD_BASE up; below it are this service's EventFd counters (and, offline, its local UDP sockets)
+static int sk_net(int fd) { return dm_net_enabled() && dm_net_owns(fd); }
 #define SKF(m, cname, ...) HLE_FORCE(m, "local BSD descriptor service; remote networking unavailable", int, cname, __VA_ARGS__)
 void dm_guest_sleep_ns(int64_t ns);
 void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);
@@ -78,10 +90,12 @@ static int efd_create(uint64_t v, int flags) {
     pthread_mutex_unlock(&g_efd_m); return fd;
 }
 int dm_sk_socket(int family, int type, int protocol) {
+    if (dm_net_enabled()) return dm_net_socket(family, type, protocol);
     if (family != 2 || type != 2 || (protocol && protocol != 17)) return sk_fail();
     dm_host_mutex_lock(&g_efd_m); int fd = sk_new_locked(SK_UDP); pthread_mutex_unlock(&g_efd_m); return fd;
 }
 int dm_sk_close(int fd) {
+    if (sk_net(fd)) return dm_net_close(fd);
     dm_host_mutex_lock(&g_efd_m);
     if (!sk_used(fd)) { pthread_mutex_unlock(&g_efd_m); return sk_fail(); }
     sk_packet *p = g_efd[fd].head;
@@ -141,10 +155,12 @@ static int sk_bind_locked(int fd, uint32_t addr, uint16_t port) {
     g_efd[fd].addr = addr; g_efd[fd].port = port; return 0;
 }
 int dm_sk_bind(int fd, const void *a, unsigned n) {
+    if (sk_net(fd)) return dm_net_bind(fd, a, n);
     uint32_t addr; uint16_t port; if (sk_addr_read(a, n, &addr, &port)) return -1;
     dm_host_mutex_lock(&g_efd_m); int r = sk_udp_locked(fd) ? sk_bind_locked(fd, addr, port) : sk_error(SK_EBADF); pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_connect(int fd, const void *a, unsigned n) {
+    if (sk_net(fd)) return dm_net_connect(fd, a, n);
     uint32_t addr = 0; uint16_t port = 0; int disconnect = a && n >= 2 && ((const uint8_t *)a)[1] == 0;
     if (!disconnect && sk_addr_read(a, n, &addr, &port)) return -1;
     if (!disconnect && !port) return sk_error(SK_EINVAL);
@@ -155,6 +171,7 @@ int dm_sk_connect(int fd, const void *a, unsigned n) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_name(int fd, void *a, unsigned *n, int peer) {
+    if (sk_net(fd)) return dm_net_name(fd, a, n, peer);
     if (!a || !n) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -163,6 +180,7 @@ int dm_sk_name(int fd, void *a, unsigned *n, int peer) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_shutdown(int fd, int how) {
+    if (sk_net(fd)) return dm_net_shutdown(fd, how);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
     else if (how < 0 || how > 2) r = sk_error(SK_EINVAL);
@@ -171,6 +189,7 @@ int dm_sk_shutdown(int fd, int how) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_fcntl(int fd, int cmd, int value) {
+    if (sk_net(fd)) return dm_net_fcntl(fd, cmd, value);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_used(fd)) r = sk_error(SK_EBADF);
     else if (cmd == 1) r = g_efd[fd].fdflags;
@@ -181,6 +200,7 @@ int dm_sk_fcntl(int fd, int cmd, int value) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size) {
+    if (sk_net(fd)) return dm_net_sockopt(fd, level, option, (void *)value, &size, 1);
     if (!value) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -201,6 +221,7 @@ int dm_sk_setopt(int fd, int level, int option, const void *value, unsigned size
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size) {
+    if (sk_net(fd)) return dm_net_sockopt(fd, level, option, value, size, 0);
     if (!value || !size) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m); int r = 0, v = 0;
     if (!sk_udp_locked(fd)) r = sk_error(SK_EBADF);
@@ -220,6 +241,7 @@ int dm_sk_getopt(int fd, int level, int option, void *value, unsigned *size) {
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 long dm_sk_sendto(int fd, const void *data, unsigned long n, int flags, const void *a, unsigned al) {
+    if (sk_net(fd)) return dm_net_send(fd, data, n, flags, a, al);
     if ((!data && n) || n > SK_UDP_MAX) return sk_error(n > SK_UDP_MAX ? SK_EMSGSIZE : SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | 4 | 0x20000)) return sk_error(SK_EOPNOTSUPP);
     uint32_t addr = 0; uint16_t port = 0; if (a && sk_addr_read(a, al, &addr, &port)) return -1;
@@ -252,18 +274,21 @@ done:
     pthread_mutex_unlock(&g_efd_m); return r;
 }
 long dm_sk_read(int fd, void *data, unsigned long size) {
+    if (sk_net(fd)) return dm_net_recv(fd, data, size, 0, NULL, NULL);
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_recvfrom(fd, data, size, 0, NULL, NULL);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; if (efd_read(fd, &v)) return -1; memcpy(data, &v, sizeof v); return sizeof v;
 }
 long dm_sk_write(int fd, const void *data, unsigned long size) {
+    if (sk_net(fd)) return dm_net_send(fd, data, size, 0, NULL, 0);
     dm_host_mutex_lock(&g_efd_m); int event = efd_used(fd); pthread_mutex_unlock(&g_efd_m);
     if (!event) return dm_sk_sendto(fd, data, size, 0, NULL, 0);
     if (!data || size < sizeof(uint64_t)) return sk_error(SK_EINVAL);
     uint64_t v; memcpy(&v, data, sizeof v); return efd_write(fd, v) ? -1 : (long)sizeof v;
 }
 long dm_sk_recvfrom(int fd, void *data, unsigned long n, int flags, void *a, unsigned *al) {
+    if (sk_net(fd)) return dm_net_recv(fd, data, n, flags, a, al);
     if ((!data && n) || (a && !al)) return sk_error(SK_EINVAL);
     if (flags & ~(SK_MSG_DONTWAIT | SK_MSG_PEEK)) return sk_error(SK_EOPNOTSUPP);
     dm_host_mutex_lock(&g_efd_m); long r = -1;
@@ -300,7 +325,25 @@ static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open, const uint64_t gen
     }
     return ready;
 }
+static int sk_poll_local(void *fds, uint64_t n, int ms);
+// Network mode: network descriptors wait in the host's poll (hle_net_backend.c). A set that also holds this service's EventFds alternates a check of those with short
+// host waits (SK_MIXED_MS), so either kind ends the wait; an endless wait returns after 100 ms, as the local one below does
+enum { SK_MIXED_MS = 5 };
 int dm_sk_poll(void *fds, uint64_t n, int ms) {
+    sk_pollfd *p = fds; int net = 0, local = 0;
+    if (dm_net_enabled() && (p || !n)) for (uint64_t i = 0; i < n; i++) { if (dm_net_owns(p[i].fd)) net = 1; else if (p[i].fd >= 0) local = 1; }
+    if (!net) return sk_poll_local(fds, n, ms);
+    int64_t limit = ms < 0 ? 100 : ms; uint64_t start = guest_ns();
+    if (!local) { for (uint64_t i = 0; i < n; i++) p[i].revents = 0; return dm_net_poll(fds, n, (int)limit); }
+    for (;;) {
+        int ready = sk_poll_local(fds, n, 0);   // clears every revents first, then sets the EventFds'
+        int64_t left = limit - (int64_t)((guest_ns() - start) / 1000000);
+        int more = dm_net_poll(fds, n, ready || left <= 0 ? 0 : (int)(left < SK_MIXED_MS ? left : SK_MIXED_MS));
+        if (more < 0) return -1;
+        if (ready + more || left <= 0) return ready + more;
+    }
+}
+static int sk_poll_local(void *fds, uint64_t n, int ms) {
     sk_pollfd *p = fds; uint64_t open = 0, generation[EFD_MAX] = {0};
     if (!p && n) return sk_error(SK_EINVAL);
     dm_host_mutex_lock(&g_efd_m);
@@ -317,10 +360,11 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {
 }
 // fd_set is1024 bits; timeval is {i64 seconds, i64 microseconds}. Only this service's small descriptors can become ready.
 int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {
-    uint64_t *sets[3] = {r, w, e}; static const int16_t ask[3] = {SK_POLLIN, SK_POLLOUT, 0}; sk_pollfd p[EFD_MAX]; int np = 0;
+    uint64_t *sets[3] = {r, w, e}; static const int16_t ask[3] = {SK_POLLIN, SK_POLLOUT, 0}; sk_pollfd p[DM_NET_FD_END]; int np = 0;
     if (nfds < 0 || (tv && (tv[0] < 0 || tv[1] < 0 || tv[1] >= 1000000))) return sk_error(SK_EINVAL);
     if (nfds > 1024) nfds = 1024;
-    for (int fd = 0; fd < nfds && fd < EFD_MAX; fd++) { int in = 0; int16_t ev = 0;
+    int net = dm_net_enabled(), limit = net ? DM_NET_FD_END : EFD_MAX;   // network mode: its descriptors too
+    for (int fd = 0; fd < nfds && fd < limit; fd++) { int in = 0; int16_t ev = 0;
         for (int k = 0; k < 3; k++) if (sets[k] && sets[k][fd >> 6] >> (fd & 63) & 1) { in = 1; ev |= ask[k]; }
         if (in) p[np++] = (sk_pollfd){fd, ev, 0};
     }
@@ -331,16 +375,19 @@ int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t 
     int n = 0;
     for (int i = 0; i < np; i++) {
         if (p[i].revents & SK_POLLNVAL) return sk_error(SK_EBADF);
-        if (p[i].revents & (SK_POLLIN | SK_POLLRDNORM) && r) { r[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
-        if (p[i].revents & SK_POLLOUT && w) { w[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+        int16_t gone = net ? p[i].revents & (8 | 0x10) : 0;   // a host socket's error or hangup makes a read or write return at once, so select reports it ready
+        if ((p[i].revents & (SK_POLLIN | SK_POLLRDNORM) || (gone && p[i].events & SK_POLLIN)) && r) { r[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+        if ((p[i].revents & SK_POLLOUT || (gone && p[i].events & SK_POLLOUT)) && w) { w[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
     }
     return n;
 }
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return dm_sk_socket(a, b, c); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return dm_sk_bind(s, a, n); }
 SKF("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return dm_sk_connect(s, a, n); }
-SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { (void)s; (void)n; return sk_fail(); }
-SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { (void)s; (void)a; (void)n; return sk_fail(); }
+int dm_sk_listen(int fd, int backlog) { return sk_net(fd) ? dm_net_listen(fd, backlog) : sk_fail(); }
+int dm_sk_accept(int fd, void *a, unsigned *n) { return sk_net(fd) ? dm_net_accept(fd, a, n) : sk_fail(); }
+SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { return dm_sk_listen(s, n); }
+SKF("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { return dm_sk_accept(s, a, n); }
 SKF("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return dm_sk_close(s); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 1); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return dm_sk_name(s, a, n, 0); }

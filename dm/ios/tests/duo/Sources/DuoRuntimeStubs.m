@@ -32,6 +32,7 @@ void duo_harness_clear(void) {
     pthread_mutex_unlock(&g_input_lock);
 }
 
+uint64_t dm_input_names(const char *list, int *unknown) { (void)list; if (unknown) *unknown = 0; return 0; }   // DM_TOUCH_TOGGLE (hle_hid.c): no latching buttons here
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     pthread_mutex_lock(&g_input_lock);
     g_state.input.buttons = buttons;

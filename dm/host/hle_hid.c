@@ -153,6 +153,17 @@ static void keys_sync(void) {
 }
 // The key names of NpadButton bits 0..15 (dm_input.h): DM_KEYS and DM_CTL read them, DM_REC writes them
 static const char *const key_names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
+uint64_t dm_input_names(const char *list, int *unknown) {
+    uint64_t m = 0; int bad = 0;
+    for (const char *p = list ? list : ""; *p;) {
+        size_t n = strcspn(p, ",+ \t");
+        if (n) { int found = 0; for (int b = 0; b < 16; b++) if (strlen(key_names[b]) == n && !strncasecmp(p, key_names[b], n)) { m |= 1ull << b; found = 1; }
+                 bad += !found; }
+        p += n; if (*p) p++;
+    }
+    if (unknown) *unknown = bad;
+    return m;
+}
 // The keys of one step, "key[+key]" (the hold and repeat already cut off), into st
 static void parse_keys(char *spec, key_step *st) {
     for (char *k = spec; k && *k;) { char *plus = strchr(k, '+'); if (plus) *plus = 0;

@@ -14,6 +14,15 @@ enum {
 #define DM_BTN_SHAKE (1ull << 63)   // not an NpadButton: the controller is shaken while set (its six-axis sensor, hle_hid.c); never reaches the game's buttons
 #define DM_STICK_MAX 32767
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
+// Button names (NpadButton bits 0..15 as DM_KEYS names them: A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, any case), separated by commas, plus signs or spaces, into
+// their bits; *unknown (if given) counts the names that are none of them (hle_hid.c)
+uint64_t dm_input_names(const char *list, int *unknown);
+// A latching button (DM_TOUCH_TOGGLE, the touch gamepad): one press holds it for the game, the next lets it go. raw: the buttons pressed now; *prev: those pressed at the last call;
+// mask: the latching buttons; *held: those latched on. Returns the buttons the game gets: the others as pressed, the latching ones as latched
+static inline uint64_t dm_input_latch(uint64_t raw, uint64_t *prev, uint64_t mask, uint64_t *held) {
+    *held ^= raw & ~*prev & mask; *prev = raw;
+    return (raw & ~mask) | *held;
+}
 uint64_t dm_input_samples(void);   // Cumulative number of times the game has sampled the controller
 // The cheat VM's key mask (hle_cheats.c): every input source's button bits (0..15 in the enum above) ORed and the
 // merged axes' eight stick-direction bits (16..23), one flat bitset; no latches are consumed (the game's own reads

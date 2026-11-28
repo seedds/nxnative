@@ -12,6 +12,8 @@ The gear at the top centre opens the in-game menu: **Controller layout** switche
 
 In 3D, the right stick (the camera in most games) is not drawn: swipe on the right third of the screen, starting anywhere off the buttons. In Super Mario Galaxy and Super Mario Galaxy 2, other touches outside the controls move the pointer; in Captain Toad: Treasure Tracker they touch the game's screen (touch blocks, stun enemies), and in Big Brain Academy: Brain vs. Brain too (its menus and activities).
 
+`DM_TOUCH_TOGGLE=ZL` in `Documents/env.txt` makes a touch button latch: a tap holds it for the game, so a button the game wants held (ZL for lock-on in Tears of the Kingdom) needs no finger kept on it, and the next tap lets it go. Several buttons go comma separated (`DM_TOUCH_TOGGLE=ZL,ZR`; L3 and R3 are `LS` and `RS`). A latched button stays lit. On a face button or the d-pad, a finger sliding onto it counts as a tap. Whatever lets the touch controls go lets latched buttons go too: opening the in-game menu, leaving the app, turning or folding the device, changing the layout, or a controller connecting or leaving.
+
 A connected game controller hides the touch controls, all but the gear, and keeps every button.
 
 In portrait (an iPad, an iPhone Duo's inner screen) the picture sits above the controls; so it does on a Duo half folded, the picture on the upper half. An iPad game also runs in a window of any size (Stage Manager).

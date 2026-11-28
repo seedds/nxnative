@@ -153,6 +153,7 @@ static void pads_start(void);   // Physical controllers, below
     UITouch *_stick[2]; CGPoint _stickNow[2];      // the touch holding each stick and where it is now (0 left, 1 right)
     CGPoint _rCentre;                              // the right stick's centre: where its touch landed, dragged along past K_RSTICK_R
     uint64_t _faceBits, _dpadBits, _btnBits;
+    uint64_t _latchMask, _latchPrev, _latched;     // DM_TOUCH_TOGGLE: the latching buttons, the buttons pressed at the last update, those latched on (dm_input_latch)
     NSMapTable<UITouch *, NSNumber *> *_faceOf;    // which keys each touch on the diamond currently holds
     CAShapeLayer *_key[B_N]; CATextLayer *_label[B_N];   // one layer per key
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
@@ -188,6 +189,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             [(UIView *)environment setNeedsLayout];
         }];
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
+        // DM_TOUCH_TOGGLE=ZL (names as DM_KEYS takes them, comma separated): a tap holds the button for the game, the next tap lets it go (GitHub issue #2620)
+        int unknown = 0; const char *toggle = getenv("DM_TOUCH_TOGGLE"); _latchMask = dm_input_names(toggle, &unknown);
+        if (unknown) LOG("[RED] front end: DM_TOUCH_TOGGLE=%s: %d name%s not a button (A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down), ignored", toggle, unknown, unknown == 1 ? " is" : "s are");
+        if (_latchMask) LOG("front end: DM_TOUCH_TOGGLE=%s: a tap holds these touch buttons for the game, the next tap lets them go", toggle);
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -382,7 +387,8 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
         CGFloat m = fmin((d - dz) / (R * K_FULL - dz), 1) / d;   // outside the dead zone: 0 rising to full at the full-tilt radius
         ax[i * 2] = (int32_t)lrint(o.x * m * 32767); ax[i * 2 + 1] = (int32_t)lrint(-o.y * m * 32767);   // host: up is positive; rounded so full tilt is exactly 32767
     }
-    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits;
+    uint64_t was = _latched, out = dm_input_latch(face | dpad | btn, &_latchPrev, _latchMask, &_latched);   // a key's press edge flips its latch: a finger sliding onto a face key or a d-pad direction too
+    BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits || was != _latched;
     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
     unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
     if (pressed || (gripping & ~_hapticSticks)) {
@@ -391,7 +397,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     _hapticSticks = gripping;
     _faceBits = face; _dpadBits = dpad; _btnBits = btn;
     pthread_mutex_lock(&g_mu);
-    g_touch_btn = face | dpad | btn; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
+    g_touch_btn = out; g_touch_lx = ax[0]; g_touch_ly = ax[1]; g_touch_rx = ax[2]; g_touch_ry = ax[3];
     pthread_mutex_unlock(&g_mu);
     publish();
     BOOL stick = _stick[0] != nil;   // only the left stick is drawn: the right one needs no refresh
@@ -478,7 +484,11 @@ int front_web_touch(void);
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset {   // every key and touch let go, latched buttons too (lit no more: recompute sees no finger change)
+    uint64_t latched = _latched; _latched = _latchPrev = 0;
+    [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute];
+    if (latched) [self refresh];
+}
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
@@ -548,7 +558,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 }
 - (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; [self setNeedsLayout]; }
 - (void)refresh {   // pressed state → fill, sticks → knob position
-    uint64_t all = _faceBits | _dpadBits | _btnBits;
+    uint64_t all = _faceBits | _dpadBits | _btnBits | _latched;   // a latched button stays lit until it is let go
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     for (int b = 0; b < B_N; b++) { BOOL on = (all >> b) & 1;
         _key[b].fillColor = (on ? k_on : k_idle).CGColor; _label[b].foregroundColor = (on ? k_textOn : k_text).CGColor; }

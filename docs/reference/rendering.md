@@ -2441,6 +2441,20 @@ The Vulkan layer (`dm/gfx/vk/hle_vk.m`) was written for Hades. Super Mario Galax
 - **Check:** `check_t_vk_cmds` reads back pixels from two instances routed through two viewports and distinct scissors, with both static state and partial dynamic updates. The shader tests reject changed triangle positions and a vertex-dependent viewport index.
 - **Found on:** [Re:ZERO](../../dm/games/0100D800117F4000/README.md), `shadow-render.gs.spv` (`287e364d4b97a5be`).
 
+### `VK_EXT_extended_dynamic_state`
+
+- **Symptom:** the first Vulkan draw of a title whose renderer loads `vkCmdBindVertexBuffers2EXT` crashes with a jump to address 0. Pipelines declaring `VK_EXT_extended_dynamic_state` states (`VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE`, `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`, etc.) report unimplemented dynamic states and fall back to static pipeline state.
+- **Cause:** `dm/gfx/vk/hle_vk.m` did not advertise `VK_EXT_extended_dynamic_state`, answer `VkPhysicalDeviceExtendedDynamicStateFeaturesEXT`, or implement its twelve dynamic states and command entry points.
+- **Fix:** `dm/gfx/vk/hle_vk.m` advertises `VK_EXT_extended_dynamic_state`, answers `extendedDynamicState = VK_TRUE` in `vkGetPhysicalDeviceFeatures2`, and implements all twelve dynamic states natively on Metal with no `MTLRenderPipelineState` variants:
+  - `VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE` (`vkCmdBindVertexBuffers2EXT`): vertex descriptor layouts use `MTLBufferLayoutStrideDynamic` and `pre_draw` binds them via `setVertexBuffer:offset:attributeStride:atIndex:` (preserving previously bound dynamic strides when `pStrides == NULL`; `pSizes` is ignored because Metal's vertex buffer bind takes no byte length).
+  - `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` and `VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT` (`vkCmdSetViewportWithCountEXT`, `vkCmdSetScissorWithCountEXT`): pipelines accept zero static counts for either state independently, and `apply_viewports` uses the recorded counts only on pipelines that declare them, clamped to `max_viewports()`.
+  - `VK_DYNAMIC_STATE_CULL_MODE` and `VK_DYNAMIC_STATE_FRONT_FACE` (`vkCmdSetCullModeEXT`, `vkCmdSetFrontFaceEXT`): applied directly on the render encoder (`VK_CULL_MODE_FRONT_AND_BACK` skips triangle draws).
+  - `VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY` (`vkCmdSetPrimitiveTopologyEXT`): selects the draw call's `MTLPrimitiveType` (same topology class as the pipeline, per spec) and tracks dynamic `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN` through `fan_prepare`.
+  - `VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE`, `VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE`, `VK_DYNAMIC_STATE_DEPTH_COMPARE_OP`, `VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE`, and `VK_DYNAMIC_STATE_STENCIL_OP`: resolved alongside dynamic stencil masks through a small device-wide `MTLDepthStencilState` cache (`dss_get`).
+  - `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE` (`vkCmdSetDepthBoundsTestEnableEXT`): toggles `pre_draw`'s depth-bounds check and `setDepthTestMinBound:maxBound:`.
+- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_vk_cmds` (`test_extended_dynamic_state`, under `MTL_DEBUG_LAYER=1`) verifies extension advertisement, feature query, `const` `vkCreateDevice` `pNext` preservation, lookup of all twelve `vkCmd*EXT` commands, and GPU readback for all twelve dynamic states (including `pStrides == NULL`, stride `0`, with-count isolation across pipelines, `TRIANGLE_STRIP`/`TRIANGLE_FAN`, depth write suppression when depth test is disabled, depth bounds enable, and stencil stamp/mask).
+- **Found on:** STAR WARS Battlefront Classic Collection (`010040701B948000`, no profile in the repository): its REI renderer loads `vkCmdBindVertexBuffers2EXT` only when `VK_EXT_extended_dynamic_state` is listed and calls it unconditionally on its draw path ([PR #3447](https://github.com/seedds/nxnative/pull/3447)).
+
 ### SPIR-V compiled by DXC
 
 - **Symptom:** `vk_shaders.py` stops with `spirv-cross failed: SPIRV-Cross threw an exception: Entry point does not exist.` A shader with push constants has no `p:` row. Metal rejects a generated dual-source variant of a shader with ordinary render targets.

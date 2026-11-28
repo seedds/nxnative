@@ -197,6 +197,358 @@ static void test_geometry_viewports(VkRenderPass rp, VkFramebuffer fb, VkImage t
     h_vkDestroyShaderModule(dev, gs, NULL); h_vkDestroyShaderModule(dev, vs, NULL); h_vkDestroyShaderModule(dev, fs, NULL);
 }
 
+// VK_EXT_extended_dynamic_state: all twelve dynamic states of the extension, read back from the GPU.
+static void test_extended_dynamic_state(VkRenderPass rp, VkFramebuffer fb, VkImage target, VkShaderModule fs) {
+    // 1. Extension advertisement, feature query, non-mutation of vkCreateDevice's const pNext, and lookup of all 12 entry points
+    uint32_t next_ext = 0; h_vkEnumerateDeviceExtensionProperties(&g_pdev, NULL, &next_ext, NULL);
+    VkExtensionProperties *exts = calloc(next_ext ? next_ext : 1, sizeof *exts);
+    int listed = 0;
+    if (exts) {
+        h_vkEnumerateDeviceExtensionProperties(&g_pdev, NULL, &next_ext, exts);
+        for (uint32_t i = 0; i < next_ext; i++) if (!strcmp(exts[i].extensionName, "VK_EXT_extended_dynamic_state")) listed = 1;
+        free(exts);
+    }
+    CHECK(listed, "the device lists VK_EXT_extended_dynamic_state among its %u extensions", next_ext);
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q};
+    h_vkGetPhysicalDeviceFeatures2(&g_pdev, &f2);
+    CHECK(q.extendedDynamicState == VK_TRUE, "vkGetPhysicalDeviceFeatures2 answers extendedDynamicState = VK_TRUE");
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT cq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .extendedDynamicState = VK_FALSE};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &cq};
+    VkDevice d2 = VK_NULL_HANDLE; h_vkCreateDevice(&g_pdev, &dci, NULL, &d2); (void)d2;
+    CHECK(cq.extendedDynamicState == VK_FALSE, "vkCreateDevice does not mutate const pNext feature structs");
+    const char *const eds_fns[12] = {
+        "vkCmdSetCullModeEXT", "vkCmdSetFrontFaceEXT", "vkCmdSetPrimitiveTopologyEXT",
+        "vkCmdSetViewportWithCountEXT", "vkCmdSetScissorWithCountEXT", "vkCmdBindVertexBuffers2EXT",
+        "vkCmdSetDepthTestEnableEXT", "vkCmdSetDepthWriteEnableEXT", "vkCmdSetDepthCompareOpEXT",
+        "vkCmdSetDepthBoundsTestEnableEXT", "vkCmdSetStencilTestEnableEXT", "vkCmdSetStencilOpEXT",
+    };
+    int all_resolved = 1;
+    for (int i = 0; i < 12; i++) all_resolved &= h_vkGetDeviceProcAddr(dev, eds_fns[i]) != NULL;
+    CHECK(all_resolved, "vkGetDeviceProcAddr resolves all twelve VK_EXT_extended_dynamic_state commands");
+
+    // 2. Dynamic vertex stride (including pStrides == NULL preservation and stride == 0), with-count viewport/scissor, and no leakage to static-count pipelines
+    VkShaderModule vs = module_of_fn("t_poscol_vs", "000000000000000d"), pfs = module_of_fn("t_col_fs", "000000000000000e");
+    VkPipelineShaderStageCreateInfo stages[] = {stage(VK_SHADER_STAGE_VERTEX_BIT, vs), stage(VK_SHADER_STAGE_FRAGMENT_BIT, pfs)};
+    VkVertexInputBindingDescription binds[2] = {
+        {.binding = 0, .stride = 8, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+        {.binding = 1, .stride = 16, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX},
+    };
+    VkVertexInputAttributeDescription attrs[2] = {
+        {.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = 0},
+        {.location = 1, .binding = 1, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 0},
+    };
+    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .vertexBindingDescriptionCount = 2,
+                                               .pVertexBindingDescriptions = binds, .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = attrs};
+    // Spec-required viewportCount = 0 / scissorCount = 0 when WITH_COUNT is dynamic
+    VkPipelineViewportStateCreateInfo vsi0 = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 0, .scissorCount = 0};
+    VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+    VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL,
+                                                 .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1};
+    VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkPipelineColorBlendAttachmentState ba = {.colorWriteMask = 0xF};
+    VkPipelineColorBlendStateCreateInfo blend = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba};
+    VkDynamicState states[] = {VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+                               VK_DYNAMIC_STATE_CULL_MODE, VK_DYNAMIC_STATE_FRONT_FACE, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY};
+    VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 6, .pDynamicStates = states};
+    VkGraphicsPipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stages, .pVertexInputState = &vi,
+                                       .pInputAssemblyState = &ia, .pViewportState = &vsi0, .pRasterizationState = &rs, .pMultisampleState = &ms,
+                                       .pColorBlendState = &blend, .pDynamicState = &dy, .renderPass = rp};
+    VkPipeline p; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &ci, NULL, &p);
+    CHECK(p->pso != nil && (p->eds & (EDS_STRIDE | EDS_VP_COUNT | EDS_SC_COUNT | EDS_CULL | EDS_WIND | EDS_PRIM)) == (EDS_STRIDE | EDS_VP_COUNT | EDS_SC_COUNT | EDS_CULL | EDS_WIND | EDS_PRIM),
+          "pipeline with dynamic stride, with-count viewport/scissor, cull, front face and topology is built");
+
+    // Mixed pipeline: VIEWPORT_WITH_COUNT (viewportCount = 0) + static scissors (scissorCount = 2 where supported) must build
+    if (max_viewports() > 1) {
+        VkRect2D two_sc[2] = {{{0, 0}, {4, 4}}, {{0, 0}, {4, 4}}};
+        VkPipelineViewportStateCreateInfo vsi_mix = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 0, .scissorCount = 2, .pScissors = two_sc};
+        VkDynamicState one_vp[] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT};
+        VkPipelineDynamicStateCreateInfo dy_mix = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 1, .pDynamicStates = one_vp};
+        VkGraphicsPipelineCreateInfo cm = ci; cm.pViewportState = &vsi_mix; cm.pDynamicState = &dy_mix;
+        VkPipeline pm; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &cm, NULL, &pm);
+        CHECK(pm->pso != nil && pm->nviewport == 2, "a mixed pipeline with dynamic viewport count (0) and 2 static scissors builds");
+        h_vkDestroyPipeline(dev, pm, NULL);
+    }
+
+    // Vertex buffers: right quad at stride 12 (3 floats/vert), left quad at stride 24 (6 floats/vert), color buffer with red at vertex 0 and green at vertices 1..5
+    VkBuffer vba = new_buf(96, 0), vbb = new_buf(160, 0), vbc = new_buf(128, 0);
+    const float right_quad[18] = {0,-1,0.5f, 1,-1,0.5f, 0,1,0.5f, 1,-1,0.5f, 1,1,0.5f, 0,1,0.5f};
+    const float left_quad[18]  = {-1,-1,0.5f, 0,-1,0.5f, -1,1,0.5f, 0,-1,0.5f, 0,1,0.5f, -1,1,0.5f};
+    memcpy(bytes(vba), right_quad, sizeof right_quad);
+    for (int i = 0; i < 6; i++) memcpy((float *)bytes(vbb) + i * 6, left_quad + 3 * i, 3 * sizeof(float));
+    float cols[24];
+    for (int i = 0; i < 6; i++) {
+        cols[4 * i + 0] = i == 0 ? 1.0f : 0.0f; cols[4 * i + 1] = i == 0 ? 0.0f : 1.0f; cols[4 * i + 2] = 0.0f; cols[4 * i + 3] = 1.0f;
+    }
+    memcpy(bytes(vbc), cols, sizeof cols);
+
+    VkDeviceSize offs[2] = {0, 0}, st12_0[2] = {12, 0}, st24_0[2] = {24, 0};
+    VkBuffer bufs_a[2] = {vba, vbc};
+    const VkViewport full = {0, 0, 4, 4, 0, 1};
+    const VkRect2D all = {{0, 0}, {4, 4}}, row1 = {{0, 1}, {4, 1}};
+    uint8_t px[64]; int ok;
+
+    // Stride 12 on binding 0 (right half) and stride 0 on binding 1 (constant red from vertex 0)
+    VkCommandBuffer cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetCullModeEXT(cb, VK_CULL_MODE_NONE); h_vkCmdSetFrontFaceEXT(cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_a, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= x >= 2 ? near(px + 4 * (y * 4 + x), 255, 0, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "dynamic stride 12 draws the right half and dynamic stride 0 broadcasts vertex 0's red color");
+
+    // Stride 24 on binding 0 (left half), then rebind with pStrides == NULL (must preserve stride 24!) + one-row scissor-with-count
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &row1);
+    h_vkCmdSetCullModeEXT(cb, VK_CULL_MODE_NONE); h_vkCmdSetFrontFaceEXT(cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_a, offs, NULL, st24_0);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 1, &vbb, &offs[0], NULL, NULL);   // pStrides == NULL preserves stride 24
+    h_vkCmdDraw(cb, 6, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= (x < 2 && y == 1) ? near(px + 4 * (y * 4 + x), 255, 0, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "vkCmdBindVertexBuffers2EXT with pStrides == NULL preserves dynamic stride 24 and with-count scissor clips to row 1");
+
+    // Switching from a 2-viewport with-count draw to a 1-viewport regular dynamic pipeline in the same command buffer must not leak count 2
+    if (max_viewports() > 1) {
+        VkDynamicState reg_dyn[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy_reg = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = reg_dyn};
+        VkPipelineViewportStateCreateInfo vsi1 = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1};
+        VkShaderModule plain_vs = module_of_fn("t_vs", "0000000000000001");
+        VkPipelineShaderStageCreateInfo plain_st[] = {stage(VK_SHADER_STAGE_VERTEX_BIT, plain_vs), stage(VK_SHADER_STAGE_FRAGMENT_BIT, fs)};
+        VkGraphicsPipelineCreateInfo cr = ci; cr.stageCount = 2; cr.pStages = plain_st; cr.pVertexInputState = NULL; cr.pViewportState = &vsi1; cr.pDynamicState = &dy_reg;
+        VkPipeline pr; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &cr, NULL, &pr);
+        const VkViewport two_vp[2] = {{0, 0, 2, 4, 0, 1}, {2, 0, 2, 4, 0, 1}};
+        const VkRect2D two_sc[2] = {{{0, 0}, {2, 4}}, {{2, 0}, {2, 4}}};
+        cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        h_vkCmdSetViewportWithCountEXT(cb, 2, two_vp); h_vkCmdSetScissorWithCountEXT(cb, 2, two_sc);
+        h_vkCmdSetCullModeEXT(cb, VK_CULL_MODE_NONE); h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_a, offs, NULL, st12_0);
+        h_vkCmdDraw(cb, 6, 1, 0, 0);
+        h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr);
+        h_vkCmdSetViewport(cb, 0, 1, &full); h_vkCmdSetScissor(cb, 0, 1, &all);
+        h_vkCmdDraw(cb, 3, 1, 0, 0);
+        h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+        CHECK(all_near(px, 16, 255, 128, 0, 255), "a 1-viewport pipeline after a 2-viewport with-count draw restores viewport/scissor count 1");
+        h_vkDestroyPipeline(dev, pr, NULL); h_vkDestroyShaderModule(dev, plain_vs, NULL);
+    }
+
+    // 3. Dynamic cull mode and front face (left_quad triangles are wound CCW in Metal framebuffer space: (-1,-1),(0,-1),(-1,1) -> signed area > 0 -> CW/CCW tested directly)
+    // First confirm which winding is front with CULL_MODE_FRONT_BIT + COUNTER_CLOCKWISE vs CLOCKWISE
+    uint8_t px_ccw[64], px_cw[64], px_both[64];
+    for (int mode = 0; mode < 3; mode++) {
+        cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+        h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        h_vkCmdSetCullModeEXT(cb, mode == 2 ? VK_CULL_MODE_FRONT_AND_BACK : VK_CULL_MODE_FRONT_BIT);
+        h_vkCmdSetFrontFaceEXT(cb, mode == 1 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
+        h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_a, offs, NULL, st12_0);
+        h_vkCmdDraw(cb, 6, 1, 0, 0);
+        h_vkCmdEndRenderPass(cb); run(cb);
+        download(target, 4, 4, mode == 0 ? px_ccw : mode == 1 ? px_cw : px_both);
+    }
+    int ccw_drawn = near(px_ccw + 4 * 2, 255, 0, 0, 255), cw_drawn = near(px_cw + 4 * 2, 255, 0, 0, 255);
+    CHECK(ccw_drawn != cw_drawn, "vkCmdSetCullModeEXT and vkCmdSetFrontFaceEXT flip which winding is culled");
+    CHECK(all_near(px_both, 16, 0, 0, 255, 255), "vkCmdSetCullModeEXT(VK_CULL_MODE_FRONT_AND_BACK) culls triangles");
+
+    // 4. Dynamic primitive topology: TRIANGLE_STRIP (4 verts -> full target) and indexed TRIANGLE_FAN (4 verts -> full target)
+    VkBuffer vstrip = new_buf(64, 0), vfan = new_buf(64, 0), fan_idx = new_buf(16, 0);
+    const float strip_q[12] = {-1,-1,0.5f, 1,-1,0.5f, -1,1,0.5f, 1,1,0.5f};
+    const float fan_q[12]   = {-1,-1,0.5f, 1,-1,0.5f, 1,1,0.5f, -1,1,0.5f};
+    const uint32_t fi4[4] = {0, 1, 2, 3};
+    memcpy(bytes(vstrip), strip_q, sizeof strip_q); memcpy(bytes(vfan), fan_q, sizeof fan_q); memcpy(bytes(fan_idx), fi4, sizeof fi4);
+    VkBuffer bufs_strip[2] = {vstrip, vbc}, bufs_fan[2] = {vfan, vbc};
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetCullModeEXT(cb, VK_CULL_MODE_NONE);
+    h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_strip, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 4, 1, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    CHECK(all_near(px, 16, 255, 0, 0, 255), "vkCmdSetPrimitiveTopologyEXT(TRIANGLE_STRIP) covers all 16 pixels from 4 vertices");
+
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    begin_pass(cb, rp, fb, 4, 4, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetCullModeEXT(cb, VK_CULL_MODE_NONE);
+    h_vkCmdSetPrimitiveTopologyEXT(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_fan, offs, NULL, st12_0);
+    h_vkCmdBindIndexBuffer(cb, fan_idx, 0, VK_INDEX_TYPE_UINT32);
+    h_vkCmdDrawIndexed(cb, 4, 1, 0, 0, 0);
+    h_vkCmdEndRenderPass(cb); run(cb); download(target, 4, 4, px);
+    CHECK(all_near(px, 16, 255, 0, 0, 255), "vkCmdSetPrimitiveTopologyEXT(TRIANGLE_FAN) converts and draws an indexed fan");
+
+    // 5. Dynamic depth test/write/compare, depth bounds enable, and stencil test/op (on a color + D32S8 render pass)
+    VkAttachmentDescription dsatts[2] = {
+        {.format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE},
+        {.format = VK_FORMAT_D32_SFLOAT_S8_UINT, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE},
+    };
+    VkAttachmentReference cref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, dsref = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription dssp = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &cref, .pDepthStencilAttachment = &dsref};
+    VkRenderPassCreateInfo dsrci = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 2, .pAttachments = dsatts, .subpassCount = 1, .pSubpasses = &dssp};
+    VkRenderPass dsrp; h_vkCreateRenderPass(dev, &dsrci, NULL, &dsrp);
+    VkImage dsc = new_img(4, 4, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    VkImage dsz = new_img(4, 4, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    VkImageView dsviews[2] = {new_view(dsc, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT),
+                              new_view(dsz, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)};
+    VkFramebufferCreateInfo dsfci = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = dsrp, .attachmentCount = 2, .pAttachments = dsviews, .width = 4, .height = 4, .layers = 1};
+    VkFramebuffer dsfb; h_vkCreateFramebuffer(dev, &dsfci, NULL, &dsfb);
+    VkStencilOpState st_base = {.failOp = VK_STENCIL_OP_KEEP, .passOp = VK_STENCIL_OP_KEEP, .depthFailOp = VK_STENCIL_OP_KEEP, .compareOp = VK_COMPARE_OP_ALWAYS,
+                                .compareMask = 0xFF, .writeMask = 0xFF, .reference = 1};
+    VkPipelineDepthStencilStateCreateInfo dsi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                                                 .depthTestEnable = VK_FALSE, .depthWriteEnable = VK_FALSE, .depthCompareOp = VK_COMPARE_OP_NEVER,
+                                                 .depthBoundsTestEnable = VK_FALSE, .stencilTestEnable = VK_FALSE,
+                                                 .front = st_base, .back = st_base, .minDepthBounds = 0.1f, .maxDepthBounds = 0.3f};
+    VkDynamicState ds_dyn[] = {VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE, VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT, VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+                               VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE, VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE, VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+                               VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE, VK_DYNAMIC_STATE_STENCIL_OP};
+    VkPipelineDynamicStateCreateInfo dy_ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 9, .pDynamicStates = ds_dyn};
+    VkGraphicsPipelineCreateInfo cd = ci; cd.pDepthStencilState = &dsi; cd.pDynamicState = &dy_ds; cd.renderPass = dsrp;
+    VkPipeline pds; h_vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &cd, NULL, &pds);
+    CHECK(pds->pso != nil && (pds->eds & (EDS_DSS_MASK | EDS_DB_EN)) == (EDS_DSS_MASK | EDS_DB_EN),
+          "pipeline with dynamic depth test/write/compare, depth bounds enable and stencil test/op is built");
+
+    // Full-screen quads at z = 0.25 (near), 0.40 (mid), 0.75 (far), and green color buffer
+    VkBuffer vnear = new_buf(96, 0), vmid = new_buf(96, 0), vfar = new_buf(96, 0), vgreen = new_buf(64, 0);
+    const float qnear[18] = {-1,-1,0.25f, 1,-1,0.25f, -1,1,0.25f, 1,-1,0.25f, 1,1,0.25f, -1,1,0.25f};
+    const float qmid[18]  = {-1,-1,0.40f, 1,-1,0.40f, -1,1,0.40f, 1,-1,0.40f, 1,1,0.40f, -1,1,0.40f};
+    const float qfar[18]  = {-1,-1,0.75f, 1,-1,0.75f, -1,1,0.75f, 1,-1,0.75f, 1,1,0.75f, -1,1,0.75f};
+    const float green4[4] = {0, 1, 0, 1};
+    memcpy(bytes(vnear), qnear, sizeof qnear); memcpy(bytes(vmid), qmid, sizeof qmid); memcpy(bytes(vfar), qfar, sizeof qfar); memcpy(bytes(vgreen), green4, sizeof green4);
+    VkClearValue dsclears[2] = {{.color = {{0, 0, 1, 1}}}, {.depthStencil = {0.5f, 0}}};
+    VkRenderPassBeginInfo dsbi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = dsrp, .framebuffer = dsfb,
+                                  .renderArea = {{0, 0}, {4, 4}}, .clearValueCount = 2, .pClearValues = dsclears};
+
+    // Depth test: z=0.75 rejected against cleared 0.5 with LESS; depthTestEnable=FALSE lets it draw without writing depth (even with depthWriteEnable=TRUE)
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_FALSE); h_vkCmdSetStencilTestEnableEXT(cb, VK_FALSE);
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthWriteEnableEXT(cb, VK_FALSE); h_vkCmdSetDepthCompareOpEXT(cb, VK_COMPARE_OP_LESS);
+    VkBuffer bf_far_r[2] = {vfar, vbc}, bf_near_r[2] = {vnear, vbc}, bf_mid_g[2] = {vmid, vgreen};
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_far_r, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // 0.75 < 0.5 is false -> rejected
+    h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+    CHECK(all_near(px, 16, 0, 0, 255, 255), "dynamic depthTestEnable + LESS rejects z=0.75 against cleared 0.5");
+
+    // Depth write + compare op: draw red at z=0.25 writing depth, then green at z=0.40 rejected by LESS and accepted by GREATER
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_FALSE); h_vkCmdSetStencilTestEnableEXT(cb, VK_FALSE);
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthWriteEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthCompareOpEXT(cb, VK_COMPARE_OP_LESS);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_near_r, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // writes red and depth = 0.25
+    h_vkCmdSetDepthWriteEnableEXT(cb, VK_FALSE);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_mid_g, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // 0.40 < 0.25 is false -> stays red
+    h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+    CHECK(all_near(px, 16, 255, 0, 0, 255), "dynamic depthWriteEnable writes z=0.25 so z=0.40 fails LESS");
+
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_FALSE); h_vkCmdSetStencilTestEnableEXT(cb, VK_FALSE);
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthWriteEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthCompareOpEXT(cb, VK_COMPARE_OP_LESS);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_near_r, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // writes red and depth = 0.25
+    h_vkCmdSetDepthCompareOpEXT(cb, VK_COMPARE_OP_GREATER);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_mid_g, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // 0.40 > 0.25 is true -> green
+    h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+    CHECK(all_near(px, 16, 0, 255, 0, 255), "vkCmdSetDepthCompareOpEXT(GREATER) lets z=0.40 pass over z=0.25");
+
+    // Depth test disabled must also disable depth writes even when depthWriteEnable is TRUE
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_FALSE); h_vkCmdSetStencilTestEnableEXT(cb, VK_FALSE);
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_FALSE); h_vkCmdSetDepthWriteEnableEXT(cb, VK_TRUE); h_vkCmdSetDepthCompareOpEXT(cb, VK_COMPARE_OP_LESS);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_near_r, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // depth test off -> draws red, must NOT write depth 0.25 (depth stays 0.5)
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_TRUE);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_mid_g, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // 0.40 < 0.50 is true -> green (would have failed if 0.25 had been written)
+    h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+    CHECK(all_near(px, 16, 0, 255, 0, 255), "vkCmdSetDepthTestEnableEXT(FALSE) suppresses depth writes even when depthWriteEnable is TRUE");
+
+    // Depth bounds test enable: static bounds [0.1, 0.3] are resolved even when static depthBoundsTestEnable is FALSE, and vkCmdSetDepthBoundsTestEnableEXT toggles live state
+    CHECK(pds->db_ok && !pds->db_en && pds->dbk == DBND_TEST && pds->db[0] == 0.1f && pds->db[1] == 0.3f,
+          "pipeline with dynamic depthBoundsTestEnable resolves static bounds [0.1, 0.3] even when statically disabled");
+    {
+        VkCommandBuffer dcb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        h_vkCmdSetDepthBoundsTestEnableEXT(dcb, VK_TRUE);
+        rs_t rs_db = {0}; replay_ops(&rs_db, dcb);
+        CHECK(rs_db.have_db_en && rs_db.db_en == 1, "vkCmdSetDepthBoundsTestEnableEXT(TRUE) enables dynamic depth bounds state");
+        dcb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        h_vkCmdSetDepthBoundsTestEnableEXT(dcb, VK_FALSE);
+        replay_ops(&rs_db, dcb);
+        CHECK(rs_db.have_db_en && rs_db.db_en == 0, "vkCmdSetDepthBoundsTestEnableEXT(FALSE) disables dynamic depth bounds state");
+    }
+    if (mtl_depth_bounds_hw()) {
+        cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+        h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+        h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+        h_vkCmdSetDepthTestEnableEXT(cb, VK_FALSE); h_vkCmdSetStencilTestEnableEXT(cb, VK_FALSE);
+        h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_TRUE);
+        h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_near_r, offs, NULL, st12_0);
+        h_vkCmdDraw(cb, 6, 1, 0, 0);   // stored depth 0.5 is outside [0.1, 0.3] -> rejected
+        h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+        CHECK(all_near(px, 16, 0, 0, 255, 255), "vkCmdSetDepthBoundsTestEnableEXT(TRUE) rejects stored depth 0.5 outside [0.1, 0.3]");
+    }
+
+    // Stencil test enable + stencil op: write stencil = 1 on right half (ALWAYS + REPLACE), then draw full-screen green with EQUAL (ref 1) -> green on right half only
+    cb = new_cb(VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    h_vkCmdBeginRenderPass(cb, &dsbi, VK_SUBPASS_CONTENTS_INLINE);
+    h_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pds);
+    h_vkCmdSetViewportWithCountEXT(cb, 1, &full); h_vkCmdSetScissorWithCountEXT(cb, 1, &all);
+    h_vkCmdSetDepthTestEnableEXT(cb, VK_FALSE); h_vkCmdSetDepthBoundsTestEnableEXT(cb, VK_FALSE);
+    h_vkCmdSetStencilTestEnableEXT(cb, VK_TRUE);
+    h_vkCmdSetStencilOpEXT(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bufs_a, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // right half -> red + stencil = 1
+    h_vkCmdSetStencilOpEXT(cb, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL);
+    h_vkCmdBindVertexBuffers2EXT(cb, 0, 2, bf_mid_g, offs, NULL, st12_0);
+    h_vkCmdDraw(cb, 6, 1, 0, 0);   // full screen -> green only where stencil == 1 (right half)
+    h_vkCmdEndRenderPass(cb); run(cb); download(dsc, 4, 4, px);
+    ok = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        ok &= x >= 2 ? near(px + 4 * (y * 4 + x), 0, 255, 0, 255) : near(px + 4 * (y * 4 + x), 0, 0, 255, 255);
+    CHECK(ok, "vkCmdSetStencilTestEnableEXT and vkCmdSetStencilOpEXT stamp and mask the right half only");
+
+    h_vkDestroyPipeline(dev, pds, NULL); h_vkDestroyFramebuffer(dev, dsfb, NULL); h_vkDestroyRenderPass(dev, dsrp, NULL);
+    h_vkDestroyImageView(dev, dsviews[0], NULL); h_vkDestroyImageView(dev, dsviews[1], NULL);
+    h_vkDestroyImage(dev, dsc, NULL); h_vkDestroyImage(dev, dsz, NULL);
+    h_vkDestroyBuffer(dev, vnear, NULL); h_vkDestroyBuffer(dev, vmid, NULL); h_vkDestroyBuffer(dev, vfar, NULL); h_vkDestroyBuffer(dev, vgreen, NULL);
+    h_vkDestroyPipeline(dev, p, NULL);
+    h_vkDestroyBuffer(dev, vba, NULL); h_vkDestroyBuffer(dev, vbb, NULL); h_vkDestroyBuffer(dev, vbc, NULL);
+    h_vkDestroyBuffer(dev, vstrip, NULL); h_vkDestroyBuffer(dev, vfan, NULL); h_vkDestroyBuffer(dev, fan_idx, NULL);
+    h_vkDestroyShaderModule(dev, vs, NULL); h_vkDestroyShaderModule(dev, pfs, NULL);
+}
+
 int main(void) {
     dev = &g_device; queue = &g_queue;
     @autoreleasepool {
@@ -208,6 +560,10 @@ int main(void) {
                 "struct Routed { float4 p [[position]]; uint i [[viewport_array_index]]; };\n"
                 "vertex Routed vk_000000000000000b_vp1(uint v [[vertex_id]], uint i [[instance_id]]) { float2 p = float2((v << 1) & 2, v & 2); return {float4(p * 2.0 - 1.0, 0.0, 1.0), i}; }\n"
                 "fragment float4 t_vp_fs(uint i [[viewport_array_index]]) { return i ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1); }\n"
+                "struct TPosColIn { float3 p [[attribute(0)]]; float4 c [[attribute(1)]]; };\n"
+                "struct TPosColOut { float4 p [[position]]; float4 c; };\n"
+                "vertex TPosColOut t_poscol_vs(TPosColIn in [[stage_in]]) { return {float4(in.p, 1.0), in.c}; }\n"
+                "fragment float4 t_col_fs(TPosColOut in [[stage_in]]) { return in.c; }\n"
                 "fragment float4 t_fs() { return float4(1.0, 0.5, 0.0, 1.0); }\n" options:nil error:&err];
         CHECK(lib != nil, "the test shaders compile: %s", err.localizedDescription.UTF8String);
         g_lib = lib;
@@ -354,6 +710,7 @@ int main(void) {
         CHECK(all_near(px, 16, 255, 128, 0, 255), "an indexed indirect draw reads its arguments and the index buffer (first texel %u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
         test_indirect_fans(crp, cfb, target, fs);
         test_geometry_viewports(crp, cfb, target);
+        test_extended_dynamic_state(crp, cfb, target, fs);
 
         // ---- Dynamic blend constants: the pipeline blends with CONSTANT_COLOR, the constants come from the command ----
         VkPipeline blended = make_pipe(crp, ok_st, 2, 1);

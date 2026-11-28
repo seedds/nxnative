@@ -26,7 +26,7 @@
 set -u
 # Both output modes change directories before copying the caller's entitlements.
 case ${DM_ENTITLEMENTS-} in
-  '' | /*) ;;
+  '' | distribution | /*) ;;
   *) DM_ENTITLEMENTS=$PWD/$DM_ENTITLEMENTS ;;
 esac
 cd "$(dirname "$0")/.." || exit 1

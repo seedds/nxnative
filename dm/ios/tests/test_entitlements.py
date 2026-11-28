@@ -16,7 +16,8 @@ XCODE = SCRIPT[SCRIPT.index('# A prepared Xcode project is signed'):SCRIPT.index
 SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
 CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')
 CUSTOM = {'com.apple.developer.kernel.extended-virtual-addressing': True}
-DEFAULT = {'com.apple.developer.kernel.increased-memory-limit': True}
+DEFAULT = {f'com.apple.developer.kernel.{k}': True for k in ('increased-memory-limit', 'extended-virtual-addressing', 'increased-debugging-memory-limit')}   # the kernel memory triplet
+PAIR = {k: v for k, v in DEFAULT.items() if not k.endswith('increased-debugging-memory-limit')}   # DM_ENTITLEMENTS=distribution
 
 
 class EntitlementsTests(unittest.TestCase):
@@ -48,6 +49,8 @@ class EntitlementsTests(unittest.TestCase):
                 env['DM_ENTITLEMENTS'] = str(custom)
             elif kind == 'empty':
                 env['DM_ENTITLEMENTS'] = ''
+            elif kind == 'distribution':
+                env['DM_ENTITLEMENTS'] = 'distribution'   # a keyword, not a path relative to the caller
             elif kind == 'missing':
                 custom.unlink()
                 env['DM_ENTITLEMENTS'] = custom.name
@@ -65,7 +68,7 @@ class EntitlementsTests(unittest.TestCase):
                 return
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             entitlements = (project / 'Gen' if prepare else package) / 'DmIOS.entitlements'
-            expected = None if kind == 'empty' else DEFAULT if kind == 'unset' else CUSTOM
+            expected = None if kind == 'empty' else DEFAULT if kind == 'unset' else PAIR if kind == 'distribution' else CUSTOM
             self.assertEqual(entitlements.exists(), expected is not None)
             if expected is not None:
                 self.assertEqual(plistlib.loads(entitlements.read_bytes()), expected)
@@ -80,13 +83,13 @@ class EntitlementsTests(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_prepared_project_entitlements(self):
-        for kind in ('relative', 'dotdot', 'absolute', 'unset', 'empty', 'missing'):
+        for kind in ('relative', 'dotdot', 'absolute', 'unset', 'distribution', 'empty', 'missing'):
             with self.subTest(kind=kind):
                 self.stage(True, kind)
 
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_unsigned_executable_entitlements(self):
-        for kind in ('relative', 'dotdot', 'absolute', 'unset', 'empty', 'missing'):
+        for kind in ('relative', 'dotdot', 'absolute', 'unset', 'distribution', 'empty', 'missing'):
             with self.subTest(kind=kind):
                 self.stage(False, kind)
 

@@ -382,6 +382,12 @@ static void force_check(void) {
     LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused - disabled, unused);
 }
 
+// The forced take-overs no module's relocation bound (not disabled, not aliases): hle_exefs.c points their definitions at the host, for a mod's code that reaches them
+// without an import
+void dm_force_unbound(void (*cb)(void *ctx, const char *name, void *fn, const char *why), void *ctx) {
+    for (unsigned i = 0; i < g_nforce; i++) if (!g_force_hits[i] && g_force[i].fn) cb(ctx, g_force[i].name, g_force[i].fn, g_force[i].why);
+}
+
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';

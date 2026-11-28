@@ -76,9 +76,56 @@ static void teardown(fixture *f) {
 }
 static const uint32_t CACHED = NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
 
+// The GPU writer must preserve bytes outside an unaligned region in either GOB
+// order. Odd widths exercise both scalar edges of swz's 16-byte stores.
+static void gpu_storage_edges(void) {
+    int saved = nvn_gob_switch2;
+    for (int gob = 0; gob <= 1; gob++) {
+        nvn_gob_switch2 = gob;
+        for (int minimal = 0; minimal <= 1; minimal++) {
+            fixture f; setup(&f, 8100 + 10 * gob + minimal, CACHED, NVN_FORMAT_RG8, 0);
+            tex_t t = texture_at(&f, 8200 + 10 * gob + minimal, 0x40000, 131, NVN_FORMAT_RG8,
+                                  minimal ? NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT : 0);
+            gpu_clear(&t, 0.2f);
+            p_clear_tex part = {.tex = &t, .r = {3, 5, 0, 27, 19, 1}, .mask = 15, .c.f = {0.8f, 0.4f, 0, 1}};
+            mtl_tex_gpu_written(&t); mtl_sub_begin(); clear_tex(&part); finish();
+            uint8_t *lin = malloc(131 * 131 * 2);
+            int bad = nvn_deswizzle(&t.d, 0, 0, t.mem, lin, 131 * 2);
+            for (int y = 0; y < 131 && !bad; y++) for (int x = 0; x < 131; x++) {
+                int inside = x >= 3 && x < 30 && y >= 5 && y < 24;
+                bad += lin[(y * 131 + x) * 2] != (inside ? 204 : 51);
+                bad += lin[(y * 131 + x) * 2 + 1] != (inside ? 102 : 0);
+            }
+            CHECK("unaligned GPU storage region preserves all surrounding pixels in either layout/order", !bad);
+            free(lin); mtl_tex_release(&t); teardown(&f);
+        }
+        fixture f; setup(&f, 8300 + gob, CACHED, NVN_FORMAT_RG8, 0);
+        tex_t t = texture_at(&f, 8400 + gob, 0x40000, 129, NVN_FORMAT_RG8, 0);
+        t.d.target = NVN_TEXTURE_TARGET_2D_ARRAY; t.d.depth = 3; nvn_tex_layout(&t.d, &t.L);
+        CHECK("array storage fits its pool", t.off + t.L.size <= POOL);
+        p_clear_tex all = {.tex = &t, .r = {0, 0, 0, 129, 129, 3}, .mask = 15, .c.f = {0.2f, 0.4f, 0, 1}};
+        mtl_tex_gpu_written(&t); mtl_sub_begin(); clear_tex(&all); finish();
+        p_clear_tex one = {.tex = &t, .r = {3, 5, 1, 27, 19, 1}, .mask = 15, .c.f = {0.8f, 0.6f, 0, 1}};
+        mtl_tex_gpu_written(&t); mtl_sub_begin(); clear_tex(&one); finish();
+        uint8_t *lin = malloc(129 * 129 * 2); int bad = 0;
+        for (unsigned z = 0; z < 3; z++) {
+            bad += nvn_deswizzle(&t.d, 0, z, t.mem, lin, 129 * 2);
+            for (int y = 0; y < 129 && !bad; y++) for (int x = 0; x < 129; x++) {
+                int inside = z == 1 && x >= 3 && x < 30 && y >= 5 && y < 24;
+                bad += lin[(y * 129 + x) * 2] != (inside ? 204 : 51);
+                bad += lin[(y * 129 + x) * 2 + 1] != (inside ? 153 : 102);
+            }
+        }
+        CHECK("GPU storage writes the selected array slice without touching neighboring slices", !bad);
+        free(lin); mtl_tex_release(&t); teardown(&f);
+    }
+    nvn_gob_switch2 = saved;
+}
+
 int main(void) {
     @autoreleasepool {
         mtl_init();
+        gpu_storage_edges();
         fixture f;
         setup(&f, 7001, CACHED, NVN_FORMAT_RGBA8, 0);
         fill(&f.t, f.mem, 40);

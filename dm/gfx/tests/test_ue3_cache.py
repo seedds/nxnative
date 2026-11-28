@@ -164,5 +164,97 @@ class Ue3CacheTests(unittest.TestCase):
         self.assertEqual(shader_split.skey(k1, c1), shader_split.hashlib.sha256(k1[:0x7d0] + bytes(0x18) + k1[0x7e8:] + c1).hexdigest()[:16])
 
 
+def compact_record(ins0, data=b'', ins1=b'', *, x0=0x11, f710=0, b14=0, b15=0, b16=1, f724=0, x1=0x22, f794=0x40, compile_info=b'', meta_len=None):
+    """A compact UE3 shader record: {u32 region_len, u32 meta_len (< 0x880), u32 0, region (ins0 || data || ins1), meta}."""
+    region = ins0 + data + ins1
+    meta = bytearray(max(0x28, 0x28 + len(compile_info), meta_len or 0))
+    struct.pack_into('<5I', meta, 0x00, 1, len(ins0), len(data), x0, f710)
+    meta[0x14], meta[0x15], meta[0x16] = b14, b15, b16
+    struct.pack_into('<4I', meta, 0x18, f724, len(ins1), x1, f794)
+    if compile_info:
+        meta[0x28:0x28 + len(compile_info)] = compile_info
+    if meta_len is not None:
+        meta = meta[:meta_len]
+    return struct.pack('<III', len(region), len(meta), 0) + region + bytes(meta)
+
+
+class Ue3CompactRecordTests(unittest.TestCase):
+    """UE3 compact records without stored NVN control sections (single-module, inline two-module VertexA+VertexB, multi-block c1 constants, metadata fields, lookalikes, and the CTL_MAGIC gate)."""
+    # Maxwell SPH word 0: version 3 (0x60) | VTG (1) | stage 0 (VertexA) or stage 1 (VertexB), or PS (2) | stage 5.
+    vs_a = struct.pack('<I', 0x0061) + bytes(0x6c)   # 0x70 bytes (0x30 + 0x70 = 0xa0 <= 0x100)
+    vs_b = struct.pack('<I', 0x0461) + bytes(0x6c)   # 0x70 bytes
+    ps = struct.pack('<I', 0x1462) + bytes(0x6c)     # 0x70 bytes
+    c1_small = b'\x5a' * 0x40
+    c1_large = b'\x3c' * 0x140   # > 0x100 bytes: requires 256-byte rounding (0x200), not a fixed 0x100 block
+
+    def test_two_module_vertex_record(self):
+        rec = compact_record(self.vs_a, self.c1_small, self.vs_b, x0=0x11, f710=0x33, b14=1, b15=0, b16=1, f724=0x44, x1=0x22, f794=0x40)
+        got = shader_split.ue3_shaders(rec, 'gs.bin')
+        self.assertEqual([(w, st) for w, st, _, _ in got], [('gs.bin#UE3@0', 'vs')])
+        ctl, code = got[0][2], got[0][3]
+        self.assertEqual(list(struct.unpack_from('<5I', ctl, 0x6f8)), [len(self.vs_a), len(self.c1_small), 0x100, 0x300, 0x30])
+        self.assertEqual(list(struct.unpack_from('<6I', ctl, 0x748)), [0x30, len(self.vs_a), 0x11, 0x230, len(self.vs_b), 0x22])
+        self.assertEqual([struct.unpack_from('<I', ctl, o)[0] for o in (0x70c, 0x710, 0x714, 0x718, 0x724, 0x734, 0x794)], [0x11, 0x33, 1, 0, 0x44, 1, 0x40])
+        self.assertEqual(len(code), 0x300)
+        self.assertEqual(code[:4], shader_split.GFX_MAGIC)
+        self.assertEqual(code[0x30:0x30 + len(self.vs_a)], self.vs_a)
+        self.assertEqual(code[0x100:0x100 + len(self.c1_small)], self.c1_small)
+        self.assertEqual(code[0x200:0x230], bytes(0x30))
+        self.assertEqual(code[0x230:0x230 + len(self.vs_b)], self.vs_b)
+        self.assertEqual(code[0x230 + len(self.vs_b):], bytes(0x300 - 0x230 - len(self.vs_b)))
+
+    def test_single_module_large_constants_and_full_metadata(self):
+        info = bytes(range(0x18))
+        rec = compact_record(self.ps, self.c1_large, x0=0x18, f710=0x04, b14=2, b15=1, b16=3, f724=0x55, f794=0x180, compile_info=info, meta_len=0x40)
+        got = shader_split.ue3_shaders(rec, 'plants.xxx')
+        self.assertEqual([(w, st) for w, st, _, _ in got], [('plants.xxx#UE3@0', 'ps')])
+        ctl, code = got[0][2], got[0][3]
+        self.assertEqual(list(struct.unpack_from('<4I', ctl, 0x6f8)), [len(self.ps), len(self.c1_large), 0x100, 0x300])
+        self.assertEqual(ctl[0x748:0x760], bytes(0x18))
+        self.assertEqual([struct.unpack_from('<I', ctl, o)[0] for o in (0x70c, 0x710, 0x714, 0x718, 0x724, 0x734, 0x794)], [0x18, 0x04, 2, 0x10000, 0x55, 3, 0x180])
+        self.assertEqual(ctl[0x7d0:0x7e8], info)
+        self.assertEqual(len(code), 0x300)
+        self.assertEqual(code[0x100:0x100 + len(self.c1_large)], self.c1_large)
+        self.assertEqual(code[0x100 + len(self.c1_large):], bytes(0x300 - 0x100 - len(self.c1_large)))
+
+    def test_two_module_with_large_constants(self):
+        rec = compact_record(self.vs_a, self.c1_large, self.vs_b, x0=0x10, x1=0x20)
+        got = shader_split.ue3_shaders(rec, 'bigc1.xxx')
+        self.assertEqual(len(got), 1)
+        ctl, code = got[0][2], got[0][3]
+        self.assertEqual(list(struct.unpack_from('<4I', ctl, 0x6f8)), [len(self.vs_a), len(self.c1_large), 0x100, 0x400])
+        self.assertEqual(list(struct.unpack_from('<6I', ctl, 0x748)), [0x30, len(self.vs_a), 0x10, 0x330, len(self.vs_b), 0x20])
+        self.assertEqual(code[0x330:0x330 + len(self.vs_b)], self.vs_b)
+
+    def test_short_metadata_zero_pads_tail_fields(self):
+        rec = compact_record(self.ps, self.c1_small, meta_len=0x20)
+        got = shader_split.ue3_shaders(rec, 'short.bin')
+        self.assertEqual(len(got), 1)
+        ctl = got[0][2]
+        self.assertEqual(struct.unpack_from('<I', ctl, 0x794)[0], 0)
+        self.assertEqual(ctl[0x7d0:0x7e8], bytes(0x18))
+
+    def test_rejects_lookalikes_and_misaligned_code_lengths(self):
+        # Bad SPH stage (stage nibble 7 is not a Maxwell graphics stage)
+        bad_sph = compact_record(struct.pack('<I', (7 << 10) | 0x61) + bytes(0x6c), self.c1_small)
+        self.assertEqual(shader_split.ue3_shaders(bad_sph, 'bad_sph.xxx'), [])
+        # Misaligned csz (0xe0: a256(0xe0) = 0x100 != a256(0x30 + 0xe0) = 0x200)
+        misaligned = compact_record(struct.pack('<I', 0x1462) + bytes(0xdc), self.c1_small)
+        self.assertEqual(shader_split.ue3_shaders(misaligned, 'misaligned.xxx'), [])
+        # Bad second-module SPH (pixel shader in VertexB slot)
+        bad_second = compact_record(self.vs_a, self.c1_small, self.ps)
+        self.assertEqual(shader_split.ue3_shaders(bad_second, 'bad_second.xxx'), [])
+        # Tail lengths do not sum to region length
+        bad_len = bytearray(compact_record(self.vs_a, self.c1_small, self.vs_b))
+        struct.pack_into('<I', bad_len, 12 + len(self.vs_a) + len(self.c1_small) + len(self.vs_b) + 0x1c, len(self.vs_b) + 4)
+        self.assertEqual(shader_split.ue3_shaders(bytes(bad_len), 'bad_len.xxx'), [])
+
+    def test_stored_control_section_gates_compact_scan(self):
+        code, ctl = shader(1)
+        mixed = record(code, ctl) + compact_record(self.vs_a, self.c1_small, self.vs_b)
+        got = shader_split.ue3_shaders(mixed, 'mixed.bin')
+        self.assertEqual([(st, c, k) for _, st, c, k in got], [('ps', ctl, code)])
+
+
 if __name__ == '__main__':
     unittest.main()

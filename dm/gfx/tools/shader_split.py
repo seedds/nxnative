@@ -3752,11 +3752,94 @@ def ue3_body(d, label):
         i = o
     return b''.join(out)
 
+UE3_COMPACT_CTL_LEN = 0x880
+UE3_COMPACT_HDR_LEN = 0x30
+UE3_COMPACT_META_MAX = 0x40
+# Match the 6 zero bytes spanning ml's high half (u16 0) and the trailing u32 0 right before a Maxwell SPH type/version byte (0x41..0x65).
+UE3_COMPACT_RE = re.compile(rb'\x00{6}[\x41-\x65]')
+
+def _ue3_compact_template():
+    """Fixed NVN control-section template built by UE3's compact shader loader (Batman: Arkham Asylum 1.0.1 main+0xcc6194) before per-shader metadata fields are written."""
+    ctl = bytearray(UE3_COMPACT_CTL_LEN)
+    ctl[:4] = CTL_MAGIC
+    struct.pack_into('<5I', ctl, 0x04, 1, 0x10, 0x120, 0xb, 0x878)
+    struct.pack_into('<I', ctl, 0x20, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<Q', ctl, 0x6f0, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x708, UE3_COMPACT_HDR_LEN)
+    struct.pack_into('<I', ctl, 0x790, 0x2a0035)
+    struct.pack_into('<Q', ctl, 0x7c8, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x7e8, UE3_COMPACT_CTL_LEN)
+    struct.pack_into('<I', ctl, 0x7f4, 0x0c)
+    return bytes(ctl)
+
+UE3_COMPACT_CTL = _ue3_compact_template()
+
+def ue3_compact_build(region, meta):
+    """Synthesize the 0x880-byte NVN control section and aligned code area from a compact UE3 shader record (Batman: Arkham Asylum 1.0.1 main+0xcc6194).
+    The metadata (up to 0x40 bytes read over a zeroed block) gives the first module's instruction size (+4), c1 constant size (+8), GLSLC register/stage fields
+    (+0x0c..+0x1b, +0x24, +0x28..+0x3f), and an optional inline second vertex module (+0x1c size, +0x20 field) placed after the aligned c1 constants with a zeroed 0x30-byte header."""
+    a256 = lambda n: (n + 0xff) & ~0xff
+    m = bytearray(UE3_COMPACT_META_MAX)
+    m[:min(len(meta), UE3_COMPACT_META_MAX)] = meta[:UE3_COMPACT_META_MAX]
+    csz, ksz, x0, f710 = struct.unpack_from('<4I', m, 0x04)
+    f724, gsz, x1, f794 = struct.unpack_from('<4I', m, 0x18)
+    c1_off = a256(csz)
+    data_end = c1_off + a256(ksz)
+    ctl = bytearray(UE3_COMPACT_CTL)
+    if gsz:
+        mod1_off = data_end + UE3_COMPACT_HDR_LEN
+        ctl_total = a256(mod1_off + gsz)
+        struct.pack_into('<6I', ctl, 0x748, UE3_COMPACT_HDR_LEN, csz, x0, mod1_off, gsz, x1)
+    else:
+        ctl_total = data_end
+    struct.pack_into('<4I', ctl, 0x6f8, csz, ksz, c1_off, ctl_total)
+    struct.pack_into('<4I', ctl, 0x70c, x0, f710, m[0x14], 0x10000 if m[0x15] else 0)
+    struct.pack_into('<I', ctl, 0x724, f724)
+    struct.pack_into('<I', ctl, 0x734, m[0x16])
+    struct.pack_into('<I', ctl, 0x794, f794)
+    ctl[0x7d0:0x7e8] = m[0x28:0x40]
+    c_end = a256(UE3_COMPACT_HDR_LEN + csz)
+    code_data_end = c_end + a256(ksz)
+    code_total = a256(code_data_end + UE3_COMPACT_HDR_LEN + gsz) if gsz else code_data_end
+    code = bytearray(code_total)
+    code[:4] = GFX_MAGIC
+    code[UE3_COMPACT_HDR_LEN:UE3_COMPACT_HDR_LEN + csz] = region[:csz]
+    code[c_end:c_end + ksz] = region[csz:csz + ksz]
+    if gsz:
+        o = code_data_end + UE3_COMPACT_HDR_LEN
+        code[o:o + gsz] = region[csz + ksz:csz + ksz + gsz]
+    return bytes(ctl), bytes(code)
+
+def ue3_compact_shaders(d, label):
+    """Compact Unreal Engine 3 shader records with no stored NVN control section: {u32 region_len, u32 meta_len (< 0x880), u32 0}, region (ins0 || c1 || ins1), meta.
+    Reconstructs each record through ue3_compact_build and skips lookalike non-shader data that lacks a valid graphics SPH or fails GLSLC's 256-byte code-end alignment."""
+    out, end, n = [], 0, len(d)
+    for m in UE3_COMPACT_RE.finditer(d):
+        p = m.start() - 6
+        if p < end: continue
+        cl, ml = struct.unpack_from('<II', d, p)
+        mo = p + 12 + cl
+        if not (0x50 <= cl <= 0x100000 and 0x20 <= ml < UE3_COMPACT_CTL_LEN) or mo + ml > n: continue
+        csz, ksz = struct.unpack_from('<II', d, mo + 4)
+        gsz = struct.unpack_from('<I', d, mo + 0x1c)[0]
+        if csz < 0x50 or (gsz and gsz < 0x50) or csz + ksz + gsz != cl: continue
+        if ((csz + 0xff) & ~0xff) != ((UE3_COMPACT_HDR_LEN + csz + 0xff) & ~0xff): continue
+        ctl, code = ue3_compact_build(d[p + 12:mo], d[mo:mo + ml])
+        st = sph_stage(code)
+        if not st or check(label, st, ctl, code): continue
+        if gsz:
+            mod1_off = struct.unpack_from('<I', ctl, 0x754)[0]
+            if st != 'vs' or sph_stage(code[mod1_off - UE3_COMPACT_HDR_LEN:mod1_off + 4]) != 'vs': continue
+        out.append((f'{label}#UE3@{p:x}', st, ctl, code))
+        end = mo + ml
+    return out
+
 def ue3_shaders(d, label):
     """Shader records of an Unreal Engine 3 game's shader caches (Batman: Arkham Knight: GlobalShaderCache-Switch.bin, 'BMSG', 1,847 shaders; CombinedShaderCache-Switch.xxx, a package holding
     22,874 once its chunks are decoded, ue3_body; none of 68 other packages sampled holds any): u32 record length, u32 code area length, u32 control length (0x880), on the global cache one more u32,
     then the code area, right followed by its control section. Found by the control section's magic, its code area length (+0x704) back to the code area's magic, and the two lengths in front.
     Mortal Kombat 11 stores control-first records: {u32 control size, u32 code size, u32 0, u32 control size}, then the control (with trailing compiler text/reflection) and the code area.
+    Compact UE3 caches (Batman: Arkham Asylum) store no control section at all, only {u32 region_len, u32 meta_len (< 0x880), u32 0, region, meta}, reconstructed via ue3_compact_shaders when the body holds no CTL_MAGIC.
     The engine combines vertex and pixel shaders per draw, so they are paired as single-stage programs (separable_pairs)"""
     out = []
     for m in re.finditer(re.escape(CTL_MAGIC), d):
@@ -3784,6 +3867,8 @@ def ue3_shaders(d, label):
         why = check(label, st, ctl, code) if st else 'no stage in the code area header'
         if why: red(f'{label}: shader record at {c:#x} ({st}): {why}')
         out.append((f'{label}#UE3@{c:x}', st, ctl, code))
+    if CTL_MAGIC not in d:
+        out.extend(ue3_compact_shaders(d, label))
     return out
 
 

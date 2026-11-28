@@ -7,7 +7,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 | Setting | Where | Why |
 |---|---|---|
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | [Cult of the Lamb](../01002E7016C46000/README.md#memory)'s layout, the same Unity generation; see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | [Cult of the Lamb](../01002E7016C46000/README.md#memory)'s layout, the same Unity generation; see [Memory](#memory) |
 | `depth_mode zero` | `game.tsv` | the game calls `nvnDeviceSetDepthMode` with near = 0 (log: `depth mode near=0`), so the pipeline bases made before it runs take the `main0_z` vertex entries |
 | `shader_groups /Data/=data` | `game.tsv` | everything with shaders is under `Data/`: the player's serialized files and the `StreamingAssets` bundles |
 | No `pad_layout` (the 2D default) | `game.tsv` | B jumps, Y attacks, A dashes in play and confirms in menus, a held L heals |
@@ -52,6 +52,7 @@ Update 1.1.0 (v65536) over the base game, SDK 19.3.16. Unity 2022.3.62f2 IL2CPP 
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - iPhone and iPad runtime validation; no IPA has been built.
 - Sound is checked only in the log (one AudioOut, no underruns): nobody has listened to it. Input has gone only through `DM_CTL`, not a controller or the keyboard.
 - Everything past the sewer's first room, including bosses and the area changes after it, and memory there.

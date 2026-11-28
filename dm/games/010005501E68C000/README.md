@@ -8,7 +8,7 @@ Update 1.0.0.2 (v131072) over the base game, which is an XCI; its DLC NSP is a l
 |---|---|---|
 | Node area cut 1 GB → 62 MB; regions of 4 MB and more aligned to 2 MB | the SDK-wide rules in `dm/tools/sdk_patches.py` (the AddressRegionManager constructor at `sdk+0x139458`: the movs at `+0x139468` and `+0x1394fc`; the placement's alignments at `+0x139654`, `+0x13965c`, `+0x139660`) | without it `StandardAllocator::Initialize(nullptr, pool − used)` (`main+0x874b6c`) aborts at its first `CentralHeap::Init`; see [Memory](#memory) |
 | 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000` | [`game.tsv`](game.tsv) | Engage's block: 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (the game never calls `SetHeapSize`) |
-| `app_pool 0x40000000` (1 GB) | `game.tsv` | with Engage's 2.5 GB pool the live address regions reached the end of the alias region after 140 s; see [Memory](#memory) |
+| `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` (1 GB) | `game.tsv` | with Engage's 2.5 GB pool the live address regions reached the end of the alias region after 140 s; see [Memory](#memory) |
 | `shader_groups _unitybuiltinshaders_=engine /Resources/=engine /StreamingAssets/=assets /Data/=data` | `game.tsv` | engine built-ins (the `unitybuiltinshaders` bundle, `Resources/`) go to engine, the player's serialized files to data, the other Addressables bundles to assets |
 
 ## Memory
@@ -56,5 +56,6 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - The one geometry shader does not build (Metal cannot express it).
 - `game.tsv` has no `sys_resource` row, so the host reports its default, 32 MB (`game.py`, `hle_svc.c`), where the NPDM declares 16 MB.

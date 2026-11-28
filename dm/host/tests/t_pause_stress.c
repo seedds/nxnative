@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
         pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
         t->started = 1; t->prio = 44; t->core = 1 + i % 2; t->mask = 1ull << t->core;
         w->regs[99] = 0x7fff0000;   // the gate block's sp
-        pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
+        g_lock(); t->handle = h_new(O_THREAD, t); t->all = g_all; g_all = t; g_unlock();
         if (pthread_create(&w->th, NULL, worker_main, w)) { perror("pthread_create"); return 2; }
         t->pt = w->th;
     }

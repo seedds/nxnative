@@ -9,8 +9,10 @@
 void dm_thread_native_wait(int entering) { (void)entering; } // queue-only test, without the guest scheduler
 uint64_t now_ns(void) { return 0; }
 void dm_audio_suspend(int on) { (void)on; }   // stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
-void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
+static int applet_suspended;
+void guest_clock_freeze_for(int reason, int on) { if (reason == DM_CLOCK_APPLET) applet_suspended = on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_gfx_quit_begin(void) {}
 void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }   // oe_start, which never returns: this test checks its plan (oe_plan)
 void dm_host_shutdown(const char *why) { (void)why; }
 // The notification event (hle_thread.c binds a kernel event): the unit test only tracks whether it is signalled
@@ -20,6 +22,8 @@ void hle_signal_system_event(void *g) { (void)g; ev_sig = 1; }
 void hle_clear_system_event(void *g) { (void)g; ev_sig = 0; }
 static int hid_moves;   // hle_hid.c signals the npads' style events there; here only that a mode change reports to it
 void dm_hid_opmode_changed(void) { hid_moves++; }
+static unsigned pushed_users;
+unsigned dm_account_pushed_users(void) { return pushed_users; }
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
 static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_seen = 1; g_applets = 0; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; g_focus_mode = -1; }
@@ -68,36 +72,100 @@ static int file_is(const char *path, const char *want, size_t n) { char b[64] = 
 static void plan_checks(void) {
     char dir[] = "/tmp/t_oe_plan.XXXXXX", old[4096], path[4200], self[4096], tsv[4200]; uint32_t ssz = sizeof self;
     if (!mkdtemp(dir) || !getcwd(old, sizeof old) || chdir(dir) || _NSGetExecutablePath(self, &ssz)) { CHECK(0, "plan: a scratch folder"); return; }
-    int cur = (int)(DM_GAME_PROGRAM_ID & 0xf); prog_plan P = {0};   // each oe_plan frees the plan before it
-    unsetenv("DM_PROGRAMS"); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
-    // a program run by itself: the relaunch is this host again, same arguments and folder, DM_RELAUNCH=1 once, no parameter or previous program
+    int cur = (int)(DM_GAME_PROGRAM_ID & 0xfff); prog_plan P = {0};   // each oe_plan frees the plan before it
+    pushed_users = 0x5;
+    unsetenv("DM_PROGRAMS"); setenv("DM_OPEN_USERS", "5", 1); setenv("DM_LAUNCH_PARAM", "/x/launch_param.bin", 1); setenv("DM_PREV_PROGRAM", "3", 1); setenv("DM_RELAUNCH", "1", 1); setenv("T_OE_KEEP", "yes", 1);
+    // a program run by itself: the relaunch is this host again, same arguments and folder, DM_RELAUNCH=1 once, no parameter, previous program or open-user handoff
     CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, self) && P.argv == *_NSGetArgv() && !P.cwd, "relaunch, no table: this host again, its own arguments, this folder");
-    CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
-          "relaunch, no table: DM_RELAUNCH=1 once, no launch parameter, no previous program, the rest kept");
+    CHECK(env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_OPEN_USERS=", 1) && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1,
+          "relaunch, no table: DM_RELAUNCH=1 once, no open users, no launch parameter, no previous program, the rest kept");
     snprintf(path, sizeof path, "%s/launch_param.bin", dir); unlink(path);
     CHECK(access(path, F_OK) != 0, "relaunch, no table: no launch parameter file");
-    // ExecuteProgram of its own index restarts it with the parameters; another program cannot start
+    // ExecuteProgram of its own index restarts it with the parameters; inherited DM_OPEN_USERS is dropped unless this process pushed open users
+    pushed_users = 0;
+    CHECK(oe_plan(cur, "ab", 2, 0, &P, "exec self unpushed") && !strcmp(P.exe, self) && !env_count(P.env, "DM_RELAUNCH=", 1) && !env_count(P.env, "DM_OPEN_USERS=", 1),
+          "ExecuteProgram(own index), no table, unpushed: stale DM_OPEN_USERS dropped, no DM_RELAUNCH");
+    pushed_users = 0x3;
     CHECK(oe_plan(cur, "ab", 2, 0, &P, "exec self") && !strcmp(P.exe, self) && !env_count(P.env, "DM_RELAUNCH=", 1), "ExecuteProgram(own index), no table: this host again, no DM_RELAUNCH");
     const char *lp = env_get(P.env, "DM_LAUNCH_PARAM"), *pv = env_get(P.env, "DM_PREV_PROGRAM"); char cv[16]; snprintf(cv, sizeof cv, "%d", cur);
-    CHECK(lp && file_is(lp, "ab", 2) && pv && !strcmp(pv, cv) && env_count(P.env, "DM_LAUNCH_PARAM=", 1) == 1, "ExecuteProgram(own index), no table: the parameters in launch_param.bin, DM_PREV_PROGRAM this program");
+    CHECK(env_count(P.env, "DM_OPEN_USERS=3", 0) == 1 && env_count(P.env, "DM_OPEN_USERS=", 1) == 1 && lp && file_is(lp, "ab", 2) && pv && !strcmp(pv, cv) && env_count(P.env, "DM_LAUNCH_PARAM=", 1) == 1,
+          "ExecuteProgram(own index), no table: pushed DM_OPEN_USERS=3 once, launch_param.bin, DM_PREV_PROGRAM this program");
     CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other"), "ExecuteProgram(another), no table: nothing starts, this program ends");
     // a table: the relaunch starts program 0's row with its keys, and drops the keys any row sets
     snprintf(tsv, sizeof tsv, "%s/programs.tsv", dir); FILE *f = fopen(tsv, "w");
     if (!f) { CHECK(0, "plan: a program table"); prog_plan_free(&P); return; }
-    fprintf(f, "# programs\n0\texe=/h/p0\targ=/d/p0\tcwd=%s\tT_OE_ROW=zero\n1\texe=/h/p1\targ=/d/p1\tcwd=%s\tT_OE_ROW=one\tT_OE_ONLY1=x\n", dir, dir); fclose(f);
+    fprintf(f, "# programs\n0\texe=/h/p0\targ=/d/p0\tcwd=%s\tT_OE_ROW=zero\n1\texe=/h/p1\targ=/d/p1\tcwd=%s\tT_OE_ROW=one\tT_OE_ONLY1=x\n16\texe=/h/p16\targ=/d/p16\tcwd=%s\tT_OE_ROW=sixteen\n", dir, dir, dir); fclose(f);
     setenv("DM_PROGRAMS", tsv, 1); unlink(path); setenv("T_OE_ONLY1", "old", 1); setenv("T_OE_ROW", "old", 1);
     CHECK(oe_plan(0, NULL, 0, 1, &P, "relaunch") && !strcmp(P.exe, "/h/p0") && P.argv[0] && !strcmp(P.argv[1], "/d/p0") && !P.argv[2] && P.cwd && !strcmp(P.cwd, dir),
           "relaunch, table: program 0's host, modules and folder");
     CHECK(env_count(P.env, "T_OE_ROW=zero", 0) == 1 && !env_count(P.env, "T_OE_ROW=old", 0) && !env_count(P.env, "T_OE_ONLY1=", 1) && env_count(P.env, "T_OE_KEEP=yes", 0) == 1
-          && env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && access(path, F_OK) != 0,
-          "relaunch, table: row 0's keys, every row's keys dropped, DM_RELAUNCH=1, no parameter or previous program");
+          && env_count(P.env, "DM_RELAUNCH=1", 0) == 1 && !env_count(P.env, "DM_OPEN_USERS=", 1) && !env_count(P.env, "DM_LAUNCH_PARAM=", 1) && !env_count(P.env, "DM_PREV_PROGRAM=", 1) && access(path, F_OK) != 0,
+          "relaunch, table: row 0's keys, every row's keys dropped, DM_RELAUNCH=1, no open users, parameter or previous program");
     CHECK(oe_plan(1, "xyz", 3, 0, &P, "exec 1") && !strcmp(P.exe, "/h/p1") && env_count(P.env, "T_OE_ROW=one", 0) == 1 && env_count(P.env, "T_OE_ONLY1=x", 0) == 1
-          && !env_count(P.env, "DM_RELAUNCH=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "xyz", 3), "ExecuteProgram(1), table: its row, its keys, the parameters");
-    CHECK(oe_plan(7, "xyz", 3, 0, &P, "exec 7") && !strcmp(P.exe, "/h/p0") && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "", 0), "ExecuteProgram(7), no such row: program 0, no parameters");
-    unsetenv("DM_PROGRAMS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
-    CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other") && !P.env && !P.tsv && !P.own[0], "a plan that cannot be made frees the one before and holds nothing");
+          && env_count(P.env, "DM_OPEN_USERS=3", 0) == 1 && env_count(P.env, "DM_OPEN_USERS=", 1) == 1
+          && !env_count(P.env, "DM_RELAUNCH=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "xyz", 3), "ExecuteProgram(1), table: its row, its keys, pushed DM_OPEN_USERS=3, the parameters");
+    pushed_users = 0;
+    CHECK(oe_plan(1, "xyz", 3, 0, &P, "exec 1 unpushed") && !strcmp(P.exe, "/h/p1") && !env_count(P.env, "DM_OPEN_USERS=", 1),
+          "ExecuteProgram(1), table, unpushed: stale DM_OPEN_USERS not leaked across hops");
+    CHECK(oe_plan(16, "p16", 3, 0, &P, "exec 16") && !strcmp(P.exe, "/h/p16") && env_count(P.env, "T_OE_ROW=sixteen", 0) == 1
+          && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "p16", 3), "ExecuteProgram(16), table: index >= 16 routes to row 16");
+    pushed_users = 0x3;
+    CHECK(oe_plan(7, "xyz", 3, 0, &P, "exec 7") && !strcmp(P.exe, "/h/p0") && !env_count(P.env, "DM_OPEN_USERS=", 1) && (lp = env_get(P.env, "DM_LAUNCH_PARAM")) && file_is(lp, "", 0),
+          "ExecuteProgram(7), no such row: program 0, no open users, no parameters");
+    pushed_users = 0;
+    unsetenv("DM_PROGRAMS"); unsetenv("DM_OPEN_USERS"); unsetenv("DM_LAUNCH_PARAM"); unsetenv("DM_PREV_PROGRAM"); unsetenv("DM_RELAUNCH"); unsetenv("T_OE_KEEP"); unsetenv("T_OE_ONLY1"); unsetenv("T_OE_ROW");
+    CHECK(!oe_plan(cur + 1, NULL, 0, 0, &P, "exec other") && !P.env && !P.tsv && !P.own[0] && !P.own[1] && !P.own[2], "a plan that cannot be made frees the one before and holds nothing");
     prog_plan_free(&P);
     unlink(path); unlink(tsv); if (chdir(old)) {} rmdir(dir);
+}
+static int lang_is(const char *want) {
+    uint64_t got = h_oe_GetLang(); char exp[8] = {0};
+    strncpy(exp, want, sizeof exp - 1);
+    return !memcmp(&got, exp, 8);
+}
+static int write_nacp_flag(const char *path, uint32_t flag) {
+    uint8_t nacp[0x4000] = {0};
+    nacp[0x302C] = (uint8_t)(flag & 0xff); nacp[0x302D] = (uint8_t)((flag >> 8) & 0xff);
+    nacp[0x302E] = (uint8_t)((flag >> 16) & 0xff); nacp[0x302F] = (uint8_t)((flag >> 24) & 0xff);
+    FILE *f = fopen(path, "wb"); if (!f) return 0;
+    size_t n = fwrite(nacp, 1, sizeof nacp, f); fclose(f);
+    return n == sizeof nacp;
+}
+static void lang_checks(void) {
+    char dir[] = "/tmp/t_oe_lang.XXXXXX", nacp[4200], other[4200], rom[4200];
+    if (!mkdtemp(dir)) { CHECK(0, "lang: a scratch folder"); return; }
+    snprintf(nacp, sizeof nacp, "%s/control.nacp", dir);
+    snprintf(other, sizeof other, "%s/other.nacp", dir);
+    snprintf(rom, sizeof rom, "%s/RomFS", dir);
+    unsetenv("DM_LANG"); unsetenv("DM_CONTROL_NACP"); setenv("DM_ROMFS", rom, 1);
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: missing control.nacp falls back to en-US / Americas");
+    CHECK(write_nacp_flag(nacp, (1u << 1) | (1u << 2)), "lang: write en-GB + ja control.nacp");
+    CHECK(lang_is("en-GB") && h_oe_GetRegion() == 2, "lang: en-GB without en-US beside DM_ROMFS selects en-GB / Europe");
+    CHECK(write_nacp_flag(nacp, (1u << 0) | (1u << 1)), "lang: write en-US + en-GB control.nacp");
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: en-US preferred when supported");
+    CHECK(write_nacp_flag(nacp, 1u << 2), "lang: write ja-only control.nacp");
+    CHECK(lang_is("ja") && h_oe_GetRegion() == 0, "lang: single non-English language selects ja / Japan");
+    CHECK(write_nacp_flag(nacp, 1u << 14), "lang: write zh-Hans-only control.nacp");
+    CHECK(lang_is("zh-Hans") && h_oe_GetRegion() == 4, "lang: zh-Hans selects zh-Hans / HK-TW-KR");
+    CHECK(write_nacp_flag(nacp, 1u << 16), "lang: write pl-only control.nacp");
+    CHECK(lang_is("pl") && h_oe_GetRegion() == 2, "lang: bit 16 selects pl");
+    CHECK(write_nacp_flag(nacp, 1u << 17), "lang: write th-only control.nacp");
+    CHECK(lang_is("th") && h_oe_GetRegion() == 2, "lang: bit 17 selects th");
+    CHECK(write_nacp_flag(nacp, 0), "lang: write empty-flag control.nacp");
+    CHECK(lang_is("en-US") && h_oe_GetRegion() == 1, "lang: zero SupportedLanguageFlag falls back to en-US");
+    CHECK(write_nacp_flag(nacp, 1u << 18), "lang: write unknown-bit control.nacp");
+    CHECK(lang_is("en-US"), "lang: unknown SupportedLanguageFlag bit falls back to en-US");
+    FILE *f = fopen(nacp, "wb"); if (f) { uint8_t short_buf[16] = {0}; fwrite(short_buf, 1, sizeof short_buf, f); fclose(f); }
+    CHECK(lang_is("en-US"), "lang: truncated control.nacp falls back to en-US");
+    CHECK(write_nacp_flag(nacp, 1u << 2) && write_nacp_flag(other, 1u << 3), "lang: write both nacp files");
+    setenv("DM_CONTROL_NACP", other, 1);
+    CHECK(lang_is("fr") && h_oe_GetRegion() == 2, "lang: DM_CONTROL_NACP takes precedence over DM_ROMFS sibling");
+    setenv("DM_LANG", "", 1);
+    CHECK(lang_is("fr"), "lang: empty DM_LANG falls back to control.nacp");
+    setenv("DM_LANG", "zh-CN", 1);
+    CHECK(lang_is("zh-CN") && h_oe_GetRegion() == 4, "lang: explicit DM_LANG passes through unchanged over control.nacp");
+    unsetenv("DM_LANG"); unsetenv("DM_CONTROL_NACP"); unsetenv("DM_ROMFS");
+    unlink(nacp); unlink(other); rmdir(dir);
 }
 int main(void) {
     unsetenv("DM_OE_SCRIPT"); reset();
@@ -109,6 +177,13 @@ int main(void) {
     h_oe_InactivityExtSafe(0x100);
     CHECK(h_oe_InactivityMode() == 0 && !h_oe_InactivityExtQ(), "clearing the extension restores mode 0");
     CHECK(empty(), "empty queue at start: returns false and leaves the output alone");
+    h_oe_FinishLogo();
+    CHECK(empty(), "finishing absent startup logo does not notify without registration");
+    h_oe_EnableStartupLogoMessage();
+    CHECK(pop_is(95) && empty(), "startup logo already absent: registration queues notification 95");
+    h_oe_GetMsgEv();
+    h_oe_EnableStartupLogoMessage();
+    CHECK(ev_sig && pop_is(95) && !ev_sig && empty(), "startup-logo notification signals and clears the existing message event");
     dm_focus_set(1); dm_set_opmode(1); CHECK(empty(), "same state sends no notification"); CHECK(hid_moves == 0, "an unchanged mode moves no npad");
     dm_set_opmode(0); CHECK(hid_moves == 1, "to handheld: hid is told that the npads moved");
     dm_set_opmode(1); CHECK(hid_moves == 2 && empty(), "and back to console (no notification: the game has not turned it on)");
@@ -195,13 +270,23 @@ int main(void) {
     dm_applet_enter("test"); dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 2, "a nested applet: the outer one keeps the game out of focus");
     dm_applet_leave(); CHECK(pop_is(15) && empty() && h_oe_GetFocus() == 1, "the outer applet closes: 15, state 1");
     h_oe_SetFocusMode(3); dm_applet_enter("test");
-    CHECK(empty() && h_oe_GetFocus() == 2, "focus mode 3: an applet changes the state without a notification");
-    dm_applet_leave(); CHECK(empty() && h_oe_GetFocus() == 1, "focus mode 3: back to 1 without a notification");
+    CHECK(empty() && h_oe_GetFocus() == 2 && applet_suspended, "AlwaysSuspend parks the guest while the applet is open");
+    dm_applet_enter("nested"); dm_applet_leave();
+    CHECK(applet_suspended, "closing the inner applet keeps the guest suspended");
+    h_oe_SetFocusMode(0);
+    CHECK(!applet_suspended, "SuspendHomeSleep keeps the guest running during an applet");
+    h_oe_SetFocusMode(3);
+    CHECK(applet_suspended, "switching to AlwaysSuspend applies to the active applet");
+    dm_applet_leave();
+    CHECK(empty() && h_oe_GetFocus() == 1 && !applet_suspended, "closing the last applet resumes the guest without a notification");
     // the graphics scale does not follow the operation mode: tier 0 in both modes; DM_GFX_SCALE picks a reduced tier, nonsense keeps 0
     unsetenv("DM_GFX_SCALE"); dm_set_opmode(1); CHECK(h_oe_GfxScale() == 0, "graphics scale docked: tier 0 (the whole GPU)");
     dm_set_opmode(0); CHECK(h_oe_GfxScale() == 0, "graphics scale handheld: tier 0");
     setenv("DM_GFX_SCALE", "2", 1); CHECK(h_oe_GfxScale() == 2, "DM_GFX_SCALE=2: tier 2");
     setenv("DM_GFX_SCALE", "7", 1); CHECK(h_oe_GfxScale() == 0, "DM_GFX_SCALE=7: no such tier, 0"); unsetenv("DM_GFX_SCALE");
+    reset(); h_oe_EnableCrashReport(); h_oe_DisableCrashReport();
+    CHECK(empty() && h_oe_GetFocus() == 1, "crash-report service switches require no SDK proxy or notifications");
     plan_checks();
+    lang_checks();
     printf("== oe %d checks, %d failed ==\n", checks, fails); return fails != 0;
 }

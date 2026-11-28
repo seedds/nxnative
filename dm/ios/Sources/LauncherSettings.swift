@@ -24,7 +24,7 @@ struct Setting: Decodable, Identifiable {
         switch kind {
         case "choice": return options?.contains { $0[0] == v } ?? false
         case "range":
-            guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }   // no hex: launcher.c's check agrees
+            guard !v.contains(where: { $0 == "x" || $0 == "X" }), let n = Double(v), n.isFinite, let lo = min, let hi = max else { return false }
             return n >= lo && n <= hi
         case "toggle": return v == onValue || v == offValue
         default: return true
@@ -33,6 +33,19 @@ struct Setting: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey { case env, kind, label, note, def = "default", section, needs, level, base, options, min, max, step, on, off }
 }
 struct SettingsFile: Decodable { let settings: [Setting] }
+
+// The Frame rate row offers 40 and 120 only where the screen shows 120 Hz: on an iPhone or iPad the host's reading of the game's screen (front_ios.m front_screen_max_fps:
+// 60 on a screen below 120 Hz and in Low Power Mode, where the host holds 30 or 60 anyway, hle_nvn.c fps40_refused / high_cap_tick). The value in use stays listed, so a
+// choice made on another screen is not dropped. The Mac app's window keeps every option: its display can change under the window
+func offeredOptions(_ s: Setting, current: String?) -> [[String]] {
+    let options = s.options ?? []
+    #if canImport(UIKit)
+    guard s.env == "DM_FPS_TARGET", front_screen_max_fps() < 120 else { return options }
+    return options.filter { ($0[0] != "120" && $0[0] != "40") || $0[0] == current }
+    #else
+    return options
+    #endif
+}
 
 final class LauncherModel: ObservableObject {
     let settings: [Setting]
@@ -52,9 +65,28 @@ final class LauncherModel: ObservableObject {
         ignoreSaved = env["DM_SAVED_CHOICES"] == "0"
         if ignoreSaved { fputs("launcher: saved choices ignored (DM_SAVED_CHOICES=0)\n", stderr) }
         for s in settings {
-            if fixed.contains(s.env), let v = env[s.env] { values[s.env] = v; continue }
-            let saved = ignoreSaved ? nil : defaults.object(forKey: "launcher." + s.env) as? String   // a string, as launcher.c reads it: not string(forKey:), which turns a number into one
-            values[s.env] = saved.flatMap { s.accepts($0) ? $0 : nil } ?? s.def   // a saved choice the game no longer offers: its default
+            if fixed.contains(s.env), let v = env[s.env] {
+                values[s.env] = v
+                if !ignoreSaved, let saved = defaults.object(forKey: "launcher." + s.env) as? String {
+                    fputs("launcher: saved choice \(s.env)=\(saved) not used: \(s.env)=\(v) is set (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr)
+                }
+                continue
+            }
+            if !ignoreSaved, let raw = defaults.object(forKey: "launcher." + s.env) {
+                if let saved = raw as? String {   // a string: not string(forKey:), which turns a number into one
+                    if s.accepts(saved) {
+                        values[s.env] = saved
+                    } else {
+                        fputs("launcher: saved choice \(s.env)=\(saved) ignored: this build does not offer it\n", stderr)
+                        values[s.env] = s.def
+                    }
+                } else {
+                    fputs("launcher: saved choice for \(s.env) ignored: not a string\n", stderr)
+                    values[s.env] = s.def
+                }
+            } else {
+                values[s.env] = s.def
+            }
         }
     }
 
@@ -93,14 +125,18 @@ final class LauncherModel: ObservableObject {
         fputs("launcher: settings reset to the game's defaults\n", stderr)
     }
 
-    // Before the game starts: every setting not set by an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default). Only a choice that
-    // differs from the game's default is stored: a setting the player left at its default follows the defaults of a later build (the settings it was tested with)
-    func apply() {
+    // Before the game starts: every setting not fixed by the launch environment or an env file goes into the environment (DM_LANG replaces the packed language main.m set as a default).
+    // With persist=true (Play), only a choice that differs from the game's default is stored so a setting the player left at its default follows a later build's tested defaults.
+    // With persist=false (no window: DM_LAUNCHER=0, --no-launcher, or "Show this window at launch" off), the same resolved values (saved choices, else launcher.json defaults) go into the
+    // environment without writing UserDefaults.
+    func apply(persist: Bool = true) {
         for s in settings {
             let v = values[s.env] ?? s.def
             if fixed.contains(s.env) { fputs("launcher: \(s.env) kept at \(v) (\(fromLaunch.contains(s.env) ? "launch environment" : "env file"))\n", stderr); continue }
-            store(s, v)
-            setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v)\(s.isDefault(v) ? "" : " (changed)")\n", stderr)
+            if persist { store(s, v) }
+            setenv(s.env, v, 1)
+            let tag = s.isDefault(v) ? "" : (persist ? " (changed)" : " (saved choice)")
+            fputs("launcher: \(s.env)=\(v)\(tag)\n", stderr)
         }
     }
     private func store(_ s: Setting, _ v: String) {
@@ -113,13 +149,5 @@ final class LauncherModel: ObservableObject {
         guard !fixed.contains(s.env), s.accepts(v) else { return }
         values[s.env] = v; store(s, v); setenv(s.env, v, 1)
         fputs("launcher: \(s.env)=\(v) (in-game menu)\n", stderr)
-    }
-
-    // DM_LAUNCHER=0: no screen, but the saved choices still apply (only DM_SAVED_CHOICES=0 ignores them); nothing is written
-    func applySaved() {
-        for s in settings where !fixed.contains(s.env) {
-            let v = values[s.env] ?? s.def
-            if !s.isDefault(v) { setenv(s.env, v, 1); fputs("launcher: \(s.env)=\(v) (saved choice)\n", stderr) }
-        }
     }
 }

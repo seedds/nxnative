@@ -7,6 +7,10 @@ static struct { uint32_t magic; } g_display = {0x50534944}, g_layer = {0x5259414
 static struct { uint32_t magic; void *layer; } g_native = {0x4e49574e, 0};
 
 HLE_FORCE("_ZN2nn2vi10InitializeEv", "display service init; the host has no vi service", void, h_vi_Init, void) {}
+// The Switch 2 SDKs' variant with low frame rate compensation for a variable refresh rate display: nn::vi::Initialize's work through vi2::InitializeWithVrrLfcEnabled, whose
+// VRR hooks ask the graphics system's user session, which the host never opens (Resident Evil 4 v131072, SDK 21.4.3: main+0xb180288 → sdk+0x5d8cf0, a null read in SdkMutexType::Lock).
+// The host has no vi service and no VRR display (QueryDisplayVrrSupported below): the same as nn::vi::Initialize
+HLE_FORCE("_ZN2nn2vi27InitializeWithVrrLfcEnabledEv", "display service init with VRR low frame rate compensation; the host has no vi service and no VRR", void, h_vi_InitVrrLfc, void) {}
 HLE_FORCE("_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE", "open default display; the host returns a static object", Result, h_vi_OpenDisp, void **out) {
     *out = &g_display; return RES_OK;
 }
@@ -69,16 +73,46 @@ HLE_FORCE("_ZN2nn2vi20GetLatestFrameNumberEPmPKNS0_5LayerE", "the layer's latest
 // FlushRenderingCommands, which waits for every fence (FFrameEndSync, main+0x15015f0), waited for ever right after the opening movie: the game thread polled its fence each ms, nothing
 // was presented again. FrameInfo is 40 bytes, as the SDK's ListFrameHistory (sdk 20.5.15, sdk+0x4510a0) fills it from the compositor's records: status (2 shown with a present
 // time, 1 queued and not shown yet), frame number (the numbering of GetLatestFrameNumber), the queue tick and the present tick twice; sorted by frame number, newest first.
-// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done) and the system did not drop it; its present time is the drawable's presented time when Metal
-// reports one, else (headless, or before the handler runs) the time it was first seen handed on
+// A frame is shown once the present queue has handed it on (nvn_mtl.m g_pq_done); its present time is the drawable's presented time when Metal reports one. Else (headless, before
+// the handler runs, or a drawable the Mac never put on screen), when the host pacer drives a vsync grid, it is the first tick of that grid at or after both its present and the end
+// of its GPU work, latched once reached so a frame never reverts to queued or shifts its flip tick. A game that times its frames by these flips (Star Fox's throttle,
+// docs/reference/frame-rate.md) sees a fixed vsync grid, as on the Switch, instead of its own first-read time. Without a pacer grid (DM_DETCLOCK, display-link pacing, or unpaced
+// presents), the time it was first seen handed on stays. A Switch's compositor shows every frame it is handed, in order, so a frame the Mac dropped (presentedTime 0) still counts
+// as shown: listed as queued, the newest ones stayed so for ever when the game presented nothing more until their flip came (Orbitals, main+0x1540460: right after both players
+// ready up the load stopped presenting, and its FFrameEndSync waited for the flip of a frame Metal had dropped, until Unreal aborted: "GameThread timed out waiting for …")
 #define VFH 8
-typedef struct { uint64_t frame, ticket, queued_ns, seen_ns; } vfh_ent;
+typedef struct { uint64_t frame, ticket, queued_ns, seen_ns, at, grid, tick, vsync_ns; uint8_t queued, enqueued; } vfh_ent;   // at, grid, tick, vsync_ns: present, pacer vsync, one vsync, latched flip (now_ns clock, ns); queued: game thread recorded it; enqueued: nq_worker assigned its physical ticket
 static vfh_ent g_vfh[VFH]; static pthread_mutex_t g_vfh_mu = PTHREAD_MUTEX_INITIALIZER;
 void mtl_present_progress(uint64_t *queued, uint64_t *done);   // nvn_mtl.m
 double mtl_presented_time(uint64_t n);                         // nvn_mtl.m: CACurrentMediaTime seconds (the now_ns clock), 0 not yet, -1 dropped by the system
-void dm_vi_frame_queued(uint64_t frame) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
-    uint64_t q, d; mtl_present_progress(&q, &d);
-    pthread_mutex_lock(&g_vfh_mu); g_vfh[frame % VFH] = (vfh_ent){frame, q, guest_ns(), 0}; pthread_mutex_unlock(&g_vfh_mu);
+int mtl_gpu_done(uint64_t f, uint64_t *t1);                    // nvn_mtl.m: 1 the frame's GPU work completed (latest end, now_ns clock), 0 running, -1 no record
+void dm_vi_frame_queued(uint64_t frame, uint64_t at, uint64_t grid, uint64_t tick) {   // hle_nvn.c, at each present the game queues: frame = GetLatestFrameNumber's count with it
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    uint64_t tk = e->frame == frame && e->enqueued ? e->ticket : 0;
+    uint8_t enq = e->frame == frame ? e->enqueued : 0;
+    *e = (vfh_ent){frame, tk, guest_ns(), 0, at, grid, tick, 0, 1, enq};
+    pthread_mutex_unlock(&g_vfh_mu);
+}
+void dm_vi_frame_ticket(uint64_t frame, uint64_t ticket) {   // nvn_queue.inc (nq_worker), when mtl_present assigns this frame's physical display ticket (0 if discarded/unsubmitted)
+    pthread_mutex_lock(&g_vfh_mu);
+    vfh_ent *e = &g_vfh[frame % VFH];
+    if (e->frame == frame) { e->ticket = ticket; e->enqueued = 1; }
+    else if (e->frame < frame) *e = (vfh_ent){frame, ticket, 0, 0, 0, 0, 0, 0, 0, 1};
+    pthread_mutex_unlock(&g_vfh_mu);
+}
+// The vsync a display would show the frame at (now_ns clock): 1 with it, 0 not yet (its GPU work still running, or that vsync still to come), -1 no pacer grid.
+// Once reached, e->vsync_ns latches the flip time so later reads stay monotonic. The frame's GPU work is tagged with the frame count before its present
+// (nq_job.frame = dm_nvn_frame_count() when queued), one less than its number here.
+static int vfh_vsync(vfh_ent *e, uint64_t hnow, uint64_t *at) {
+    if (e->vsync_ns) { *at = e->vsync_ns; return 1; }
+    if (!e->grid || !e->tick) return -1;
+    uint64_t ready = e->at, end = 0; int g = mtl_gpu_done(e->frame - 1, &end);
+    if (!g) return 0;
+    if (g > 0 && end > ready) ready = end;
+    uint64_t t = ready <= e->grid ? e->grid : e->grid + (ready - e->grid + e->tick - 1) / e->tick * e->tick;
+    if (t > hnow) return 0;
+    e->vsync_ns = t; *at = t; return 1;
 }
 static uint64_t vfh_ticks(uint64_t ns) { return dm_sdk_ounce() ? ns / 32 : ns * 12 / 625; }   // as guest_ticks (hle_os.c)
 HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the layer's frame history: the last 8 presents, newest first, shown once the present queue handed them on", int, h_vi_FrameHist, void *out, int n, const void *layer) {
@@ -89,11 +123,16 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
     int k = 0;
     pthread_mutex_lock(&g_vfh_mu);
     for (uint64_t f = latest; f > 0 && latest - f < VFH && k < n; f--) {
-        vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f) continue;
+        vfh_ent *e = &g_vfh[f % VFH]; if (e->frame != f || !e->queued) continue;
         uint64_t *o = (uint64_t *)out + 5 * k++, shown = 0;
-        double pt = e->ticket <= d ? mtl_presented_time(e->ticket) : -1;
+        int handed = e->enqueued && e->ticket <= d;
+        double pt = handed && e->ticket ? mtl_presented_time(e->ticket) : 0;
         if (pt > 0) { uint64_t ago = hnow > (uint64_t)(pt * 1e9) ? hnow - (uint64_t)(pt * 1e9) : 0; shown = gnow > ago ? gnow - ago : 1; }
-        else if (pt == 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        else if (handed) {
+            uint64_t vs; int v = vfh_vsync(e, hnow, &vs);
+            if (v > 0) { uint64_t ago = hnow > vs ? hnow - vs : 0; shown = gnow > ago ? gnow - ago : 1; }
+            else if (v < 0) { if (!e->seen_ns) e->seen_ns = gnow; shown = e->seen_ns; }
+        }
         o[0] = shown ? 2 : 1; o[1] = f; o[2] = vfh_ticks(e->queued_ns); o[3] = o[4] = shown ? vfh_ticks(shown) : 0;
     }
     pthread_mutex_unlock(&g_vfh_mu);
@@ -105,12 +144,27 @@ HLE_FORCE("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", "the lay
 HLE_FORCE("_ZN2nn2vi32GetDefaultDisplayPanelIdentifierEPNS0_15PanelIdentifierE", "built-in panel identity; the host has no panel: all zero", Result, h_vi_PanelId, void *out) {
     memset(out, 0, 0x18); return RES_OK;
 }
+// Switch 2 BufferMaxResolution tiers. Handheld and an unknown docked display report 1080p; a known docked display gets the largest tier it holds.
+__attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+static const int k_buf_max_res[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+static uint32_t buf_max_res(int *w, int *h) {
+    *w = *h = 0;
+    if (dm_opmode() != 1 || !front_display_pixels(w, h)) return 1;
+    if (*w < *h) { int t = *w; *w = *h; *h = t; }
+    uint32_t r = 0;
+    for (uint32_t i = 1; i < 4; i++) if (*w >= k_buf_max_res[i][0] && *h >= k_buf_max_res[i][1]) r = i;
+    return r;
+}
 // The Great Ace Attorney Chronicles (SDK 10) lists up to 10 displays before opening the default one (main+0x808f08) and does not read the list. DisplayInfo is 0x60 bytes:
-//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application
-HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list displays; the host has one, \"Default\"", int, h_vi_ListDisp, void *out, int n) {
+//   name[0x40], bool has a layer limit at +0x40, then u64 layer count limit, largest layer width and height. One display, "Default", as Horizon lists for an application.
+// Star Fox sizes its docked window from the largest layer and clamps it to QueryDisplayBufferMaxResolution. Both replies use the same tier for Switch 2.
+HLE_FORCE("_ZN2nn2vi12ListDisplaysEPNS0_11DisplayInfoEi", "list the Default display and its largest layer", int, h_vi_ListDisp, void *out, int n) {
     if (n <= 0 || !out) return 0;
+    int w, h;
+    uint32_t r = dm_sdk_ounce() ? buf_max_res(&w, &h) : 1;
     uint8_t *p = out; memset(p, 0, 0x60); strcpy((char *)p, "Default");
-    p[0x40] = 1; uint64_t lim[3] = {1, 1920, 1080}; memcpy(p + 0x48, lim, sizeof lim);
+    p[0x40] = 1; uint64_t lim[3] = {1, (uint64_t)k_buf_max_res[r][0], (uint64_t)k_buf_max_res[r][1]}; memcpy(p + 0x48, lim, sizeof lim);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::ListDisplays: \"Default\", largest layer %dx%d", k_buf_max_res[r][0], k_buf_max_res[r][1]);
     return 1;
 }
 HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "destroy layer; host static object", void, h_vi_DestroyLayer, void *layer) { (void)layer; }
@@ -132,19 +186,21 @@ HLE_FORCE("_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb", "display VRR cap
     (void)disp; (void)on; return RES_OK; }
 // The largest display buffer (vi2 through the SDK, sdk+0x5e10c0, which the host does not serve: Result 0x272 and the output left as the game set it). BufferMaxResolution is
 // 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160 (Fire Emblem Fortune's Weave's own table, main+0x1abc2c0 / +0x1abc050). Fire Emblem Fortune's Weave sets 0 first, so the failed call
-// told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window. Answered as a Switch 2 would: in handheld mode its own 1920x1080
-// screen; docked, the largest of the four the display it is shown on holds (front_display_pixels), 1920x1080 when that is not known
-__attribute__((weak)) int front_display_pixels(int *w, int *h) { (void)w; (void)h; return 0; }   // front_mac.m, front_ios.m; graphics unit tests have none
+// told it 720p: it chose its 1280x720 DLSS network and rendered at 640x360, and the host scaled that to the window.
 HLE_FORCE("_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", "largest display buffer: the Switch 2's screen handheld, the host display's docked",
           Result, h_vi_BufMaxRes, uint32_t *out, const void *disp) {
-    (void)disp; static const int k[4][2] = {{1280, 720}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
-    uint32_t r = 1; int w = 0, h = 0;
-    if (dm_opmode() == 1 && front_display_pixels(&w, &h)) {
-        if (w < h) { int t = w; w = h; h = t; }
-        r = 0; for (uint32_t i = 0; i < 4; i++) if (w >= k[i][0] && h >= k[i][1]) r = i;
-    }
-    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k[r][0], k[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
+    (void)disp; int w, h; uint32_t r = buf_max_res(&w, &h);
+    static atomic_int once; if (!atomic_exchange(&once, 1)) LOG("vi::QueryDisplayBufferMaxResolution: %dx%d (%s, display %dx%d)", k_buf_max_res[r][0], k_buf_max_res[r][1], dm_opmode() == 1 ? "docked" : "handheld", w, h);
     if (out) *out = r; return RES_OK;
+}
+// The SDK only accepts its own default display (SDK 20.5.3, sdk+0x55dbd0). Answer for the display OpenDefaultDisplay returns here,
+// with the guest's fixed refresh rate in Hz. Cyberpunk 2077 treats a zero as VRR and keeps rebuilding its swap chain when trying to use four active textures.
+int nvn_vsync_hz(void);   // hle_nvn.c, shared with GetDisplayVsyncEvent's nominal pacing
+HLE_FORCE("_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPKNS0_7DisplayE", "display refresh rate in Hz from guest vsync", Result, h_vi_RefreshRate,
+          uint32_t *out, const void *disp) {
+    if (disp != &g_display) return 0x272;
+    if (out) *out = (uint32_t)nvn_vsync_hz();
+    return RES_OK;
 }
 // The extended swap interval asks for a presentation rate between whole vsync intervals (VRR); without VRR the swap interval NVN sets stays in effect
 HLE_FORCE("_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", "layer extended swap interval: needs VRR, which the host has not; NVN's swap interval stays", Result, h_vi_ExtSwap,

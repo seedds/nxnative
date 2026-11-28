@@ -42,3 +42,7 @@ mem_used	0x6000000
 # ---- Shader split (shader_split.py; GLSLC outputs in loose RomFS files, main and the run-time capture) ----
 shader_groups	/data/=data
 shader_note	Catherine: Full Body shaders
+
+# ---- Texture uploads ----
+# GFD's CPU staging upload at CopyBufferToTexture. The resource thread can reuse the block as soon as the call returns.
+tex_copy_staging	93a79c77da81f7f15db021c5c7431eb4:0x32bd78

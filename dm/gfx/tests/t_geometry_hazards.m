@@ -64,7 +64,7 @@ static void drain_contract(void) {
     EXPECT("no drain: a write earlier in the submission is a hazard",1,geo_cpu_hazard(0x10000,4));
     drw_drained();
     EXPECT("drained: an earlier write no longer counts",0,geo_cpu_hazard(0x10000,4));
-    EXPECT("the drain re-encodes bindings",1,g_args_dirty[0]&&g_args_dirty[2]);
+    EXPECT("the drain re-encodes bindings",1,args_changed(0)&&args_changed(2));
     sbw_note(0x20000, 16, SBW_GPU);
     EXPECT("a storage write after the drain counts",1,geo_cpu_hazard(0x2000c,4));
     EXPECT("only where it wrote",0,geo_cpu_hazard(0x20010,4));
@@ -149,7 +149,7 @@ static void dependency(int mode) {
     if(independent){bind.stage=0;bind.addr+=16;EMIT(OP_BIND_SSBO,bind);bind.stage=2;EMIT(OP_BIND_SSBO,bind);}
     EMIT(OP_DRAW,d);op_hdr end={OP_END,8};memcpy(cmd+used,&end,8);
     #undef EMIT
-    state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts,h=(uint64_t)cmd;mtl_sub_index(&h,1);mtl_exec(cmd);
+    state_reset();memset(&R,0,sizeof R);mtl_set_frame(100+mode);mtl_sub_begin();uint64_t cuts=g_cuts;mtl_exec(cmd);
     id<MTLBuffer> rb=[g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];EXPECT("readback buffer",1,rb!=nil);if(!rb)abort();[blit() copyFromTexture:tex_mtl(&target) sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(32,32,1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:128 destinationBytesPerImage:4096];finish();
     uint8_t *px=rb.contents;
     if(independent) {

@@ -221,6 +221,7 @@ def screen_shape(ctx):
         emit(0xbd000001 | (o << 10))   # str s1, [x0, #0x10 + 4 i]
     emit(0xd65f03c0)   # ret
     put(0x265140, [B(0x265140, start)], 'nn::ui2d::DrawInfo::SetProjectionMtx: the y row divided by the vertical stretch, layouts in their own shape (bit 6)')
+    ctx.capabilities.add('SCREEN_ASPECT')
 
 
 

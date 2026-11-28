@@ -1,9 +1,13 @@
 """shader_split: the budgets of archives in archives (scan_blob, NEST). A Yaz0 member that expands is not overlap (GitHub issue #640: Mario Kart 8 Deluxe's UI/<lang>/race.sarc,
 one layout archive that expands 9 times, was left out), while members that overlap and Yaz0 members that expand without end are still stopped early. No game files needed."""
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -75,7 +79,155 @@ class Nesting(unittest.TestCase):
         self.assertEqual(dec.call_count, 0)
 
 
+class Emz(unittest.TestCase):
+    def setUp(self):
+        self.payload = b'#EMB' + bytes(60) + fz.bnsh()
+        stream = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        self.packed = (struct.pack('<4sIII', b'#EMZ', 0, len(self.payload), 16)
+                       + stream.compress(self.payload) + stream.flush())
+
+    def test_loose_and_nested_emz_reach_the_shader_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'shaders.bin'
+            path.write_bytes(self.packed)
+            _, loose, _, unreadable = ss.scan_file((str(path), path.name))
+        self.assertFalse(unreadable)
+        self.assertEqual({s[1] for s in loose.values()}, {'vs', 'ps'})
+        found = []
+        ss.scan_blob(fz.sarc([(b'shaders.bin', self.packed), (b'padding', bytes(len(self.payload)))]), '/pack', found)
+        self.assertEqual(set(ss.uniq_keys(found)), set(loose))
+
+    def test_emz_rejects_over_budget_and_incomplete_streams(self):
+        with self.assertRaisesRegex(SystemExit, 'archive byte budget'):
+            ss.emz_decode(self.packed, '/shaders.emz', len(self.payload) - 1)
+        with self.assertRaisesRegex(SystemExit, 'does not end at its declared size'):
+            ss.emz_decode(self.packed[:-1], '/shaders.emz', len(self.payload))
+
+
+class NestedZstd(unittest.TestCase):
+    def pack(self, payload, *, unknown=False):
+        zstd = ss.zstd_mod()
+        options = {zstd.CompressionParameter.content_size_flag: 0} if unknown else None
+        return zstd.compress(payload, options=options)
+
+    def scan(self, data):
+        out = []
+        ss.scan_blob(data, '/models.pack', out)
+        return out
+
+    def test_nested_frames_reach_shader_reader_through_file_prefilter(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh())])
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                packed = self.pack(inner, unknown=unknown)
+                outer = fz.sarc([(b'model.zs', packed), (b'padding', b'\1' * len(inner))])
+                self.assertNotIn(b'BNSH' + bytes(4), outer)
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / 'models.pack'; path.write_bytes(outer)
+                    _, shaders, _, unreadable = ss.scan_file((str(path), 'models.pack'))
+                self.assertFalse(unreadable)
+                self.assertEqual({s[1] for s in shaders.values()}, {'vs', 'ps'})
+                self.assertTrue(all('/models.pack/model.zs/shader.bnsh' in s[0] for s in shaders.values()))
+
+    def test_concatenated_frames_decode_within_shared_budget(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh())])
+        mid = len(inner) // 2
+        packed = self.pack(inner[:mid]) + self.pack(inner[mid:])
+        outer = fz.sarc([(b'model.zs', packed), (b'padding', b'\1' * len(inner))])
+        self.assertEqual({s[1] for s in self.scan(outer)}, {'vs', 'ps'})
+        bomb = self.pack(bytes(512 << 10)) + self.pack(bytes(512 << 10))
+        with self.assertRaisesRegex(SystemExit, 'zstd archive members expand'):
+            self.scan(fz.sarc([(b'bomb.zs', bomb)]))
+
+    def test_decoded_container_traversal_is_not_another_expansion(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh()), (b'padding', bytes(32768))])
+        for _ in range(3): inner = fz.sarc([(b'inner.sarc', inner)])
+        for pack in (self.pack, yaz0):
+            with self.subTest(pack=pack.__name__):
+                outer = fz.sarc([(b'layout', pack(inner)), (b'padding', b'\1' * (len(inner) // 10))])
+                self.assertEqual({s[1] for s in self.scan(outer)}, {'vs', 'ps'})
+
+    def test_decoded_member_does_not_credit_sibling_overlap(self):
+        # A compressed non-archive sibling must not enlarge the enclosing archive's traversal budget for overlapping members.
+        overlap = fanout(bytes(0x4000), n=17)
+        blob = self.pack(bytes(len(overlap) * 4))
+        outer = fz.sarc([(b'blob.zs', blob), (b'overlap.sarc', overlap)])
+        with self.assertRaisesRegex(SystemExit, r'members add up to more than 16 times the file \(members that overlap\)'):
+            self.scan(outer)
+
+    def test_top_level_high_ratio_zstd_is_not_capped_at_nested_ratio(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh()), (b'pad.bin', bytes(1 << 20))])
+        packed = self.pack(inner)
+        self.assertGreater(len(inner), ss.NEST * len(packed))
+        self.assertEqual({s[1] for s in self.scan(packed)}, {'vs', 'ps'})
+
+    def test_expansion_budget_applies_with_and_without_declared_size(self):
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                outer = fz.sarc([(b'bomb.zs', self.pack(bytes(1 << 20), unknown=unknown))])
+                with self.assertRaisesRegex(SystemExit, 'zstd archive members expand'):
+                    self.scan(outer)
+
+    def test_incomplete_trailing_or_corrupt_frames_fail_cleanly(self):
+        packed = self.pack(b'payload')
+        for bad in (packed[:-1], packed + b'junk', packed + packed[:-1]):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(SystemExit, 'incomplete or trailing data'):
+                    self.scan(fz.sarc([(b'bad.zs', bad)]))
+        corrupt = ss.ZSTD_MAGIC + b'\x00\x58\x07\x00\x00\xff\xff\xff\xff'
+        with self.assertRaisesRegex(SystemExit, r'^\[RED\] .*invalid nested zstd frame'):
+            self.scan(fz.sarc([(b'corrupt.zs', corrupt)]))
+
+    def test_missing_dictionary_is_reported(self):
+        packed = self.pack(b'payload')
+        # Add a one-byte dictionary ID to a single-segment synthetic frame.
+        self.assertTrue(packed[4] & 32)
+        packed = packed[:4] + bytes([packed[4] | 1, 7]) + packed[5:]
+        with mock.patch.object(ss, 'ZDICTS', {}):
+            with self.assertRaisesRegex(SystemExit, 'needs zstd dictionary 7'):
+                self.scan(fz.sarc([(b'model.zs', packed)]))
+
+    @unittest.skipUnless(shutil.which('zstd'), 'requires the existing zstd CLI to train a synthetic dictionary')
+    def test_named_dictionary_decodes_nested_shaders(self):
+        inner = fz.sarc([(b'shader.bnsh', fz.bnsh())])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); samples = []
+            for i in range(32):
+                sample = root / f'sample{i}'
+                sample.write_bytes(inner + (f'synthetic sample {i} '.encode() * 64))
+                samples.append(str(sample))
+            dictionary = root / 'dictionary'
+            subprocess.run(['zstd', '--train', '--maxdict=1024', '--dictID=7', '-o', str(dictionary), *samples], check=True, capture_output=True)
+            data = dictionary.read_bytes(); zstd = ss.zstd_mod()
+            packed = zstd.compress(inner, zstd_dict=zstd.ZstdDict(data))
+        self.assertEqual(ss.zs_dict_id(packed), 7)
+        with mock.patch.object(ss, 'ZDICTS', {7: data}), mock.patch.object(ss, '_ZD', {}):
+            outer = fz.sarc([(b'model.zs', packed), (b'padding', b'\1' * len(inner))])
+            self.assertEqual({s[1] for s in self.scan(outer)}, {'vs', 'ps'})
+
+    def test_overlapping_compressed_members_still_stop(self):
+        data = bytes(0x4000)
+        for _ in range(6): data = fanout(self.pack(data), pad=0x4000)
+        with mock.patch.object(ss, 'scan_blob', wraps=ss.scan_blob) as calls:
+            with self.assertRaisesRegex(SystemExit, 'more than 16 times the file'):
+                self.scan(data)
+            self.assertLess(calls.call_count, 200)
+
+
 class MemberNames(unittest.TestCase):
+    def test_big_endian_archive_scans_named_shaders(self):
+        shader = fz.bnsh()
+        name = b'program.bnsh\0'
+        start = 0x38 + len(name)
+        archive = struct.pack('>4sHHII4x', b'SARC', 0x14, 0xfeff, start + len(shader), start)
+        archive += struct.pack('>4sHHI', b'SFAT', 0xc, 1, 0x65)
+        archive += struct.pack('>IIII', 0, 1 << 24, 0, len(shader))
+        archive += struct.pack('>4sHH', b'SFNT', 8, 0) + name + shader
+        out = []
+        ss.scan_blob(archive, '/program.sarc', out)
+        self.assertEqual({where.split('#')[0] for where, *_ in out}, {'/program.sarc/program.bnsh'})
+        self.assertEqual({stage for _, stage, *_ in out}, {'vs', 'ps'})
+
     def test_names_and_time(self):   # each name ends at its own NUL; splitting the rest of the archive per member made Fire Emblem Fortune's Weave's 9.8 MB layout SARC take 6 minutes
         members = [(b'tex%04d.bntx' % i, bytes(0x4000)) for i in range(800)]
         archive = fz.sarc(members)   # built outside the timing: only the member reading is measured (about 1 ms here, 47 s with the per-member split)

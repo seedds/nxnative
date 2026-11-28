@@ -36,6 +36,11 @@ snowdrop_pools	2048	512	1280
 shader_groups	/moria/=moria
 shader_note	Mario + Rabbids® Sparks of Hope shaders (provisional profile)
 
+# ---- Frame rate ----
+# Snowdrop's default limit comes from the NVN present interval. Use the host's display pacing.
+fps_target	60
+present_interval	display
+
 # ---- Input ----
 # Movement and camera use both sticks.
 pad_layout	full

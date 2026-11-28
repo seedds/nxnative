@@ -898,6 +898,17 @@ check_t_vk_clear_int: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vk_conv_upload: t_vk_conv_upload.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_conv_upload.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_conv_upload: RUN_ENV = MTL_DEBUG_LAYER=1
+# The staging row pitch a buffer→image copy proves from the VkBuffer's size, in both byte-exact layouts and times the layer count: built twice, with the
+# profile's tex_row_pad key off and on, because the key may only move the ambiguous single-layer case (f) and never (a)-(e). DM_VK_PITCHDBG=1 prints the
+# [NARROW] table the two runs go through.
+t_vk_copyb2i: t_vk_copyb2i.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_copyb2i.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+t_vk_copyb2i_pad: t_vk_copyb2i.m ../vk/hle_vk.m $(MTL_T_DEP)
+	clang $(CFLAGS) -DP3_ROW_PAD=1 -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_copyb2i.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
+check_t_vk_copyb2i: RUN_ENV = MTL_DEBUG_LAYER=1 DM_VK_PITCHDBG=1
+check_t_vk_copyb2i: t_vk_copyb2i t_vk_copyb2i_pad
+	$(RUN_ENV) ./t_vk_copyb2i
+	$(RUN_ENV) ./t_vk_copyb2i_pad
 t_vk_clear_attachments: t_vk_clear_attachments.m ../vk/hle_vk.m $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_clear_attachments.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
 check_t_vk_clear_attachments: RUN_ENV = MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1

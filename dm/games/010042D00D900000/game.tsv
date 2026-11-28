@@ -1,0 +1,40 @@
+# LEGO Star Wars: The Skywalker Saga, update 1.10.0, SDK 12.3.6
+
+# ---- Identity ----
+title_id	010042D00D900000
+program_id	010042D00D900000
+
+# ---- App ----
+name	LEGO® Star Wars™: The Skywalker Saga
+ipa	LegoStarWarsTheSkywalkerSaga.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v589824	1.10.0	main=ec593a5f9552100a9fe95c4ca9e34873	subsdk1=c21e6cdb086c7734345cb677057749f0	sdk=26dfae95ca29ae3c49dfd84d69f8b7fd
+package	v589824
+shader_versions	v589824
+
+# ---- Files ----
+# subsdk1 supplies the movie library. The host supplies the GLSLC imports from subsdk0.
+modules	main subsdk1 sdk
+romfs_marker	GAME0.DAT
+zip_store	.dat:.png:.metallib
+
+# ---- Memory ----
+# The game opens a 3.13 GiB heap in the 3.25 GiB heap region.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares zero system resource.
+sys_resource	0x0
+
+# ---- Frame rate ----
+# The engine steps by elapsed time. Its NVN present interval is the only FPS cap.
+fps_target	60
+present_interval	display
+
+# ---- Shader split ----
+depth_mode	zero
+shader_groups	/=romfs
+shader_note	LEGO® Star Wars™: The Skywalker Saga shaders

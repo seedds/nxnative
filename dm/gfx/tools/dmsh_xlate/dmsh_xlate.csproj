@@ -13,9 +13,17 @@
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj" />
     <ProjectReference Include="$(RyuSrc)/src/Ryujinx.Common/Ryujinx.Common.csproj" />
   </ItemGroup>
-  <!-- Embeds its own source: the source-sha argument prints its hash, by which dmsh_chain.py checks that the translator was built from the in-repo source -->
-  <ItemGroup>
-    <EmbeddedResource Include="Program.cs" LogicalName="src0" />
-    <EmbeddedResource Include="dmsh_xlate.csproj" LogicalName="src1" />
-  </ItemGroup>
+  <!-- Stamps the source digest passed by dm/tools/native_tools.sh (computed by dmsh_chain.xlate_source_sha() over Program.cs, dmsh_xlate.csproj and dm/third_party/ryujinx) -->
+  <PropertyGroup>
+    <XlateSourceSha Condition="'$(XlateSourceSha)' == ''">unknown</XlateSourceSha>
+  </PropertyGroup>
+  <Target Name="WriteXlateSourceSha" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_XlateSourceShaFile>$(IntermediateOutputPath)XlateSourceSha.g.cs</_XlateSourceShaFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_XlateSourceShaFile)" Lines="static partial class SwshXlate { const string SourceSha = &quot;$(XlateSourceSha)&quot;%3B }" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(_XlateSourceShaFile)" />
+    </ItemGroup>
+  </Target>
 </Project>

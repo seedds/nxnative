@@ -6,6 +6,12 @@ vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); 
 // p[0] = source origin (texels) + source texels per destination texel, p[1] = destination origin + source level size
 fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; return t.sample(s, st / p[1].zw, level(0)); }
+// DLSS's alpha-only pass: p[2] bounds the input content's texel centers. Clamp before sampling so padding around a dynamic or offset input never contributes alpha.
+fragment float4 fsa(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; st = clamp(st, p[2].xy, p[2].zw); return float4(0, 0, 0, t.sample(s, st / p[1].zw, level(0)).a); }
+// fs with each colour channel squared, keeping its sign: c * |c| (COPY_T2T_SQUARE: an upscaler's square-rooted input into linear colour, up_mfx_encode)
+fragment float4 fsq(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
+  float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; float4 c = t.sample(s, st / p[1].zw, level(0)); return float4(c.rgb * abs(c.rgb), c.a); }
 struct D { float d [[depth(any)]]; };
 fragment D fsd(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]], constant float4 *p [[buffer(0)]]) {
   float2 st = p[0].xy + (in.p.xy - p[1].xy) * p[0].zw; D o; o.d = t.read(uint2(st)); return o; }

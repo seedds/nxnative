@@ -3,7 +3,12 @@
 #include "nvn_obj.h"
 void nvn_queue_submit(queue_t *q, int n, const uint64_t *handles);
 uint64_t nvn_queue_present(queue_t *q,const tex_t *t,double period,const int crop[4]);
+void nvn_queue_present_ref(uint64_t ticket);
 void nvn_queue_present_wait(uint64_t ticket);
+int nvn_queue_present_wait_timeout(uint64_t ticket, uint64_t timeout_ns);
+int nvn_queue_present_ready(uint64_t ticket);
+int nvn_queue_present_gpu_ready(uint64_t ticket, int wait_tex);
+int nvn_queue_present_gpu_wait_timeout(uint64_t ticket, uint64_t timeout_ns, int wait_tex);
 void nvn_queue_present_release(uint64_t ticket);
 // Unit tests: while held (on=1), replay takes no queued work, so a test can change state between a submit or QueuePresent and its replay; work already replaying finishes
 void nvn_queue_test_hold(int on);
@@ -12,6 +17,9 @@ void nvn_queue_wait_sync(queue_t *q, const sync_t *s);
 void nvn_queue_finish(queue_t *q);
 void nvn_queue_forget(queue_t *q);
 void nvn_sync_release(sync_t *s);
+void nvn_sync_set_acq(sync_t *s, uint64_t handle);
+void nvn_sync_set_acq_fence(sync_t *s, uint64_t fence);
+uint64_t nvn_sync_ref_acq(const sync_t *s);
 int nvn_sync_wait(const sync_t *s, uint64_t timeout);
 void nvn_event_publish(volatile uint32_t *word, unsigned mode, uint32_t value);
 void nvn_event_publish_gpu(volatile uint32_t *word, unsigned mode, uint32_t value, uint64_t fence);

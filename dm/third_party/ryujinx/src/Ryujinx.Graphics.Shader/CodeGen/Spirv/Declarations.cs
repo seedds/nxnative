@@ -12,6 +12,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 {
     static class Declarations
     {
+        // nxnative: where LDTRAM's per-vertex inputs start (UserDefinedPerVertex), past every attribute location (32)
+        public const int PerVertexLocationBase = 64;
+
         public static void DeclareParameters(CodeGenContext context, StructuredFunction function)
         {
             DeclareParameters(context, function.InArguments, 0);
@@ -31,6 +34,15 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         public static void DeclareLocals(CodeGenContext context, StructuredFunction function)
         {
+            if (context.Properties.RayQueryBinding.HasValue)
+            {
+                // Function variables must precede all executable instructions.
+                // Sequential traces reuse this query; native callees have their
+                // own variable, so calls cannot overwrite an in-flight query.
+                context.RayQueryVariable = context.Variable(
+                    context.TypePointer(StorageClass.Function, context.TypeRayQueryKHR()), StorageClass.Function);
+                context.AddLocalVariable(context.RayQueryVariable);
+            }
             foreach (AstOperand local in function.Locals)
             {
                 SpvInstruction localPointerType = context.TypePointer(StorageClass.Function, context.GetType(local.VarType));
@@ -43,6 +55,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         public static void DeclareAll(CodeGenContext context, StructuredProgramInfo info)
         {
+            if (context.Properties.RayQueryBinding is SetBindingPair rayBinding)
+            {
+                context.AddCapability(Capability.RayQueryKHR);
+                context.AddExtension("SPV_KHR_ray_query");
+                context.RayQueryScene = context.Variable(
+                    context.TypePointer(StorageClass.UniformConstant, context.TypeAccelerationStructureKHR()),
+                    StorageClass.UniformConstant);
+                context.Decorate(context.RayQueryScene, Decoration.DescriptorSet, (LiteralInteger)rayBinding.SetIndex);
+                context.Decorate(context.RayQueryScene, Decoration.Binding, (LiteralInteger)rayBinding.Binding);
+                context.Name(context.RayQueryScene, "rt_scene");
+                context.AddGlobalVariable(context.RayQueryScene);
+            }
             DeclareConstantBuffers(context, context.Properties.ConstantBuffers.Values);
             DeclareStorageBuffers(context, context.Properties.StorageBuffers.Values);
             DeclareMemories(context, context.Properties.LocalMemories, context.LocalMemories, StorageClass.Private);
@@ -368,6 +392,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     {
                         iq = context.Definitions.ImapTypes[ioDefinition.Location].GetFirstUsedType();
                     }
+                    else if (ioVariable == IoVariable.UserDefinedPerVertex)
+                    {
+                        iq = PixelImap.Constant;   // nxnative: a vertex's own word, not interpolated (LDTRAM)
+                    }
                     else
                     {
                         (_, AggregateType varType) = IoMap.GetSpirvBuiltIn(ioVariable);
@@ -508,6 +536,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 varType = context.Definitions.GetUserDefinedType(ioDefinition.Location, isOutput);
                 isBuiltIn = false;
             }
+            else if (ioVariable == IoVariable.UserDefinedPerVertex)   // nxnative: LDTRAM's inputs, the words of a vec4 (an attribute's four words are untyped)
+            {
+                varType = AggregateType.Vector4 | AggregateType.FP32;
+                isBuiltIn = false;
+            }
             else if (ioVariable == IoVariable.FragmentOutputColor)
             {
                 varType = context.Definitions.GetFragmentOutputColorType(ioDefinition.Location);
@@ -540,6 +573,18 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     4 => AggregateType.Vector4,
                     _ => AggregateType.Invalid,
                 };
+            }
+
+            if (context.Definitions.Stage == ShaderStage.Fragment &&
+                !isOutput &&
+                !isPerPatch &&
+                ioVariable == IoVariable.UserDefined &&
+                context.Definitions.IaIndexing &&
+                !hasComponent &&
+                ioDefinition.Location == 0 &&
+                TryDeclareSplitIndexedFragmentInputs(context, ioDefinition, varType, iq))
+            {
+                return;
             }
 
             SpvInstruction spvType = context.GetType(varType, IoMap.GetSpirvBuiltInArrayLength(ioVariable));
@@ -611,6 +656,13 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.Decorate(spvVar, Decoration.PassthroughNV);
                 }
             }
+            else if (ioVariable == IoVariable.UserDefinedPerVertex)
+            {
+                // nxnative: one input for each vertex of the attribute, at locations past the attributes' own, named for dmsh_rewrite.per_vertex (SPIRV-Cross has no MSL
+                // form of PerVertexKHR): it makes the three of location L one vertex_value<float4> at user(locnL), the vertex shader's output there
+                context.Decorate(spvVar, Decoration.Location, (LiteralInteger)(PerVertexLocationBase + ioDefinition.Location));
+                context.Name(spvVar, $"dm_pv{ioDefinition.Location / 3}_{ioDefinition.Location % 3}");
+            }
             else if (ioVariable == IoVariable.FragmentOutputColor)
             {
                 int location = ioDefinition.Location;
@@ -664,6 +716,81 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 ? (isOutput ? context.OutputsPerPatch : context.InputsPerPatch)
                 : (isOutput ? context.Outputs : context.Inputs);
             dict.Add(ioDefinition, spvVar);
+        }
+
+        // nxnative: when an indexed fragment shader mixes interpolation modes across locations, a single
+        // Input array at location 0 can carry only location 0's qualifier. Declare per-location Input vec4
+        // variables with their SPH qualifiers and gather them into a Private array at main entry; keep the
+        // stock single Input array when all used locations agree with location 0.
+        private static bool TryDeclareSplitIndexedFragmentInputs(
+            CodeGenContext context,
+            IoDefinition ioDefinition,
+            AggregateType varType,
+            PixelImap baseIq)
+        {
+            int count = IoMap.GetSpirvBuiltInArrayLength(IoVariable.UserDefined);
+            PixelImap stockEffective = baseIq == PixelImap.Unused ? PixelImap.Perspective : baseIq;
+            bool needsSplit = false;
+
+            for (int i = 0; i < count; i++)
+            {
+                ImapPixelType imap = context.Definitions.ImapTypes[i];
+                PixelImap mode = imap.GetFirstUsedType();
+
+                if (mode != PixelImap.Unused &&
+                    ((imap.X != PixelImap.Unused && imap.X != mode) ||
+                     (imap.Y != PixelImap.Unused && imap.Y != mode) ||
+                     (imap.Z != PixelImap.Unused && imap.Z != mode) ||
+                     (imap.W != PixelImap.Unused && imap.W != mode)))
+                {
+                    context.Logger.Log($"Indexed fragment input location {i} has mixed component interpolation modes ({imap.X}, {imap.Y}, {imap.Z}, {imap.W}); using {mode}.");
+                }
+
+                if (mode != PixelImap.Unused && mode != stockEffective)
+                {
+                    needsSplit = true;
+                }
+            }
+
+            if (!needsSplit)
+            {
+                return false;
+            }
+
+            SpvInstruction elemType = context.GetType(varType & ~AggregateType.Array);
+            SpvInstruction elemPtrType = context.TypePointer(StorageClass.Input, elemType);
+            SpvInstruction[] splitInputs = new SpvInstruction[count];
+
+            for (int i = 0; i < count; i++)
+            {
+                SpvInstruction elemVar = context.Variable(elemPtrType, StorageClass.Input);
+                context.Decorate(elemVar, Decoration.Location, (LiteralInteger)i);
+
+                switch (context.Definitions.ImapTypes[i].GetFirstUsedType())
+                {
+                    case PixelImap.Constant:
+                        context.Decorate(elemVar, Decoration.Flat);
+                        break;
+                    case PixelImap.ScreenLinear:
+                        context.Decorate(elemVar, Decoration.NoPerspective);
+                        break;
+                }
+
+                context.AddGlobalVariable(elemVar);
+                splitInputs[i] = elemVar;
+            }
+
+            SpvInstruction arrayType = context.GetType(varType, count);
+            SpvInstruction privatePtrType = context.TypePointer(StorageClass.Private, arrayType);
+            SpvInstruction privateArray = context.Variable(privatePtrType, StorageClass.Private);
+            context.AddGlobalVariable(privateArray);
+
+            context.IndexedFragmentInputs = splitInputs;
+            context.IndexedFragmentInputArray = privateArray;
+            context.IndexedFragmentInputElemType = elemType;
+            context.IndexedFragmentInputArrayType = arrayType;
+            context.Inputs.Add(ioDefinition, privateArray);
+            return true;
         }
     }
 }

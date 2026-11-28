@@ -193,6 +193,38 @@ static void open_waits_busy(size_t pg) {
     nvn_dirty_remove_range(m); munmap(m, pg);
 }
 
+static void gpu_written(size_t pg) {
+    uint8_t *m = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    nvn_dirty_add_range(m, 2 * pg); nvn_dirty_own_thread();
+    nvn_dirty_protect(m, 2 * pg);
+    uint64_t stamp = nvn_dirty_now(), own = nvn_dirty_own_writes();
+    nvn_dirty_gpu_written((uintptr_t)m + 16, 16);
+    EXPECT("GPU write dirties its protected page", 1, nvn_dirty_since(m, pg, stamp));
+    EXPECT("GPU write leaves the other page clean", 0, nvn_dirty_since(m + pg, pg, stamp));
+    EXPECT("replayed GPU write invalidates the same-submission cache", 1, nvn_dirty_own_writes() > own);
+    range_t *r = find_span((uintptr_t)m, pg);
+    EXPECT("GPU stamp preserves protection", PG_PROT, atomic_load(&r->state[0]));
+    stamp = nvn_dirty_now(); m[0] = 42;
+    EXPECT("CPU write after the GPU stamp still faults and is recorded", 1, nvn_dirty_since(m, pg, stamp));
+    nvn_dirty_remove_range(m); munmap(m, 2 * pg);
+}
+
+// A page the tracker previously unprotected (state NONE, non-zero generation) that another subsystem later made read-only:
+// on_fault must check kernel writability instead of claiming it blindly (which would re-execute the faulting store forever).
+static void foreign_ro_on_none_page(size_t pg) {
+    uint8_t *m = mmap(NULL, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap"); g_fail++; return; }
+    nvn_dirty_add_range(m, pg);
+    nvn_dirty_protect(m, pg);
+    m[0] = 1;   // faults and leaves the page NONE with a non-zero generation
+    mprotect(m, pg, PROT_READ);
+    EXPECT("write fault on a NONE page the kernel has read-only is declined", 0, on_fault(m, 1, NULL));
+    mprotect(m, pg, PROT_READ | PROT_WRITE);
+    EXPECT("write fault on a NONE page the kernel has writable is claimed", 1, on_fault(m, 1, NULL));
+    nvn_dirty_remove_range(m); munmap(m, pg);
+}
+
 int main(void) {
     crash_install();
     size_t pg = (size_t)getpagesize();
@@ -221,5 +253,7 @@ int main(void) {
     open_close(pg);
     open_waits_busy(pg);
     open_shared_page(pg);
+    gpu_written(pg);
+    foreign_ro_on_none_page(pg);
     printf("t_dirty_race: %s\n", g_fail ? "FAILED" : "all passed"); return g_fail != 0;
 }

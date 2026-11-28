@@ -33,12 +33,16 @@ POLL = [0xb4000434, 0xb901028b, 0xb940012e, 0x710005df, 0x54ffffc0, 0x885ffd2e, 
         0x1a9f37ed, 0x14000002, 0xd5033f5f, 0x885f7d2f, 0x710005ff, 0x54ffffa1, 0x880ffd3f, 0x35ffff8f, 0x34fffc0e, 0xd65f03c0]
 
 
-def region(words, T, bes):
+def make_scope(words):
     md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); md.detail = True
     scope = {'re': re, 'struct': struct, 'ARM64_OP_IMM': ARM64_OP_IMM, 'ARM64_OP_MEM': ARM64_OP_MEM, 'ARM64_OP_REG': ARM64_OP_REG,
              'IMG': struct.pack('<' + 'I' * len(words), *words) + bytes(64), 'md': md, 'spin_dec': {}, 'DATA_BLOCKS': [], 'spin_touched': set()}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(TOOLS / 'patch_nso.py'), 'exec'), scope)
-    return scope['spin_region'](T, bes)
+    return scope
+
+
+def region(words, T, bes):
+    return make_scope(words)['spin_region'](T, bes)
 
 
 def patched(**at):
@@ -48,6 +52,41 @@ def patched(**at):
 
 
 class SpinWaits(unittest.TestCase):
+    def test_lock_poll_without_clrex(self):
+        # The same poll as Breath of the Wild 1.6.0's compiler writes it (main+0x12c0e48): the acquire's failed test and the release's failed compare go straight back to
+        # the exclusive load (0x18 cbnz w14, L1; 0x74 b.ne U), no clrex; two nops keep the branches below in place
+        w = patched(o18=0x35ffffee, o1c=0x880e7d2a, o20=0x35ffffae, o24=0xd503201f, o28=0xd503201f, o74=0x54ffffc1)
+        g = region(w, 0, [0x80])
+        self.assertIsNotNone(g)
+        self.assertEqual(g['valid'], {0x80})
+        self.assertNotIn(0x5c, g['R'])
+        # no release on the path that skips it; a release of another address; a failed store retried somewhere else than its load
+        for off, word in [(0x4c, 0x540001a1), (0x78, 0x880ffd5f), (0x20, 0x35ffff8e)]:
+            broken = list(w); broken[off // 4] = word
+            self.assertIsNone(region(broken, 0, [0x80]))
+
+    def test_lock_wait_without_poll(self):
+        # A lock that heads no poll: its own retry loop waits for the holder, a spin wait as before the lock rules (Mario vs. Donkey Kong's locks, main+0x470fa8)
+        #   0x00 L: ldaxr w8, [x0] / cbnz w8, L / stxr w9, w10, [x0] / cbnz w9, L / ret
+        acq = [0x885ffc08, 0x35ffffe8, 0x88097c0a, 0x35ffffa9, 0xd65f03c0]
+        g = region(acq, 0, [0x4, 0xc])
+        self.assertEqual((g['valid'], g['R']), ({0x4}, [0x0, 0x4]))
+        #   0x00 U: ldxr w8, [x0] / cmp w8, #1 / b.ne U / stlxr w9, wzr, [x0] / cbnz w9, U / ret
+        rel = [0x885f7c08, 0x7100051f, 0x54ffffc1, 0x8809fc1f, 0x35ffff89, 0xd65f03c0]
+        g = region(rel, 0, [0x8, 0x10])
+        self.assertEqual((g['valid'], g['R']), ({0x8}, [0x0, 0x4, 0x8]))
+
+    def test_lock_poll_headed_by_its_acquire(self):
+        # The acquire is the poll's head: the poll is the region, the acquire's own branches back stay inside it
+        #   0x00 T: ldaxr w8, [x0] / cbnz w8, T / stxr w9, w10, [x0] / cbnz w9, T
+        #   0x10    ldr w11, [x1]
+        #   0x14 U: ldxr w8, [x0] / cmp w8, #1 / b.ne U / stlxr w9, wzr, [x0] / cbnz w9, U
+        #   0x28    cbz w11, T / ret
+        w = [0x885ffc08, 0x35ffffe8, 0x88097c0a, 0x35ffffa9, 0xb940002b, 0x885f7c08, 0x7100051f, 0x54ffffc1, 0x8809fc1f, 0x35ffff89, 0x34fffecb, 0xd65f03c0]
+        g = region(w, 0, [0x4, 0xc, 0x28])
+        self.assertEqual(g['valid'], {0x28})
+        self.assertEqual(region(w, 0x14, [0x1c, 0x24])['valid'], {0x1c})   # the release's retry loop is still a spin wait of its own
+
     def test_lock_poll_is_a_wait(self):
         g = region(POLL, 0, [0x80])
         self.assertIsNotNone(g)
@@ -68,6 +107,27 @@ class SpinWaits(unittest.TestCase):
         g = region([0xb9400008, 0x34ffffe8], 0, [4])
         self.assertIsNotNone(g)
         self.assertEqual(g['valid'], {4})
+
+    def test_decode_cache_cleared_and_quick_filters_before_decode(self):
+        # Found and rejected heads both leave spin_dec empty, and a head rejected by spin_quick (bl #0; b back) decodes nothing.
+        scope = make_scope(POLL)
+        self.assertIsNotNone(scope['spin_region'](0, [0x80]))
+        self.assertEqual(scope['spin_dec'], {})
+        scope_rej = make_scope([0x94000000, 0x17ffffff])   # bl #0; b #0
+        decoded = []
+        orig = scope_rej['spin_ins']
+        scope_rej['spin_ins'] = lambda a: (decoded.append(a), orig(a))[1]
+        self.assertIsNone(scope_rej['spin_region'](0, [4]))
+        self.assertEqual(decoded, [])
+        self.assertEqual(scope_rej['spin_dec'], {})
+        # A non-lock instruction (add w8, w8, #1; cbz w8, back) does not decode 5 lookahead words in spin_lock.
+        scope_cnt = make_scope([0x11000508, 0x34ffffe8])
+        decoded_cnt = []
+        orig_cnt = scope_cnt['spin_ins']
+        scope_cnt['spin_ins'] = lambda a: (decoded_cnt.append(a), orig_cnt(a))[1]
+        self.assertIsNone(scope_cnt['spin_region'](0, [4]))
+        self.assertLessEqual(set(decoded_cnt), {0, 4})
+        self.assertEqual(scope_cnt['spin_dec'], {})
 
 
 if __name__ == '__main__':

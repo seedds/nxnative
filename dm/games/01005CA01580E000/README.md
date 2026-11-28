@@ -4,12 +4,15 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 
 **Current:** opening casino gameplay tested on Mac with the complete shader library. The unsigned 1.0.2 IPA is built (15,969,549,546 bytes, about 14.9 GiB). iOS and later battles have not been tested.
 
+The base game (1.0.0, `v0`) is also playable: on 2026-11-12 a self-contained Mac app was built from `P5R [01005ca01580e000].nsp`, the only NSP, through a profile derived from this one (which registers 1.0.2 alone). Boot, the Thieves Guild network prompt, the opening movie, the title screen, the main menu, the load screen's existing saves, New Game with English voices and the opening casino cutscene rendered at 30 fps with no red line; movement in the casino was not exercised. Its 30,646 shader keys match 1.0.2's, and its shaders were compiled for the Mac with Xcode 27.3's Metal (`--allow-other-metal`, not the chain's tested 27.2).
+
 ## What it needs
 
 | Setting | Where | Why |
 |---|---|---|
 | `mem_reserve 0x100000000`, `mem_alias 0x10000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | [`game.tsv`](game.tsv) | the NPDM declares no system resource; the game sets a heap in the existing 4 GB layout |
 | `mem_used 0x4c00000` | `game.tsv` | the rewritten modules require 76 MB, exceeding the default 64 MB deducted from the pool |
+| `depth_mode zero` | `game.tsv` | the game sets near = 0, so the offline archive and Mac prebuild use the near-zero vertex entries ([iPhone evidence](#found-on-this-game)) |
 | `pad_layout full` | `game.tsv` | movement and camera use both sticks |
 
 ## Rendering
@@ -23,6 +26,7 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 - `CPK/ALL_USEU.CPK` contains 94,631 files, 74,521 CRILAYLA-compressed; `CPK/PATCH1.CPK` contains one USM movie. The host reads the archives through the game's own CRI file system.
 - The available release supports English, French, German, Spanish and Italian language codes. The build defaults to American English.
 - Only the merged update is extracted and registered. Fixed addresses in this note refer to `main` build `d4b150b29a931cd381e2a30318fc299f`.
+- The Asian title `01004B10157F2000` v65536 (1.0.2) has the same `main` build but ships `CPK/ALL_ASIA.CPK` instead of `CPK/ALL_USEU.CPK`, and packs from a profile derived under its own title ID, whose marker is taken from its own RomFS ([the finding](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker)). Its Mac app packed and passed its codesign check; its gameplay and iOS are not tested.
 
 ## Shaders
 
@@ -32,6 +36,8 @@ Update 1.0.2 (`v65536`) over the base game, SDK 13.3.2. Atlus GFD / Needle on NV
 
 ## Testing and running
 
+The packed app's first launch took about four minutes ([A Mac app](../../../docs/development.md#a-mac-app), signing).
+
 On 2026-10-25, update 1.0.2 was tested on an M4 Pro Mac with Metal API validation enabled. Boot, startup movies, title and language menus, opening dialogue, and casino gameplay rendered. Movement, camera control and the first two platform jumps were exercised. The full-library run exceeded 35 minutes without a crash, missing shader or Metal validation error. Recent casino frame-time windows measured p50 33.33 ms and p95 33.36 ms (about 30 fps); occasional longer frames occurred during the run. Resident memory was about 1.9 GB and GPU allocations about 1.75 GB. This is an opening-sequence check, not a full playthrough.
 
 Build with `scripts/build_ipa_from_nsp.py` pointed at the NSP folder and the local keys file. The output is `Persona5Royal.ipa`; it contains no code signature or provisioning profile. For Mac testing use the generated `<title ID>_build/tools/dmhost` and `patched_v65536`, with `DM_ROOT` set to the build directory, `DM_ROMFS` to `extract/v65536/RomFS`, `DM_MSL_DIR` to `shader/cache`, and `DM_FONT_DIR` to `font`. Set `DM_NVN_SHMAP` to this profile's `shader_map.tsv`, `DM_LANG=en-US`, and writable `DM_SAVE` / `DM_TEMP` directories under the NSP folder. See the [control-file recipe](../../../docs/agents/05-debugging.md) for `DM_CTL`.
@@ -40,10 +46,12 @@ Choose offline mode at the network prompt, then New Game and English voices. Adv
 
 ## Found on this game
 
+- **Resolved.** On NX18's iPhone 18 Pro Max, the game selected near = 0 and the host rejected the bundled archive stamped near = −w. The device's own cache covered that run. The corrected 63 MB archive held 3,342 bases, and the same phone found 16 of 16 probed bases at startup. Fresh-install startup time is unknown. [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree) · [NX18 iPhone results](https://github.com/kencalx/NX18/commit/4b1a2621ab735ff18882a62c510e2a8b702599c2)
 - [Linear render-target storage without the LINEAR flag](../../../docs/reference/nvn-objects.md#linear-render-target-storage-without-the-linear-flag): sizing, row pitch and deswizzle eligibility must all recognize `LINEAR_RENDER_TARGET` independently.
 - [Needle shader containers in main and GFD archives](../../../docs/reference/shaders.md#needle-shader-containers-in-main-and-gfd-archives): descriptor-based extraction of NVN control/code sections.
 
 - [Texture clears with partial channel masks or regions](../../../docs/reference/rendering.md#texture-clears-with-partial-channel-masks-or-regions): a load/store draw applies the requested write mask and rectangle.
+- [Another edition's files lack the profile's RomFS marker](../../../docs/reference/packing.md#another-editions-files-lack-the-profiles-romfs-marker): the Asian title's derived profile takes its marker from its own RomFS, and its extraction is reused.
 
 ## Open
 

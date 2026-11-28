@@ -1,0 +1,38 @@
+# ULTRA STREET FIGHTER II: The Final Challengers, update 1.1.1. Capcom MT Framework, SDK 1.3.1, NVN.
+
+# ---- Identity ----
+title_id	01007330027EE000
+program_id	01007330027EE000
+
+# ---- App ----
+name	ULTRA STREET FIGHTER II: The Final Challengers
+ipa	UltraStreetFighterIITheFinalChallengers.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v131072	1.1.1	main=8726f5e816b001b2af588df35996c4c0	subsdk0=ad84f543dad22836a94c58daae35ea3a	subsdk1=fb6cf575030b172de196a929241cac7f	subsdk2=3612d66d30dbd18d6cce211138c88eec	subsdk3=8a052b6dfd9b1515a85882ad8699869d	sdk=9f841a6521ca02a184ce694c3e242519
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 subsdk1 subsdk2 subsdk3 sdk
+romfs_marker	nativeNXx64/app/movie/advertise.mp4
+zip_store	.arc:.mfx:.mp4:.tex:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false
+sys_resource	0x0
+
+# ---- Graphics ----
+# The engine sets nvnDeviceSetDepthMode to near = 0.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/nativeNXx64/=nativenxx64 /nx_sys/=nxsys
+shader_note	ULTRA STREET FIGHTER® II The Final Challengers shaders

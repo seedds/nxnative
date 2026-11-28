@@ -22000,14 +22000,38 @@ static void ua_stamp_set(id<MTLTexture> rm, const void *mem, uint64_t gen) {
     if (!st) { st = [NvUaStamp new]; objc_setAssociatedObject(rm, &g_ua_stamp_key, st, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
     st->mem = mem; st->gen = gen;
 }
+enum { UA_PEND = 64 };
+typedef struct { tex_t t; uint8_t from_rt, cleared, zero_clear; } ua_pend_ent;
+static ua_pend_ent g_ua_pend[UA_PEND];
 static void ua_sync_tex(const tex_t *r, id<MTLTexture> rm0, const ua_entry *w0, int reason) {
     if (!bcp_on() || !rm0 || !w0 || !g_cb) return;
-    // Snapshot the g_ua_wr entry before blit() / bcp_blocks(), which can end an open render pass
-    // (rp_end -> ua_flush -> ua_note_write -> ua_drain_drops) and free or mutate *w0 in place.
-    const ua_entry w = *w0;
+    // Snapshot *w0 before any rp_end() / ua_drain_drops(), which can free or mutate g_ua_wr entries.
+    ua_entry w = *w0;
     id<MTLTexture> rm = rm0; while (rm.parentTexture) rm = rm.parentTexture;
     if ((__bridge void *)rm == w.root) return;
     NvUaStamp *st = objc_getAssociatedObject(rm, &g_ua_stamp_key);
+    if (st && st->mem == w.mem && st->gen == w.gen) return;
+    // If a render pass is open and this sync will blit (or the pass has pending writes at w.mem),
+    // end the pass before choosing what to copy so ua_flush(1) / ua_drain_drops() publish the
+    // pass's final writer at w.mem first. Also refresh from g_ua_wr in case an earlier sync in
+    // the same batch already ended the pass and updated g_ua_wr[w.mem].
+    if (g_enc) {
+        int pend_hit = 0;
+        for (int i = 0; i < g_nua_pend && !pend_hit; i++) pend_hit = g_ua_pend[i].t.mem == w.mem;
+        id<MTLTexture> wm0 = w.zero_clear ? nil : bcp_have(&w.t);
+        int will_blit = w.zero_clear ? (mtl_pf_bytes(rm.pixelFormat) != 0) : (wm0 && wm0 != rm && fam_is_valid(wm0));
+        if (!will_blit && !pend_hit) return;
+        g_blit_splits++;
+        rp_end();
+    }
+    ua_drain_drops();
+    const ua_entry *now = nvn_hm_get(&g_ua_wr, &w.mem);
+    if (!now) return;
+    w = *now;
+    if ((__bridge void *)rm == w.root) return;
+    if (reason == UA_RSN_CLEAR && !w.is_clear) return;
+    if (r && !ua_compat_desc(&w.t.d, w.bpp, &r->d, ua_kind_desc(&r->d))) return;
+    st = objc_getAssociatedObject(rm, &g_ua_stamp_key);
     if (st && st->mem == w.mem && st->gen == w.gen) return;
     if (w.zero_clear) {
         size_t bpp = mtl_pf_bytes(rm.pixelFormat);
@@ -22085,9 +22109,6 @@ static void ua_note_write(const tex_t *t, id<MTLTexture> mt0, int is_clear, int 
     os_unfair_lock_unlock(&g_ua_reg_lk);
     if (has_alias) ua_bdirty_push(e);
 }
-enum { UA_PEND = 64 };
-typedef struct { tex_t t; uint8_t from_rt, cleared, zero_clear; } ua_pend_ent;
-static ua_pend_ent g_ua_pend[UA_PEND];
 static void ua_pend_add(const tex_t *t, id<MTLTexture> mt, int from_rt, int cleared, int zero_clear) {
     if (!bcp_on() || !t || !t->mem || !mt || !ua_kind(t)) return;
     for (int i = 0; i < g_nua_pend; i++) {

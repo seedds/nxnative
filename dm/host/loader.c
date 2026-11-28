@@ -418,7 +418,9 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "RENDER_STATE_OFF")) m->render_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "DRS_BOUNDS")) m->drs_bounds = v == 1;
         else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "FRAME_STEP_120")) m->fstep_t120 = v != 0;
@@ -460,6 +462,8 @@ static void read_layout(module_t *m, const char *dir) {
         }
     }
     fclose(f);
+    if (m->render_state_off && (m->fps_state_off || !m->render_scale_max || m->render_scale_max > 9))
+        die("%s: RENDER_STATE_OFF requires RENDER_SCALE (1 to 9) and no FPS_STATE_OFF", path);
     if (!m->patch_off || m->key_page_off % 0x4000 || m->key_page_size != 0x4000 || seen != (1u << KEY_N) - 1)
         die("%s: the output comes from an old rewriter; rewrite the modules again with dm/tools/patch_nso.py", path);
     if (m->patch_off < 0 && (!m->image_size || !m->file_image_len || m->file_image_len % 0x4000 || m->patch_off % 0x4000 || m->key_page_off + m->key_page_size > m->image_size))
@@ -487,9 +491,62 @@ static void install_fps_state(module_t *m) {
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
     g_fstep_t120 = m->fstep_t120;
 }
-// The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
-// DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
+// Scale and the DRS switch are shared by both layouts; the bounds belong to the render-only DRS_BOUNDS layout.
+enum { RENDER_SCALE_OFF = 0x10, RENDER_DRS_OFF = 0x40, RENDER_DRS_MIN_OFF = 0xA0, RENDER_DRS_MAX_OFF = 0xA4 };
+static float render_scale_setting(const char *mod, float hi, int render_only) {
+    const char *rs = getenv("DM_RENDER_SCALE");
+    float fallback = render_only ? 0.0f : 1.0f;
+    if (!rs || (render_only && !strcmp(rs, "game"))) return fallback;
+    char *end; float sc = strtof(rs, &end);
+    if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) {
+        LOG("[RED] DM_RENDER_SCALE=%s: must be %s0.5 to %.*f; keeping the game's size", rs, render_only ? "game or " : "", render_only ? 2 : 1, hi);
+        return fallback;
+    }
+    if (render_only) LOG("%s: 3D render target %.2f of the game's size (DM_RENDER_SCALE)", mod, sc);
+    else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", mod, sc);
+    return sc;
+}
+static uint32_t dynamic_resolution_setting(const char *fallback) {
+    const char *dr = getenv("DM_DYNAMIC_RESOLUTION");
+    if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping %s resolution", dr, fallback);
+    return dr && !strcmp(dr, "1");
+}
+static int render_drs_bound(const char *s, double *v) {
+    if (!s) return 1;
+    char *end; *v = strtod(s, &end);
+    return end != s && !*end && *v >= 0.5 && *v <= 1.0;
+}
+static void render_drs_apply(uint8_t *state, const char *mod, float scale) {
+    // The render stub takes the untouched game path at scale zero; even env overrides cannot enable DRS bounds there.
+    uint32_t dyn = scale != 0.0f && dynamic_resolution_setting("the selected");
+    double lo = 1.0, hi = 1.0;
+    if (dyn) {
+        const char *min = getenv("DM_DRS_MIN"), *max = getenv("DM_DRS_MAX");
+        lo = 0.8;
+        if (!render_drs_bound(min, &lo) || !render_drs_bound(max, &hi) || lo > hi) {
+            LOG("[RED] DM_DRS_MIN=%s DM_DRS_MAX=%s: need 0.5 <= min <= max <= 1.0; using 0.8 to 1.0", min ? min : "(unset)", max ? max : "(unset)");
+            lo = 0.8; hi = 1.0;
+        }
+        LOG("%s: dynamic resolution from %.2f to %.2f of the selected size", mod, lo, hi);
+    } else if (scale != 0.0f) {
+        LOG("%s: dynamic resolution off at the selected size", mod);
+    }
+    float min = (float)lo, max = (float)hi;
+    memcpy(state + RENDER_DRS_OFF, &dyn, sizeof dyn);
+    memcpy(state + RENDER_DRS_MIN_OFF, &min, sizeof min);
+    memcpy(state + RENDER_DRS_MAX_OFF, &max, sizeof max);
+}
+// The settings in the state pages, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set
+// the environment (Launcher.swift), and nothing reads the pages before the game runs
 void dm_fps_state_apply(void) {
+    for (int i = 0; i < g_nmod; i++) {
+        const module_t *m = &g_mod[i];
+        if (!m->render_state_off) continue;
+        float sc = render_scale_setting(m->name, m->render_scale_max, 1);
+        uint8_t *state = m->base + m->render_state_off;
+        memcpy(state + RENDER_SCALE_OFF, &sc, sizeof sc);
+        if (m->drs_bounds) render_drs_apply(state, m->name, sc);
+    }
     if (!dm_fps_state) return;
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     // The step's unit, before the target: 120 (ticks of 1/120 s) for a stub that takes them, fixed for the run (nvn_fstep.h FSTEP_UNIT_OFF); 0 = vsyncs of 1/60 s
@@ -500,14 +557,12 @@ void dm_fps_state_apply(void) {
     // Render scale of the 3D views (the stubs at Tears of the Kingdom's main+0xd5cc0, Breath of the Wild's main+0x1266880, Hades II's render size, Ocarina of Time's view-size
     // update): 1.0 keeps the game's own size and dynamic resolution; another factor fixes the size at that fraction (DM_RENDER_SCALE, 0.5 to the stub's largest scale: 1.0, or
     // above for a stub that also raises it, Hades II's 3.0). Independent of the frame step: written at target 0 too
-    const char *rs = getenv("DM_RENDER_SCALE"); float sc = 1.0f, hi = g_render_scale_max;
-    if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= hi)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to %.1f; keeping the game's size", rs, hi); sc = 1.0f; } else LOG("%s: 3D views rendered at %.2f of the game's size (DM_RENDER_SCALE)", g_fps_mod, sc); }
-    memcpy(dm_fps_state + 0x10, &sc, sizeof sc);
+    float sc = render_scale_setting(g_fps_mod, g_render_scale_max, 0);
+    memcpy(dm_fps_state + RENDER_SCALE_OFF, &sc, sizeof sc);
     // The game's own dynamic resolution, for builds whose stubs read it (the DYNAMIC_RESOLUTION capability of a frame step stub: Ocarina of Time's level function): 1 lets it
     // run, 0 (the default) holds full resolution. Builds without such a stub ignore the field
-    const char *dr = getenv("DM_DYNAMIC_RESOLUTION"); uint32_t dyn = dr && !strcmp(dr, "1");
-    if (dr && strcmp(dr, "0") && strcmp(dr, "1")) LOG("[RED] DM_DYNAMIC_RESOLUTION=%s: must be 0 or 1; keeping full resolution", dr);
-    memcpy(dm_fps_state + 0x40, &dyn, sizeof dyn);
+    uint32_t dyn = dynamic_resolution_setting("full");
+    memcpy(dm_fps_state + RENDER_DRS_OFF, &dyn, sizeof dyn);
     // Screen shape: DM_SCREEN_ASPECT, the screen's width / height between 1.3 and 1.77, makes the builds with screen-shape stubs
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio, a multiple of 48 so the
     // 2/3-size layout space (1280 wide) stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
@@ -554,6 +609,15 @@ static void install_key_page(module_t *m) {
     for (unsigned i = 0; i < KEY_N; i++) page[m->key_idx[i]] = (uint64_t)key_value(i) * 8;
     for (int k = 0; k < KEY_N; k++) if (!page[m->key_idx[k]]) die("%s: key page entry %d is 0 (host key not created) -- the game would read TSD slot 0", m->name, k);
     if (mprotect(m->base + m->key_page_off, m->key_page_size, PROT_READ)) die("%s key page mprotect", m->name);
+    if (m->render_state_off) {
+        // The state is the 16 KB page after the protected key page, before either appended patch area.
+        uint64_t off = m->render_state_off, end = m->size;
+        if (m->patch_off > 0) end = (uint64_t)m->patch_off & ~0x3FFFull;
+        else if (m->back_off) end = m->back_off;
+        if (off % 0x4000 || off < m->text_end || off < m->key_page_size || off - m->key_page_size != m->key_page_off ||
+            end > m->size || off > end || end - off < 0x4000)
+            die("%s: render state page out of range or not aligned", m->name);
+    }
     if (m->fps_state_off) install_fps_state(m);
 }
 

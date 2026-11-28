@@ -30,6 +30,15 @@ def rows_with_languages(listed):   # the settings rows, by variable, of a game w
         return {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
 
 
+def render_settings(fixups, presets=None, platform='ios'):
+    g = settings.game.load(BOTW)
+    if presets is not None: g.rows.append(('render_presets', [presets]))
+    with tempfile.TemporaryDirectory() as tmp, patch.object(settings.game, 'load', return_value=g), \
+            patch.dict(os.environ, {'GFXAPI': 'nvn', 'SETTINGS_PLATFORM': platform}):
+        (Path(tmp) / 'main.fixups.tsv').write_text(fixups, encoding='utf-8')
+        return settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')
+
+
 class LauncherSettingsTests(unittest.TestCase):
     def test_game_language_row_offers_the_games_own_or_every_language_when_unknown(self):
         self.assertNotIn('DM_LANG', rows_with_languages(['ja']))   # one language: nothing to pick
@@ -183,6 +192,49 @@ class LauncherSettingsTests(unittest.TestCase):
                 (Path(tmp) / 'main.fixups.tsv').write_text(f'# RENDER_SCALE\t{value}\n')
                 row = {s['env']: s for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}['DM_RENDER_SCALE']
             self.assertEqual((row['min'], row['max']), (0.5, top))
+
+    def test_render_only_offers_only_verified_presets_on_both_platforms(self):
+        schema = json.loads((ROOT / 'docs/launcher.schema.json').read_text(encoding='utf-8'))
+        legacy = '# RENDER_SCALE\t1\n'
+        fixups = legacy + '# RENDER_STATE_OFF\t0x4000\n'
+        toggle, bounds = '# DYNAMIC_RESOLUTION\t1\n', '# DRS_BOUNDS\t1\n'
+        dyn, lo, hi = 'DM_DYNAMIC_RESOLUTION', 'DM_DRS_MIN', 'DM_DRS_MAX'
+        presets = '1.0=720p'
+        for platform in ('ios', 'mac'):
+            with self.subTest(platform=platform):
+                listed = render_settings(fixups + toggle + bounds, presets, platform)
+                rows = {s['env']: s for s in listed['settings']}
+                row = rows['DM_RENDER_SCALE']
+                self.assertEqual((row['kind'], row['default'], row['options']), ('choice', 'game', [["game", "Game's own"], ['1.0', '720p']]))
+                self.assertFalse({'base', 'min', 'max', 'step'} & row.keys())
+                self.assertIn("Game's own ignores Dynamic resolution", row['note'])
+                self.assertEqual((rows[dyn]['kind'], rows[dyn]['default']), ('toggle', '0'))
+                self.assertIn('keeps the selected preset fixed', rows[dyn]['note'])
+                for env, default in ((lo, '0.8'), (hi, '1.0')):
+                    bound = rows[env]
+                    self.assertEqual((bound['kind'], bound['default'], bound['needs']), ('range', default, dyn + '=1'))
+                    self.assertEqual((bound['min'], bound['max'], bound['step']), (0.5, 1.0, 0.05))
+                self.assertEqual(conforms(listed, schema, schema), [])
+        for headers, profile_presets in ((fixups + toggle + bounds, None), ('', presets)):
+            self.assertFalse({'DM_RENDER_SCALE', dyn, lo, hi} & {s['env'] for s in render_settings(headers, profile_presets)['settings']})
+        for headers in (fixups, fixups + toggle, fixups + bounds):
+            rows = {s['env']: s for s in render_settings(headers, presets)['settings']}
+            self.assertIn('DM_RENDER_SCALE', rows)
+            self.assertFalse({dyn, lo, hi} & rows.keys())
+        rows = {s['env']: s for s in render_settings(legacy + toggle + bounds, presets)['settings']}
+        row = rows['DM_RENDER_SCALE']
+        self.assertEqual((row['kind'], row['default'], row['max']), ('range', '1.0', 1.0))
+        self.assertIn('keep full resolution for the selected console mode', rows[dyn]['note'])
+        self.assertFalse({lo, hi} & rows.keys())
+
+    def test_render_only_rejects_malformed_or_out_of_range_presets(self):
+        fixups = '# RENDER_SCALE\t1\n# RENDER_STATE_OFF\t0x4000\n'
+        for presets, why in (('0.49=Too small', 'outside 0.5 to 1'),
+                             ('1.5=Too large', 'outside 0.5 to 1'),
+                             ('1.0=720p,1=Also 720p', 'repeats scale'),
+                             ('1.0=', 'scale=label')):
+            with self.subTest(presets=presets), self.assertRaisesRegex(SystemExit, why):
+                render_settings(fixups, presets)
 
     def test_table_format_is_strict(self):
         good = 'DM_X\ttoggle\t-\t0\talways\tGame\tX\n'

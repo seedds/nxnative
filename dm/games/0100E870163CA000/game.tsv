@@ -1,0 +1,48 @@
+# Game profile of Batman: Arkham Asylum (Switch, update 1.0.1 = v65536). Plays on the Mac
+# Format: see dm/games/README.md; bring-up and measurements in README.md beside this file
+# Rocksteady's Unreal Engine 3 (package version 0x243, licensee 0x15, Oodle chunks) with FMOD, Scaleform menus and Bink movies, SDK 14.3.0, NVN.
+# The shaders are compact records without stored NVN control sections, including inline two-module VertexA+VertexB vertex programs (shader_split.py ue3_compact_shaders; README.md, Files and shaders).
+
+# ---- Identity ----
+title_id	0100E870163CA000
+program_id	0100E870163CA000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Batman: Arkham Asylum
+ipa	BatmanArkhamAsylum.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v65536	1.0.1	main=621ee66a6743d750cb91e4e5e3c94e43	sdk=2aef2cffb104ee7c9e212fd2f4c731e9
+package	v65536
+shader_versions	v65536
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	BmGame/CookedSwitch/Textures.tfc
+zip_store	.bik:.tfc:.upk:.xxx:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool - 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource (IsVirtualAddressMemoryEnabled is false)
+sys_resource	0x0
+
+# ---- Graphics ----
+# The game selects near-zero NVN depth (nvnDeviceSetDepthMode near = 0 at boot); offline pipeline bases use main0_z.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/BmGame/=bmgame
+shader_note	Batman: Arkham Asylum shaders
+
+# ---- CPU-written textures ----
+# The game writes into texture storage from the CPU without flushing (README.md, What it needs: 234,144 writes against 485 re-uploads, stale HUD sprite with them off).
+# tex_dirty_upload needs tex_flush_upload on. Both default off, and a provisional profile never guesses them.
+tex_flush_upload	on
+tex_dirty_upload	on

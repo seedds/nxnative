@@ -47,6 +47,7 @@ module_t *g_mod;
 int g_nmod;
 uint64_t g_t0_ns;
 __thread _Atomic int dm_host_work;
+int nvn_rt_threads(mach_port_t *port, uint64_t *tid, const char **name, int max) { (void)port; (void)tid; (void)name; (void)max; return 0; }   // referenced by hle_thread.c (DM_HITCH_DUMP); in the host it is hle_nvn.c's
 pthread_key_t g_key18;
 void crash_thread_init(void) {}
 void guest_thread_init(void) {}

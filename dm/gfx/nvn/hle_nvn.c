@@ -2852,6 +2852,12 @@ static rt_thr *rt_register(const char *name, int acq) {   // on the thread itsel
     int i = atomic_fetch_add(&g_rtt_n, 1); if (i >= RT_THREADS) { atomic_fetch_sub(&g_rtt_n, 1); return NULL; }
     rt_thr *t = &g_rtt[i]; rt_init(t, name, acq, rt_self_tid()); return t;
 }
+// DM_HITCH_DUMP (hle_thread.c): the threads that declared a real-time policy (the acquire threads, the queue replay thread, the encode thread): mach port, thread ID and name
+int nvn_rt_threads(mach_port_t *port, uint64_t *tid, const char **name, int max) {
+    int n = atomic_load(&g_rtt_n); if (n > RT_THREADS) n = RT_THREADS; int k = 0;
+    for (int i = 0; i < n && k < max; i++) if (!g_rtt[i].retired && g_rtt[i].port) { port[k] = g_rtt[i].port; tid[k] = g_rtt[i].tid; name[k] = g_rtt[i].name; k++; }
+    return k;
+}
 static int rt_allowed(const rt_thr *t) { return rt_on() && (t->acq || rt_frame_on()); }
 static void rt_declare(rt_thr *t, uint64_t period_ns, double comp_ms) {
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);

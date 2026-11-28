@@ -9,7 +9,7 @@ Update 1.1.1 (v131072) over the base game, SDK 18.3.5. Unity 2022.3.54f1 IL2CPP 
 | `present_interval display` | [`game.tsv`](game.tsv) | 60 fps: the game asks for interval 2 and its animations follow the time that passed; see [Frame rate](#frame-rate) |
 | `pad_layout full` | `game.tsv` | the 3D layout, whose right stick scrolls the route map as the game's prompt shows |
 | `sys_resource 0x1000000` | `game.tsv` | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): with the hardware pool (3.2 GB) StandardAllocator's region alone reached +3.9 GB of the 4.38 GB alias region in `nninitStartup`; see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | Ace Attorney Investigations Collection's layout ([010005501E68C000](../010005501E68C000/README.md)): with the hardware pool (3.2 GB) StandardAllocator's region alone reached +3.9 GB of the 4.38 GB alias region in `nninitStartup`; see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB and regions of 4 MB and more aligned to 2 MB, as SDK 20 | `dm/tools/sdk_patches.py`, the SDK-wide rules (`MATCH_CUTS`) on `sdk` build `60751516…` (Super Mario Galaxy's and Galaxy 2's; the constructor at `sdk+0x13be3c`, the movs at `+0x13be4c` and `+0x13bee0`, the placement's constants at `sdk+0x13c034` / `+0x13c03c` / `+0x13c040`) | the 0.94 GB region sits at alias +0.06 GB either way; the build's row (the node area cut alone) was removed on 2026-10-30 after a smoke run with the rules |
 | `svcGetInfo` type 24 (FreeThreadCount) | host, `hle_svc.c` / `thr_limit_used` (every game) | Unity creates a thread only when the count is at least 1; see [Threads](#threads) |
 | Movie audio decoder output slots | host, `hle_movie.c` (every game) | the intro hung on a black screen; see [Movies](#movies) |
@@ -74,5 +74,6 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - docs/development.md says audio decoders have 64 output slots and the 03 entry says video keeps 8; the host now has 32 for AAC (`MD_NOUT_AAC`) and 16 for video (`MD_NOUT_VIDEO`). No source says the intro was played again after those changes.
 - The built-in VR blit's geometry shader does not build.

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[3]
 GAME = '010015100B514000'
+DRY = f'clang -O2 -c main.c -o gen/{GAME}/obj/host/main.c.o\nclang -O2 -o gen/{GAME}/dmhost gen/{GAME}/obj/host/main.c.o -framework Metal\ndsymutil gen/{GAME}/dmhost\n'   # make -n's host lines
 
 
 def script(name):
@@ -125,18 +126,26 @@ class HostMSL(unittest.TestCase):
 
     def test_regress_cache_refreshes_shaders_before_reusing_a_host(self):
         regress = script('regress')
-        self.host_dirs(regress.HOST_DIRS)
+        self.host_dirs(script('build_ipa_from_nsp').HOST_DIRS)
         tree = NS(path=self.root, id='candidate')
         game = NS(id=GAME, env=lambda tree: self.env, profile_dir=lambda tree: self.root / f'dm/games/{GAME}')
         real_run = subprocess.run
         builds = []
+        built_bin = self.root / f'dm/host/gen/{GAME}/dmhost'
 
         def run(cmd, **kw):
-            if cmd[0] == 'make' and 'host_msl' not in cmd:
-                if 'dmhost' in cmd:
-                    builds.append(cmd)
-                    (self.root / 'dm/host/dmhost').write_bytes(b'host executable')
-                return NS(returncode=0)
+            if cmd[0] == 'make':
+                if '-n' in cmd:
+                    return NS(returncode=0, stdout='', stderr='')
+                if f'gen/{GAME}/dmhost' in cmd:
+                    p = real_run(['make', '-s', f'GAME={GAME}', 'host_msl'], cwd=kw['cwd'], env=kw['env'], capture_output=True, text=True)
+                    self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                    hdr = self.header.read_bytes()
+                    if not built_bin.is_file() or built_bin.read_bytes() != hdr:
+                        builds.append(cmd)
+                        built_bin.parent.mkdir(parents=True, exist_ok=True)
+                        built_bin.write_bytes(hdr)
+                return NS(returncode=0, stdout='', stderr='')
             return real_run(cmd, **kw)
 
         with patch.object(regress, 'game_root', return_value=self.root / 'regress'), patch.object(regress, 'say'), patch.object(regress.subprocess, 'run', side_effect=run):
@@ -165,17 +174,17 @@ class HostMSL(unittest.TestCase):
         builds = []
 
         def run(cmd, log, env=None, cwd=None):
-            if cmd[0] == 'make':
+            if f'gen/{GAME}/dmhost' in cmd:   # the host itself (make gen/<id>/dmhost), which the script copies to out
+                self.assertTrue(self.header.is_file(), 'the host build needs the header the key fingerprints')
+                builds.append(cmd)
+                built = self.root / f'dm/host/gen/{GAME}/dmhost'; built.parent.mkdir(parents=True, exist_ok=True); built.write_bytes(b'host executable')
+            else:
                 self.assertIn('host_msl', cmd)
                 p = real_run(['make', '-s', f'GAME={GAME}', 'host_msl'], cwd=cwd, env=env, capture_output=True, text=True)
                 self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-            else:
-                self.assertTrue(self.header.is_file(), 'direct clang needs the header before its first compile')
-                builds.append(cmd)
-                out.write_bytes(b'host executable')
 
         def command(cmd, **kw):
-            return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else 'test toolchain', stderr='')
+            return NS(returncode=0, stdout=DRY if cmd[0] == 'make' else 'test toolchain', stderr='')
 
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
             self.env['TEST_METAL_VERSION'] = ''
@@ -198,11 +207,11 @@ class HostMSL(unittest.TestCase):
         profile = self.root / f'dm/host/gen/{GAME}/game_profile.h'; profile.parent.mkdir(parents=True); profile.write_text('#define HEAP 1\n')
         toolchain, builds = ['compiler 1'], []
         def run(cmd, log, env=None, cwd=None):
-            if cmd[0] != 'make':
+            if f'gen/{GAME}/dmhost' in cmd:
                 builds.append(cmd)
-                out.write_bytes(f'host {len(builds)}'.encode())
+                built = self.root / f'dm/host/gen/{GAME}/dmhost'; built.parent.mkdir(parents=True, exist_ok=True); built.write_bytes(f'host {len(builds)}'.encode())
         def command(cmd, **kw):
-            return NS(returncode=0, stdout='clang -o dmhost main.c\n' if cmd[0] == 'make' else toolchain[0], stderr='')
+            return NS(returncode=0, stdout=DRY if cmd[0] == 'make' else toolchain[0], stderr='')
         with patch.object(nsp, 'apple_silicon', return_value=True), patch.object(nsp, 'run', side_effect=run), patch.object(nsp.subprocess, 'run', side_effect=command):
             def build(): return nsp.build_mac_host(self.root, out, self.env, logs, NS(id=GAME))
             build()

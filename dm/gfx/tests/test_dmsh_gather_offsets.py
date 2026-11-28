@@ -75,8 +75,9 @@ int main(int ac, char **av) { @autoreleasepool {
 
 class Rewrite(unittest.TestCase):
     def test_no_call_no_change(self):
-        src = HEAD + '\nkernel void k() {}\n'
-        self.assertEqual(gather_offsets(src), src)
+        for head in ('', HEAD, '// spvGatherConstOffsetsExtra(t);\n'):
+            src = head + '\nkernel void k() {}\n'
+            with self.subTest(head=head): self.assertEqual(gather_offsets(src), src)
 
     def test_call_becomes_four_gathers(self):
         out = gather_offsets(HEAD + 'float4 f(texture2d<float> t, sampler s, float2 c) { float4 a = spvGatherConstOffsets(t, s, _8, component::z, select(c, float2(0.0), isnan(c))); return a; }\n')
@@ -101,6 +102,11 @@ class Rewrite(unittest.TestCase):
         self.assertIn('t.gather(s, c, uint(rint(1.0)), int2(2, 0), component::x).w', out)
         self.assertIn('z.gather_compare(s, c, 0.5, int2(0, 2)).w', out)
         self.assertIn('(z.gather_compare(s, c, 0.5, int2(0, 0)).wzxy)', out)
+
+    def test_compare_without_the_plain_wrapper(self):   # a shader that only compares has only that wrapper's name
+        src = 'using namespace metal;\n' + HEAD[HEAD.index('constant spvUnsafeArray<int2, 4> _9'):] + 'float4 f(depth2d<float> z, sampler s, float2 c) { float4 q = spvGatherCompareConstOffsets(z, s, _9, c, 0.5); return q; }\n'
+        self.assertNotIn('spvGatherConstOffsets', src)
+        self.assertIn('float4 q = (z.gather_compare(s, c, 0.5, int2(0, 0)).wzxy);', gather_offsets(src))
 
     def test_offsets_not_constant_refused(self):
         with self.assertRaises(ValueError):

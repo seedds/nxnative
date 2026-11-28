@@ -68,6 +68,7 @@ The work folder's `run/` has `host.sh` (copies a host to `build/mlhost`), `boot.
 General changes first needed here; each applies to every game:
 
 - **Inline shaders with the cooked packages in an IoStore container** (`uepak.py`, `shader_split.py`): [Unreal Engine 4.27 shaders inline in IoStore export bundles](../../../docs/reference/shaders.md#unreal-engine-427-shaders-inline-in-iostore-export-bundles).
+- **Buffer textures shared by storage** (`nvn_mtl.m` `tex_buffer`, `tbuf_usage`): about 18 transient buffer textures a frame each made a view of their own, 5,350 views added to the residency set every 300 frames (GitHub issue #1061): [Transient buffer textures shared by storage](../../../docs/reference/rendering.md#transient-buffer-textures-shared-by-storage). Not run on this game since: its build folder is gone.
 - **More than one audio renderer** (`hle_audren.c`): [A game with more than one renderer](../../../docs/reference/audio.md#a-game-with-more-than-one-renderer).
 - **An update whose RomFS tables fail the hash check** (`nx_extract`): [A damaged RomFS's own tables](../../../docs/reference/packing.md#a-damaged-romfss-own-tables).
 

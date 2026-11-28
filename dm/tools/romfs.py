@@ -4,7 +4,11 @@ Readers opt into Path/open/os/mmap here; the real filesystem is untouched. A pat
 like /game/RomFS.img/Data/archive is a bounded view of that image entry. Ordinary
 paths retain their normal behavior, including writes to generated outputs.
 """
+from __future__ import annotations
+
 import builtins
+from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
 import errno
 import fnmatch
 import functools
@@ -91,6 +95,28 @@ def is_image(path):
     except (OSError, TypeError): return False
 
 
+def _identity(st: _os.stat_result): return st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+_scan_descriptors: ContextVar[dict[str, tuple[tuple[int, int, int, int], int]] | None] = ContextVar('_scan_descriptors', default=None)
+
+
+@contextmanager
+def reuse_descriptors(roots):
+    """Keep one backing descriptor per RomFS image for a scan. Each reader still owns a duplicate for pread and bounded mmap."""
+    with ExitStack() as stack:
+        descriptors = {}
+        for path in dict.fromkeys(map(_os.path.abspath, roots)):
+            if not is_image(path): continue
+            fd = stack.enter_context(builtins.open(path, 'rb')).fileno()
+            descriptors[path] = (_identity(_os.fstat(fd)), fd)
+        token = _scan_descriptors.set(descriptors)
+        try:
+            yield
+        finally:
+            _scan_descriptors.reset(token)
+
+
 def _resolve(path):
     p = _os.path.abspath(_os.fsdecode(path))
     parts = p.split('/')
@@ -100,7 +126,7 @@ def _resolve(path):
         try: st = _os.stat(image)
         except OSError: continue
         if not _stat.S_ISREG(st.st_mode): continue
-        loaded = _image(image, (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        loaded = _image(image, _identity(st))
         if loaded is not None: return loaded, '/'.join(parts[i + 1:])
     return None
 
@@ -115,7 +141,9 @@ _fd_ranges = {}
 
 class _File(io.RawIOBase):
     def __init__(self, image, k):
-        self.fd = _os.open(image.path, _os.O_RDONLY)
+        descriptors = _scan_descriptors.get()
+        backing = descriptors.get(image.path) if descriptors is not None else None
+        self.fd = _os.dup(backing[1]) if backing is not None and backing[0] == _identity(image.stat) else _os.open(image.path, _os.O_RDONLY)
         self.start, self.length = image.entry(k)[:2]
         self.pos = 0
         _fd_ranges[self.fd] = (self.start, self.length)
@@ -157,8 +185,12 @@ else:
 def stat(path, **kwargs):
     resolved = _resolve(path)
     if not resolved: return _os.stat(path, **kwargs)
-    image, relative = resolved; k = image.find(relative)
-    a, b, _, _, t, _ = image.entry(k); s = image.stat
+    image, relative = resolved
+    return _entry_stat(image, image.find(relative))
+
+
+def _entry_stat(image, k):
+    _, b, _, _, t, _ = image.entry(k); s = image.stat
     return SimpleNamespace(st_mode=(_stat.S_IFREG | 0o444) if t else (_stat.S_IFDIR | 0o555), st_size=b if t else 0,
                            st_ino=k + 1, st_dev=s.st_dev, st_mtime=s.st_mtime, st_mtime_ns=s.st_mtime_ns,
                            st_ctime=s.st_ctime, st_ctime_ns=s.st_ctime_ns, st_atime=s.st_atime, st_atime_ns=s.st_atime_ns)
@@ -175,13 +207,13 @@ def isfile(path):
     except OSError: return False
 
 
-class _Entry:
-    def __init__(self, parent, name): self.name, self.path = name, _os.path.join(parent, name)
-    def stat(self, **kwargs): return stat(self.path)
-    def is_dir(self, **kwargs): return isdir(self.path)
-    def is_file(self, **kwargs): return isfile(self.path)
+class _Entry:   # an image entry as the scan that listed it found it: its type, size and inode come from that image's index, not from the path resolved again
+    def __init__(self, parent, name, image, k): self.name, self.path, self._image, self._k = name, _os.path.join(parent, name), image, k
+    def stat(self, **kwargs): return _entry_stat(self._image, self._k)
+    def is_dir(self, **kwargs): return not self._image.entry(self._k)[4]
+    def is_file(self, **kwargs): return bool(self._image.entry(self._k)[4])
     def is_symlink(self): return False
-    def inode(self): return self.stat().st_ino
+    def inode(self): return self._k + 1
     def __fspath__(self): return self.path
 
 
@@ -198,7 +230,7 @@ def scandir(path):
     resolved = _resolve(path)
     if not resolved: return _os.scandir(path)
     image, relative = resolved
-    return _Scan(_Entry(path, name) for name, _ in image.children(image.find(relative)))
+    return _Scan(_Entry(path, name, image, k) for name, k in image.children(image.find(relative)))
 
 
 def walk(top, topdown=True, onerror=None, followlinks=False):
@@ -236,7 +268,12 @@ class Path(type(_Path())):
         if not _resolve(self): yield from super().glob(pattern, **kwargs); return
         if '/' not in pattern:
             yield from (p for p in self.iterdir() if fnmatch.fnmatchcase(p.name, pattern)); return
+        tail = pattern[3:] if pattern.startswith('**/') and '/' not in pattern[3:] else None
         for directory, dirs, files in walk(self):
+            if tail is not None:
+                for name in dirs + files:
+                    if fnmatch.fnmatchcase(name, tail): yield Path(directory) / name
+                continue
             for name in dirs + files:
                 p = Path(directory) / name; rel = p.relative_to(self).as_posix()
                 if fnmatch.fnmatchcase(rel, pattern) or (pattern.startswith('**/') and fnmatch.fnmatchcase(rel, pattern[3:])): yield p

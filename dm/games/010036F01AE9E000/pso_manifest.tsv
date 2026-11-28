@@ -1,0 +1,2 @@
+# Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S<TAB>shader key<TAB>stage / R<TAB>render pipeline key (pso_skey hex) / C<TAB>compute shader key / M<TAB>task shader key or -<TAB>native task / mesh pipeline key (pso_skey hex: the mesh shader in the vertex place).
+# No prewarm list recorded yet. The Mac app builds the bases it meets on its first start.

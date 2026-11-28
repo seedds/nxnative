@@ -7,7 +7,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 | Setting | Where | Why |
 |---|---|---|
 | `sys_resource 0x1000000` | [`game.tsv`](game.tsv) | the NPDM's 16 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | [Cult of the Lamb](../01002E7016C46000/README.md#memory)'s layout, the same Unity family; the NSP script's heap check chose the 1 GB pool: the game sets no heap, and with the hardware pool the alias region reached +4.27 of 4.38 GB within its first seconds |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | [Cult of the Lamb](../01002E7016C46000/README.md#memory)'s layout, the same Unity family; the NSP script's heap check chose the 1 GB pool: the game sets no heap, and with the hardware pool the alias region reached +4.27 of 4.38 GB within its first seconds |
 | `depth_mode zero` | `game.tsv` | the game calls `nvnDeviceSetDepthMode` with near = 0 (log: `depth mode near=0`), so the pipeline bases made before it runs take the `main0_z` vertex entries |
 | `shader_groups /Data/=data` | `game.tsv` | everything with shaders is under `Data/`: the player's serialized files and the `StreamingAssets` bundles |
 
@@ -42,6 +42,7 @@ Update 1.0.1 (v65536) over the base game, SDK 14.3.1. Unity 2021.3.15f1 IL2CPP w
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - **Current (2026-11-05):** the translator deletes 20 bindless accesses in 4 shaders (4 pixel; texture2D 20), whose results read 0: `0918eb68f1a71924` `220a6f463d1b1588` `768ad53b637e9686` `8027369dadd26a36`. The cause is not traced, and whether a route reaches them is not known. [Losses a shader build reports](../../../docs/reference/shaders.md#losses-a-shader-build-reports).
 - Everything past the first battle's first attack: the rest of the game, party members, a save and its load. This was a short test on purpose.
 - Nobody has watched it in motion or listened to it: the checks are single frames and the log. Sound is checked only in the log (one AudioOut with 6 channels; a few underruns of 5 ms, under the load above). Input has gone only through `DM_CTL`, not a controller or the keyboard.

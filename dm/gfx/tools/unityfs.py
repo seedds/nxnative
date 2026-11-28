@@ -223,6 +223,11 @@ Shader: string m_Name; SerializedShader m_ParsedForm; vector<data:unsigned int> 
 SHADER_2017_4 = SHADER_2018_3.replace('bool m_HasInstancingVariant; bool! m_HasProceduralInstancingVariant',
                                       'bool! m_HasInstancingVariant').replace(
     '; map<data:pair(string,PPtr<Texture>)>~ m_NonModifiableTextures', '')
+# Unity 2017.2.1p3 (Mercenaries Wings: The False Phoenix): the 2017.4 layout without m_MultiSampled in TextureParameter
+# or m_StructParams in ConstantBuffer. All 1,178 nodes and alignment flags match AssetRipper's TypeTreeDumps
+# StructsDump/release/2017.2.1p3.dump. All 53 Shader objects read to their exact ends and yield 456 programs.
+SHADER_2017_2 = SHADER_2017_4.replace('; bool m_MultiSampled', '').replace(
+    '; vector<data:StructParameter> m_StructParams', '')
 # The Unity 2019.4 Shader (Dodgeball Academia, Unity 2019.4.21f1: every serialized file is stripped and no bundle carries a tree), from Unity 2019.4.21f1's type tree as AssetRipper's
 # TypeTreeDumps records it (StructsDump/release/2019.4.21f1.dump): the 2018.3 layout with global and local keyword indices per subprogram, a ray tracing program in each pass, and 2019.3's
 # segments (offsets, compressedLengths and decompressedLengths hold one list per platform). Checked node for node with the flags (1,481 nodes), and equal to the tree Subnautica's 2019.4.36f1
@@ -321,6 +326,7 @@ KNOWN_TREES = {(CLASS_SHADER, bytes.fromhex('4496e93f2179252104401c8dda0a1751'))
                (CLASS_SHADER, bytes.fromhex('ed2a06ce7fb8203f6efb5ab5e0ce20d5')): ('Shader', SHADER_2019_4),
                (CLASS_SHADER, bytes.fromhex('8db760073e1392061e4a36995f0735af')): ('Shader', SHADER_2018_3),
                (CLASS_SHADER, bytes.fromhex('266d53113fa30d2b858f2768f92eaa14')): ('Shader', SHADER_2017_4),
+               (CLASS_SHADER, bytes.fromhex('71556c0fc74d861cf024e0cd349bd987')): ('Shader', SHADER_2017_2),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('43a0948a3f403068c0b31bff90ba0c9a')): ('ComputeShader', COMPUTE_6000_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('bfdf63ab0ce84d5a2c765ee560d90fe7')): ('ComputeShader', COMPUTE_2022_3),
                (CLASS_COMPUTE_SHADER, bytes.fromhex('abd9135b8ce83d043fef4e9ec7f53366')): ('ComputeShader', COMPUTE_2021_3),

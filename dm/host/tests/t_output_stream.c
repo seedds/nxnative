@@ -72,3 +72,5 @@ int main(void) {
     printf("OutputStream: 100 ms played in %llu ms, %d release events\n", (unsigned long long)ms, atomic_load(&g_sig));
     return 0;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

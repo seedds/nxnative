@@ -1,0 +1,10 @@
+# The existing map save: title (L+R), slot 1, then stand on Inkwell Isle One.
+# Unity's dynamic buffers exercise repeated buffer copies between draws.
+save	run
+keys	20:L+R,26:A,32:A,35:A
+secs	85
+quick	60
+reach	2000@65
+window	50	30
+shots	55,75
+hang	20

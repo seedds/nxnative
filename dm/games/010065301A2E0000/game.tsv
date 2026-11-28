@@ -1,0 +1,40 @@
+# Star Ocean: The Second Story R, Switch update 1.1.0 (v196608), SDK 15.3.2, Unity 2021.3.22f1 / NVN.
+
+# ---- Identity ----
+title_id	010065301A2E0000
+program_id	010065301A2E0000
+
+# ---- App ----
+name	Star Ocean: The Second Story R
+ipa	StarOceanTheSecondStoryR.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.1.0	main=d214ba64d902aeda4197b57debabd01b	subsdk0=368f01d5cb42f06cd125dc739d036719	sdk=8618895246b420329b77746b960a66ab
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/Movie/Movie_11.usm
+zip_store	.awb:.dat:.unity3d:.usm:.metallib
+
+# ---- Memory ----
+# 5 GiB phone-compatible guest layout. The SDK and Unity use virtual address regions.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# Give Unity's later regions room in the 4.375 GiB alias window. Use the
+# tested 1.5 GiB StandardAllocator cap for the 4.375 GiB phone layout. This caps address space, not the application pool.
+stdalloc_cap	0x60000000
+# the NPDM declares 16 MB of system resource
+sys_resource	0x1000000
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	STAR OCEAN THE SECOND STORY R shaders
+
+# Match the NVN near=0 depth mode used at startup when baking pipelines.
+depth_mode	zero

@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_dmsh_maxwell_ftz import EXIT, PT, RZ, TOOLS, code, sts   # noqa: E402
 from test_dmsh_nvn2_buffers import EXIT as A_EXIT, MOV_R6_C3_10, SUATOM_R5, ULDC64_C0_10   # noqa: E402
+sys.path.insert(0, str(TOOLS)); import dmsh_chain   # noqa: E402  (the chain's MSL version)
 
 
 def mov_c(rd, slot, offset): return 0x4c98 << 48 | 0xf << 39 | slot << 34 | offset // 4 << 20 | PT << 16 | rd                                 # MOV rd, c[slot][offset]
@@ -37,7 +38,7 @@ class StorageOffset(unittest.TestCase):
             res = json.loads((work / 'k.res.json').read_text())
             sys.path.insert(0, str(TOOLS)); import dmsh_geometry
             dmsh_geometry.flatten_sets(work / 'k.spv')
-            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', '20300', '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
+            r = subprocess.run([str(TOOLS / 'spirv_cross_bin/spirv-cross'), '--msl', '--msl-version', dmsh_chain.MSL_VERSION, '--msl-argument-buffers', str(work / 'k.spv')], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             return res, r.stdout
 

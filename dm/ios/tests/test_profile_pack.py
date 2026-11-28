@@ -7,7 +7,9 @@ import tempfile
 import unittest
 import zipfile
 
-REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ipa_pack_fixture import PACKING, REPO, run_step
+
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
 sys.path.insert(0, str(REPO / 'dm/tools'))
@@ -46,19 +48,14 @@ class ProfilePackTests(unittest.TestCase):
                 (romfs / 'marker').write_text('romfs')
                 (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
                 out = root / 'fixture.ipa'
-                env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'DM_GAMES_DIR', 'DM_GAMES_FIRST')}
-                env.update(GAME=gid, DM=str(dm), APP=str(app), MSL_IOS=str(shaders), MSLDIR='b-fixture',
-                           AOC='', ROMFS=str(romfs), OUT_IPA=str(out), PROFILE_TOOL=str(REPO / 'dm/games/game.py'))
-                if override is not None: env['IOS_PULL'] = override
+                extra = dict(APP=str(app), MSL_IOS=str(shaders), MSLDIR='b-fixture',
+                             AOC='', ROMFS=str(romfs), OUT_IPA=str(out))
+                if override is not None: extra['IOS_PULL'] = override
                 if with_pso:
                     pso = root / 'pso'; pso.mkdir(); (pso / 'prebuilt.tsv').write_text('fixture')
-                    env['PSO'] = str(pso)
+                    extra['PSO'] = str(pso)
                 # Exercise the actual archive step; only the preceding Xcode build is bypassed.
-                script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-                packing = script[script.index('\nP=Payload/DmIOS.app\n'):]
-                result = subprocess.run(['/bin/bash', '-c', 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\n'
-                                         'gp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n' + packing],
-                                        cwd=root, env=env, capture_output=True, text=True)
+                result = run_step(PACKING, root, gid, **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 with zipfile.ZipFile(out) as archive:
                     names = set(archive.namelist())

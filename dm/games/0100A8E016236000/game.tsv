@@ -1,0 +1,35 @@
+# Kirby's Dream Buffet 1.0.0 (SDK 13.3.0, HAL Laboratory, NVN).
+# Initialization ordering: patches.py and README.md.
+
+# ---- Identity ----
+title_id	0100A8E016236000
+program_id	0100A8E016236000
+
+# ---- App ----
+name	Kirby's Dream Buffet
+ipa	KirbysDreamBuffet.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=82af4e16bbc0bec8df70cd03e99bfc8c	subsdk0=7e9f31f59e001cf5d9b546ffb233f480	sdk=2bf3519216f5b9d3e8ce26863c2e98b6
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	basil/ScnCommon.bin
+zip_store	.bfstm:.opus:.webm:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/ubin/=ubin /gfx/=gfx /msg/=msg /snd/=snd /yaml/=yaml /lyt/=lyt /hidvib/=hidvib /font/=font /ptcl/=ptcl /shader/=shader /exlyml/=exlyml /param/=param /basil/=basil /fdg/=fdg /mov/=mov
+shader_note	Kirby's Dream Buffet shaders

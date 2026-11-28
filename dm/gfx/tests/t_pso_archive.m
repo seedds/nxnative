@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <dispatch/dispatch.h>
 // Keep the host's cache observations/deletions in a directory owned by this test.
 // Metal itself still uses its real compiler cache; only this translation unit's
 // confstr calls see the fixture parent, including when testing the former cleanup.
@@ -20,13 +21,17 @@ static size_t archive_confstr(int name, char *buffer, size_t length) {
     return size;
 }
 #define confstr archive_confstr
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block);
+#define dispatch_after archive_dispatch_after
 #include "../nvn/nvn_mtl.m"
+#undef dispatch_after
 static void archive_cache_cleanup(void) {
     [NSFileManager.defaultManager removeItemAtPath:@(archive_cache_root) error:nil];
 }
 uint64_t g_t0_ns;
 int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
-void *front_metal_layer(void) { return NULL; }
+static CAMetalLayer *test_layer;
+void *front_metal_layer(void) { return (__bridge void *)test_layer; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t *g_mod; int g_nmod;
 void svc_thread_dump(void) {}
@@ -36,9 +41,31 @@ static int checks, failed;
 // The next program of a test hand-over (--exec-seed): it starts only after the archive's write, so the folder holds the file; it says so in exec.txt (the test reads it)
 static void exec_then(void *dir) {
     int files = 0; for (NSString *f in [NSFileManager.defaultManager contentsOfDirectoryAtPath:@((const char *)dir) error:nil]) files += [f hasSuffix:@".mtl4a"];
-    [[NSString stringWithFormat:@"%d\n", files] writeToFile:[@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSString *path = [@((const char *)dir) stringByAppendingPathComponent:@"exec.txt"];
+    if (!path) abort();
+    [[NSString stringWithFormat:@"%d\n", files] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 #define EXPECT(name, want, got) do { uint64_t w = (want), g = (got); checks++; if (w != g) { fprintf(stderr, "%s: expected %llu, got %llu\n", name, (unsigned long long)w, (unsigned long long)g); failed++; } } while (0)
+
+// Drive the real archive timer callback on its queue without waiting ten seconds for each retry.
+static int test_archive_timer;
+static dispatch_block_t test_timer_block;
+static void archive_dispatch_after(dispatch_time_t when, dispatch_queue_t queue, dispatch_block_t block) {
+    if (test_archive_timer && queue == g_arch_q) {
+        EXPECT("at most one archive timer queued", 1, test_timer_block == nil);
+        test_timer_block = block;
+    } else {
+        dispatch_after(when, queue, block);
+    }
+}
+static void fire_archive_timer(void) {
+    dispatch_sync(g_arch_q, ^{
+        dispatch_block_t tick = test_timer_block;
+        EXPECT("archive timer armed", 1, tick != nil);
+        test_timer_block = nil;
+        if (tick) tick();
+    });
+}
 
 static id<MTLLibrary> g_lib, g_lib2;   // g_lib2: the same source again, for functions with no Metal 4 descriptor (a library hands out one function object per name)
 static id<MTLCommandQueue> g_q;
@@ -51,14 +78,19 @@ static id<MTLFunction> test_fn(id<MTLLibrary> lib, NSString *name, int registere
     if (cv) f = [lib newFunctionWithName:name constantValues:cv error:nil];
     return registered ? fn4_note(f, lib, name, cv) : f;
 }
+static NSError *compile_error(int kind) {
+    return kind == 2 ? [NSError errorWithDomain:@"AGXMetalG14G" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED."}]
+                     : [NSError errorWithDomain:@"test" code:1 userInfo:nil];
+}
 // Hold one function's first library specialization while another caller requests it and an unrelated function specializes.
 @interface FunctionGateLibrary : NSObject {
-@public id<MTLLibrary> library; NSString *name; dispatch_semaphore_t entered, extra, release; _Atomic int calls;
+@public id<MTLLibrary> library; NSString *name; dispatch_semaphore_t entered, extra, release; _Atomic int calls; int fail;
 }
 @end
 @implementation FunctionGateLibrary
 - (id)forwardingTargetForSelector:(SEL)selector { return library; }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)entry constantValues:(MTLFunctionConstantValues *)values error:(NSError **)error {
+    if (fail) { if (error) *error = compile_error(fail); return nil; }
     if ([entry isEqualToString:name]) {
         if (!atomic_fetch_add(&calls, 1)) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
         else dispatch_semaphore_signal(extra);
@@ -90,17 +122,47 @@ static void concurrent_functions(id<MTLLibrary> library) {
 }
 // Hold the first base build while other callers request colour variants and an unrelated base.
 @interface ArchiveGateCompiler : NSObject {
-@public id<MTL4Compiler> compiler; dispatch_semaphore_t entered, release; _Atomic int calls, lookup_calls; int fail;
+@public id<MTL4Compiler> compiler; dispatch_semaphore_t entered, release; _Atomic int calls, lookup_calls; int fail, fail_spec;
 }
 @end
 @implementation ArchiveGateCompiler
 - (id)forwardingTargetForSelector:(SEL)selector { return compiler; }
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
-    if (opts.lookupArchives.count) atomic_fetch_add(&lookup_calls, 1);
+- (BOOL)refuses:(NSError **)error {
     int call = atomic_fetch_add(&calls, 1);
     if (!call) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
-    if (fail) { if (error) *error = [NSError errorWithDomain:@"test" code:1 userInfo:nil]; return nil; }
+    if (fail && error) *error = compile_error(fail);
+    return fail != 0;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    if (opts.lookupArchives.count) atomic_fetch_add(&lookup_calls, 1);
+    if ([self refuses:error]) return nil;
     return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTL4ComputePipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    if ([self refuses:error]) return nil;
+    return [compiler newComputePipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateBySpecializationWithDescriptor:(MTL4RenderPipelineDescriptor *)d pipeline:(id<MTLRenderPipelineState>)base error:(NSError **)error {
+    if (entered) { dispatch_semaphore_signal(entered); dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); }
+    if (fail_spec) { if (error) *error = compile_error(fail_spec); return nil; }
+    return [compiler newRenderPipelineStateBySpecializationWithDescriptor:d pipeline:base error:error];
+}
+@end
+// Inject service loss at the device compilation APIs without changing the real compiler service.
+@interface CompileFailureDevice : NSObject { @public id<MTLDevice> device; } @end
+@implementation CompileFailureDevice
+- (id)forwardingTargetForSelector:(SEL)selector { return device; }
+- (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)f error:(NSError **)error {
+    if (error) *error = compile_error(2); return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)error {
+    if (error) *error = compile_error(2); return nil;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithMeshDescriptor:(MTLMeshRenderPipelineDescriptor *)d options:(MTLPipelineOption)o reflection:(MTLAutoreleasedRenderPipelineReflection *)r error:(NSError **)error {
+    if (error) *error = compile_error(2); return nil;
+}
+- (id<MTLLibrary>)newLibraryWithSource:(NSString *)s options:(MTLCompileOptions *)o error:(NSError **)error {
+    if (error) *error = compile_error(2); return nil;
 }
 @end
 // Counts the compute pipeline lookups in an archive file
@@ -254,6 +316,7 @@ static void mesh_pipelines(void) {
     uint64_t built = g_mtk_built, arch = g_mtk_arch, dev = g_mtk_dev; int pending = g_arch_new, got = 0;
     id<MTLRenderPipelineState> p1 = mtk_build(&k, nil, ms, fs, &err, &got), p2 = mtk_build(&k, os, mt, fs, &err, NULL), p3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
     EXPECT("mesh: pipelines", 1, p1 && p2 && p3);
+    EXPECT("mesh: whole pipeline keeps mesh grid limit", 1, p1.maxTotalThreadgroupsPerMeshGrid > 0 && p2.maxTotalThreadgroupsPerMeshGrid > 0);
     EXPECT("mesh: built", built + 3, g_mtk_built);
     EXPECT("mesh: not from the archive", 0, got);
     dispatch_sync(arch_harvest_q(), ^{});   // their captures, in the background
@@ -271,6 +334,7 @@ static void mesh_pipelines(void) {
     built = g_mtk_built; pending = g_arch_new;
     id<MTLRenderPipelineState> q1 = mtk_build(&k, nil, ms, fs, &err, &got), q2 = mtk_build(&k, os, mt, fs, &err, NULL), q3 = mtk_build(&kz, nil, ms, nil, &err, NULL);
     EXPECT("mesh again: from the archive", arch + 3, g_mtk_arch);
+    EXPECT("mesh again: archived whole pipeline keeps mesh grid limit", 1, q1.maxTotalThreadgroupsPerMeshGrid > 0 && q2.maxTotalThreadgroupsPerMeshGrid > 0);
     EXPECT("mesh again: reported as archived", 1, got);
     EXPECT("mesh again: not built", built, g_mtk_built);
     dispatch_sync(arch_harvest_q(), ^{});
@@ -403,6 +467,7 @@ static void depth_only(void) {
     MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new]; ds.depthWriteEnabled = YES; ds.depthCompareFunction = MTLCompareFunctionAlways;
     float v[4] = {1, 1, 1, 1}; id<MTLBuffer> vb = [g_dev newBufferWithBytes:v length:sizeof v options:MTLResourceStorageModeShared];
     id<MTLBuffer> out = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared];
+    if (!out) abort();
     id<MTLCommandBuffer> cb = [g_q commandBuffer]; id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     [enc setRenderPipelineState:ps]; [enc setDepthStencilState:[g_dev newDepthStencilStateWithDescriptor:ds]];
     [enc setVertexBuffer:vb offset:0 atIndex:16]; [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [enc endEncoding];
@@ -433,15 +498,18 @@ static void concurrent_bases(int fail) {
         }
     });
     EXPECT("concurrent: first compiler entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
-    // An unrelated key must complete while the first remains blocked.
+    // An unrelated key must complete while the first remains blocked. It has the held compile's stage functions, so it is not captured beside it (fn_claim, Metal crashes on
+    // that): after the wait the plain compiler builds it
+    int plain0 = g_fn_plain; g_fn_wait_ms = 200;
     MTLRenderPipelineDescriptor *other = [ds[0] copy]; other.vertexDescriptor = [other.vertexDescriptor copy]; other.vertexDescriptor.layouts[16].stride = 1024;
     dispatch_group_t separate = dispatch_group_create();
     dispatch_group_async(separate, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { pso_build(other, 0, NULL); } });
     EXPECT("concurrent: unrelated base progresses", 0, dispatch_group_wait(separate, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("concurrent: the unrelated base built without the archive", 1, g_fn_plain - plain0); g_fn_wait_ms = FN_WAIT_MS;
     dispatch_semaphore_signal(gate->release);
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER); dispatch_group_wait(separate, DISPATCH_TIME_FOREVER);
     EXPECT("concurrent: all callers receive result", 8, good);
-    if (!fail) EXPECT("concurrent: one compile per base", 2, gate->calls);
+    if (!fail) EXPECT("concurrent: one compile per base, the unrelated one by the plain compiler", 1, gate->calls);
     EXPECT("concurrent: no unfinished builds", 0, g_pbase_pending.n);
     ep->comp = gate->compiler;
     if (!fail) return;
@@ -469,6 +537,148 @@ static void concurrent_bases(int fail) {
     atomic_store(&fresh->n, 0); g_comp4 = plain; fresh->comp = fg->compiler;
     nvn_hm_clear(&g_pbase, hm_rel); err = nil;
     EXPECT("concurrent: failed base can retry", 1, pso_build(ds[0], 0, &err) != nil);
+}
+// A capture the compiler service died under (arch_capture_try, err_compiler_died): its period is handed over and not written, the counts of unwritten pipelines drop by what it held,
+// and the run goes on capturing into a new period that is written. A written crashed period made Ocarina of Time's every later start abort in Metal's archive lookup
+static void crashed_period(void) {
+    char cdir[] = "/tmp/t_pso_crashed.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    arch_flush_wait(); NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    NSError *err = nil;
+    MTLRenderPipelineDescriptor *a = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); a.vertexDescriptor.layouts[16].stride = 4096;
+    EXPECT("crashed: a capture before", 1, pso_build(a, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = 2; gate->calls = 1; ep->comp = (id<MTL4Compiler>)gate;
+    MTLRenderPipelineDescriptor *b = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); b.vertexDescriptor.layouts[16].stride = 3072;
+    err = nil; EXPECT("crashed: the pipeline built by the plain compiler", 1, pso_build(b, 0, &err) != nil && !err);
+    EXPECT("crashed: the period marked", 1, ep->crashed);
+    EXPECT("crashed: handed over", 1, g_ep != ep);
+    EXPECT("crashed: still capturing", 1, arch_capturing());
+    ep->comp = gate->compiler;
+    arch_flush_wait();
+    EXPECT("crashed: the period not written", 0, (int)archive_files(@(cdir)).count);
+    EXPECT("crashed: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
+    MTLRenderPipelineDescriptor *c = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); c.vertexDescriptor.layouts[16].stride = 2560;
+    EXPECT("crashed: the next period captures", 1, pso_build(c, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    arch_flush_wait();
+    EXPECT("crashed: the next period written", 1, (int)archive_files(@(cdir)).count);
+    // the compiler service dying under a compile that is not a capture (a plain or MTLDevice pipeline): the current period is not written either
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 1, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 2048;
+    EXPECT("died elsewhere: a capture before", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep2 = g_ep;
+    arch_died([NSError errorWithDomain:@"AGXMetalG14G" code:2 userInfo:@{NSLocalizedDescriptionKey: @"Compilation failed due to an interrupted connection: XPC_ERROR_CONNECTION_INTERRUPTED."}]);
+    arch_died([NSError errorWithDomain:@"test" code:1 userInfo:nil]);   // any other error: nothing
+    EXPECT("died elsewhere: the period marked", 1, ep2->crashed);
+    EXPECT("died elsewhere: handed over", 1, g_ep != ep2);
+    arch_flush_wait();
+    EXPECT("died elsewhere: the period not written", 1, (int)archive_files(@(cdir)).count);
+    EXPECT("died elsewhere: nothing left counted as unwritten", 0, atomic_load(&g_arch_new));
+    nvn_hm_clear(&g_pbase, hm_rel);
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
+}
+// Hand over a period while its last capture is blocked. The plain fallback stays blocked until the writer has run: marking after fallback is too late, even if it succeeds.
+static void crashed_flush_race(int compute) {
+    char cdir[] = "/tmp/t_pso_crash_race.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    arch_flush_wait(); NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    NSError *err = nil;
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 4608 + compute * 16;
+    EXPECT("crash race: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep = g_ep; ArchiveGateCompiler *capture = [ArchiveGateCompiler new], *plain = [ArchiveGateCompiler new];
+    capture->compiler = ep->comp; capture->fail = 2; capture->entered = dispatch_semaphore_create(0); capture->release = dispatch_semaphore_create(0);
+    plain->compiler = g_comp4; plain->fail = 1; plain->entered = dispatch_semaphore_create(0); plain->release = dispatch_semaphore_create(0);
+    ep->comp = (id<MTL4Compiler>)capture; g_comp4 = (id<MTL4Compiler>)plain;
+    MTL4RenderPipelineDescriptor *rd = pso_desc4(d, 1, 0);
+    MTL4ComputePipelineDescriptor *cd = [MTL4ComputePipelineDescriptor new]; cd.computeFunctionDescriptor = rd.vertexFunctionDescriptor;   // the fake compiler refuses before validation
+    dispatch_group_t work = dispatch_group_create();
+    dispatch_group_async(work, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (compute) arch_capture_cs(cd, NULL, NULL); else arch_capture(rd, NULL, 1, NULL);
+    });
+    EXPECT("crash race: capture entered", 0, dispatch_semaphore_wait(capture->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    arch_hand_over(ep, ARCH_FLUSH_NOW);
+    EXPECT("crash race: handed over while active", 1, g_ep != ep && atomic_load(&ep->active) == 1);
+    dispatch_semaphore_signal(capture->release);
+    EXPECT("crash race: capture left", 0, dispatch_group_wait(ep->busy, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("crash race: marked before releasing the period", 1, atomic_load(&ep->crashed));
+    dispatch_semaphore_t written = dispatch_semaphore_create(0);
+    dispatch_async(g_arch_q, ^{ dispatch_semaphore_signal(written); });
+    EXPECT("crash race: writer completed before fallback", 0, dispatch_semaphore_wait(written, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("crash race: nothing published", 0, archive_files(@(cdir)).count);
+    EXPECT("crash race: unwritten count drained", 0, atomic_load(&g_arch_new));
+    dispatch_semaphore_signal(plain->release);
+    EXPECT("crash race: fallback finished", 0, dispatch_group_wait(work, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    g_comp4 = plain->compiler; ep->comp = capture->compiler;
+    arch_flush_wait(); nvn_hm_clear(&g_pbase, hm_rel);
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
+}
+// Callers may ignore errors (background prediction) or pass NULL. The shared pipeline/function compile boundary must still invalidate the archive; ordinary errors must not.
+static void compiler_death_notifications(void) {
+    char cdir[] = "/tmp/t_pso_notify.XXXXXX"; if (!mkdtemp(cdir)) abort();
+    arch_flush_wait(); NSString *saved = g_arch_dir; g_arch_dir = @(cdir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    for (int kind = 1; kind <= 2; kind++) {
+        NSError *err = nil; MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 4704 + kind * 16;
+        EXPECT("notify: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+        ArchEpoch *ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = g_comp4; gate->fail_spec = kind; g_comp4 = (id<MTL4Compiler>)gate;
+        EXPECT("notify: specialization refused with no error output", 1, pso_build(d, 0, NULL) == nil);
+        g_comp4 = gate->compiler;
+        EXPECT("notify: only compiler death invalidates", kind == 2, atomic_load(&ep->crashed));
+        EXPECT("notify: only compiler death hands over", kind == 2, g_ep != ep);
+        arch_flush_wait();
+        EXPECT("notify: only the ordinary error's period published", 1, archive_files(@(cdir)).count);
+    }
+    NSError *err = nil; MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1); d.vertexDescriptor.layouts[16].stride = 4800;
+    EXPECT("notify function: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ArchEpoch *ep = g_ep; FunctionGateLibrary *lib = [FunctionGateLibrary new]; lib->library = g_lib; lib->fail = 2;
+    EXPECT("notify function: specialization refused with no error output", 1, fn_lib_spec((id<MTLLibrary>)lib, @"vs", [MTLFunctionConstantValues new], NULL) == nil);
+    EXPECT("notify function: period invalidated", 1, atomic_load(&ep->crashed));
+    arch_flush_wait();
+    EXPECT("notify function: nothing published", 1, archive_files(@(cdir)).count);
+    // The background worker ignores NSError. Its interruption may return after the writer's bounded wait: that wait must never publish a still-unclassified period.
+    d.vertexDescriptor.layouts[16].stride = 4816;
+    EXPECT("notify background: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+    ep = g_ep; ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = g_comp4; gate->fail_spec = 2;
+    gate->entered = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0); g_comp4 = (id<MTL4Compiler>)gate;
+    dispatch_queue_t q = dispatch_queue_create("test.pso-death", DISPATCH_QUEUE_SERIAL);
+    pso_key key = {0}; uint32_t gen = 0;
+    pthread_mutex_lock(&g_pp_mu); int slot = pso_pend_slot(&key, 0, &gen); pthread_mutex_unlock(&g_pp_mu);
+    if (slot < 0) abort();
+    pso_pend_start(slot, gen, d, 0, q);
+    EXPECT("notify background: specialization entered", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    arch_hand_over(ep, ARCH_FLUSH_NOW);
+    dispatch_semaphore_t writer = dispatch_semaphore_create(0);
+    dispatch_async(g_arch_q, ^{ dispatch_semaphore_signal(writer); });
+    EXPECT("notify background: writer finishes with plain compile unresolved", 0, dispatch_semaphore_wait(writer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("notify background: no publication before the compile reports its error", 1, archive_files(@(cdir)).count);
+    dispatch_semaphore_signal(gate->release); dispatch_sync(q, ^{});
+    EXPECT("notify background: the worker completed without a pipeline", 1, g_pp[slot].done && !g_pp[slot].ps);
+    g_comp4 = gate->compiler; g_pp[slot].used = 0;
+    arch_flush_wait();
+    EXPECT("notify background: handed-over period not published", 1, archive_files(@(cdir)).count);
+    // Geometry and embedded pipelines share these MTLDevice boundaries; no reporter is required to notify the archive.
+    CompileFailureDevice *device = [CompileFailureDevice new]; device->device = g_dev;
+    id<MTLLibrary> mesh_lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct V { float4 p [[position]]; };\n"
+        "[[mesh]] void ms(mesh<V, void, 3, 1, topology::triangle> out) { out.set_primitive_count(0); }\n"
+        options:nil error:&err];
+    id<MTLFunction> mesh_fn = [mesh_lib newFunctionWithName:@"ms"];
+    EXPECT("notify device: fixture mesh function", 1, mesh_fn != nil);
+    for (int kind = 0; kind < 4; kind++) {
+        d.vertexDescriptor.layouts[16].stride = 4832 + kind * 16;
+        EXPECT("notify device: a captured base", 1, pso_build(d, 0, &err) != nil && atomic_load(&g_ep->n) == 1);
+        ep = g_ep; g_dev = (id<MTLDevice>)device; id result;
+        if (kind == 0) result = cps_new([g_lib2 newFunctionWithName:@"vs"], NULL);   // unregistered: directly through the MTLDevice
+        else if (kind == 1) result = pso_build_dev(d, 0, NULL);
+        else if (kind == 2) {
+            MTLMeshRenderPipelineDescriptor *m = [MTLMeshRenderPipelineDescriptor new];
+            m.meshFunction = mesh_fn; m.fragmentFunction = [g_lib newFunctionWithName:@"fs"];
+            result = dev_mps(m, NULL);
+        }
+        else result = dev_lib(@"fragment void fixture() {}", NULL);
+        g_dev = device->device;
+        EXPECT("notify device: compile refused", 1, result == nil);
+        EXPECT("notify device: period invalidated", 1, atomic_load(&ep->crashed));
+        arch_flush_wait();
+        EXPECT("notify device: nothing published", 1, archive_files(@(cdir)).count);
+    }
+    nvn_hm_clear(&g_pbase, hm_rel);
+    [NSFileManager.defaultManager removeItemAtPath:@(cdir) error:nil]; g_arch_dir = saved; g_arch4 = @[]; g_arch4p = @[];
 }
 static void capture_preserves_foreign_folder(void) {
     arch_flush_wait();   // Finish earlier captures: the captures below go into a new flush period
@@ -573,24 +783,540 @@ static void repeated_archive_miss(void) {
     nvn_hm_clear(&g_pbase_miss, hm_rel);
 }
 
-// An app's folder of Metal's build folders (ga_claim): a start with no other copy running lists the earlier runs' folders; a copy started beside it lists none; and once the first
-// exits, a third start still lists none while the second runs, whose folders are live. Each claim opens the lock anew, and flock locks of separate opens conflict as between processes
+// An app's folder of Metal's build folders (ga_claim / ga_remove): a start with no other copy running snapshots only earlier runs' directories with their (dev, ino)
+// identity; a copy started beside it lists none; once the first exits, a third start still lists none while the second runs; and background removal preserves files,
+// symlinks, unrelated directories, post-snapshot directories, and any entry replaced by a new directory, file, or symlink with the same name.
+static NSSet<NSString *> *ga_names(NSArray<GaDir *> *dirs) {
+    NSMutableSet<NSString *> *s = [NSMutableSet setWithCapacity:dirs.count];
+    for (GaDir *g in dirs) [s addObject:g->name];
+    return s;
+}
 static void app_folder_claim(void) {
     EXPECT("app folder: a host without a bundle shares Metal's folder", 0, ga_own());
     EXPECT("app folder: Metal's folder", 1, [ga_dir() hasSuffix:@"/com.apple.gpuarchiver"]);
-    NSString *dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test/com.apple.gpuarchiver"];
-    for (NSString *n in @[@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb"]) [NSFileManager.defaultManager createDirectoryAtPath:[dir stringByAppendingPathComponent:n] withIntermediateDirectories:YES attributes:nil error:nil];
-    [@"x" writeToFile:[dir stringByAppendingPathComponent:@"other"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *app_dir = [@(archive_cache_root) stringByAppendingPathComponent:@"org.nxnative.test"];
+    NSString *dir = [app_dir stringByAppendingPathComponent:@"com.apple.gpuarchiver"];
+    NSString *d_a = [dir stringByAppendingPathComponent:@"gpuarchiver-aaaaaa"];
+    NSString *d_a_nested = [d_a stringByAppendingPathComponent:@"nested"];
+    NSString *d_b = [dir stringByAppendingPathComponent:@"gpuarchiver-bbbbbb"];
+    NSString *d_rep = [dir stringByAppendingPathComponent:@"gpuarchiver-replaced"];
+    NSString *d_sfile = [dir stringByAppendingPathComponent:@"gpuarchiver-swapfile"];
+    NSString *d_slink = [dir stringByAppendingPathComponent:@"gpuarchiver-swaplink"];
+    for (NSString *p in @[d_a_nested, d_b, d_rep, d_sfile, d_slink])
+        [fm createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"old" writeToFile:[d_a_nested stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_b stringByAppendingPathComponent:@"state"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_rep stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_sfile stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    [@"old" writeToFile:[d_slink stringByAppendingPathComponent:@"old"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+
+    NSString *other = [dir stringByAppendingPathComponent:@"unrelated"];
+    NSString *other_file = [other stringByAppendingPathComponent:@"state"];
+    [fm createDirectoryAtPath:other withIntermediateDirectories:NO attributes:nil error:nil];
+    [@"keep" writeToFile:other_file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    EXPECT("app folder: nested symlink fixture created", 0, symlink(other.fileSystemRepresentation, [d_a_nested stringByAppendingPathComponent:@"out"].fileSystemRepresentation));
+
+    NSString *file = [dir stringByAppendingPathComponent:@"gpuarchiver-file"];
+    [@"keep" writeToFile:file atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    NSString *link = [dir stringByAppendingPathComponent:@"gpuarchiver-link"];
+    EXPECT("app folder: matching symlink fixture created", 0, symlink(other.fileSystemRepresentation, link.fileSystemRepresentation));
+
     int a, b, c, d;
-    NSSet<NSString *> *got = ga_claim(dir, &a), *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", nil];
-    EXPECT("app folder: the first copy lists the earlier runs' folders", 1, a >= 0 && [got isEqualToSet:want]);
+    NSArray<GaDir *> *got = ga_claim(dir, &a);
+    NSSet<NSString *> *want = [NSSet setWithObjects:@"gpuarchiver-aaaaaa", @"gpuarchiver-bbbbbb", @"gpuarchiver-replaced", @"gpuarchiver-swapfile", @"gpuarchiver-swaplink", nil];
+    EXPECT("app folder: the first copy lists only earlier run directories", 1, a >= 0 && [ga_names(got) isEqualToSet:want]);
+    NSString *late = [dir stringByAppendingPathComponent:@"gpuarchiver-late"], *late_file = [late stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: post-snapshot directory created", 1, [fm createDirectoryAtPath:late withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: post-snapshot file written", 1, [@"live" writeToFile:late_file atomically:NO encoding:NSUTF8StringEncoding error:nil]);
     EXPECT("app folder: a second copy lists none", 1, ga_claim(dir, &b) == nil && b >= 0);
     close(a);   // the first copy quits
     EXPECT("app folder: a third copy lists none while the second runs", 1, ga_claim(dir, &c) == nil && c >= 0);
     close(b); close(c);
-    EXPECT("app folder: with no copy running, a start lists them again", 2, ga_claim(dir, &d).count);
+    NSArray<GaDir *> *again = ga_claim(dir, &d);
+    EXPECT("app folder: with no copy running, a start lists old and late directories", 6, again.count);
     close(d);
+
+    // Concurrent-writer mutations after snapshot: keep the old directory's inode allocated across replacement creation so the new directory gets a distinct st_ino.
+    NSString *moved_rep = [app_dir stringByAppendingPathComponent:@"moved-replaced"];
+    NSString *rep_live = [d_rep stringByAppendingPathComponent:@"live"];
+    EXPECT("app folder: move replaced fixture aside", 1, [fm moveItemAtPath:d_rep toPath:moved_rep error:nil]);
+    EXPECT("app folder: create replacement directory", 1, [fm createDirectoryAtPath:d_rep withIntermediateDirectories:NO attributes:nil error:nil]);
+    EXPECT("app folder: write file in replacement directory", 1, [@"live" writeToFile:rep_live atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+    EXPECT("app folder: remove moved old fixture", 1, [fm removeItemAtPath:moved_rep error:nil]);
+
+    EXPECT("app folder: remove swapfile fixture dir", 1, [fm removeItemAtPath:d_sfile error:nil]);
+    EXPECT("app folder: replace with regular file", 1, [@"file" writeToFile:d_sfile atomically:NO encoding:NSUTF8StringEncoding error:nil]);
+
+    EXPECT("app folder: remove swaplink fixture dir", 1, [fm removeItemAtPath:d_slink error:nil]);
+    EXPECT("app folder: replace with symlink", 0, symlink(other.fileSystemRepresentation, d_slink.fileSystemRepresentation));
+
+    EXPECT("app folder: removes only unchanged snapshotted directories", 2, ga_remove(dir, got));
+    struct stat st;
+    EXPECT("app folder: old matching directory a gone", 0, lstat(d_a.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: old matching directory b gone", 0, lstat(d_b.fileSystemRepresentation, &st) == 0);
+    EXPECT("app folder: unrelated directory retained", 1, [fm fileExistsAtPath:other_file]);
+    EXPECT("app folder: matching regular file retained", 1, lstat(file.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: matching symlink retained without following it", 1, lstat(link.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
+    EXPECT("app folder: directory created after snapshot retained", 1, [fm fileExistsAtPath:late_file]);
+    EXPECT("app folder: replacement directory with same name retained", 1, [fm fileExistsAtPath:rep_live]);
+    EXPECT("app folder: directory swapped for regular file retained", 1, lstat(d_sfile.fileSystemRepresentation, &st) == 0 && S_ISREG(st.st_mode));
+    EXPECT("app folder: directory swapped for symlink retained", 1, lstat(d_slink.fileSystemRepresentation, &st) == 0 && S_ISLNK(st.st_mode));
     EXPECT("app folder: no folder, no lock", 1, ga_claim(nil, &d) == nil && d < 0);
+    EXPECT("app folder: no folder, nothing removed", 0, ga_remove(nil, got));
+}
+
+// Injects per-stride compile failures across both the current compiler and fresh compilers created by ep_new().
+@interface StrideFaultCompiler : NSObject {
+@public
+    id<MTL4Compiler> compiler;
+    NSUInteger transient_stride, permanent_stride, reject_stride;
+    _Atomic int transient_left;
+    _Atomic int permanent_calls, reject_calls;
+}
+@end
+@implementation StrideFaultCompiler
+- (id)forwardingTargetForSelector:(SEL)selector { return compiler; }
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTL4RenderPipelineDescriptor *)d compilerTaskOptions:(MTL4CompilerTaskOptions *)opts error:(NSError **)error {
+    NSUInteger stride = d.vertexDescriptor.layouts[16].stride;
+    if (permanent_stride && stride == permanent_stride) {
+        atomic_fetch_add(&permanent_calls, 1);
+        if (error) *error = compile_error(2);
+        return nil;
+    }
+    if (reject_stride && stride == reject_stride) {
+        atomic_fetch_add(&reject_calls, 1);
+        if (error) *error = compile_error(1);
+        return nil;
+    }
+    if (transient_stride && stride == transient_stride) {
+        int left = atomic_load(&transient_left);
+        while (left > 0 && !atomic_compare_exchange_weak(&transient_left, &left, left - 1)) {}
+        if (left > 0) {
+            if (error) *error = compile_error(2);
+            return nil;
+        }
+    }
+    return [compiler newRenderPipelineStateWithDescriptor:d compilerTaskOptions:opts error:error];
+}
+@end
+
+@interface StrideFaultDevice : NSObject {
+@public
+    id<MTLDevice> device;
+    StrideFaultCompiler *proto;
+}
+@end
+@implementation StrideFaultDevice
+- (id)forwardingTargetForSelector:(SEL)selector { return device; }
+- (id<MTL4Compiler>)newCompilerWithDescriptor:(MTL4CompilerDescriptor *)d error:(NSError **)error {
+    id<MTL4Compiler> real = [device newCompilerWithDescriptor:d error:error];
+    if (!real) return nil;
+    StrideFaultCompiler *wrap = [StrideFaultCompiler new];
+    wrap->compiler = real;
+    wrap->transient_stride = proto->transient_stride;
+    wrap->permanent_stride = proto->permanent_stride;
+    wrap->reject_stride = proto->reject_stride;
+    atomic_store(&wrap->transient_left, atomic_load(&proto->transient_left));
+    return (id<MTL4Compiler>)wrap;
+}
+@end
+
+static int run_self_bundle_open(NSString *bundle, int count, int with_compute, uint64_t *mask_out, int *usable_out, int *cs_usable_out) {
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:NSProcessInfo.processInfo.arguments[0]];
+    t.arguments = @[@"--bundle-open", bundle, [NSString stringWithFormat:@"%d", count], with_compute ? @"1" : @"0"];
+    NSMutableDictionary *e = [NSProcessInfo.processInfo.environment mutableCopy];
+    e[@"DM_PSO_BUNDLE"] = bundle;
+    e[@"DM_PSO_ARCHIVE"] = @"off";
+    t.environment = e;
+    NSPipe *pipe = [NSPipe pipe];
+    t.standardOutput = pipe;
+    t.standardError = pipe;
+    if (![t launchAndReturnError:nil]) return -1;
+    NSData *out = [pipe.fileHandleForReading readDataToEndOfFile];
+    [t waitUntilExit];
+    NSString *text = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding] ?: @"";
+    int usable = -1, cs_usable = -1; uint64_t mask = 0;
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+        if ([line hasPrefix:@"BUNDLE_USABLE="]) usable = [line substringFromIndex:14].intValue;
+        else if ([line hasPrefix:@"BUNDLE_MASK="]) mask = strtoull([line substringFromIndex:12].UTF8String, NULL, 16);
+        else if ([line hasPrefix:@"BUNDLE_CS_USABLE="]) cs_usable = [line substringFromIndex:17].intValue;
+    }
+    if (usable_out) *usable_out = usable;
+    if (mask_out) *mask_out = mask;
+    if (cs_usable_out) *cs_usable_out = cs_usable;
+    if (t.terminationStatus || usable < 0) fprintf(stderr, "--bundle-open output:\n%s\n", text.UTF8String);
+    return t.terminationStatus;
+}
+
+static MTLRenderPipelineDescriptor *bundle_desc(int i) {
+    MTLRenderPipelineDescriptor *d = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+    d.vertexDescriptor.layouts[16].stride = 16 * (NSUInteger)(100 + i);
+    return d;
+}
+
+static MTL4ComputePipelineDescriptor *bundle_compute_desc(void) {
+    NSError *err = nil;
+    NSString *ksrc = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void bundle_k(device uint *o [[buffer(0)]], uint i [[thread_position_in_grid]]) { o[i] = i ^ 0x5au; }\n";
+    id<MTLLibrary> lib = [g_dev newLibraryWithSource:ksrc options:nil error:&err];
+    if (!lib) return nil;
+    lib_tag(lib, @"fixture-bundle-cs.metallib");
+    id<MTLFunction> fn = fn4_note([lib newFunctionWithName:@"bundle_k"], lib, @"bundle_k", nil);
+    MTL4ComputePipelineDescriptor *cd = [MTL4ComputePipelineDescriptor new];
+    cd.computeFunctionDescriptor = fn4_of(fn);
+    return cd;
+}
+
+static void bundle_open_verify(int count, int with_compute) {
+    pso4_init();
+    int usable = 0; uint64_t mask = 0;
+    for (int i = 0; i < count; i++) {
+        NSError *err = nil;
+        MTLRenderPipelineDescriptor *d = bundle_desc(i);
+        if (pso_build_ex(d, 0, &err, 0) != nil) { usable++; mask |= 1ull << i; }
+    }
+    int cs_usable = 0;
+    if (with_compute) {
+        MTL4ComputePipelineDescriptor *cd = bundle_compute_desc();
+        cs_usable = cd && arch_lookup(cd, 1, NULL) != nil;
+    }
+    printf("BUNDLE_USABLE=%d\nBUNDLE_MASK=%llx\nBUNDLE_CS_USABLE=%d\n", usable, (unsigned long long)mask, cs_usable);
+    fflush(stdout);
+}
+
+// 1. Recoverable interruption: period 2 dies partway through (2 captured + 1 in-flight fallback);
+// recovery recaptures all 3 in a fresh period after the serialization gate is released and publishes a complete bundle.
+static void bundle_recovery_recoverable(void) {
+    char sdir[] = "/tmp/t_pso_bstage.XXXXXX", bdir[] = "/tmp/t_pso_bout.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    for (int i = 0; i < 12; i++) {
+        NSError *err = nil;
+        ArchEpoch *ep = g_ep;
+        ArchiveGateCompiler *gate = nil;
+        if (i == 6) {
+            gate = [ArchiveGateCompiler new]; gate->compiler = ep->comp; gate->fail = 2; gate->calls = 1;
+            ep->comp = (id<MTL4Compiler>)gate;
+        }
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        if (gate) ep->comp = gate->compiler;
+        EXPECT("recoverable: pipeline built", 1, ps != nil);
+    }
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 12);
+    EXPECT("recoverable: pre_bundle_out succeeded", 1, pub);
+    EXPECT("recoverable: 12 requested, 12 published", 1, g_pkg_last_requested == 12 && g_pkg_last_published == 12);
+    EXPECT("recoverable: 3 lost keys recovered in 1 round", 1, g_pkg_last_recovered == 3 && g_pkg_last_rounds == 1);
+    EXPECT("recoverable: 0 missing and 0 rejected", 1, g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0 && g_pkg_last_rejected == 0);
+    // Retained descriptors are released once their periods write.
+    int retained = 0;
+    os_unfair_lock_lock(&g_pkg_lock);
+    for (ArchPkgItem *it in g_pkg_items.allValues) retained += it->desc != nil;
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("recoverable: retained descriptors released after publish", 0, retained);
+    // Every published archive file has a matching pipelines script for other GPUs.
+    NSArray<NSString *> *out_files = archive_files(@(bdir));
+    NSArray<NSString *> *scripts = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(bdir) error:nil]
+                                    filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4-json'"]];
+    EXPECT("recoverable: scripts match archive file count", out_files.count, scripts.count);
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("recoverable: fresh open succeeded", 0, rc);
+    EXPECT("recoverable: all 12 keys usable in fresh process", 12, usable);
+    EXPECT("recoverable: exact key mask usable", (1ull << 12) - 1, mask);
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 2. Repeated compiler-death failure with isolation:
+// base 4 enters period 2, base 5 suffers a transient double-death (unconfirmed once), base 6 always kills the compiler service.
+// Recovery rescues base 4 (known-buildable) and base 5 (isolated unconfirmed), bounds retries on base 6, reports it missing, and returns incomplete (2).
+static void bundle_recovery_repeated_failure(void) {
+    char sdir[] = "/tmp/t_pso_brep.XXXXXX", bdir[] = "/tmp/t_pso_brep_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    id<MTLDevice> saved_dev = g_dev; id<MTL4Compiler> saved_comp4 = g_comp4;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    StrideFaultCompiler *proto = [StrideFaultCompiler new];
+    proto->transient_stride = 16 * 105;   // base 5: fails first capture + plain fallback (2 calls), succeeds on recovery
+    atomic_store(&proto->transient_left, 2);
+    proto->permanent_stride = 16 * 106;   // base 6: always kills MTLCompilerService
+
+    StrideFaultDevice *fdev = [StrideFaultDevice new]; fdev->device = saved_dev; fdev->proto = proto;
+    StrideFaultCompiler *fplain = [StrideFaultCompiler new];
+    fplain->compiler = saved_comp4; fplain->transient_stride = proto->transient_stride; fplain->permanent_stride = proto->permanent_stride;
+    atomic_store(&fplain->transient_left, 1);
+
+    g_dev = (id<MTLDevice>)fdev;
+    g_comp4 = (id<MTL4Compiler>)fplain;
+    // Swap current epoch's compiler through the same fault wrapper.
+    ArchEpoch *ep0 = g_ep;
+    StrideFaultCompiler *fep = [StrideFaultCompiler new];
+    fep->compiler = ep0->comp; fep->transient_stride = proto->transient_stride; fep->permanent_stride = proto->permanent_stride;
+    atomic_store(&fep->transient_left, 1);
+    ep0->comp = (id<MTL4Compiler>)fep;
+
+    uint64_t key6 = arch_key(pso_desc4(bundle_desc(6), 1, 0));
+    for (int i = 0; i < 12; i++) {
+        NSError *err = nil;
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        EXPECT("repeated: expected build outcome", (i != 5 && i != 6), ps != nil);
+    }
+    // After the initial pass, clear transient_left on proto so recovery's fresh compilers let base 5 succeed while base 6 keeps dying.
+    atomic_store(&proto->transient_left, 0);
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 12);
+    // Restore device and compilers before fresh-process verification.
+    ep0->comp = fep->compiler;
+    g_comp4 = saved_comp4;
+    g_dev = saved_dev;
+    arch_flush_wait();
+    os_unfair_lock_lock(&g_ep_lock); g_ep = ep_new(); os_unfair_lock_unlock(&g_ep_lock);
+
+    EXPECT("repeated: pre_bundle_out reports incomplete (2)", 2, pub);
+    EXPECT("repeated: 12 requested, 11 published", 1, g_pkg_last_requested == 12 && g_pkg_last_published == 11);
+    EXPECT("repeated: base 4 and base 5 recovered despite poison base 6", 2, g_pkg_last_recovered);
+    EXPECT("repeated: retries bounded at max", g_arch_pkg_max_retries, g_pkg_last_rounds);
+    EXPECT("repeated: exactly 1 repeated compiler-death key missing, 0 rejected", 1, g_pkg_last_missing_died == 1 && g_pkg_last_missing_lost == 0 && g_pkg_last_rejected == 0);
+    int retries6 = -1, state6 = -1;
+    os_unfair_lock_lock(&g_pkg_lock);
+    ArchPkgItem *it6 = g_pkg_items[@(key6)];
+    if (it6) { retries6 = it6->retries; state6 = it6->state; }
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("repeated: poison key hit retry bound as unconfirmed compiler death", 1, retries6 == g_arch_pkg_max_retries && state6 == ARCH_PKG_LOST_UNCONFIRMED);
+
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("repeated: fresh open succeeded", 0, rc);
+    EXPECT("repeated: all 11 innocent keys usable in fresh process", 11, usable);
+    EXPECT("repeated: only base 6 missing from usable mask", ((1ull << 12) - 1) & ~(1ull << 6), mask);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 3. Permanently rejected pipeline vs compiler-death loss:
+// base 12 fails with an ordinary non-compiler-death error on both capture and plain; base 6 triggers a recoverable compiler-death interruption.
+// Base 12 must not be retried, remains classified as permanently rejected, and does not prevent the 12 valid pipelines from publishing cleanly.
+static void bundle_recovery_rejected_vs_lost(void) {
+    char sdir[] = "/tmp/t_pso_brej.XXXXXX", bdir[] = "/tmp/t_pso_brej_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    id<MTL4Compiler> saved_comp4 = g_comp4;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 4;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    StrideFaultCompiler *fplain = [StrideFaultCompiler new];
+    fplain->compiler = saved_comp4; fplain->reject_stride = 16 * 112;
+    g_comp4 = (id<MTL4Compiler>)fplain;
+
+    uint64_t key12 = arch_key(pso_desc4(bundle_desc(12), 1, 0));
+    for (int i = 0; i < 13; i++) {
+        NSError *err = nil;
+        ArchEpoch *ep = g_ep;
+        id<MTL4Compiler> orig_ep_comp = ep->comp;
+        if (i == 6) {
+            ArchiveGateCompiler *gate = [ArchiveGateCompiler new]; gate->compiler = orig_ep_comp; gate->fail = 2; gate->calls = 1;
+            ep->comp = (id<MTL4Compiler>)gate;
+        } else if (i == 12) {
+            StrideFaultCompiler *rej = [StrideFaultCompiler new]; rej->compiler = orig_ep_comp; rej->reject_stride = 16 * 112;
+            ep->comp = (id<MTL4Compiler>)rej;
+        }
+        id ps = pso_build(bundle_desc(i), 0, &err);
+        ep->comp = orig_ep_comp;
+        EXPECT("rejected vs lost: expected build outcome", i != 12, ps != nil);
+    }
+    arch_flush_wait();
+    int pub = pre_bundle_out(@(bdir), 13);
+    g_comp4 = saved_comp4;
+
+    EXPECT("rejected vs lost: pre_bundle_out succeeds for all valid keys", 1, pub);
+    EXPECT("rejected vs lost: 13 requested, 12 published, 1 rejected", 1, g_pkg_last_requested == 13 && g_pkg_last_published == 12 && g_pkg_last_rejected == 1);
+    EXPECT("rejected vs lost: 3 lost keys recovered, 0 missing", 1, g_pkg_last_recovered == 3 && g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0);
+    int retries12 = -1, state12 = -1; int has_desc12 = -1;
+    os_unfair_lock_lock(&g_pkg_lock);
+    ArchPkgItem *it12 = g_pkg_items[@(key12)];
+    if (it12) { retries12 = it12->retries; state12 = it12->state; has_desc12 = it12->desc != nil; }
+    os_unfair_lock_unlock(&g_pkg_lock);
+    EXPECT("rejected vs lost: permanently rejected key never retried and drops descriptor", 1, retries12 == 0 && state12 == ARCH_PKG_REJECTED && has_desc12 == 0);
+
+    int usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 12, 0, &mask, &usable, NULL);
+    EXPECT("rejected vs lost: fresh open succeeded", 0, rc);
+    EXPECT("rejected vs lost: all 12 valid keys usable in fresh process", 12, usable);
+    EXPECT("rejected vs lost: exact valid key mask usable", (1ull << 12) - 1, mask);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+// 4. Compute pipeline captured via arch_capture_cs in an interrupted period is also recovered and usable in a fresh process.
+static void bundle_recovery_compute(void) {
+    char sdir[] = "/tmp/t_pso_bcs.XXXXXX", bdir[] = "/tmp/t_pso_bcs_out.XXXXXX";
+    if (!mkdtemp(sdir) || !mkdtemp(bdir)) abort();
+    arch_flush_wait(); arch_pkg_reset();
+    NSString *saved_dir = g_arch_dir, *saved_out = g_pre_out;
+    int saved_tool = g_pre_tool, saved_max = g_arch_period_max;
+    g_arch_dir = @(sdir); g_pre_out = @(bdir); g_pre_tool = 1; g_arch_period_max = 8;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    MTL4ComputePipelineDescriptor *cd = bundle_compute_desc();
+    EXPECT("compute recovery: descriptor built", 1, cd != nil);
+    NSError *err = nil; int cap = 0;
+    EXPECT("compute recovery: render 0 built", 1, pso_build(bundle_desc(0), 0, &err) != nil);
+    EXPECT("compute recovery: render 1 built", 1, pso_build(bundle_desc(1), 0, &err) != nil);
+    EXPECT("compute recovery: compute captured", 1, arch_capture_cs(cd, &err, &cap) != nil && cap == 1);
+    // Kill the compiler service before this period flushes: all 3 captures (2 render + 1 compute) are discarded.
+    arch_died(compile_error(2));
+    arch_flush_wait();
+    EXPECT("compute recovery: crashed period discarded before publish", 0, archive_files(@(sdir)).count);
+
+    int pub = pre_bundle_out(@(bdir), 3);
+    EXPECT("compute recovery: pre_bundle_out succeeded", 1, pub);
+    EXPECT("compute recovery: all 3 recovered", 1, g_pkg_last_requested == 3 && g_pkg_last_published == 3 && g_pkg_last_recovered == 3 && g_pkg_last_missing_lost == 0 && g_pkg_last_missing_died == 0);
+    int usable = -1, cs_usable = -1; uint64_t mask = 0;
+    int rc = run_self_bundle_open(@(bdir), 2, 1, &mask, &usable, &cs_usable);
+    EXPECT("compute recovery: fresh open succeeded", 0, rc);
+    EXPECT("compute recovery: both render bases usable", 2, usable);
+    EXPECT("compute recovery: compute pipeline usable in fresh process", 1, cs_usable);
+
+    arch_pkg_reset(); nvn_hm_clear(&g_pbase, hm_rel);
+    g_arch_dir = saved_dir; g_pre_out = saved_out; g_pre_tool = saved_tool; g_arch_period_max = saved_max;
+    g_arch4 = @[]; g_arch4p = @[];
+    [NSFileManager.defaultManager removeItemAtPath:@(sdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+}
+
+@interface BatchProbeSerializer : NSObject {
+@public
+    id<MTL4PipelineDataSetSerializer> ser;
+    _Atomic int *active, *peak, *calls, *bad_gate;
+} @end
+@implementation BatchProbeSerializer
+- (id)forwardingTargetForSelector:(SEL)selector { return ser; }
+- (BOOL)serializeAsArchiveAndFlushToURL:(NSURL *)url error:(NSError **)error {
+    atomic_fetch_add(calls, 1);
+    pthread_mutex_lock(&g_ser_mu);
+    int bad = g_ser_compiles != 0 || g_ser_want < 1;
+    pthread_mutex_unlock(&g_ser_mu);
+    if (bad) atomic_fetch_add(bad_gate, 1);
+    int cur = atomic_fetch_add(active, 1) + 1;
+    int prev = atomic_load(peak);
+    while (cur > prev && !atomic_compare_exchange_weak(peak, &prev, cur)) {}
+    usleep(40000);
+    BOOL ok = [ser serializeAsArchiveAndFlushToURL:url error:error];
+    atomic_fetch_sub(active, 1);
+    return ok;
+}
+@end
+
+static void batch_wave(void) {
+    char bdir[] = "/tmp/t_pso_wave.XXXXXX"; if (!mkdtemp(bdir)) abort();
+    arch_flush_wait();
+    NSString *saved_dir = g_arch_dir;
+    int saved_max = g_arch_period_max, saved_batch = g_arch_ser_batch;
+    g_arch_dir = @(bdir); g_arch_period_max = 2; g_arch_ser_batch = 3;
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+
+    _Atomic int ser_active = 0, ser_peak = 0, ser_calls = 0, bad_gate = 0;
+    NSMutableArray<MTLRenderPipelineDescriptor *> *built = [NSMutableArray array];
+    NSError *err = nil;
+    arch_batch_begin();
+    for (int i = 0; i < 6; i++) {
+        // Wrap each new period's serializer before it rolls over to observe concurrent wave serialization and ser_begin exclusion.
+        if (i % 2 == 0 && ![(id)g_ep->ser isKindOfClass:BatchProbeSerializer.class]) {
+            BatchProbeSerializer *p = [BatchProbeSerializer new];
+            p->ser = g_ep->ser; p->active = &ser_active; p->peak = &ser_peak; p->calls = &ser_calls; p->bad_gate = &bad_gate;
+            g_ep->ser = (id<MTL4PipelineDataSetSerializer>)p;
+        }
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+        if (i == 3) {
+            __block NSUInteger queued = 0; __block int comps_live = 0;
+            dispatch_sync(g_arch_q, ^{
+                queued = g_arch_batch.count;
+                for (ArchEpoch *e in g_arch_batch) if (e->comp != nil) comps_live++;
+            });
+            EXPECT("wave: two full periods parked before reaching batch limit 3", 2, queued);
+            EXPECT("wave: parked periods released their compilers", 0, comps_live);
+            EXPECT("wave: no files written before wave fills", 0, archive_files(@(bdir)).count);
+        }
+    }
+    dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+    EXPECT("wave: third full period flushed all 3 files", 3, archive_files(@(bdir)).count);
+    EXPECT("wave: serializer invoked for all 3 periods", 3, atomic_load(&ser_calls));
+    EXPECT("wave: serializers ran concurrently inside one wave", 1, atomic_load(&ser_peak) >= 2);
+    EXPECT("wave: ser_begin held with zero compiles active", 0, atomic_load(&bad_gate));
+    EXPECT("wave: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Partial wave (1 full parked period + 1 partial period in g_ep) drains cleanly on arch_batch_end + arch_flush_wait.
+    for (int i = 6; i < 9; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 300);
+        EXPECT("wave tail: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+        [built addObject:cd];
+    }
+    arch_batch_end();
+    arch_flush_wait();
+    NSArray<NSString *> *names = [archive_files(@(bdir)) sortedArrayUsingSelector:@selector(compare:)];
+    EXPECT("wave tail: all 5 period files written", 5, names.count);
+    EXPECT("wave tail: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    // Every base from the parallel wave is usable through Metal's archive open.
+    NSMutableArray<id<MTL4Archive>> *opened = [NSMutableArray array];
+    for (NSString *n in names) {
+        id<MTL4Archive> a = [g_dev newArchiveWithURL:[NSURL fileURLWithPath:[@(bdir) stringByAppendingPathComponent:n]] error:&err];
+        if (a) [opened addObject:a];
+    }
+    EXPECT("wave verify: all 5 archives opened", 5, opened.count);
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = opened;
+    int found = 0;
+    for (MTLRenderPipelineDescriptor *cd in built) if (pso_build_ex(cd, 0, &err, 0) != nil) found++;
+    EXPECT("wave verify: all 9 bases found in archives with compile=0", 9, found);
+
+    // Compiler death discards any already-parked period in the batch instead of publishing it.
+    char ddir[] = "/tmp/t_pso_wdeath.XXXXXX"; if (!mkdtemp(ddir)) abort();
+    g_arch_dir = @(ddir); nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[];
+    uint64_t disc0 = atomic_load(&g_arch_discarded);
+    arch_batch_begin();
+    for (int i = 0; i < 2; i++) {
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        cd.vertexDescriptor.layouts[16].stride = 16 * (i + 340);
+        EXPECT("wave death: pipeline built", 1, pso_build(cd, 0, &err) != nil);
+    }
+    arch_died([NSError errorWithDomain:@"AGX" code:2 userInfo:@{NSLocalizedDescriptionKey: @"XPC_ERROR_CONNECTION_INTERRUPTED"}]);
+    arch_batch_end();
+    arch_flush_wait();
+    EXPECT("wave death: parked period discarded, no archive written", 0, archive_files(@(ddir)).count);
+    EXPECT("wave death: discard counted", 1, atomic_load(&g_arch_discarded) > disc0);
+    EXPECT("wave death: unwritten count drained", 0, atomic_load(&g_arch_new));
+
+    nvn_hm_clear(&g_pbase, hm_rel); g_arch4 = @[]; g_arch4p = @[];
+    g_arch_dir = saved_dir; g_arch_period_max = saved_max; g_arch_ser_batch = saved_batch;
+    [NSFileManager.defaultManager removeItemAtPath:@(bdir) error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:@(ddir) error:nil];
 }
 
 int main(int argc, char **argv) { @autoreleasepool {
@@ -600,8 +1326,14 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!cache_path) abort();
     if (![NSFileManager.defaultManager createDirectoryAtPath:cache_path
                                withIntermediateDirectories:NO attributes:nil error:nil]) abort();
+    if (argc == 2 && !strcmp(argv[1], "--cache-only")) {
+        app_folder_claim();
+        printf("t_pso_archive cache cleanup: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
     char dir[] = "/tmp/t_pso_archive.XXXXXX"; if (!mkdtemp(dir)) abort();
-    setenv("DM_PSO_ARCHIVE", argc == 3 ? argv[2] : dir, 1);
+    int bundle_open = argc == 5 && !strcmp(argv[1], "--bundle-open");
+    setenv("DM_PSO_ARCHIVE", bundle_open ? "off" : argc == 3 ? argv[2] : dir, 1);
     mtl_init(); g_q = [g_dev newCommandQueue]; NSError *err = nil;
     NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\nstruct I { float4 a [[attribute(0)]]; };\n"
         "vertex V vs(I in [[stage_in]], uint id [[vertex_id]]) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.p = float4(uv * 2 - 1, 0, in.a.w); return o; }\n"
@@ -623,6 +1355,106 @@ int main(int argc, char **argv) { @autoreleasepool {
     if (!g_lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     g_lib2 = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// another library: the same source would come back as the same library\n"] options:nil error:&err];
     lib_tag(g_lib, @"fixture.metallib"); lib_tag(g_lib2, @"fixture2.metallib");   // as lib_from_file names the game's: their pipelines have index keys
+    if (bundle_open) {
+        bundle_open_verify(atoi(argv[3]), atoi(argv[4]));
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--bundle-recovery")) {
+        pso4_init();
+        bundle_recovery_recoverable();
+        bundle_recovery_repeated_failure();
+        bundle_recovery_rejected_vs_lost();
+        bundle_recovery_compute();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive bundle recovery: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--compiler-death")) {
+        pso4_init(); crashed_flush_race(0); crashed_flush_race(1); compiler_death_notifications();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive compiler death: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--batch-wave")) {
+        pso4_init(); batch_wave();
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive batch wave: %d checks, %d failed\n", checks, failed); return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--active-flush")) {
+        pso4_init();
+        test_archive_timer = 1;
+        test_layer = [CAMetalLayer layer];
+        const uint64_t idle_ns = (ARCH_FLUSH_INTERVAL_S + 1) * (uint64_t)NSEC_PER_SEC;
+        MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        EXPECT("capture before the timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        ser_compile_begin();
+        ArchEpoch *busy = ep_enter();
+        fire_archive_timer();
+        EXPECT("idle timer keeps the period while its compile is pending", 1, busy == g_ep);
+        atomic_store(&dm_present_ns, now_ns());
+        ep_leave(busy);
+        ser_compile_end();
+        fire_archive_timer();
+        EXPECT("compile completion and a retry cannot start a write after presentation resumes", 0, archive_files(@(dir)).count);
+        EXPECT("the partial period is still pending", 1, atomic_load(&g_arch_new));
+        atomic_store(&dm_present_ns, now_ns() - idle_ns);
+        plain_compile_begin();
+        fire_archive_timer();
+        EXPECT("idle timer also defers for a plain compile", 0, archive_files(@(dir)).count);
+        plain_compile_end();
+        fire_archive_timer();
+        EXPECT("retry wrote the archive when idle with no compiles pending", 1, archive_files(@(dir)).count);
+        EXPECT("the partial period was drained", 0, atomic_load(&g_arch_new));
+        EXPECT("no retry after the archive was written", 1, test_timer_block == nil);
+        atomic_store(&dm_present_ns, now_ns());
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before explicit save", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        mtl_arch_save(5000, 0);
+        EXPECT("explicit save also writes during presentation", 2, archive_files(@(dir)).count);
+        g_arch_period_max = 1;
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture fills another period", 1, pso_build(cd, 0, &err) != nil);
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("full period also writes during presentation", 3, archive_files(@(dir)).count);
+        g_arch_period_max = ARCH_PERIOD_MAX;
+        test_layer = nil;
+        cd.vertexDescriptor.layouts[16].stride += 16;
+        EXPECT("capture before headless timer", 1, pso_build(cd, 0, &err) != nil && atomic_load(&g_arch_new) == 1);
+        atomic_store(&dm_present_ns, now_ns());
+        fire_archive_timer();
+        dispatch_group_wait(g_arch_pending, DISPATCH_TIME_FOREVER);
+        EXPECT("headless timer wrote the capture", 4, archive_files(@(dir)).count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive active flush: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--adopt-prebuilt")) {
+        // Real Metal 4 end-to-end check of arch_adopt_prebuilt(): a no-layout base captured into p*.mtl4a is opened and indexed in the same process,
+        // clears g_pbase_miss, serves compile=0 lookups with zero recompiles, stays out of g_arch_use (arch_sweep), and is idempotent on repeat calls.
+        pso4_init();
+        MTLRenderPipelineDescriptor *nd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+        nd.vertexFunction = fn4_note([g_lib newFunctionWithName:@"vs0"], g_lib, @"vs0", nil);
+        nd.vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
+        EXPECT("adopt: misses before capture", 1, pso_build_ex(nd, 0, &err, 0) == nil);
+        EXPECT("adopt: miss cached in g_pbase_miss", 1, g_pbase_miss.n == 1);
+        MTL4RenderPipelineDescriptor *m4 = pso_desc4(nd, 1, 0);
+        EXPECT("adopt: Metal 4 base descriptor built", 1, m4 != nil);
+        EXPECT("adopt: prebuild capture succeeded", 1, arch_capture(m4, &err, 0, NULL) != nil);
+        arch_flush_wait();
+        EXPECT("adopt: wrote a p*.mtl4a file", 1, archive_files(@(dir)).count == 1 && [archive_files(@(dir))[0] hasPrefix:@"p"]);
+        uint64_t arch0 = g_pb_archived, built0 = g_pb_built, asks0 = g_arch_asks;
+        arch_adopt_prebuilt();
+        EXPECT("adopt: indexed into g_arch_ix and g_arch_ixf", 1, g_arch_ix.n == 1 && g_arch_ixf.count == 1);
+        EXPECT("adopt: prior miss cleared", 0, g_pbase_miss.n);
+        EXPECT("adopt: excluded from arch_sweep", 0, g_arch_use.count);
+        EXPECT("adopt: compile=0 lookup finds base in same run", 1, pso_build_ex(nd, 0, &err, 0) != nil);
+        EXPECT("adopt: served from archive via index (1 ask, 0 compiles)", 1, g_pb_archived == arch0 + 1 && g_pb_built == built0 && g_arch_asks == asks0 + 1);
+        arch_adopt_prebuilt();
+        EXPECT("adopt: idempotent on already-opened file", 1, g_arch_ixf.count);
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive adopt prebuilt: %d checks, %d failed\n", checks, failed);
+        return failed != 0;
+    }
     if (argc == 3 && !strncmp(argv[1], "--cold-", 7)) {   // across fresh processes: a cold start's prewarm with a timer flush after each new base, then the next start
         g_arch_period_max = 4; int seed = !strcmp(argv[1], "--cold-seed"), cut = !strcmp(argv[1], "--cold-cut-seed"), after_cut = !strcmp(argv[1], "--cold-after-cut");
         int quit = !strcmp(argv[1], "--cold-quit-seed"), after_quit = !strcmp(argv[1], "--cold-after-quit");
@@ -653,6 +1485,34 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("cold restart: compiled in the cold start, from the archive in the next", expect_archived, (int)(g_pb_archived - arch0));
         EXPECT("cold restart: compiled where not in the archive", PSO_ARCH_COMPACT + 1 - expect_archived, (int)(g_pb_built - built0));
         EXPECT("cold restart: the index asks one file for each base found and none for a miss", expect_archived, (int)(g_arch_asks - asks0));
+        [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
+        printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
+        return failed != 0;
+    }
+    if (argc == 3 && !strncmp(argv[1], "--sweep-", 8)) {   // across fresh processes: two files of four bases; the next start takes the first file's alone, so once the prewarm and the
+        // pairs were asked for (arch_sweep's two conditions), the second leaves the archive (DM_OBSOLETE: into its folder), with its index
+        g_arch_period_max = 4; int seed = !strcmp(argv[1], "--sweep-seed");
+        pso4_init();
+        NSUInteger (^files)(void) = ^NSUInteger { return [[NSFileManager.defaultManager contentsOfDirectoryAtPath:@(argv[2]) error:nil] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"self ENDSWITH '.mtl4a'"]].count; };
+        for (int f = 0; f < (seed ? 2 : 1); f++) {
+            for (int i = 0; i < 4; i++) {
+                MTLRenderPipelineDescriptor *cd = desc(MTLPixelFormatRGBA8Unorm, 0, MTLPixelFormatRGBA8Unorm, MTLColorWriteMaskAll, 1);
+                cd.vertexDescriptor.layouts[16].stride = 16 * (i + 200 + 10 * f);
+                EXPECT("sweep: pipeline", 1, pso_build(cd, 0, &err) != nil);
+            }
+            dispatch_sync(g_arch_q, ^{ arch_flush(); }); arch_flush_wait();
+        }
+        if (seed) EXPECT("sweep: two files written", 2, (int)files());
+        else {
+            EXPECT("sweep: two files opened", 2, (int)g_arch_use.count);
+            EXPECT("sweep: every base from the archive", 4, (int)g_pb_archived);
+            atomic_store(&g_sweep_warm, 1); arch_sweep();
+            EXPECT("sweep: nothing goes before the pairs were asked for", 2, (int)files());
+            atomic_store(&g_sweep_pairs, 1); arch_sweep();
+            EXPECT("sweep: the file no base was taken from left the archive", 1, (int)files());
+            arch_sweep();
+            EXPECT("sweep: once", 1, (int)files());
+        }
         [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];
         printf("t_pso_archive %s: %d checks, %d failed\n", argv[1], checks, failed);
         return failed != 0;
@@ -796,6 +1656,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     ArchEpoch *ep0 = g_ep;
     arch_flush_wait();
     NSString *file = [@(dir) stringByAppendingPathComponent:@"00000-1.mtl4a"];   // <seq>-<pipelines it holds>
+    if (!file) abort();
     EXPECT("archive file written", 1, [NSFileManager.defaultManager fileExistsAtPath:file]);
     EXPECT("the flush began a new period", 1, g_ep != ep0);
     EXPECT("nothing left to write", 0, g_arch_new);
@@ -1077,6 +1938,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     depth_only();
     concurrent_bases(0);
     concurrent_bases(1);
+    crashed_period();
+    crashed_flush_race(0);
+    crashed_flush_race(1);
+    compiler_death_notifications();
+    batch_wave();
     // key normalization
     pso_key k; memset(&k, 0, sizeof k); k.blend_en = 0x5; k.dfmt = MTLPixelFormatDepth32Float; k.sfmt = MTLPixelFormatStencil8;
     for (int i = 0; i < 8; i++) { k.cfmt[i] = MTLPixelFormatRGBA8Unorm; k.blend[i].src_rgb = 5; k.blend[i].dst_rgb = 6; }   // every target present: only the blend rule acts
@@ -1107,6 +1973,31 @@ int main(int argc, char **argv) { @autoreleasepool {
         EXPECT("constants: that pipeline went through the MTLDevice", legacy0 + 1, g_pb_legacy);
         EXPECT("constants: the vertex function given to it is specialized once", 1, fn_dev(cv) != cv && fn_dev(cv) == fn_dev(cv));
         EXPECT("constants: a function without constants is its own", 1, fn_dev(cd.fragmentFunction) == cd.fragmentFunction);
+        // fn4_note(..., nil) must never publish or downgrade to an unspecialized descriptor for a function declaring constants, and concurrent fn_load never exposes an unspecialized window
+        id<MTLLibrary> bl = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\nconstant bool dm_blend_off [[function_constant(217)]];\n"
+            "fragment float4 bfs() { return is_function_constant_defined(dm_blend_off) && dm_blend_off ? float4(1) : float4(0); }\n" options:nil error:&err];
+        id<MTLFunction> raw_bfs = [bl newFunctionWithName:@"bfs"];
+        fn4_note(raw_bfs, bl, @"bfs", nil);
+        EXPECT("constants: fn4_note(nil) refuses function with constants", 1, fn4_of(raw_bfs) == nil);
+        id<MTLFunction> bf = fn_load(bl, @"bfs", &se);
+        EXPECT("constants: fn_load specializes dm_blend_off function", 1, bf != nil && [fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        fn4_note(raw_bfs, bl, @"bfs", nil);
+        EXPECT("constants: fn4_note(nil) does not downgrade specialized descriptor", 1, [fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]);
+        __block _Atomic int bad_race = 0;
+        dispatch_group_t rg = dispatch_group_create();
+        dispatch_queue_t rq = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        for (int t = 0; t < 4; t++) dispatch_group_async(rg, rq, ^{
+            for (int i = 0; i < 2000; i++) {
+                if (t == 0) {
+                    if (![fn4_of(bf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) atomic_fetch_add(&bad_race, 1);
+                } else {
+                    id<MTLFunction> rf = fn_load(bl, @"bfs", NULL);
+                    if (!rf || ![fn4_of(rf) isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) atomic_fetch_add(&bad_race, 1);
+                }
+            }
+        });
+        dispatch_group_wait(rg, DISPATCH_TIME_FOREVER);
+        EXPECT("constants: concurrent fn_load never exposes unspecialized descriptor", 0, atomic_load(&bad_race));
     }
     repeated_archive_miss();
     spec_desc_ownership();

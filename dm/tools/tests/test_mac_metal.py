@@ -14,7 +14,10 @@ class MacMetal(unittest.TestCase):
     def test_command(self):
         mac_min = re.search(r'^MACOS_MIN := (\S+)', (REPO / 'dm/mac/min_os.mk').read_text(), re.M)
         assert mac_min is not None
-        self.assertEqual(dmsh_chain.MAC_METAL, ['xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1', f'-mmacosx-version-min={mac_min.group(1)}', '-fpreserve-invariance', '-fwrapv'])
+        self.assertEqual(dmsh_chain.MAC_METAL, [
+            'xcrun', '-sdk', 'macosx', 'metal', '-c', '-O1',
+            f'-mmacosx-version-min={mac_min.group(1)}', '-fpreserve-invariance', '-fwrapv', '-fmetal-math-mode=relaxed',
+        ])
 
     def test_build_uses_it(self):   # dmsh_build.py has no copy: its record names this command, and its direct run drops the xcrun prefix (the first four words)
         src = (REPO / 'dm/gfx/tools/dmsh_build.py').read_text()

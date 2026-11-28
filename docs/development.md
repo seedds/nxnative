@@ -31,7 +31,8 @@ Switches:
 - `DM_CHEATS=<folder>`: cheats folder. Default `<DM_ROOT>/cheats` (the game's work folder). A flat folder and the Atmosphère tree both work.
 - `DM_CHEATS_ANY_BUILD=1`: with no file of this build, load the folder's single `.txt` of another build with a `[RED]` warning that addresses may be wrong.
 - `DM_CHEATS_ON=<name>,…`: cheats turned on by name at launch (case-insensitive; the `<build ID>.enabled` states still apply).
-- `DM_CHEATS_DEBUG=1`: log every write the cheats make (cheat name, bytes, value, guest address), and with no file of this build the other-build `.txt` list.
+- `DM_CHEATS_DEBUG=1`: log every write the cheats make (cheat name, bytes, value, guest address), and with no file of this build the other-build `.txt` list. The undo log's restores are logged too.
+- `DM_CHEATS_UNDO=0`: turning a cheat off leaves what it wrote, as on a Switch (by default its undo log puts the old values back).
 - `DM_CHEATS_WINDOW=1`: open the Cheats panel at launch.
 
 Implemented opcodes, all with the reference's word order and block-skipping (`dmnt_cheat_vm.cpp`):
@@ -47,6 +48,7 @@ The others (pause/resume, the debug log) mark the whole cheat `(unsupported opco
 On top of the format (`hle_cheats.c`; the `dm_cheat*` calls of `dm.h` give them to a front end, the Mac panel above):
 - **Labels and sections.** An entry without code words is a label, not a broken cheat: a credits line, or EdiZon's `[--SectionStart:Name--]` / `[--SectionEnd:Name--]`, whose entries in between carry that section. A header glued to the previous code word (`00000008[Next]`, found in a cheat-site file) still starts its own entry. Code words on the header's own line belong to the entry, as in dmnt. An entry whose lines were all dropped as prose is broken (`no code words`), not a label.
 - **On / off pairs.** "X - on" / "X - off" entries (also "X on", "X (off)", …, or a pair the meta file names) are one switch. Turning the on half on turns the off half off. Turning it off runs the off half, the restore, for one pass. A saved state is kept as it is.
+- **Turning a cheat off undoes it.** The first time a plain cheat writes an address, the value there before is kept in its undo log; the pass after the player turns the cheat off writes each kept value back where the address still holds what the cheat wrote last, so a value the game changed since (rupees spent, a loading screen that moved the data) stays the game's. The log is kept in `<build>.undo`, so a cheat that was on when the game quit, or whose values the game saved, is still undone in a later launch, and one turned off just before a quit finishes its restore at the next start. Masters, "set" cheats and on / off pairs keep no log (they always run, change once by design, or bring their own restore); a cheat writing more than 512 addresses logs the first 512 and says so. `DM_CHEATS_UNDO=0` turns it off: turning a cheat off then leaves what it wrote, as on a Switch.
 - **Duplicate names.** `<build ID>.enabled` saves the second entry of a name as `Name #2`, and so on. A plain name, as older files have it, turns on the next entry of that name that is still off. One-pass cheats ("set", a pending restore) are never saved as on.
 - **The meta file.** `<build ID>.meta.tsv` beside the file ([Cheats that survive game updates](#cheats-that-survive-game-updates)) adds per entry:
   - its section, note and type, and its on / off pair;

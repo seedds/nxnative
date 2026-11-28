@@ -627,11 +627,13 @@ static void fam_track_pool_serial(__unsafe_unretained NvImageHeap *o, uint64_t s
     o->pool_sers[o->npool_sers++] = (fam_pool_ser){serial, wh};
     os_unfair_lock_unlock(&o->pool_lk);
 }
+static _Atomic uint64_t g_fam_valid_gen;
 static void fam_set_valid(NvImageHeap *o, uint64_t wh) {
     if (!o || !o->compressed) return;
     uint64_t prev = atomic_load_explicit(&o->valid_wh, memory_order_acquire);
     if (prev == wh) return;
     atomic_store_explicit(&o->valid_wh, wh, memory_order_release);
+    atomic_fetch_add_explicit(&g_fam_valid_gen, 1, memory_order_release);
     args_dirty_all();
     os_unfair_lock_lock(&o->pool_lk);
     if (!o->npool_sers) { os_unfair_lock_unlock(&o->pool_lk); return; }
@@ -5279,8 +5281,10 @@ static inline void sparse_look(NvSparse *s, const tex_t *t) {
     if (!s->gpu && nvn_dirty_sparse_writes() != s->wseen && (s->wown != nvn_dirty_own_writes() || atomic_load(&g_cur_frame) - s->wframe >= 60)) sparse_sync(s, t, 2);
 }
 static char g_sp_key;   // a GPU texture's NvSparse, as its associated object
+static _Atomic uint64_t g_sp_gpu_n;
 // A GPU-written placement sparse texture follows the game's mappings when it is resolved again (tex_mtl_)
 static void sparse_gpu_look(const tex_t *t, id have) {
+    if (!atomic_load_explicit(&g_sp_gpu_n, memory_order_relaxed)) return;
     NvSparse *ps = objc_getAssociatedObject(have, &g_sp_key);
     if (ps) sparse_look(ps, t);
 }
@@ -5290,7 +5294,7 @@ static void sparse_gpu_wrote(const tex_t *t) {
     if (!t || !t->pool || !nvn_sparse_pool(t->pool)) return;
     id have = tex_get(t->serial); NvSparse *s = nil;
     if ([have isKindOfClass:[NvPkg class]]) s = ((NvPkg *)have)->ps;
-    else if (have) s = objc_getAssociatedObject(have, &g_sp_key);
+    else if (have && atomic_load_explicit(&g_sp_gpu_n, memory_order_relaxed)) s = objc_getAssociatedObject(have, &g_sp_key);
     if (!s || !s->undrawn) return;
     s->undrawn = 0;
     pthread_mutex_lock(&g_sp_mu);
@@ -5301,6 +5305,7 @@ static void sparse_gpu_wrote(const tex_t *t) {
 static id<MTLTexture> sparse_gpu_make(const tex_t *t) {
     id<MTLTexture> made = nil; NvSparse *ps = sparse_make(t, 1, &made); if (!ps) return nil;
     objc_setAssociatedObject(made, &g_sp_key, ps, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    atomic_fetch_add_explicit(&g_sp_gpu_n, 1, memory_order_relaxed);
     sparse_sync(ps, t, 1);
     return made;
 }
@@ -8962,7 +8967,7 @@ typedef struct { tex_t t; int ok; view_t v; int has_v; void *view, *view_fam; ui
                  void *palt[5], *palt_of[5]; uint64_t palt_rid[5];   // Four layered views (pool_lk) and the sampled buffer's float view. Pool snapshots can keep all of them at once.
                  void *alt, *alt_of; uint64_t alt_rid; uint8_t alt_type;   // alt: compatible view used when the shader's declared type differs from view (tex_fit), alt_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid;                       // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
-                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp, evicted;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp; evicted: idle package freed (pkg_evict_idle)
+                 int prev, next, retired, gone; uint64_t transient_sub; uint8_t tt1, sp, evicted, in_transient;   // prev / next: descriptor index + 1, by texture serial; gone: its memory pool was finalized (treg_drop_pool_views); sp: in g_treg_sp; evicted: idle package freed (pkg_evict_idle); in_transient: tracked in g_treg_transient
                  void *stand; uint64_t stand_rid, stand_sum, reg_frame; uint8_t stand_tt1, stand_no;
                  uint32_t used; } treg_t;   // stand: what its pool table entries hold while its texture is not made (pool_stand; retained), stand_tt1 its texture type + 1, stand_no: it can have none (STAND_NO), or none until a mapping notes its pages (STAND_WAIT); reg_frame: the frame of the registration
 enum { STAND_NO = 1, STAND_WAIT = 2 };   // treg_t.stand_no: no stand-in while the registration stands; none until a mapping over its pages notes it (treg_sparse_notes)
@@ -8974,11 +8979,23 @@ static int treg_serial_held(uint64_t serial) { return nvn_hm_get(&g_treg_serial,
 // few serials a frame (the per-stage program ring in bind_stages among them), and each change made the next pool walk (pool_gpu) resolve all ~5,000 IDs again, 2 ms a frame.
 // A sparse mapping that changes a texture's pages is a note too (treg_sparse_notes). Under g_rmu
 static uint64_t g_treg_ep = 1, g_ser_synced = 1;
+static void treg_drop_views(treg_t *r);
+static void treg_drop_transient_all(int force);
 static void ser_sync(void) {
     uint64_t s[SER_NOTES];
     uint64_t sg; unsigned n = own_notes_take(s, &sg);
-    if (sg - g_ser_synced != n) g_treg_ep++;
-    else for (unsigned i = 0; i < n; i++) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &s[i]); k; k = g_treg[k - 1].next) g_treg[k - 1].view_ser = 0;
+    if (sg - g_ser_synced != n) { g_treg_ep++; treg_drop_transient_all(1); }
+    else for (unsigned i = 0; i < n; i++) {
+        int evicted = -1;
+        for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &s[i]); k; k = g_treg[k - 1].next) {
+            treg_t *r = &g_treg[k - 1];
+            r->view_ser = 0;
+            if (r->retired && r->view) {
+                if (evicted < 0) evicted = own_resolve_ref(s[i]) == NULL;
+                if (evicted) { treg_drop_views(r); r->transient_sub = 0; }
+            }
+        }
+    }
     g_ser_synced = sg;
 }
 static inline uint64_t treg_ep(void) { if (g_ser_gen != g_ser_synced) ser_sync(); return g_treg_ep; }
@@ -9040,6 +9057,8 @@ static void treg_sparse_notes(void) {
     for (size_t i = 0; i < ns; i++) if (!i || ser[i] != ser[i - 1]) own_note(ser[i]);
 }
 static int *g_treg_transient; static size_t g_ntreg_transient, g_treg_transient_cap;
+static uint64_t g_treg_trans_gen = 1, g_treg_takeover_gen;
+static int g_treg_sub_transient_any;
 // Lock-free copy of texture ID → serial (the replay hot path only needs the serial): texture IDs are 20 bits, fixed 1M entries (BSS, only touched pages are used),
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
@@ -9111,14 +9130,34 @@ static void treg_res_check(void) {
     }
     os_unfair_lock_unlock(&g_rmu);
 }
-static void treg_finish_submission(void) {
-    if (!g_ntreg_transient) return;
-    os_unfair_lock_lock(&g_rmu);
+static void treg_drop_transient_all(int force) {   // caller holds g_rmu
+    size_t w = 0; int dropped_owned = 0;
     for (size_t i = 0; i < g_ntreg_transient; i++) {
-        treg_t *r = &g_treg[g_treg_transient[i]];
-        if (r->retired && r->transient_sub == g_sub_serial) treg_drop_views(r);
+        int tid = g_treg_transient[i];
+        treg_t *r = &g_treg[tid];
+        if (!r->ok || !r->retired || !r->view) { r->in_transient = 0; r->transient_sub = 0; continue; }
+        if (force || (r->transient_sub && r->transient_sub == g_sub_serial)) {
+            if (!r->transient_sub) dropped_owned = 1;
+            treg_drop_views(r); r->transient_sub = 0; r->in_transient = 0;
+            continue;
+        }
+        g_treg_transient[w++] = tid;
     }
-    g_ntreg_transient = 0;
+    g_ntreg_transient = w;
+    if (force && dropped_owned) g_treg_trans_gen++;
+}
+static void treg_finish_submission(void) {
+    // Owner-held retired views stay valid across submissions until the owner releases their backing (ghost eviction via own_note -> ser_sync,
+    // pool finalization, or storage takeover via own_alias_takeover_gen), eliminating per-submission drop/rebuild churn on multi-submission frames.
+    // Unowned retired views (transient_sub == g_sub_serial) still drop at submission end.
+    uint64_t tg = own_alias_takeover_gen();
+    int takeover = tg != g_treg_takeover_gen;
+    if (!takeover && !g_treg_sub_transient_any && atomic_load_explicit(&g_ser_gen, memory_order_relaxed) == g_ser_synced) return;
+    os_unfair_lock_lock(&g_rmu);
+    if (g_ser_gen != g_ser_synced) ser_sync();
+    if (takeover) { g_treg_takeover_gen = tg; treg_drop_transient_all(1); }
+    else if (g_treg_sub_transient_any) treg_drop_transient_all(0);
+    g_treg_sub_transient_any = 0;
     os_unfair_lock_unlock(&g_rmu);
 }
 // Texture views by the Metal texture they are views of and their parameters, beside the per-ID view (treg_t.view). One cache for every way a game reaches a texture again:
@@ -9134,23 +9173,31 @@ static void treg_finish_submission(void) {
 // have nothing to let it go), and goes at the first commit after the owner lets the texture go (vc_commit: the owner runs under g_smu, which cannot take g_rmu, so it lists them,
 // own_gone_take_locked), when its pool is finalized (treg_drop_pool_views), and with all the others past VC_MAX textures. Under g_rmu
 typedef struct { uint32_t pf, l0, nl, s0, ns; uint8_t tt, sw[4], pad[3]; } vc_key;
-enum { VC_WAYS = 8, VC_MAX = 16384 };   // 8: a mip chain's per-level views (fb_view: one per level a pass renders) beside the registrations' own; 4 took turns
-struct vc_set { const void *pool; unsigned next; vc_key k[VC_WAYS]; void *view[VC_WAYS];   // view: retained
+enum { VC_WAYS = 8, VC_WAYS_MAX = 64, VC_MAX = 16384 };   // inline 8 ways, grown up to 64 when a mip chain or array texture holds more distinct views (avoids FIFO thrashing on retired registrations)
+struct vc_set { const void *pool; unsigned n, cap, next; vc_key *k; void **view; vc_key k0[VC_WAYS]; void *v0[VC_WAYS];   // view: retained
                 void *rows; uint64_t rows_rid, rows_n; };   // rows: a texture buffer as 2D rows (tbuf_as_2d; retained, resident), rows_n: its element count
 static nvn_hmap g_vc = {.klen = 8};   // the Metal texture's address → vc_set
 static uint64_t g_vc_hit, g_vc_new, g_vc_uncached;
 static inline uint64_t vc_addr(id<MTLTexture> t) { return (uint64_t)(uintptr_t)(__bridge void *)t; }
 static void vc_rows_drop(vc_set *s) { if (s->rows) { defer_obj_release((__bridge id)s->rows); CFRelease(s->rows); s->rows = NULL; s->rows_rid = s->rows_n = 0; } }
+static vc_set *vc_set_new(const void *pool) {
+    vc_set *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->pool = pool; s->cap = VC_WAYS; s->k = s->k0; s->view = s->v0;
+    return s;
+}
 static void vc_set_free(void *p) {
     vc_set *s = p;
     if (!s) return;
-    for (int i = 0; i < VC_WAYS; i++) if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    for (unsigned i = 0; i < s->n; i++) if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    if (s->k && s->k != s->k0) free(s->k);
+    if (s->view && s->view != s->v0) free(s->view);
     vc_rows_drop(s);
     free(s);
 }
 static id<MTLTexture> vc_set_get(vc_set *s, const vc_key *k) {
     if (!s) return nil;
-    for (int i = 0; i < VC_WAYS; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) { g_vc_hit++; return (__bridge id<MTLTexture>)s->view[i]; }
+    for (unsigned i = 0; i < s->n; i++) if (s->view[i] && !memcmp(&s->k[i], k, sizeof *k)) { g_vc_hit++; return (__bridge id<MTLTexture>)s->view[i]; }
     return nil;
 }
 static id<MTLTexture> vc_get(id<MTLTexture> base, const vc_key *k) {
@@ -9162,8 +9209,8 @@ static vc_set *vc_set_for(id<MTLTexture> base, const void *pool) {   // base's e
     pthread_mutex_lock(&g_smu); int held = own_holds_locked((__bridge const void *)base); pthread_mutex_unlock(&g_smu);   // lock order g_rmu, then g_smu
     if (!held) return NULL;
     if (g_vc.n >= VC_MAX) nvn_hm_clear(&g_vc, vc_set_free);
-    if (!(s = calloc(1, sizeof *s))) return NULL;
-    s->pool = pool; nvn_hm_put(&g_vc, &a, s);
+    if (!(s = vc_set_new(pool))) return NULL;
+    nvn_hm_put(&g_vc, &a, s);
     return s;
 }
 // The owner tables hold an uploaded texture's package, so the package keeps views of its backing and
@@ -9186,11 +9233,33 @@ static id<MTLTexture> vc_get_registered(id<MTLTexture> base, const vc_key *k, ui
 static int vc_put_registered(id<MTLTexture> base, const void *pool, const vc_key *k, id<MTLTexture> v, NvPkg *pkg) {
     g_vc_new++;
     vc_set **set = vc_package_set(pkg, base);
-    if (set && !*set) *set = calloc(1, sizeof(**set));
+    if (set && !*set) *set = vc_set_new(NULL);
     vc_set *s = set ? *set : vc_set_for(base, pool);
     if (!s) { g_vc_uncached++; return 0; }
-    unsigned i = s->next++ % VC_WAYS;
-    if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    unsigned i;
+    if (s->n < s->cap) {
+        i = s->n++;
+    } else if (s->cap < VC_WAYS_MAX) {
+        unsigned nc = s->cap * 2;
+        if (nc > VC_WAYS_MAX) nc = VC_WAYS_MAX;
+        vc_key *nk = malloc(nc * sizeof *nk);
+        void **nv = malloc(nc * sizeof *nv);
+        if (nk && nv) {
+            memcpy(nk, s->k, s->n * sizeof *nk);
+            memcpy(nv, s->view, s->n * sizeof *nv);
+            if (s->k != s->k0) free(s->k);
+            if (s->view != s->v0) free(s->view);
+            s->k = nk; s->view = nv; s->cap = nc;
+            i = s->n++;
+        } else {
+            free(nk); free(nv);
+            i = s->next++ % s->cap;
+            if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+        }
+    } else {
+        i = s->next++ % s->cap;
+        if (s->view[i]) { defer_obj_unref((__bridge id)s->view[i]); CFRelease(s->view[i]); }
+    }
     s->k[i] = *k; s->view[i] = (void *)CFBridgingRetain(v);
     return 1;
 }
@@ -9645,12 +9714,16 @@ static void *tex_by_id_ref(int tid) {
             else vc_put_registered(base, rp->t.pool, &k, v, pkg);
         }
     }
-    if (rp->retired && rp->transient_sub != g_sub_serial) {
-        if (g_ntreg_transient == g_treg_transient_cap) {
-            g_treg_transient_cap = g_treg_transient_cap ? g_treg_transient_cap * 2 : 64;
-            g_treg_transient = realloc_or_die(g_treg_transient, g_treg_transient_cap * sizeof *g_treg_transient, "the transient texture registrations");
+    if (rp->retired) {
+        if (!rp->in_transient) {
+            if (g_ntreg_transient == g_treg_transient_cap) {
+                g_treg_transient_cap = g_treg_transient_cap ? g_treg_transient_cap * 2 : 64;
+                g_treg_transient = realloc_or_die(g_treg_transient, g_treg_transient_cap * sizeof *g_treg_transient, "the transient texture registrations");
+            }
+            g_treg_transient[g_ntreg_transient++] = tid; rp->in_transient = 1;
         }
-        g_treg_transient[g_ntreg_transient++] = tid; rp->transient_sub = g_sub_serial;
+        if (!own_resolve_ref(rp->t.serial)) { rp->transient_sub = g_sub_serial; g_treg_sub_transient_any = 1; }
+        else rp->transient_sub = 0;
     }
     rp->view = (void *)CFBridgingRetain(v); rp->view_rid = v.gpuResourceID._impl; rp->view_tt = (uint8_t)v.textureType; rp->view_pf = (uint32_t)v.pixelFormat;
     { uint64_t fwh = 0; NvImageHeap *fo = fam_owner(v, &fwh); rp->view_fam = (fo && fo->compressed) ? (__bridge void *)fo : NULL; rp->view_fam_wh = rp->view_fam ? fwh : 0; }
@@ -14791,7 +14864,7 @@ static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dumm
 // 1.4-1.6 a frame of 9 ms, 50-55 fps for five seconds; PR #2389)
 enum { POOL_IDS_MAX = 8192 };   // the IDs a patch takes at most, and a list holds
 typedef struct { int *v, n, cap; } pool_ids;
-typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub, sync_sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // sync_sub: last submission in which this table was validated; over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
+typedef struct { __strong id<MTLBuffer> buf; uint64_t gpu, reg, ser, frame, sub, trans_gen, sync_sub; int samp, dtt, dpf, base, left, left_req; pool_ids dead, trans; int over; } pool_snap;   // sync_sub: last submission in which this table was validated; trans_gen: g_treg_trans_gen when owner-held retired views were taken; over: its last walk found the budget full, so what it left out has its stand-in (pool_stand)
 static pool_snap g_psnap[POOL_SNAPS]; static unsigned g_psnap_next;
 // Each table's log of the entries written into it since its build: the patches' (pool_walk) and the scan updates' (pool_seen_scan, pool_stand_scan), so a spare the table left at log
 // position lpos is brought up to date by the entries after it (pool_patch_take). A ring of a quarter of the table's entries: past that a whole copy is cheaper than the writes. build: the
@@ -14819,8 +14892,8 @@ static void ids_push(pool_ids *l, int id_) {   // past POOL_IDS_MAX the list is 
     if (l->n == l->cap) { l->cap = l->cap ? l->cap * 2 : 16; l->v = realloc_or_die(l->v, (size_t)l->cap * sizeof *l->v, "the pool tables' ID lists"); }
     l->v[l->n++] = id_;
 }
-// A list being made: each ID once (a stamp per ID, one stamp table per kind of list: [0] dead, [1] trans)
-static struct { uint32_t *stamp; int cap; uint32_t cur; } g_pids[2];
+// A list being made: each ID once (a stamp per ID, one stamp table per kind of list: [0] dead, [1] trans, [2] pkg)
+static struct { uint32_t *stamp; int cap; uint32_t cur; } g_pids[3];
 static void ids_begin(int k) { if (!++g_pids[k].cur) { if (g_pids[k].stamp) memset(g_pids[k].stamp, 0, (size_t)g_pids[k].cap * sizeof *g_pids[k].stamp); g_pids[k].cur = 1; } }
 static void ids_add(int k, pool_ids *l, int id_) {
     if (l->n < 0 || id_ < 0) return;
@@ -15148,7 +15221,9 @@ static void pool_seen_scan(void) {
             void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv); if (!tv || !tr) continue;
             g_treg[id_].evicted = 0;
             if (!treg_fam_pool_ok(id_, (__bridge id<MTLTexture>)tv, g_treg[id_].t.serial)) continue;
-            MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType; int trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
+            MTLTextureType tt = ((__bridge id<MTLTexture>)tv).textureType;
+            int sub_trans = g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial;
+            int ret_trans = g_treg[id_].retired && g_treg[id_].view != NULL;
             for (int k = 0; k < POOL_SNAPS; k++) { pool_snap *q = &g_psnap[k]; int at = id_ - q->base;
                 if (!q->buf || q->samp || at < 0 || (uint32_t)at >= *(uint32_t *)q->buf.contents) continue;
                 if (q->dtt == MTLTextureTypeTextureBuffer) { q->reg = 0; continue; }
@@ -15158,7 +15233,7 @@ static void pool_seen_scan(void) {
                     er = pool_bridge_pair((int)tt, q->dtt) ? pool_fit(id_, (__bridge id<MTLTexture>)tv, q->dtt) : 0;
                     if (!er) { pool_type_note(id_, (int)tt, q->dtt); continue; } }
                 pool_snap_set(q, (uint32_t)at, er, &forked);
-                if (trans) { ids_push(&q->trans, id_); if (!q->sub) q->sub = g_sub_serial; } }   // a view of a retired registration goes at this submission's end, so the next one takes it again (pool_gpu)
+                if (ret_trans) { ids_push(&q->trans, id_); if (!q->trans_gen) q->trans_gen = g_treg_trans_gen; if (sub_trans && !q->sub) q->sub = g_sub_serial; } }
         }
     }
 }
@@ -15262,11 +15337,19 @@ static uint64_t pool_entry(int samp, int dtt, int dpf, int id_, uint64_t limit, 
     if (dtt == MTLTextureTypeTextureBuffer && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER) return 0;
     if (r->gone) { ++*gone; return 0; }
     if (!r->view && !tex_storage_live(&r->t)) { ++*gone; *dead = 1; return 0; }
-    if (!r->view && pool_unwritten_target(&r->t)) return 0;   // dummy until a pass writes it (its new texture is noted: own_note)
-    if (r->evicted && !r->view && !pool_seen(id_) && !tex_get(r->t.serial) && !pkg_shared(&r->t)) return pool_stand(id_, dtt);   // freed idle or at memory pressure: made again when a shader reads it, not up front
-    if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && pool_tex_size(&r->t) > limit && !pkg_shared(&r->t) && !tex_get(r->t.serial) && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES)) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // BUFFER is a live view, with no upload for this budget to defer
     if (r->tt1 && r->tt1 - 1 != dtt && !(pool_bridge_pair(r->tt1 - 1, dtt) && pool_seen_t(id_, dtt))) { pool_type_note(id_, r->tt1 - 1, dtt); return 0; }   // an ID of another texture type, seen before (the table holds only its own type, or a view of an ID read through it: pool_fit): nothing to look up or charge (the idea is from PR 1428)
-    if (!r->view && r->t.d.target != NVN_TEXTURE_TARGET_BUFFER && !pkg_shared(&r->t)) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
+    if (!r->view) {
+        const int sparse = r->t.pool && nvn_sparse_pool(r->t.pool);
+        int shared = -1;
+        #define PE_SHARED() (shared >= 0 ? shared : (shared = (!sparse && pkg_shared(&r->t) != nil)))
+        if ((r->t.d.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && r->t.serial && !own_resolve_ref(r->t.serial) && !PE_SHARED()) return 0;   // dummy until a pass writes it (its new texture is noted: own_note)
+        if (r->evicted && !pool_seen(id_) && !own_resolve_ref(r->t.serial) && !PE_SHARED()) return pool_stand(id_, dtt);   // freed idle or at memory pressure: made again when a shader reads it, not up front
+        if (r->t.d.target != NVN_TEXTURE_TARGET_BUFFER) {
+            if (pool_tex_size(&r->t) > limit && !(pool_seen(id_) && g_walk_req < POOL_REQ_BYTES) && !own_resolve_ref(r->t.serial) && !PE_SHARED()) { ++*left; *left_req += pool_seen(id_); return pool_stand(id_, dtt); }   // BUFFER is a live view, with no upload for this budget to defer
+            if (!PE_SHARED()) { g_walk_spent += pool_tex_size(&r->t); if (pool_seen(id_)) g_walk_req += pool_tex_size(&r->t); }
+        }
+        #undef PE_SHARED
+    }
     void *tv = NULL; uint8_t vtt = 0; uint64_t tr = tex_fast_rid_meta(id_, &tv, &vtt, NULL);
     if (!tv) return 0;
     if (!treg_fam_pool_ok(id_, (__bridge id<MTLTexture>)tv, r->t.serial)) return 0;
@@ -15286,7 +15369,7 @@ static uint64_t pool_entry(int samp, int dtt, int dpf, int id_, uint64_t limit, 
         if (lk >= 0 && g_treg[id_].palt[lk]) chk = (__bridge id<MTLTexture>)g_treg[id_].palt[lk];
     }
     if (__builtin_expect(g_res_check_on, 0)) res_check(chk, "pool_gpu", id_);
-    if (g_treg[id_].retired && g_treg[id_].transient_sub == g_sub_serial) *transient = 1;
+    if (g_treg[id_].retired && g_treg[id_].view) *transient = g_treg[id_].transient_sub == g_sub_serial ? 1 : 2;
     return tr;
 }
 // Fold shader reads from g_seen_buf onto g_treg[id_].used on the g_tu_now clock (caller holds g_rmu). With clear=1 (tu_pass / tu_tick, once a second), clears the marks already folded
@@ -15453,7 +15536,7 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
     for (int i = 0; i < POOL_SNAPS && !p; i++) { pool_snap *q = &g_psnap[i];
         if (!q->buf) { if (!free_) free_ = q; }
         else if (q->samp == samp && q->dtt == dtt && q->dpf == dpf && q->base == base) p = q; }
-    int stale = p && p->sub && p->sub != g_sub_serial;   // its transient entries name views that went at the end of submission p->sub
+    int stale = p && ((p->sub && p->sub != g_sub_serial) || (p->trans_gen && p->trans_gen != g_treg_trans_gen));   // its transient entries name views that went at submission end or on storage takeover
     int walk_on = p && p->left && p->frame != atomic_load(&g_cur_frame) && (p->left_req || !pool_budget_full() || (!p->over && stand_on()));   // left: the walk goes on next frame, unless the budget has no room and nothing read waits: another walk would build the same table (but one, when the budget has filled since the last: what that left out for a later walk gets its stand-in)
     if (p && p->reg == rg && p->ser == sg && !stale && !walk_on) { p->sync_sub = g_sub_serial; *out = p->buf; return p->gpu; }
     // Only registrations and noted storage changes since the table was built (each generation in its log), the IDs without storage after a pool change and the transient IDs in a
@@ -15493,19 +15576,23 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         int gone = 0, left = 0, left_req = 0; id<MTLBuffer> b = nil; uint64_t *be = NULL, lpos = 0;   // lpos: the log position the old buffer holds, where this patch's entries begin
         pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
         if (!pools) ids_keep(0, &nd, &p->dead);    // not taken again: they stay on the list for the next pool change
-        if (!stale) ids_keep(1, &nt, &p->trans);   // this submission's views, still good
+        if (!stale) {
+            if (p->trans.n < 0) nt.n = -1;
+            else for (int k = 0; k < p->trans.n; k++) { int id_ = p->trans.v[k]; if (id_ >= 0 && id_ < g_ntreg && g_treg[id_].ok && !g_treg[id_].gone && g_treg[id_].retired && g_treg[id_].view) ids_add(1, &nt, id_); }
+        }
+        int has_sub_trans = stale ? 0 : (p->sub != 0);
         for (size_t k = 0; k < nid; k++) {
             int i = ids[k] - base; if (i < 0 || i >= nn || (samp && !i)) continue;
             uint64_t used = g_walk_spent - spent, limit = used < room ? room - used : 0;   // what this patch made comes off the room
             int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, dpf, ids[k], limit, &gone, &left, &left_req, &t, &d, NULL); r = r ? r : dummy;
             if (d) ids_add(0, &nd, ids[k]);
-            if (t) ids_add(1, &nt, ids[k]);
+            if (t) { ids_add(1, &nt, ids[k]); if (t == 1) has_sub_trans = 1; }
             if (r == (be ? be[i] : e[i])) continue;
             if (!b) { b = pool_patch_take(p); be = (uint64_t *)((uint8_t *)b.contents + DMSH_POOL_HEAD); lpos = g_plog[p - g_psnap].n; }
             be[i] = r; plog_add(p, (uint32_t)i, r);
         }
         g_stat_pool_pchg += pools; g_stat_pool_schg += stale; free(p->dead.v); free(p->trans.v);
-        p->reg = rg; p->ser = sg; p->sub = nt.n ? g_sub_serial : 0; p->sync_sub = g_sub_serial; p->dead = nd; p->trans = nt;
+        p->reg = rg; p->ser = sg; p->sub = has_sub_trans ? g_sub_serial : 0; p->trans_gen = nt.n ? g_treg_trans_gen : 0; p->sync_sub = g_sub_serial; p->dead = nd; p->trans = nt;
         if (left) { p->left += left; p->left_req += left_req; p->frame = atomic_load(&g_cur_frame); }   // textures past this frame's room: the walk goes on next frame, as for its own
         if (!b) { g_stat_pool_kept++; *out = p->buf; return p->gpu; }
         pool_table_give(p->buf, (int)(p - g_psnap), lpos); p->buf = b; p->gpu = b.gpuAddress;
@@ -15533,17 +15620,18 @@ static uint64_t pool_walk(int samp, int dtt, int dpf, int base, __unsafe_unretai
         (dummy_tbuf(dpf) ? g_dummy_tbuf_rid[dpf & 3] : 0) : (dummy_tex(dtt, dpf) ? g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] : 0);
     int real = 0, gone = 0, left = 0, left_req = 0; uint64_t limit = samp ? UINT64_MAX : pool_walk_limit(base, n);
     pool_ids nd = {0}, nt = {0}; ids_begin(0); ids_begin(1);
+    int has_sub_trans = 0;
     if (samp) { e[0] = samp_pool_zero() ? g_samp_zero_rid : dummy; real += e[0] != dummy; }
     for (int i = samp ? 1 : 0; i < n; i++) {
         int d = 0, t = 0; uint64_t r = pool_entry(samp, dtt, dpf, base + i, limit, &gone, &left, &left_req, &t, &d, leads ? leads + i : NULL);
         if (d) ids_add(0, &nd, base + i);
-        if (t) ids_add(1, &nt, base + i);
+        if (t) { ids_add(1, &nt, base + i); if (t == 1) has_sub_trans = 1; }
         e[i] = r ? r : dummy; real += r != 0;
     }
     e[n] = dummy;
     pool_table_give(p->buf, -1, 0); free(p->dead.v); free(p->trans.v); plog_build(p, n);   // the spares of the table's earlier build, or of another table in this slot, are of no live table now
-    // Retired registrations drop their views at submission end; their resource IDs cannot outlive that submission (trans, taken again by the next one)
-    *p = (pool_snap){b, b.gpuAddress, rg, sg, atomic_load(&g_cur_frame), nt.n ? g_sub_serial : 0, g_sub_serial, samp, dtt, dpf, base, left, left_req, nd, nt, samp || g_walk_over};
+    // Unowned retired views drop at submission end (sub); owner-held retired views stay valid until ghost eviction or storage takeover (trans_gen)
+    *p = (pool_snap){b, b.gpuAddress, rg, sg, atomic_load(&g_cur_frame), has_sub_trans ? g_sub_serial : 0, nt.n ? g_treg_trans_gen : 0, g_sub_serial, samp, dtt, dpf, base, left, left_req, nd, nt, samp || g_walk_over};
     g_psnap_gen++;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     double ms = (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6; g_stat_pool_ms += ms;
@@ -15692,13 +15780,17 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
 #define IMG_POOLS 16
 typedef struct {
     int dtt, dpf, rw, atom, base, capacity;
-    uint64_t rg, sg, sub;
+    uint64_t rg, sg, sub, trans_gen, dirty, vgen;
     id<MTLBuffer> buf;
     uint64_t gpu;
-    pool_ids refresh;
+    pool_ids dead, trans, pkg;
 } img_pool;
 static img_pool g_ipool[IMG_POOLS]; static int g_ipool_next;
 static int *g_ipool_ids, g_ipool_nids, g_ipool_cap; static uint64_t g_ipool_ids_rg;
+// Explicit NVN_TEXTURE_FLAGS_IMAGE registrations for image_prepare_shader, kept incrementally via REG_LOG so Switch 2's full-pool implicit list is not scanned on every dispatch.
+static int *g_ipool_img_ids, g_ipool_img_nids, g_ipool_img_cap; static uint64_t g_ipool_img_rg;
+static uint8_t *g_ipool_img_in; static int g_ipool_img_incap;
+static uint64_t g_stat_ipool_builds, g_stat_ipool_patched, g_stat_ipool_kept;
 static id<MTLTexture> dummy_img_atomic(int dtt, int dpf, int wide);
 static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b);
 
@@ -15720,7 +15812,17 @@ static int img_pool_writable_format(MTLPixelFormat pf, int target) {
 static int img_pool_matches(const treg_t *r, const nvn_rbind *b) {
     if (!r->ok || r->gone || !img_pool_target_ok(r, b->dtt) || (!r->view && !tex_storage_live(&r->t))) return 0;
     int explicit_image = (r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE) != 0;
-    if (!b->atom) return explicit_image || dm_sdk_ounce();
+    if (!b->atom) {
+        if (!explicit_image && !dm_sdk_ounce()) return 0;
+        if (b->rw) {
+            // Metal never supports shader writes to compressed, depth, or packed 16-bit formats, nor to implicit MSAA/video textures (mirrors img_usage).
+            if (fmt_compressed(r->t.d.format) || fmt_depth(r->t.d.format)) return 0;
+            if (!explicit_image && (r->t.d.samples > 1 || (r->t.d.flags & NVN_TEXTURE_FLAGS_VIDEO_DECODE))) return 0;
+            uint32_t base_pf = 0;
+            if (!nvn_fmt_to_mtl(r->t.d.format, &base_pf, NULL) || !img_pool_writable_format((MTLPixelFormat)base_pf, r->t.d.target)) return 0;
+        }
+        return 1;
+    }
     if (!explicit_image && (!img_pool_implicit(&r->t) || tex_from_storage(&r->t))) return 0;
 
     uint32_t base_pf = 0, view_pf = 0;
@@ -15753,21 +15855,54 @@ static void img_pool_ids(void) {   // registered candidates, by registration gen
     }
     g_ipool_ids_rg = rg;
 }
+static void img_pool_img_add(int id_) {
+    if (id_ < 0) return;
+    if (id_ >= g_ipool_img_incap) {
+        int nc = id_ + 4096;
+        g_ipool_img_in = realloc_or_die(g_ipool_img_in, (size_t)nc, "explicit image pool membership");
+        memset(g_ipool_img_in + g_ipool_img_incap, 0, (size_t)(nc - g_ipool_img_incap));
+        g_ipool_img_incap = nc;
+    }
+    if (g_ipool_img_in[id_]) return;
+    g_ipool_img_in[id_] = 1;
+    if (g_ipool_img_nids == g_ipool_img_cap) { g_ipool_img_cap = g_ipool_img_cap ? g_ipool_img_cap * 2 : 64; g_ipool_img_ids = realloc_or_die(g_ipool_img_ids, (size_t)g_ipool_img_cap * sizeof *g_ipool_img_ids, "explicit image pool"); }
+    g_ipool_img_ids[g_ipool_img_nids++] = id_;
+}
+static void img_pool_explicit_ids(void) {   // caller holds g_rmu; maintains compact list of NVN_TEXTURE_FLAGS_IMAGE IDs incrementally
+    uint64_t rg = atomic_load(&g_reg_gen);
+    if (rg == g_ipool_img_rg) return;
+    if (g_ipool_img_rg && rg - g_ipool_img_rg < REG_LOG) {
+        int known = 1;
+        for (uint64_t g = g_ipool_img_rg + 1; g <= rg && known; g++) {
+            int nid_, nsamp; known = reg_read(g, &nid_, &nsamp);
+            if (!known) break;
+            if (nsamp == 0 && nid_ >= 0 && nid_ < g_ntreg && g_treg[nid_].ok && !g_treg[nid_].gone && (g_treg[nid_].t.d.flags & NVN_TEXTURE_FLAGS_IMAGE))
+                img_pool_img_add(nid_);
+        }
+        if (known) { g_ipool_img_rg = rg; return; }
+    }
+    if (g_ipool_img_in) memset(g_ipool_img_in, 0, (size_t)g_ipool_img_incap);
+    g_ipool_img_nids = 0;
+    for (int id_ = 0; id_ < g_ntreg; id_++) {
+        const treg_t *r = &g_treg[id_];
+        if (r->ok && !r->gone && (r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE)) img_pool_img_add(id_);
+    }
+    g_ipool_img_rg = rg;
+}
 // One element of an image pool table: a view matching the shader's declared Metal type and pixel class (and writable when b->rw), or 0 (write sink) without logging mismatches
 // or triggering format-view upgrades on unrelated textures. Uses vc_get/vc_put directly so simultaneous image pools of different types or classes do not clobber r->im. Caller holds g_rmu.
-enum { IMG_POOL_TRANSIENT = 1, IMG_POOL_REFRESH = 2 };
-static int img_pool_elem(int tid, const nvn_rbind *b, uint64_t *rid, uint32_t *lead, int *flags) {
+enum { IMG_POOL_TRANSIENT = 1, IMG_POOL_PKG = 2, IMG_POOL_RETIRED = 4 };
+static int img_pool_elem(int tid, const nvn_rbind *b, uint64_t *rid, uint32_t *lead, int *flags, int *dead) {
     if (tid < 0 || tid >= g_ntreg) return 0;
     treg_t *r = &g_treg[tid];
+    if (!r->ok || r->gone || !img_pool_target_ok(r, b->dtt)) return 0;
+    if (!r->view && !tex_storage_live(&r->t)) { if (dead) *dead = 1; return 0; }
     if (!img_pool_matches(r, b)) return 0;
     uint8_t type = 0;
     uint32_t format = 0;
     void *tv = NULL; uint64_t tr = tex_fast_rid_meta(tid, &tv, &type, &format);
-    // An unresolved view may become available, and CPU writes can replace packaged views
-    // without a registration change. Recheck both when a submission refreshes this table.
-    if (!r->view || r->view_pkg) *flags |= IMG_POOL_REFRESH;
     id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
-    if (!t || !tr) return 0;
+    if (!t || !tr) { if (!r->view) *flags |= IMG_POOL_PKG; return 0; }
     if (!treg_fam_pool_ok(tid, t, r->t.serial)) return 0;
     const MTLTextureType have = (MTLTextureType)type, want = (MTLTextureType)b->dtt;
     const MTLPixelFormat source = (MTLPixelFormat)format;
@@ -15811,18 +15946,21 @@ static int img_pool_elem(int tid, const nvn_rbind *b, uint64_t *rid, uint32_t *l
     if (b->atom && !img_atomic_ok(t, b)) return 0;
     if (lead && t.textureType == MTLTextureTypeTextureBuffer) *lead = tbuf_lead(tid, t);
     if (__builtin_expect(g_res_check_on, 0)) res_check(t, "img_pool_gpu", tid);
-    if (r->retired && r->transient_sub == g_sub_serial) *flags |= IMG_POOL_TRANSIENT;
+    if (r->view_pkg) *flags |= IMG_POOL_PKG;
+    if (r->retired && r->view) *flags |= r->transient_sub == g_sub_serial ? IMG_POOL_TRANSIENT : IMG_POOL_RETIRED;
     *rid = tr;
     return 1;
 }
 static uint64_t img_pool_gpu(const nvn_rbind *b, int base, __unsafe_unretained id<MTLBuffer> *out) {   // caller holds g_rmu
-    uint64_t rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen);
+    uint64_t rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen), dg = nvn_dirty_now(), vg = nvn_sparse_gen();
     const int capacity = g_tpool_n;
     img_pool *table = NULL;
     for (int i = 0; i < IMG_POOLS; i++) if (g_ipool[i].buf && g_ipool[i].dtt == b->dtt && g_ipool[i].dpf == b->dpf &&
         g_ipool[i].rw == b->rw && g_ipool[i].atom == b->atom && g_ipool[i].base == base) {
         table = &g_ipool[i];
-        if (table->rg == rg && table->sg == sg && (!table->sub || table->sub == g_sub_serial)) {
+        int pkg_chg = (table->pkg.n != 0) && (table->dirty != dg || table->vgen != vg);
+        int stale_ = (table->sub && table->sub != g_sub_serial) || (table->trans_gen && table->trans_gen != g_treg_trans_gen);
+        if (table->rg == rg && table->sg == sg && !stale_ && !pkg_chg) {
             *out = table->buf;
             return table->gpu;
         }
@@ -15832,52 +15970,122 @@ static uint64_t img_pool_gpu(const nvn_rbind *b, int base, __unsafe_unretained i
     size_t metadata = b->dtt == (uint8_t)MTLTextureTypeTextureBuffer ? 4 * (size_t)(n + 1) : 0;
     size_t lead_off = DMSH_POOL_HEAD + 8 * (size_t)(n + 1);
     size_t bytes = lead_off + metadata;
+    int stale = table && ((table->sub && table->sub != g_sub_serial) || (table->trans_gen && table->trans_gen != g_treg_trans_gen));
+    int pkg_chg = table && (table->pkg.n != 0) && (table->dirty != dg || table->vgen != vg);
+    // Incremental update: inspect only IDs touched by registrations, storage notes, memory pool changes (dead), submission/takeover retirement (trans),
+    // or guest writes/sparse remaps (pkg), keeping the existing table buffer and g_psnap_gen when no entry changed (mirrors pool_walk).
+    if (table && table->buf && table->capacity == capacity && *(const uint32_t *)table->buf.contents == (uint32_t)n) do {
+        if (rg - table->rg >= REG_LOG || sg - table->sg >= SER_LOG) break;
+        static int *ids; static size_t idcap; size_t nid = 0; int known = 1, pools = 0;
+        #define IPOOL_ID(x) do { if (nid == idcap) { idcap = idcap ? idcap * 2 : 256; ids = realloc_or_die(ids, idcap * sizeof *ids, "the image pool patch"); } ids[nid++] = (x); } while (0)
+        for (uint64_t g = table->rg + 1; g <= rg && known; g++) {
+            int nid_, nsamp; known = reg_read(g, &nid_, &nsamp);
+            if (!known) break;
+            if (nsamp == REG_POOL) pools = 1;
+            else if (nsamp == 0) IPOOL_ID(nid_);
+        }
+        if (known && table->sg != sg) {
+            for (uint64_t g = table->sg + 1; g <= sg && known; g++) {
+                uint64_t serial = 0; known = own_note_at(g, &serial);
+                if (known) for (int k = (int)(uintptr_t)nvn_hm_get(&g_treg_serial, &serial); k && nid < POOL_IDS_MAX; k = g_treg[k - 1].next) IPOOL_ID(k - 1);
+            }
+        }
+        if (known && pools) {
+            if (table->dead.n < 0) break;
+            for (int k = 0; k < table->dead.n; k++) IPOOL_ID(table->dead.v[k]);
+        }
+        if (known && stale) {
+            if (table->trans.n < 0) break;
+            for (int k = 0; k < table->trans.n; k++) IPOOL_ID(table->trans.v[k]);
+        }
+        if (known && (pkg_chg || pools)) {
+            if (table->pkg.n < 0) break;
+            for (int k = 0; k < table->pkg.n; k++) IPOOL_ID(table->pkg.v[k]);
+        }
+        #undef IPOOL_ID
+        if (!known || nid >= POOL_IDS_MAX) break;
+        const uint8_t *old_c = (const uint8_t *)table->buf.contents;
+        const uint64_t *old_e = (const uint64_t *)(const void *)(old_c + DMSH_POOL_HEAD);
+        const uint32_t *old_leads = metadata ? (const uint32_t *)(const void *)(old_c + lead_off) : NULL;
+        uint64_t dummy = old_e[n];
+        id<MTLBuffer> buf = nil; uint64_t *be = NULL; uint32_t *bleads = NULL;
+        pool_ids nd = {0}, nt = {0}, np = {0}; ids_begin(0); ids_begin(1); ids_begin(2);
+        if (!pools) ids_keep(0, &nd, &table->dead);
+        if (!stale) {
+            if (table->trans.n < 0) nt.n = -1;
+            else for (int k = 0; k < table->trans.n; k++) { int id_ = table->trans.v[k]; if (id_ >= 0 && id_ < g_ntreg && g_treg[id_].ok && !g_treg[id_].gone && g_treg[id_].retired && g_treg[id_].view) ids_add(1, &nt, id_); }
+        }
+        if (!pkg_chg && !pools) ids_keep(2, &np, &table->pkg);
+        int trans = stale ? 0 : (table->sub != 0);
+        g_pool_walk = 1;
+        for (size_t k = 0; k < nid; k++) {
+            int id_ = ids[k], i = id_ - base; if (i < 0 || i >= n) continue;
+            uint64_t rid = 0; uint32_t lead = 0; int flags = 0, d = 0;
+            int found = img_pool_elem(id_, b, &rid, metadata ? &lead : NULL, &flags, &d);
+            uint64_t nv = found ? rid : dummy; uint32_t nl = found ? lead : 0;
+            if (d) ids_add(0, &nd, id_);
+            if (flags & (IMG_POOL_TRANSIENT | IMG_POOL_RETIRED)) ids_add(1, &nt, id_);
+            if (flags & IMG_POOL_PKG) ids_add(2, &np, id_);
+            trans |= flags & IMG_POOL_TRANSIENT;
+            int chg = nv != (be ? be[i] : old_e[i]) || (metadata && nl != (bleads ? bleads[i] : old_leads[i]));
+            // A retired transient view re-resolved for a new submission must not alias the previous submission's table buffer.
+            if (!chg && !(stale && (flags & (IMG_POOL_TRANSIENT | IMG_POOL_RETIRED)))) continue;
+            if (!buf) {
+                buf = pool_table_take(bytes);
+                uint8_t *c = buf.contents;
+                memcpy(c, old_c, bytes);
+                be = (uint64_t *)(void *)(c + DMSH_POOL_HEAD);
+                bleads = metadata ? (uint32_t *)(void *)(c + lead_off) : NULL;
+            }
+            be[i] = nv;
+            if (bleads) bleads[i] = nl;
+        }
+        g_pool_walk = 0;
+        free(table->dead.v); free(table->trans.v); free(table->pkg.v);
+        table->rg = rg; table->sg = sg; table->sub = trans ? g_sub_serial : 0; table->trans_gen = nt.n ? g_treg_trans_gen : 0; table->dirty = dg; table->vgen = vg;
+        table->dead = nd; table->trans = nt; table->pkg = np;
+        if (!buf) { g_stat_ipool_kept++; *out = table->buf; return table->gpu; }
+        pool_table_give(table->buf, -1, 0);
+        table->buf = buf; table->gpu = buf.gpuAddress;
+        g_psnap_gen++; g_stat_ipool_patched++;
+        *out = buf; return table->gpu;
+    } while (0);
     id<MTLBuffer> buf = pool_table_take(bytes);
     uint8_t *c = buf.contents;
     uint64_t *e = (uint64_t *)(void *)(c + DMSH_POOL_HEAD);
     uint32_t *leads = metadata ? (uint32_t *)(void *)(c + lead_off) : NULL;
-    // The submission ended the lifetime of some views. When no registrations or storage
-    // changed, keep the stable entries and resolve only those that can change on refresh.
-    int refresh_only = table && table->rg == rg && table->sg == sg && table->capacity == capacity && table->refresh.n >= 0 &&
-        *(const uint32_t *)table->buf.contents == (uint32_t)n;
-    uint64_t dummy;
-    if (refresh_only) {
-        memcpy(c, table->buf.contents, bytes);
-        dummy = e[n];
-    } else {
-        img_pool_ids();
-        memset(c, 0, DMSH_POOL_HEAD);
-        *(uint32_t *)c = (uint32_t)n;
-        *(uint32_t *)(void *)(c + DMSH_POOL_BIAS) = leads ? (uint32_t)lead_off : 0;
-        if (leads) memset(leads, 0, metadata);
-        id<MTLTexture> sink = b->atom ? dummy_img_atomic(b->dtt, b->dpf, b->atom == 2) : dummy_img(b->dtt, b->dpf);
-        dummy = sink.gpuResourceID._impl;
-        for (int i = 0; i <= n; i++) e[i] = dummy;
-    }
-    const int *ids = refresh_only ? table->refresh.v : g_ipool_ids;
-    int count = refresh_only ? table->refresh.n : g_ipool_nids;
-    pool_ids refresh = {0};
+    img_pool_ids();
+    memset(c, 0, DMSH_POOL_HEAD);
+    *(uint32_t *)c = (uint32_t)n;
+    *(uint32_t *)(void *)(c + DMSH_POOL_BIAS) = leads ? (uint32_t)lead_off : 0;
+    if (leads) memset(leads, 0, metadata);
+    id<MTLTexture> sink = b->atom ? dummy_img_atomic(b->dtt, b->dpf, b->atom == 2) : dummy_img(b->dtt, b->dpf);
+    uint64_t dummy = sink.gpuResourceID._impl;
+    for (int i = 0; i <= n; i++) e[i] = dummy;
+    pool_ids nd = {0}, nt = {0}, np = {0}; ids_begin(0); ids_begin(1); ids_begin(2);
     int real = 0, trans = 0;
     g_pool_walk = 1;
-    for (int k = 0; k < count; k++) {
-        int id_ = ids[k], i = id_ - base; if (i < 0 || i >= n) continue;
+    for (int k = 0; k < g_ipool_nids; k++) {
+        int id_ = g_ipool_ids[k], i = id_ - base; if (i < 0 || i >= n) continue;
         uint64_t rid = 0; uint32_t lead = 0;
-        int flags = 0;
-        int found = img_pool_elem(id_, b, &rid, leads ? &lead : NULL, &flags);
+        int flags = 0, d = 0;
+        int found = img_pool_elem(id_, b, &rid, leads ? &lead : NULL, &flags, &d);
         e[i] = found ? rid : dummy;
         if (leads) leads[i] = found ? lead : 0;
-        if (flags) ids_push(&refresh, id_);
+        if (d) ids_add(0, &nd, id_);
+        if (flags & (IMG_POOL_TRANSIENT | IMG_POOL_RETIRED)) ids_add(1, &nt, id_);
+        if (flags & IMG_POOL_PKG) ids_add(2, &np, id_);
         trans |= flags & IMG_POOL_TRANSIENT;
         real += found;
     }
     g_pool_walk = 0;
     if (!table) table = &g_ipool[g_ipool_next++ % IMG_POOLS];
     pool_table_give(table->buf, -1, 0);
-    free(table->refresh.v);
+    free(table->dead.v); free(table->trans.v); free(table->pkg.v);
     *table = (img_pool){.dtt=b->dtt, .dpf=b->dpf, .rw=b->rw, .atom=b->atom, .base=base, .capacity=capacity,
-        .rg=rg, .sg=sg, .sub=trans ? g_sub_serial : 0, .buf=buf, .gpu=buf.gpuAddress, .refresh=refresh};
-    g_psnap_gen++;
-    static int logged; if (!refresh_only && logged++ < 8) MLOG("image pool (Metal type %d, class %d, %s): %d IDs, %d candidates, %d viewed for the shader", b->dtt, b->dpf, b->atom ? "atomic" : b->rw ? "rw" : "ro", n, count, real);
+        .rg=rg, .sg=sg, .sub=trans ? g_sub_serial : 0, .trans_gen=nt.n ? g_treg_trans_gen : 0, .dirty=dg, .vgen=vg, .buf=buf, .gpu=buf.gpuAddress, .dead=nd, .trans=nt, .pkg=np};
+    g_psnap_gen++; g_stat_ipool_builds++;
+    static int logged; if (logged++ < 8) MLOG("image pool (Metal type %d, class %d, %s): %d IDs, %d candidates, %d viewed for the shader", b->dtt, b->dpf, b->atom ? "atomic" : b->rw ? "rw" : "ro", n, g_ipool_nids, real);
     *out = buf; return table->gpu;
 }
 // Resolve shader image writes before an encoder is opened. Snowdrop's cf5ba107e29b51f4 writes a COMPRESSIBLE-only R16F texture registered with RegisterTexture, not RegisterImage.
@@ -15918,6 +16126,15 @@ static void image_prepare_one(int tid, const nvn_rbind *b, int bindless_pool) {
     }
     os_unfair_lock_unlock(&g_rmu);
 }
+static int bcp_kind(const tex_t *t);
+// Cache of prepared bindless image pool classes per submission/generation so repeat draws and dispatches do not re-walk and re-resolve every IMAGE texture.
+// Any compressed-alias-capable IDs (bcp_kind != 0) are still re-noted for bcp_wrote on cache hits because bcp_flush clears g_bcp_pend between encoders.
+typedef struct {
+    int valid, dtt, dpf, atom, base;
+    uint64_t rg, sg, sub, fg;
+    int *bcp_ids, nbcp, bcp_cap;
+} img_prep_ent;
+static img_prep_ent g_iprep[IMG_POOLS]; static int g_iprep_next;
 static void image_prepare_shader(NvShader *sh, int st) {
     if (!sh) return;
     static int *prep_ids; static int prep_cap;
@@ -15928,18 +16145,37 @@ static void image_prepare_shader(NvShader *sh, int st) {
             int nprep = 0;
             os_unfair_lock_lock(&g_rmu);
             img_pool_note_bound(st);
-            img_pool_ids();
-            for (int k = 0; k < g_ipool_nids; k++) {
-                int tid = g_ipool_ids[k];
+            uint64_t rg = atomic_load(&g_reg_gen), sg = atomic_load(&g_ser_gen), fg = atomic_load_explicit(&g_fam_valid_gen, memory_order_acquire);
+            img_prep_ent *pe = NULL;
+            for (int j = 0; j < IMG_POOLS; j++) if (g_iprep[j].valid && g_iprep[j].dtt == b->dtt && g_iprep[j].dpf == b->dpf && g_iprep[j].atom == b->atom && g_iprep[j].base == S.tex_base) { pe = &g_iprep[j]; break; }
+            if (pe && pe->rg == rg && pe->sg == sg && pe->sub == g_sub_serial && pe->fg == fg) {
+                for (int k = 0; k < pe->nbcp; k++) {
+                    if (nprep == prep_cap) { prep_cap = prep_cap ? prep_cap * 2 : 64; prep_ids = realloc_or_die(prep_ids, (size_t)prep_cap * sizeof *prep_ids, "image pool prepare"); }
+                    prep_ids[nprep++] = pe->bcp_ids[k];
+                }
+                os_unfair_lock_unlock(&g_rmu);
+                for (int k = 0; k < nprep; k++) image_prepare_one(prep_ids[k], b, 1);
+                continue;
+            }
+            img_pool_explicit_ids();
+            if (!pe) { pe = &g_iprep[g_iprep_next++ % IMG_POOLS]; pe->valid = 1; }
+            pe->dtt = b->dtt; pe->dpf = b->dpf; pe->atom = b->atom; pe->base = S.tex_base; pe->nbcp = 0;
+            for (int k = 0; k < g_ipool_img_nids; k++) {
+                int tid = g_ipool_img_ids[k];
                 if (tid < S.tex_base || tid >= g_ntreg) continue;
                 const treg_t *r = &g_treg[tid];
                 // A GPU-selected ordinary descriptor already has the usage its format allows. The ID alone cannot mark its guest storage GPU-written.
-                if (!(r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE) || !img_pool_matches(r, b)) continue;
+                if (!r->ok || r->gone || !(r->t.d.flags & NVN_TEXTURE_FLAGS_IMAGE) || !img_pool_matches(r, b)) continue;
                 if (nprep == prep_cap) { prep_cap = prep_cap ? prep_cap * 2 : 64; prep_ids = realloc_or_die(prep_ids, (size_t)prep_cap * sizeof *prep_ids, "image pool prepare"); }
                 prep_ids[nprep++] = tid;
+                if (bcp_kind(&r->t)) {
+                    if (pe->nbcp == pe->bcp_cap) { pe->bcp_cap = pe->bcp_cap ? pe->bcp_cap * 2 : 16; pe->bcp_ids = realloc_or_die(pe->bcp_ids, (size_t)pe->bcp_cap * sizeof *pe->bcp_ids, "image pool bcp"); }
+                    pe->bcp_ids[pe->nbcp++] = tid;
+                }
             }
             os_unfair_lock_unlock(&g_rmu);
             for (int k = 0; k < nprep; k++) image_prepare_one(prep_ids[k], b, 1);
+            pe->rg = rg; pe->sg = atomic_load(&g_ser_gen); pe->sub = g_sub_serial; pe->fg = atomic_load_explicit(&g_fam_valid_gen, memory_order_acquire);
             continue;
         }
         if (b->kind != NVN_RB_IMGU && (b->kind != NVN_RB_IMG || b->reg >= 32)) continue;

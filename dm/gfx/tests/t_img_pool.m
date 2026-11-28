@@ -310,7 +310,7 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_unlock(&g_rmu);
     CHECK(gpu_after != 0 && pb_out != nil && g_psnap_gen > pgen_before, "img_pool_gpu rebuild bumps g_psnap_gen for argument-block invalidation");
 
-    // A submission retires late views, while a neighbouring descriptor's resource stays live.
+    // A retired image view stays cached while the owner holds it, and refreshes into a separate argument buffer when forced to drop (e.g. storage takeover).
     uint64_t retired_serial = ((tex_t *)&tex2d_regimg)->serial;
     treg_retire_serial(retired_serial);
     own_note(retired_serial);
@@ -320,16 +320,21 @@ int main(void) { @autoreleasepool {
     os_unfair_lock_lock(&g_rmu);
     img_pool_gpu(&refresh_bind, 0, &refresh_out);
     id<MTLBuffer> earlier = refresh_out;
-    require(earlier && g_treg[311].transient_sub == g_sub_serial, "the retired image has a view scoped to this submission");
+    require(earlier && g_treg[311].in_transient && g_treg[311].view, "the retired image resolves and is tracked for owner-driven retirement");
     const uint64_t *before = (const uint64_t *)((const uint8_t *)earlier.contents + DMSH_POOL_HEAD);
     const uint64_t stable_rid = before[310], retired_rid = before[311];
     const uint64_t old_reg = g_reg_gen, old_ser = g_ser_gen;
     os_unfair_lock_unlock(&g_rmu);
     require(mtl_wait(mtl_sub_commit(), 5000000000ull), "the image-pool submission completes");
-    require(!g_treg[311].view, "the late image view is dropped at submission end");
+    require(g_treg[311].view != NULL, "the owner-held retired image view stays cached across a plain submission");
+    // Simulate a storage takeover / forced drop of retired views at submission end.
+    os_unfair_lock_lock(&g_rmu);
+    treg_drop_transient_all(1);
+    os_unfair_lock_unlock(&g_rmu);
+    require(!g_treg[311].view, "the retired image view is dropped on takeover");
     mtl_sub_begin();
     os_unfair_lock_lock(&g_rmu);
-    require(g_reg_gen == old_reg && g_ser_gen == old_ser, "only the submission changed before the refresh");
+    require(g_reg_gen == old_reg && g_ser_gen == old_ser, "only the retired-view generation changed before the refresh");
     img_pool_gpu(&refresh_bind, 0, &refresh_out);
     require(refresh_out && refresh_out != earlier, "refresh writes a separate argument buffer");
     const uint64_t *after = (const uint64_t *)((const uint8_t *)refresh_out.contents + DMSH_POOL_HEAD);
@@ -382,7 +387,8 @@ int main(void) { @autoreleasepool {
     P(nvnCommandBufferCopyTextureToBuffer)(&command, &cpu_r8, NULL, &reg2d, base + READBACK_OFF + 0x6000, 0);
     submit_and_wait(P(nvnCommandBufferEndRecording)(&command));
     CHECK(memory[READBACK_OFF + 0x4000] == 255, "NVN2 image pool writes a flagless compatible color texture");
-    id<MTLTexture> bc = tex_made((const tex_t *)&compressed);
+    CHECK(!tex_made((const tex_t *)&compressed), "writable image pool skips compressed textures without materializing them");
+    id<MTLTexture> bc = tex_mtl((const tex_t *)&compressed);
     CHECK(bc && !(bc.usage & MTLTextureUsageShaderWrite), "the compressed texture is resolved without shader write usage");
     CHECK(memory[READBACK_OFF + 0x6000] == 0x55, "a matching CPU-fed texture retains its unflushed contents");
     os_unfair_lock_lock(&g_rmu);

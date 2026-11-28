@@ -117,7 +117,7 @@ int main(void) { @autoreleasepool {
         // The registration's own view and a feedback view of the very same levels, slices, format and swizzle: two entries, each found only by its own key
         os_unfair_lock_lock(&g_rmu);
         uint64_t ma = vc_addr(mb); vc_set *set = nvn_hm_get(&g_vc, &ma); vc_key rk; int have = 0;
-        for (int i = 0; set && i < VC_WAYS; i++) if (set->view[i] == (__bridge void *)t) { rk = set->k[i]; have = 1; }
+        for (unsigned i = 0; set && i < set->n; i++) if (set->view[i] == (__bridge void *)t) { rk = set->k[i]; have = 1; }
         os_unfair_lock_unlock(&g_rmu);
         CHECK(have && rk.pad[0] == 0 && rk.pf == (uint32_t)t.pixelFormat && rk.tt == (uint8_t)t.textureType && rk.sw[3] == (uint8_t)MTLTextureSwizzleOne, "the registration's view is in the cache under a registration key");
         made = g_vc_new;

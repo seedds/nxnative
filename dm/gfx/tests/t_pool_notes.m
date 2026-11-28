@@ -125,19 +125,19 @@ int main(void) { @autoreleasepool {
           "retirement itself notifies later replays about the dropped view");
     id<MTLBuffer> b6 = table_current();
     CHECK(g_treg[3].retired && entry(b6, 3) != dummy_of(b6), "the finalized texture's ID still resolves in this submission");
-    CHECK(snap()->sub == g_sub_serial && lists(&snap()->trans, 3), "the table lists it as a view of this submission");
+    CHECK(snap()->trans_gen == g_treg_trans_gen && lists(&snap()->trans, 3), "the table lists it as an owner-held retired view");
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
-    CHECK(!g_treg[3].view, "its view went at the end of the submission");
+    CHECK(g_treg[3].view != NULL, "its view stays cached while the ghost table still holds the texture");
     builds = g_stat_pool_builds; uint64_t schg = g_stat_pool_schg;
     id<MTLBuffer> b7 = table();
-    CHECK(g_stat_pool_builds == builds && g_stat_pool_schg == schg + 1, "the next submission takes the retired ID again without building the table");
-    CHECK(entry(b7, 3) != dummy_of(b7) && entry(b7, 2) == entry(b6, 2), "ID 3 resolves again, ID 2 unchanged");
-    same_as_whole(b7, "the patched table holds what a table built whole does (retired ID)");
+    CHECK(g_stat_pool_builds == builds && g_stat_pool_schg == schg, "a plain next submission does not re-walk owner-held retired IDs");
+    CHECK(entry(b7, 3) != dummy_of(b7) && entry(b7, 2) == entry(b6, 2), "ID 3 keeps resolving, ID 2 unchanged");
+    same_as_whole(b7, "the table holds what a table built whole does (retired ID)");
     h_nvnTextureFinalize(&t3);
 
     // A storage takeover: ID 4 names a finalized texture that resolves to a shared one (a pool the CPU cannot reach). When a texture of another description takes its storage,
     // the change names no texture: no table is built, and no ID view is checked again. The evicted texture goes only behind the submission's fence (here the ghost table of finalized
-    // serials keeps it), and a retired ID's view of it goes at the submission's end, so the next submission takes ID 4 again
+    // serials keeps it), and a takeover drops retired views at the submission's end so the next submission takes ID 4 again
     uint8_t *md = pages(); pool_t dpool = {0}; pool_builder_t pd = {.mem = md, .size = LEN, .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED};
     CHECK(h_nvnMemoryPoolInitialize((NVNmemoryPool *)&dpool, (const NVNmemoryPoolBuilder *)&pd), "pool D initialized");
     NVNtexture t4 = {0}; h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&dpool, 0);
@@ -146,7 +146,10 @@ int main(void) { @autoreleasepool {
     table(); h_nvnTextureFinalize(&t4);
     id<MTLBuffer> b9 = table();
     CHECK(g_treg[4].retired && entry(b9, 4) != dummy_of(b9), "the finalized texture's ID resolves to the shared texture");
-    CHECK(!g_treg[4].view && lists(&snap()->trans, 4), "its view went at the submission's end, and the table lists it");
+    CHECK(g_treg[4].view && lists(&snap()->trans, 4), "its view stays cached while no takeover happened, and the table lists it");
+    builds = g_stat_pool_builds; schg = g_stat_pool_schg;
+    id<MTLBuffer> b9b = table();
+    CHECK(g_stat_pool_builds == builds && g_stat_pool_schg == schg && entry(b9b, 4) == entry(b9, 4), "another plain submission does not re-walk owner-held retired ID 4");
     for (int i = 0; i <= ALIAS_IDLE; i++) { mtl_sub_begin(); mtl_wait(mtl_sub_commit(), 5000000000ull); }   // until the sharing table no longer spares the entry
     NVNtexture t5 = {0}; h_nvnTextureBuilderSetFormat(&tb, NVN_FORMAT_R32F); h_nvnTextureBuilderSetStorage(&tb, (NVNmemoryPool *)&dpool, 0);
     CHECK(h_nvnTextureInitialize(&t5, &tb), "texture 5 over the same storage initialized");
@@ -156,14 +159,15 @@ int main(void) { @autoreleasepool {
     CHECK(alias_taken() > taken, "texture 5 took the storage over");
     CHECK(g_stat_pool_builds == builds && entry(b10, 5) != dummy_of(b10) && entry(b10, 4) == entry(b9, 4), "the takeover builds no table, and ID 4 keeps its entry in that submission");
     CHECK(g_treg_ep == ep, "nor sends every texture ID down the slow path");
-    CHECK(!g_treg[4].view, "ID 4's view went at the submission's end");
+    CHECK(!g_treg[4].view, "ID 4's view went at the submission's end after takeover");
+    schg = g_stat_pool_schg;
     id<MTLBuffer> b11 = table();
-    CHECK(g_stat_pool_builds == builds && entry(b11, 4) != dummy_of(b11), "the next submission takes ID 4 again without building the table");
+    CHECK(g_stat_pool_builds == builds && g_stat_pool_schg == schg + 1 && entry(b11, 4) != dummy_of(b11), "the next submission takes ID 4 again without building the table");
     same_as_whole(b11, "the patched table holds what a table built whole does (takeover)");
 
     // Past the budget: a texture registered since the walk that no shader has read is not made, as in a walk (its entry is its stand-in, or the dummy with DM_NVN_POOL_STANDIN=0), and the table is patched rather than built whole. ID 6 names a
     // texture the game finalized before anything made it. Once a shader reads ID 6, the scan of the read bitmap makes it whatever the budget and forks the table via copy-on-write:
-    // a view of a retired registration, which the table lists, so the next submission takes it again
+    // a view of a retired registration, which the table lists
     mtl_reg_tex(3, NULL, NULL); mtl_reg_tex(4, NULL, NULL); table(); table();   // no retired IDs left: the table lists none
     CHECK(snap()->sub == 0 && snap()->trans.n == 0, "a table without views of retired registrations");
     id<MTLBuffer> hog = [g_dev newBufferWithLength:pool_budget() + (1u << 20) options:MTLResourceStorageModePrivate];
@@ -183,12 +187,12 @@ int main(void) { @autoreleasepool {
     mtl_sub_begin(); os_unfair_lock_lock(&g_rmu); pool_seen_scan();
     pool_snap *s = snap(); id<MTLBuffer> b13 = s->buf;
     CHECK(b13 != b12b && entry(b12b, 6) == b12b_e6 && entry(b13, 6) != dummy_of(b13), "a read updates the table via copy-on-write past the budget without mutating the prior buffer");
-    CHECK(s->sub == g_sub_serial && lists(&s->trans, 6), "as a view of a retired registration of this submission");
+    CHECK(s->trans_gen == g_treg_trans_gen && lists(&s->trans, 6), "listed as a retired registration on the table");
     os_unfair_lock_unlock(&g_rmu); CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the submission completed");
-    CHECK(!g_treg[6].view, "the view went at the submission's end");
-    builds = g_stat_pool_builds; schg = g_stat_pool_schg;
+    CHECK(g_treg[6].view != NULL, "the owner-held retired view stays cached without a takeover");
+    builds = g_stat_pool_builds;
     id<MTLBuffer> b14 = table();
-    CHECK(g_stat_pool_builds == builds && g_stat_pool_schg > schg && entry(b14, 6) != dummy_of(b14), "the next submission takes ID 6 again without building the table");
+    CHECK(g_stat_pool_builds == builds && entry(b14, 6) != dummy_of(b14), "the next submission keeps ID 6 without building the table");
     hog = nil;
 
     // A live sRGB / linear twin: ID 8's serial resolves to a view of the shared texture that ID 7, finalized since, made (srgb_twins in tex_mtl_). The view's entry counts as

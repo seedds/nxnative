@@ -57,7 +57,7 @@ static int presents_done(void) {   // every committed present has completed, wit
     return left == 0;
 }
 static uint64_t present(const tex_t *t, const int crop[4], id<CAMetalDrawable> *dr) {   // queued and taken by the next tick; returns its ticket
-    present_enqueue(t, 1. / 60, crop, 0, NULL); id<CAMetalDrawable> d = tick(); if (dr) *dr = d;
+    present_enqueue(t, 1. / 60, crop, 0, 0, NULL); id<CAMetalDrawable> d = tick(); if (dr) *dr = d;
     pthread_mutex_lock(&g_pq_mu); uint64_t tk = g_pq_read; pthread_mutex_unlock(&g_pq_mu); return tk;
 }
 // The drawable's pixels against one colour (BGRA bytes), each channel within tol; prints the first pixel when they differ

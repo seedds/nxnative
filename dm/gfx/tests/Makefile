@@ -803,6 +803,12 @@ t_pkg_spare: t_pkg_spare.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_spare.m $(MTL_T_SRC) $(FW)
 t_pkg_evict: t_pkg_evict.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pkg_evict.m $(MTL_T_SRC) $(FW)
+t_mem_census: t_mem_census.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_mem_census.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_mem_census
+check_t_mem_census: t_mem_census
+	DM_NVN_ENC_THREAD=0 MTL_DEBUG_LAYER=1 ./t_mem_census
+	DM_NVN_ENC_THREAD=1 MTL_DEBUG_LAYER=1 ./t_mem_census
 t_storage_pair: t_storage_pair.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_storage_pair.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_storage_pair

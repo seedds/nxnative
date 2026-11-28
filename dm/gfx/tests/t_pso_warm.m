@@ -44,11 +44,11 @@ static int fixtures(NSString *dir) {
         NSData *json = [NSJSONSerialization dataWithJSONObject:reflection options:0 error:nil];
         if (![json writeToFile:[dir stringByAppendingPathComponent:[NSString stringWithFormat:@"warm-%@.json", stage]] atomically:YES]) return 0;
     }
-    g_msl_dir = dir; g_shmap = @{@"warm-vs": @"vertex", @"warm-fs": @"pixel", @"warm-ms": @"mesh"}.mutableCopy;
+    g_msl_dir = dir; g_shmap = @{@"warm-vs": @"vertex", @"warm-fs": @"pixel", @"warm-fs2": @"pixel", @"warm-other": @"pixel", @"warm-ms": @"mesh"}.mutableCopy;
     return 1;
 }
 
-// Hold the real first library load, not a replacement shader loader. The S and R tasks below
+// Hold the real first library load, not a replacement shader loader. Two R tasks sharing warm-vs
 // then reach warm_shader concurrently, while a different shader must still load successfully.
 @interface WarmGateDevice : NSObject {
 @public id<MTLDevice> device; dispatch_semaphore_t entered, release; _Atomic unsigned library_calls;
@@ -79,13 +79,14 @@ static int fixtures(NSString *dir) {
 }
 @end
 
-static NSString *row(const pso_key *key, int merged) {
+static NSString *row_pair(const pso_key *key, const char *fs_name, int merged) {
     NvShader *vs = [NvShader new], *fs = [NvShader new];
-    strcpy(vs->key, "warm-vs"); strcpy(fs->key, "warm-fs"); fs->stage = 1;
+    strcpy(vs->key, "warm-vs"); strcpy(fs->key, fs_name); fs->stage = 1;
     pso_skey sk; char hex[sizeof sk * 2 + 1];
     pso_skey_from(key, vs, fs, merged, NULL, &sk); pso_skey_hex(&sk, hex);
     return [NSString stringWithFormat:@"R\t%s\n", hex];
 }
+static NSString *row(const pso_key *key, int merged) { return row_pair(key, "warm-fs", merged); }
 
 static void pixels(id<MTLRenderPipelineState> pipeline, int mesh, uint8_t out[4]) {
     MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
@@ -140,18 +141,18 @@ static void singleflight(NSString *dir) {
     warm_load_begin(); g_warm_items = [NSMutableArray array]; atomic_store(&g_warm_ready, 0);
     WarmLookupDictionary *lookup = [WarmLookupDictionary new]; lookup->dictionary = g_warm_dict;
     lookup->second_lookup = dispatch_semaphore_create(0); g_warm_dict = (NSMutableDictionary *)lookup;
-    for (NSString *extension in @[@"json", @"metallib"]) {
+    for (NSString *name in @[@"warm-other", @"warm-fs2"]) for (NSString *extension in @[@"json", @"metallib"]) {
         NSString *source = [dir stringByAppendingPathComponent:[@"warm-fs." stringByAppendingString:extension]];
-        NSString *target = [dir stringByAppendingPathComponent:[@"warm-other." stringByAppendingString:extension]];
+        NSString *target = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", name, extension]];
         if (![NSFileManager.defaultManager fileExistsAtPath:target])
-            EXPECT("unrelated fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:source toPath:target error:nil]);
+            EXPECT("fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:source toPath:target error:nil]);
     }
     pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
     NSString *manifest = [dir stringByAppendingPathComponent:@"concurrent.tsv"];
-    NSString *text = [@"S\twarm-vs\t0\n" stringByAppendingString:row(&key, 0)];
+    NSString *text = [NSString stringWithFormat:@"S\twarm-vs\t0\n%@%@", row_pair(&key, "warm-fs", 0), row_pair(&key, "warm-fs2", 0)];
     EXPECT("concurrent manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
-    EXPECT("S and R are distinct real warm tasks", 2, tasks.count);
+    EXPECT("legacy S row ignored, two R pairs are distinct warm tasks", 2, lines == 2 && tasks.count == 2 ? 2 : 0);
     if (tasks.count != 2) return;
     pso4_init();   // Match warm_start: initialize the real compiler before substituting the test device.
     WarmGateDevice *gate = [WarmGateDevice new]; gate->device = g_dev;
@@ -161,7 +162,7 @@ static void singleflight(NSString *dir) {
     dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[0]); });
     EXPECT("first real shader load reaches device gate", 0, dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
     dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ warm_task(tasks[1]); });
-    EXPECT("R task reaches S task's key while its load is held", 0, dispatch_semaphore_wait(lookup->second_lookup, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
+    EXPECT("second R task reaches warm-vs while its load is held", 0, dispatch_semaphore_wait(lookup->second_lookup, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)));
     // A dedicated worker avoids a failed assertion hanging the test behind the very global load lock it is meant to catch.
     dispatch_group_t unrelated = dispatch_group_create();
     __block NvShader *other = nil;
@@ -170,20 +171,19 @@ static void singleflight(NSString *dir) {
     dispatch_semaphore_signal(gate->release);
     dispatch_group_wait(callers, DISPATCH_TIME_FOREVER); dispatch_group_wait(unrelated, DISPATCH_TIME_FOREVER);
     EXPECT("unrelated shader loaded", 1, other != nil);
-    EXPECT("actual library loads", 3, atomic_load(&gate->library_calls));
+    EXPECT("actual library loads", 4, atomic_load(&gate->library_calls));
     NvShader *published = warm_shader(@"warm-vs", 0);
     unsigned references = 0;
     for (WarmItem *item in g_warm_items) {
-        if (item->kind == 0) { EXPECT("S task retains the published shader", 1, item->shader == published); references++; }
         if (item->kind == 1) { EXPECT("R task retains the published shader", 1, item->vs == published); references++; }
     }
     EXPECT("both real callers returned the same shader", 2, references);
     EXPECT("cached lookup returns the published shader", 1, warm_shader(@"warm-vs", 0) == published);
-    EXPECT("cached lookups perform no library loads", 3, atomic_load(&gate->library_calls));
+    EXPECT("cached lookups perform no library loads", 4, atomic_load(&gate->library_calls));
     g_dev = gate->device;
     warm_claim();
     NvShader *vs = g_shcache[@"warm-vs"];
-    EXPECT("S and R publish one shader identity", 1, vs == published);
+    EXPECT("R tasks publish one shader identity", 1, vs == published);
     // Missing geometry reflection returns nil quietly. Warm callers share its negative result;
     // a later demand caller still retries, and succeeds once real reflection appears.
     EXPECT("failed warm load", 1, warm_shader(@"retry-gs", 2) == nil);
@@ -261,12 +261,12 @@ static void native_mesh(NSString *dir) {
     NSString *text = [NSString stringWithFormat:@"S\twarm-ms\t7\nS\twarm-ms\t4\n%@%@%@%@", wrong_stage, raw, valid, valid];
     EXPECT("mesh manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
-    EXPECT("one mesh library and one mesh pipeline after normalizing stage aliases", 2, lines);
-    if (tasks.count != 2) return;
-    warm_load_begin(); warm_task(tasks[0]); warm_task(tasks[1]);
-    EXPECT("mesh warm tasks publish the library and the pipeline", 2, g_warm_items.count);
-    if (g_warm_items.count != 2) return;
-    WarmItem *item = g_warm_items[1];
+    EXPECT("legacy S rows ignored and one mesh pipeline kept after normalizing stage aliases", 1, lines);
+    if (tasks.count != 1) return;
+    warm_load_begin(); warm_task(tasks[0]);
+    EXPECT("mesh warm task publishes the pipeline", 1, g_warm_items.count);
+    if (g_warm_items.count != 1) return;
+    WarmItem *item = g_warm_items[0];
 
     // A live shader loaded while prewarm was in flight has a different object identity.
     g_shcache = @{@"warm-ms": live, @"warm-fs": fragment}.mutableCopy;
@@ -329,6 +329,65 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+static void geometry_reader(NSString *dir) {
+    NSString *base = @"0123456789abcdef", *reader = [base stringByAppendingString:@"_bgv"];
+    for (NSString *ext in @[@"metallib", @"json"]) {
+        NSString *src = [dir stringByAppendingPathComponent:[@"warm-vs." stringByAppendingString:ext]];
+        NSString *dst = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.%@", reader, ext]];
+        EXPECT("bgv fixture copied", 1, [NSFileManager.defaultManager copyItemAtPath:src toPath:dst error:nil]);
+    }
+    g_shmap[base] = @"geometry";
+    nvn_hm_clear(&g_pso, hm_rel); g_shcache = nil; g_warm_items = [NSMutableArray array];
+    warm_load_begin();
+    g_warm_rps = g_warm_claim_rps = 0; atomic_store(&g_warm_ready, 0);
+    uint64_t stale0 = g_warm_skip_stale;
+    pso_key key = {0}; key.cfmt[0] = MTLPixelFormatRGBA8Unorm; key.samples = 1; key.chmask = 15;
+    NvShader *vs = [NvShader new], *fs = [NvShader new];
+    strlcpy(vs->key, reader.UTF8String, sizeof vs->key); vs->stage = 0;
+    strlcpy(fs->key, "warm-fs", sizeof fs->key); fs->stage = 1;
+    pso_skey sk; char hex[sizeof sk * 2 + 1];
+    pso_skey_from(&key, vs, fs, 0, NULL, &sk); pso_skey_hex(&sk, hex);
+    NSString *valid = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 2; pso_skey_hex(&sk, hex);
+    NSString *bad_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    sk.vs_stage = 0; strlcpy(sk.vs, "warm-vs_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *wrong_map_stage = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "fedcba9876543210_bgv", sizeof sk.vs); pso_skey_hex(&sk, hex);
+    NSString *missing_map = [NSString stringWithFormat:@"R\t%s\n", hex];
+    strlcpy(sk.vs, "warm-vs", sizeof sk.vs); strlcpy(sk.fs, reader.UTF8String, sizeof sk.fs); pso_skey_hex(&sk, hex);
+    NSString *bgv_in_fs = [NSString stringWithFormat:@"R\t%s\n", hex];
+    NSString *manifest = [dir stringByAppendingPathComponent:@"bgv.tsv"];
+    NSString *text = [NSString stringWithFormat:@"%@%@%@%@%@", bad_stage, wrong_map_stage, missing_map, bgv_in_fs, valid];
+    EXPECT("bgv manifest written", 1, [text writeToFile:manifest atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+    long lines = 0; NSArray<WarmTask *> *tasks = warm_parse(@[manifest], &lines);
+    EXPECT("only valid _bgv R row accepted", 1, lines == 1 && tasks.count == 1 ? 1 : 0);
+    EXPECT("missing _bgv base key and _bgv in fs counted as stale", 2, g_warm_skip_stale - stale0);
+    if (tasks.count != 1) return;
+    g_warm_t0 = bp_now(); atomic_store(&g_warm_running, 1);
+    warm_task(tasks[0]);
+    warm_finish();
+    EXPECT("bgv render pipeline enqueued", 1, g_warm_rps);
+    warm_claim();
+    EXPECT("bgv render pipeline claimed", 1, g_warm_claim_rps);
+    NvShader *claimed_vs = shader_get(reader, 0), *claimed_fs = shader_get(@"warm-fs", 1);
+    EXPECT("bgv reader cached by shader_get", 1, claimed_vs != nil && claimed_fs != nil);
+    if (!claimed_vs || !claimed_fs) return;
+    state_reset(); S.chmask.mask = 15;
+    memset(g_pass.cfmt, 0, sizeof g_pass.cfmt);
+    g_pass.cfmt[0] = MTLPixelFormatRGBA8Unorm; g_pass.dfmt = g_pass.sfmt = 0; g_pass.samples = 1;
+    uint64_t before = g_pb_spec + g_pb_legacy;
+    NvProg *program = [NvProg new]; program->sh[0] = claimed_vs; program->sh[1] = claimed_fs;
+    id<MTLRenderPipelineState> warmed = pso_get(program, nil);
+    EXPECT("bgv draw hits warmed pipeline without compiling", before, g_pb_spec + g_pb_legacy);
+    EXPECT("bgv draw returns a pipeline", 1, warmed != nil);
+    if (warmed) {
+        uint8_t px[4]; pixels(warmed, 0, px);
+        EXPECT("bgv warmed pipeline renders expected pixels", 1, abs((int)px[0] - 128) <= 1 && abs((int)px[1] - 64) <= 1 && px[2] == 255 && abs((int)px[3] - 128) <= 1);
+    }
+    [g_shmap removeObjectForKey:base];
+    g_shcache = nil; nvn_hm_clear(&g_pso, hm_rel);
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -341,6 +400,7 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    geometry_reader(@(dir));
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

@@ -46,7 +46,7 @@ static void *game(void *arg) {
     (void)arg;
     for (;;) {
         dispatch_semaphore_wait(t_go, DISPATCH_TIME_FOREVER);
-        @autoreleasepool { mtl_link_wait_ticks(g_ticks, 2000000000ull); if (g_delay_us) usleep(g_delay_us); present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL); }
+        @autoreleasepool { mtl_link_wait_ticks(g_ticks, 2000000000ull); if (g_delay_us) usleep(g_delay_us); present_enqueue(&g_tex, 1. / 60, NULL, 0, 0, NULL); }
         dispatch_semaphore_signal(t_done);
     }
     return NULL;
@@ -77,8 +77,8 @@ static void hold_case(int mode, int screen_hz, int fps, int callbacks, const cha
         target += 2 * step;
     }
     double period = (1000000000ull / (uint64_t)fps) / 1e9;   // the same whole-nanosecond period as the guest presents
-    uint64_t first = present_enqueue(&g_tex, period, NULL, 0, NULL);
-    uint64_t second = present_enqueue(&g_tex, period, NULL, 0, NULL);
+    uint64_t first = present_enqueue(&g_tex, period, NULL, 0, 0, NULL);
+    uint64_t second = present_enqueue(&g_tex, period, NULL, 0, 0, NULL);
     tick_at(target);
     int waited = first && second == first + 1 && g_pq_read == first && queued() == 1;
     for (int i = 1; i < callbacks; i++) {
@@ -117,7 +117,7 @@ int main(void) { @autoreleasepool {
 
     // 2. A standing frame goes out first: a frame queued before the woken callback is shown, the woken present stands, nothing is dropped
     frame_start(1, 0); int w = waiting(0);
-    present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL);   // a frame that missed the previous tick
+    present_enqueue(&g_tex, 1. / 60, NULL, 0, 0, NULL);   // a frame that missed the previous tick
     tick(); int done = frame_done();
     CHECK("standing frame: the callback did not latch over it", w && done && g_link_latched == 1 && g_link_dropped == 0 && queued() == 1);
     CHECK("the next woken callback takes the standing frame in order", frame1(500) && g_link_latched == 1 && g_link_dropped == 0 && queued() == 1);
@@ -139,7 +139,7 @@ int main(void) { @autoreleasepool {
 
     // 4. A plain drain (no LINK_DRAIN_LATCH) does not enter the latch: it sets no waiter. The drain must have run (g_link_drained): a game thread that entered its acquire
     // after the tick would return at once and drop the request, and there would be no waiter with or without one
-    frame_start(1, 0); waiting(0); present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL); tick(); frame_done();   // a late frame: one stands again
+    frame_start(1, 0); waiting(0); present_enqueue(&g_tex, 1. / 60, NULL, 0, 0, NULL); tick(); frame_done();   // a late frame: one stands again
     latched0 = g_link_latched; uint64_t drained0 = atomic_load(&g_link_drained);
     atomic_store(&g_link_drain_req, 1);
     frame_start(1, 500);
@@ -176,7 +176,7 @@ int main(void) { @autoreleasepool {
 
     // 6. Entry gate with GPU timing (issue #3251): early CPU presents whose GPU work finishes past room - tick / 8 never drain into the latch
     g_gap = 1. / 60; g_link_drain = (nvn_link_drain){0}; g_link_latch_health = (nvn_link_latch_health){0}; atomic_store(&g_link_drain_req, 0); g_link_latch_misses = 0;
-    present_enqueue(&g_tex, 1. / 60, NULL, 0, NULL);   // put one standing frame in the queue
+    present_enqueue(&g_tex, 1. / 60, NULL, 0, 0, NULL);   // put one standing frame in the queue
     uint64_t entries_gpu0 = g_link_drain.entries;
     for (int i = 0; i < need + 20; i++) {
         uint64_t f = 500 + (uint64_t)i;

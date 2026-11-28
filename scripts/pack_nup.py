@@ -20,7 +20,9 @@
 # Every file read is checked against its SHA-256. A repeat run keeps code modules whose content is the same and an image made from the same container tree by the same packer,
 # or, after a packer update, an image whose bytes check against the container's hashes.
 # Needs the zstd module: compression.zstd (Python 3.14+) or backports.zstd, as the NSP script.
-# Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR]   (exit 1 on error)
+# --verify checks every file in the container against its size and SHA-256 and writes nothing: the check a build makes as it extracts, done in one read pass,
+# so a damaged container is reported before a build rather than partway through.
+# Usage: pack_nup.py <game.nup> [--version N] [--program N] [--work-dir DIR] [--verify]   (exit 1 on error)
 import argparse, hashlib, mmap, os, re, shutil, struct, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'dm/tools'))
@@ -248,6 +250,23 @@ class Nup:
                 while len(out) < min(n, size) and not d.needs_input and not d.eof: out += d.decompress(b'', max_length=n - len(out))
         except zstd.ZstdError as e: raise Error(f'{self.path}: {name.decode(errors="replace")}: {e}') from e
         return out[:n]
+
+
+class Sink:
+    """copy()'s out when the content is only checked: it keeps nothing"""
+    def write(self, b): return len(b)
+
+
+def verify(n, say=print):
+    """Every file against its size and SHA-256, writing nothing (--verify). Reports each damaged file and goes on, so one pass lists them all; returns how many."""
+    if zstd is None and any(f[5] for f in n.files):
+        raise Error('checking a NUP needs the zstd module: compression.zstd (Python 3.14+) or pip install backports.zstd')
+    sink, bad = Sink(), 0
+    for i in range(len(n.files)):
+        try: n.copy(i, sink)
+        except Error as e: say(f'[RED] {e}'); bad += 1
+        if (i + 1) % 50000 == 0: say(f'  {i + 1:,} of {len(n.files):,} files checked, {bad} damaged')
+    return bad
 
 
 def program_id(npdm, where):   # the ACI0 program ID of an NPDM
@@ -519,10 +538,18 @@ def main():
     ap.add_argument('--version', type=int, help='the update version to pack (default: the newest in the container; 0 = the base game)')
     ap.add_argument('--program', type=int, help='a NUP holding several programs of one application (a Switch 2 Edition of a Switch 1 game): the index of the one to pack (default: the highest)')
     ap.add_argument('--work-dir', type=Path, help='the build folder (default: <folder of the .nup>/<title ID>_build)')
+    ap.add_argument('--verify', action='store_true', help='check every file in the container against its size and SHA-256, write nothing, and list the damaged ones (exit 1 if any)')
     a = ap.parse_args()
     path = a.nup.resolve()
     try:
         with Nup(path) as n:
+            if a.verify:
+                say = lambda s: print(s, flush=True)
+                say(f'{path.name}: {len(n.files):,} files, {sum(f[1] for f in n.files) / 2**30:.2f} GB')
+                bad = verify(n, say)
+                if bad: sys.exit(f'[RED] {bad} of {len(n.files):,} files are damaged')
+                say(f'all {len(n.files):,} files match their size and SHA-256')
+                return
             app, base, vers, dlc = scan(n, a.program)
             ver = a.version if a.version is not None else max(vers, default=0)
             if ver and ver not in vers: raise Error(f'no update {ver} in {path.name} (have: {", ".join(map(str, sorted(vers))) or "none"})')

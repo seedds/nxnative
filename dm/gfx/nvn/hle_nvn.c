@@ -3875,25 +3875,31 @@ static void vshadow_add(struct vpool *v, struct vshadow entry) {
 }
 static void vshadow_cut(struct vpool *v, uint64_t lo, uint64_t hi) {   // drop or trim shadow entries overlapping [lo, hi)
     if (lo >= hi) return;
-    size_t first = vshadow_first(v, lo), end = first;
-    struct vshadow piece[2];
-    size_t np = 0;
+    size_t first = vshadow_first(v, lo);
+    if (first == v->nsh || v->sh[first].voff >= hi) return;
+    size_t end = vshadow_first(v, hi);
+    if (end < v->nsh && v->sh[end].voff < hi) end++;
+
+    // Only the first and last overlaps can leave a piece outside the cut.
+    const struct vshadow *head = &v->sh[first], *tail = &v->sh[end - 1];
+    uint64_t tail_end = tail->voff + tail->size;
+    int keep_head = head->voff < lo, keep_tail = tail_end > hi;
+    struct vshadow left = {0}, right = {0};
+    if (keep_head) left = vshadow_slice(head, head->voff, lo - head->voff);
+    if (keep_tail) right = vshadow_slice(tail, hi, tail_end - hi);
+
     uint64_t removed = 0;
-    for (; end < v->nsh && v->sh[end].voff < hi; end++) {
-        struct vshadow *e = &v->sh[end];
-        uint64_t a = e->voff, b = a + e->size;
-        if (a < lo) piece[np++] = vshadow_slice(e, a, lo - a);
-        if (b > hi) piece[np++] = vshadow_slice(e, hi, b - hi);
-        removed += e->size;
-        vshadow_free(e);
+    for (size_t i = first; i < end; i++) {
+        removed += v->sh[i].size;
+        vshadow_free(&v->sh[i]);
     }
-    if (first == end) return;
+    size_t np = keep_head + keep_tail;
     if (np > end - first) vshadow_room(v);
     memmove(v->sh + first + np, v->sh + end, (v->nsh - end) * sizeof *v->sh);
-    memcpy(v->sh + first, piece, np * sizeof *piece);
+    if (keep_head) v->sh[first] = left;
+    if (keep_tail) v->sh[first + keep_head] = right;
     v->nsh = v->nsh - (end - first) + np;
-    for (size_t i = 0; i < np; i++) removed -= piece[i].size;
-    atomic_fetch_sub(&g_sh_bytes, removed);
+    atomic_fetch_sub(&g_sh_bytes, removed - left.size - right.size);
 }
 static void vshadow_drop_phys(const uint8_t *mem, uint64_t size) {   // physical pool Finalize: release any shadow entries still pointing into [mem, mem + size)
     if (!atomic_load_explicit(&g_sh_bytes, memory_order_relaxed) || !size) return;

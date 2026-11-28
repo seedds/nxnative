@@ -19,6 +19,7 @@ uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 uint64_t guest_ns(void) { return 0; }
 uint64_t guest_ticks(void) { return 0; }
 void guest_clock_read_wait(void) {}
+void guest_applet_wait(void) {}
 void thr_svc_enter(uint64_t *r, uint64_t a) { (void)r; (void)a; }
 void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
@@ -1123,6 +1124,122 @@ static void test_active_attributes(void) {
     puts("GL attribute reflection: count, maximum length, enumeration, truncation and errors: OK");
 }
 
+static void test_uniform_block_reflection(void) {
+    void (*uniformsiv)(GLuint, GLsizei, const GLuint *, GLenum, GLint *) = import("glGetActiveUniformsiv");
+    assert(uniformsiv && h_eglGetProcAddress("glGetActiveUniformsiv") == (void *)uniformsiv);
+
+    // Reject malformed member rows (out-of-range block slot or invalid row_major flag)
+    char bad_slot[] = "aaaaaaaaaaaaaaaa\tvert\tr:0:1 n:B=0:16 m:x=1:0:vec4:0:0:0:0\ttest";
+    char bad_rm[] = "bbbbbbbbbbbbbbbb\tvert\tr:0:1 n:B=0:16 m:x=0:0:mat4:0:0:16:2\ttest";
+    shinfo bad = {0};
+    assert(!sh_read_row(bad_slot, &bad));
+    assert(!sh_read_row(bad_rm, &bad));
+
+    // Vertex + fragment tables: shared block across stages (deduplicated), two distinct uninstanced blocks with a colliding
+    // bare member name (`common`), two instanced blocks (`InstA.m` / `InstB.m`), reflected matrix strides (8 and 16) and row_major
+    char vrow[] = "1111111111111111\tvert\tr:0:4 b:0:64 u:scale=0:float:0:0 u:weights=16:vec4:3:16 "
+                  "n:SharedCB=1:128 m:mtxPVW=1:0:mat4:0:0:16:0 m:rm3=1:64:mat3:0:0:16:1 "
+                  "n:VertCB=2:64 m:common=2:0:mat2:0:0:8:0 "
+                  "n:InstA=3:64 m:InstA.m=3:0:mat3x4:0:0:16:1\ttest";
+    char frow[] = "2222222222222222\tfrag\tr:0:3 "
+                  "n:SharedCB=0:128 m:mtxPVW=0:0:mat4:0:0:16:0 "
+                  "n:FragCB=1:64 m:common=1:16:vec4:2:16:0:0 "
+                  "n:InstB=2:64 m:InstB.m=2:0:mat4:0:0:16:0\ttest";
+    shinfo vsi = {0}, fsi = {0};
+    assert(sh_read_row(vrow, &vsi) && sh_read_row(frow, &fsi));
+    assert(vsi.nb == 3 && vsi.nm == 4 && fsi.nb == 3 && fsi.nm == 3);
+    vsi.nargs = fsi.nargs = 0;   // synthetic link without Metal argument encoder
+
+    GLuint pr = h_glCreateProgram(), vs = h_glCreateShader(GL_VERTEX_SHADER), fs = h_glCreateShader(GL_FRAGMENT_SHADER);
+    shader_of(vs)->si = &vsi; shader_of(vs)->fn = (id)[NSObject new];
+    shader_of(fs)->si = &fsi; shader_of(fs)->fn = (id)[NSObject new];
+    h_glAttachShader(pr, vs); h_glAttachShader(pr, fs); h_glLinkProgram(pr);
+
+    GLint val = -1;
+    h_glGetProgramiv(pr, 0x8a36 /* GL_ACTIVE_UNIFORM_BLOCKS */, &val); assert(val == 5);
+    h_glGetProgramiv(pr, 0x8a35 /* GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH */, &val); assert(val == (GLint)sizeof "SharedCB");
+    h_glGetProgramiv(pr, GL_ACTIVE_UNIFORMS, &val); assert(val == 8);   // 2 default + 6 block members
+    h_glGetProgramiv(pr, GL_ACTIVE_UNIFORM_MAX_LENGTH, &val); assert(val == (GLint)sizeof "weights[0]");
+
+    // Default uniforms have locations; named block members never do
+    assert(h_glGetUniformLocation(pr, "scale") > 0 && h_glGetUniformLocation(pr, "weights") > 0);
+    assert(h_glGetUniformLocation(pr, "mtxPVW") == -1 && h_glGetUniformLocation(pr, "common") == -1 && h_glGetUniformLocation(pr, "InstA.m") == -1);
+
+    // Enumerate every active uniform and check glGetActiveUniform + glGetActiveUniformsiv
+    static const struct {
+        const char *name; GLenum type; GLint size, blk, off, astride, mstride, rm;
+    } want[8] = {
+        {"scale",      GL_FLOAT,        1, -1, -1, -1, -1, 0},
+        {"weights[0]", GL_FLOAT_VEC4,   3, -1, -1, -1, -1, 0},
+        {"mtxPVW",     GL_FLOAT_MAT4,   1,  0,  0,  0, 16, 0},
+        {"rm3",        GL_FLOAT_MAT3,   1,  0, 64,  0, 16, 1},
+        {"common",     GL_FLOAT_MAT2,   1,  1,  0,  0,  8, 0},
+        {"InstA.m",    GL_FLOAT_MAT3x4, 1,  2,  0,  0, 16, 1},
+        {"common[0]",  GL_FLOAT_VEC4,   2,  3, 16, 16,  0, 0},
+        {"InstB.m",    GL_FLOAT_MAT4,   1,  4,  0,  0, 16, 0},
+    };
+    GLuint idxs[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    GLint types[8], sizes[8], nlens[8], blks[8], offs[8], astrides[8], mstrides[8], rms[8];
+    uniformsiv(pr, 8, idxs, 0x8a37, types);
+    uniformsiv(pr, 8, idxs, 0x8a38, sizes);
+    uniformsiv(pr, 8, idxs, 0x8a39, nlens);
+    uniformsiv(pr, 8, idxs, 0x8a3a, blks);
+    uniformsiv(pr, 8, idxs, 0x8a3b, offs);
+    uniformsiv(pr, 8, idxs, 0x8a3c, astrides);
+    uniformsiv(pr, 8, idxs, 0x8a3d, mstrides);
+    uniformsiv(pr, 8, idxs, 0x8a3e, rms);
+    assert(h_glGetError() == GL_NO_ERROR);
+    for (int i = 0; i < 8; i++) {
+        char buf[64] = {0}; GLsizei len = -1; GLint cnt = -1; GLenum ty = 0;
+        h_glGetActiveUniform(pr, (GLuint)i, sizeof buf, &len, &cnt, &ty, buf);
+        assert(!strcmp(buf, want[i].name) && len == (GLsizei)strlen(want[i].name) && cnt == want[i].size && ty == want[i].type);
+        assert(types[i] == (GLint)want[i].type && sizes[i] == want[i].size && nlens[i] == (GLint)strlen(want[i].name) + 1);
+        assert(blks[i] == want[i].blk && offs[i] == want[i].off && astrides[i] == want[i].astride && mstrides[i] == want[i].mstride && rms[i] == want[i].rm);
+    }
+
+    // glGetActiveUniformBlockiv: name length, active uniforms/indices, stage references
+    GLint bval = -1, bindices[4] = {-1, -1, -1, -1};
+    h_glGetActiveUniformBlockiv(pr, 0, 0x8a41, &bval); assert(bval == (GLint)sizeof "SharedCB");
+    h_glGetActiveUniformBlockiv(pr, 0, 0x8a42, &bval); assert(bval == 2);
+    h_glGetActiveUniformBlockiv(pr, 0, 0x8a43, bindices); assert(bindices[0] == 2 && bindices[1] == 3);
+    h_glGetActiveUniformBlockiv(pr, 0, 0x8a44, &bval); assert(bval == 1);
+    h_glGetActiveUniformBlockiv(pr, 0, 0x8a46, &bval); assert(bval == 1);
+    h_glGetActiveUniformBlockiv(pr, 1, 0x8a44, &bval); assert(bval == 1);
+    h_glGetActiveUniformBlockiv(pr, 1, 0x8a46, &bval); assert(bval == 0);
+    h_glGetActiveUniformBlockiv(pr, 3, 0x8a42, &bval); assert(bval == 1);
+    h_glGetActiveUniformBlockiv(pr, 3, 0x8a43, bindices); assert(bindices[0] == 6);
+    h_glGetActiveUniformBlockiv(pr, 3, 0x8a44, &bval); assert(bval == 0);
+    h_glGetActiveUniformBlockiv(pr, 3, 0x8a46, &bval); assert(bval == 1);
+    assert(h_glGetError() == GL_NO_ERROR);
+
+    // Error handling: negative count, out-of-range index leaves output untouched, wrong object, invalid pname even with n == 0
+    GLint out[2] = {77, 88};
+    const GLuint bad_idx[2] = {0, 8};
+    uniformsiv(pr, -1, idxs, 0x8a3a, out); assert(h_glGetError() == GL_INVALID_VALUE);
+    uniformsiv(pr, 2, bad_idx, 0x8a3a, out); assert(h_glGetError() == GL_INVALID_VALUE && out[0] == 77 && out[1] == 88);
+    uniformsiv(vs, 1, idxs, 0x8a3a, out); assert(h_glGetError() == GL_INVALID_OPERATION);
+    uniformsiv(pr, 0, idxs, 0x1234, out); assert(h_glGetError() == GL_INVALID_ENUM);
+
+    // Failed relink clears blocks and members
+    h_glDetachShader(pr, vs); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, 0x8a36, &val); assert(val == 0);
+    h_glGetProgramiv(pr, GL_ACTIVE_UNIFORMS, &val); assert(val == 0);
+
+    // More than 8 uniform blocks link cleanly
+    char many[] = "3333333333333333\tvert\tr:0:10 n:B0=0:16 n:B1=1:16 n:B2=2:16 n:B3=3:16 n:B4=4:16 n:B5=5:16 n:B6=6:16 n:B7=7:16 n:B8=8:16 n:B9=9:16 "
+                  "m:m9=9:0:vec4:0:0:0:0\ttest";
+    shinfo msi = {0}; assert(sh_read_row(many, &msi)); msi.nargs = 0;
+    shader_of(vs)->si = &msi;
+    h_glDetachShader(pr, fs); h_glAttachShader(pr, vs); h_glLinkProgram(pr);
+    h_glGetProgramiv(pr, 0x8a36, &val); assert(val == 10);
+    GLuint idx0 = 0; GLint blk9 = -1;
+    uniformsiv(pr, 1, &idx0, 0x8a3a, &blk9); assert(blk9 == 9 && h_glGetError() == GL_NO_ERROR);
+
+    h_glDeleteProgram(pr); h_glDeleteShader(vs); h_glDeleteShader(fs);
+    sh_free(&vsi); sh_free(&fsi); sh_free(&msi);
+    puts("GL uniform block reflection: layout, collisions, glGetActiveUniformsiv and errors: OK");
+}
+
 static void test_fate_calls(void) {
     assert(import("glValidateProgram") == (void *)h_glValidateProgram_ctx && import("glLineWidth") == (void *)h_glLineWidth_ctx);
     assert(import("glClearTexImage") == (void *)h_glClearTexImage_bs);
@@ -1183,6 +1300,21 @@ static void test_argument_buffers(const char *dir) {
         assert(shader_of(shaders[st])->fn); h_glAttachShader(pr, shaders[st]);
     }
     h_glLinkProgram(pr); assert(prog_of(pr)->linked && prog_of(pr)->ae[0] && prog_of(pr)->ae[1]); h_glUseProgram(pr);
+    // Named block member reflection end-to-end through gl_shaders.py -> gl_shaders.tsv -> host
+    GLint nblk = 0, nuni = 0, fidx = -1;
+    h_glGetProgramiv(pr, 0x8a36, &nblk); assert(nblk == 1);
+    h_glGetProgramiv(pr, GL_ACTIVE_UNIFORMS, &nuni); assert(nuni >= 1);
+    for (GLint i = 0; i < nuni; i++) {
+        char nm[64]; GLsizei l = 0; GLint c = 0; GLenum t = 0;
+        h_glGetActiveUniform(pr, (GLuint)i, sizeof nm, &l, &c, &t, nm);
+        if (!strcmp(nm, "factors")) { assert(c == 1 && t == GL_FLOAT_VEC4); fidx = i; }
+    }
+    assert(fidx >= 0 && h_glGetUniformLocation(pr, "factors") == -1);
+    GLuint fu = (GLuint)fidx; GLint fblk = -1, foff = -1, fastr = -1, fmstr = -1, frow = -1;
+    h_glGetActiveUniformsiv(pr, 1, &fu, 0x8a3a, &fblk); h_glGetActiveUniformsiv(pr, 1, &fu, 0x8a3b, &foff);
+    h_glGetActiveUniformsiv(pr, 1, &fu, 0x8a3c, &fastr); h_glGetActiveUniformsiv(pr, 1, &fu, 0x8a3d, &fmstr);
+    h_glGetActiveUniformsiv(pr, 1, &fu, 0x8a3e, &frow);
+    assert(fblk == 0 && foff == 0 && fastr == 0 && fmstr == 0 && frow == 0);
     GLuint textures[17], samplers[17], vao, vb, ub, target, fb;
     h_glGenTextures(17, textures); h_glGenSamplers(17, samplers);
     for (int i = 0; i < 17; i++) {
@@ -2146,6 +2278,7 @@ int main(int argc, char **argv) {
     if (!cpu) { test_shared_contexts(); test_nvn_interop(); }
     test_program_validation();
     test_active_attributes();
+    test_uniform_block_reflection();
     test_fate_calls();
     test_fixed_function(!cpu);
     if (!cpu) {

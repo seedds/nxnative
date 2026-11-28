@@ -44,9 +44,21 @@ class FrameRateOption(unittest.TestCase):
 class UpscalerSetting(unittest.TestCase):
     def test_only_for_games_naming_their_upscaler(self):
         with tempfile.TemporaryDirectory() as tmp,patch.object(settings.nacp,'languages',return_value=['en-US']):
-            (Path(tmp)/'main.fixups.tsv').write_text('')
-            for gid,shown in [('040074A01BF12000',True),('040077201BE50000',True),('010056B015FE8000',False)]:   # Donkey Kong Bananza (agl's NDSR pack), Kirby Air Riders (the pack under its own name), NieR:Automata (none)
-                up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
+            root=Path(tmp)
+            (root/'main.fixups.tsv').write_text('')
+            profiles=root/'profiles'
+            # Synthetic working profiles matching build_ipa_from_nsp.py's generated shader_map.tsv:
+            # an NDSR compute shader (#NDSR@0x...) enables DM_UPSCALER; a profile without one does not.
+            for gid,rows,shown in [
+                ('040074A01BF12000','package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\t0123456789abcdef\t/Lib/agl/ndsr.bin#NDSR@0x0\n',True),
+                ('040077201BE50000','package\tindex\tstage\tdm_ctl_sha16\tsource\ncs.bin\t0\tcompute\tfedcba9876543210\t/ndsr/upscale.bin#NDSR@0x100\n',True),
+                ('010056B015FE8000','',False),
+            ]:
+                pdir=profiles/gid; pdir.mkdir(parents=True)
+                (pdir/'game.tsv').write_text((Path(settings.__file__).resolve().parent/gid/'game.tsv').read_text(encoding='utf-8'),encoding='utf-8')
+                if rows:(pdir/'shader_map.tsv').write_text(rows,encoding='utf-8')
+                with patch.dict(settings.os.environ,{'DM_GAMES_DIR':str(profiles),'DM_GAMES_FIRST':'1'}):
+                    up=[s for s in settings.build(gid,tmp,'unused')['settings'] if s['env']=='DM_UPSCALER']
                 self.assertEqual(bool(up),shown,gid)
                 if up:self.assertEqual((up[0]['default'],up[0]['options']),('game',[['game',"Game's own"],['metalfx','MetalFX']]))
 

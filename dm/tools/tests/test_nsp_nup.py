@@ -1117,7 +1117,7 @@ class Main(Base):
             with self.assertRaisesRegex(nsp.BuildError, 'version to pack .* is not in the folder'):
                 self.run_main(target, package='v0')
 
-    def test_both_forms_of_no_base_pack_alike(self):   # Mario's profile needs v0 and registers the update: without a base game it is packed from a derived profile, whichever the form
+    def test_both_forms_of_no_base_pack_alike(self):   # Wonder generates shader tables from the registered update alone
         tid, ver = 0x010015100B514000, 327680
         for packages, flags in (([(1, tid, ver, version(tid=tid), META)], pack_nup.STANDALONE), ([(0, 0, 0, {'exefs': {}}, META), (1, tid, ver, version(tid=tid), b'')], 0)):
             with self.subTest(flags=flags):
@@ -1126,7 +1126,8 @@ class Main(Base):
                 self.assertFalse((work / 'extract/v0').exists())
                 self.assertEqual((work / f'extract/v{ver}/ExeFS/main').read_bytes(), b'code')
                 self.assertEqual(nacp.name(work / f'extract/v{ver}/control.nacp'), 'Test Game')
-                self.assertTrue(any('the folder has no v0' in s for s in said), said)
+                self.assertIn(f'game profile: {tid:016X}', said)
+                self.assertFalse(any('from a profile derived from it' in s for s in said), said)
                 self.assertIn(pack_nup.NO_BASE, said)
 
     def test_a_version_it_cannot_pack_is_a_red_line(self):   # through cli(): the disk check reads the RomFS folder before any extraction
@@ -1225,6 +1226,71 @@ class WriterErrors(Base):
         self.assertIn(os.strerror(errno.ENOSPC), str(ctx.exception))
         self.assertEqual(img.read_bytes(), previous)
         self.assertFalse(Path(str(img) + '.part').exists())
+
+
+class Verify(Base):
+    def test_clean_container_succeeds_and_writes_nothing(self):
+        with pack_nup.Nup(self.path) as n:
+            nfiles = len(n.files)
+        before = sorted(p.name for p in self.dir.iterdir())
+        work = self.dir / 'should_not_exist'
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nup.py'), str(self.path), '--verify', '--work-dir', str(work)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stderr, '')
+        self.assertIn(f'all {nfiles} files match their size and SHA-256', r.stdout)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), before)
+        self.assertFalse(work.exists())
+
+    def test_damaged_entries_are_all_reported_and_exit_one(self):
+        tree = {
+            'exefs': {'main': b'code', 'main.npdm': npdm(TID)},
+            'romfs': {'stored.bin': b'short-stored-entry', 'compressed.bin': b'zstd-entry-' * 40, 'healthy.bin': b'intact', 'empty.bin': b''},
+        }
+        write_nup(self.path, [(0, TID, 0, tree, META)])
+        with pack_nup.Nup(self.path) as n:
+            total = len(n.files)
+            stored = n.child(n.packages[0].romfs, b'stored.bin')
+            comp = n.child(n.packages[0].romfs, b'compressed.bin')
+            assert stored is not None and comp is not None
+            self.assertEqual((n.files[stored][5], n.files[comp][5]), (0, 1))
+            stored_off, comp_off = n.files[stored][3], n.files[comp][3]
+        raw = bytearray(self.path.read_bytes())
+        raw[stored_off] ^= 0xFF
+        raw[comp_off:comp_off + 4] = b'\xff\xff\xff\xff'
+        self.path.write_bytes(raw)
+
+        said = []
+        with pack_nup.Nup(self.path) as n:
+            self.assertEqual(pack_nup.verify(n, say=said.append), 2)
+        self.assertEqual(len(said), 2, said)
+        self.assertTrue(any('[RED]' in s and 'stored.bin' in s for s in said), said)
+        self.assertTrue(any('[RED]' in s and 'compressed.bin' in s for s in said), said)
+        self.assertFalse(any('healthy.bin' in s for s in said), said)
+
+        work = self.dir / 'should_not_exist'
+        r = subprocess.run([sys.executable, str(REPO / 'scripts/pack_nup.py'), str(self.path), '--verify', '--work-dir', str(work)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('stored.bin', r.stdout)
+        self.assertIn('compressed.bin', r.stdout)
+        self.assertNotIn('healthy.bin', r.stdout)
+        self.assertIn(f'[RED] 2 of {total} files are damaged', r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+        self.assertFalse(work.exists())
+
+    def test_missing_zstd_guard(self):
+        said = []
+        with pack_nup.Nup(self.path) as n, mock.patch.object(pack_nup, 'zstd', None):
+            with self.assertRaisesRegex(pack_nup.Error, 'zstd module'):
+                pack_nup.verify(n, say=said.append)
+        self.assertEqual(said, [])
+
+        raw_only = self.dir / 'raw.nup'
+        write_nup(raw_only, [(0, TID, 0, {'exefs': {'main': b'code'}, 'romfs': {'a': b'raw'}}, b'')])
+        with pack_nup.Nup(raw_only) as n, mock.patch.object(pack_nup, 'zstd', None):
+            self.assertEqual(pack_nup.verify(n, say=said.append), 0)
+        self.assertEqual(said, [])
 
 
 if __name__ == '__main__':

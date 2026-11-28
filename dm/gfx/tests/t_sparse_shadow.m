@@ -66,11 +66,11 @@ int main(void) {
     CHECK("mmap raw_cpu", raw_cpu != MAP_FAILED);
     uint8_t *p1_mem = (uint8_t *)raw_cpu + 0x1000;
     uint8_t *p2_mem = (uint8_t *)raw_cpu + 4 * pg + 0x3000;
-    memset(p1_mem, 0x11, 2 * pg);
+    memset(p1_mem, 0x11, 3 * pg);
     memset(p2_mem, 0x22, 2 * pg);
 
     NVNmemoryPool phys1, phys2;
-    init_pool(&dev, &phys1, p1_mem, 2 * pg, NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+    init_pool(&dev, &phys1, p1_mem, 3 * pg, NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
     init_pool(&dev, &phys2, p2_mem, 2 * pg, NVN_MEMORY_POOL_FLAGS_PHYSICAL | NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
 
     map_req mrs[2] = {
@@ -243,6 +243,14 @@ int main(void) {
     CHECK("CPU write still syncs into the trimmed shadow", vbase[3 * pg - 1] == 0x91);
     CHECK("submission after trimming completes", mtl_wait(mtl_sub_commit(), 5000000000ull));
     CHECK("unmap the remaining side", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&unmap));
+
+    // Cutting the middle of one shadow must retain both ends.
+    map_req whole = { &phys1, 0, (int64_t)(2 * pg), 3 * pg, 0, 0 };
+    CHECK("map a single three-page shadow", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&whole));
+    CHECK("split one shadow by unmapping its middle", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&tail));
+    CHECK("split keeps exactly two pages", atomic_load(&g_sh_bytes) == 2 * pg && ((pool_t *)&virt)->vp->nsh == 2);
+    CHECK("both sides of the split stay mapped", nvn_shadow_arm(sh_va, pg) && !nvn_shadow_arm(sh_va + pg, pg) && nvn_shadow_arm(sh_va + 2 * pg, pg));
+    CHECK("unmap both sides of the split", h_nvnMemoryPoolMapVirtual(&virt, 1, (const NVNmappingRequest *)&unmap));
 
     // A new mapping spanning two existing shadows can keep their backing.
     CHECK("map adjacent shadows for remap", h_nvnMemoryPoolMapVirtual(&virt, 2, (const NVNmappingRequest *)mrs));

@@ -84,13 +84,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             public readonly bool RawOnly;
 
-            public GtsContext(HelperFunctionManager hfm, bool ampere, bool rawOnly)
+            // nxnative: whether the shader contains any global memory store or atomic (needs gmem_idx in the shared raw cache for gmem_log)
+            public readonly bool HasGlobalWrite;
+
+            public GtsContext(HelperFunctionManager hfm, bool ampere, bool rawOnly, bool hasGlobalWrite)
             {
                 _entries = [];
                 _sharedEntries = new Dictionary<LsKey, Dictionary<uint, SearchResult>>();
                 _hfm = hfm;
                 RawOnly = rawOnly;
                 Ampere = ampere;
+                HasGlobalWrite = hasGlobalWrite;
             }
 
             // nxnative: the function that finds a raw access's pool table entry past the last one it chose (GetRawFindFunction), -1 before the first
@@ -246,7 +250,24 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             TargetLanguage targetLanguage,
             bool ampere)
         {
-            GtsContext gtsContext = new(hfm, ampere, gpuAccessor.QueryRawGlobalMemory());
+            bool hasGlobalWrite = false;
+            foreach (BasicBlock block in blocks)
+            {
+                for (LinkedListNode<INode> node = block.Operations.First; node != null; node = node.Next)
+                {
+                    if (node.Value is Operation op && IsGlobalMemory(op.StorageKind) && (op.Inst == Instruction.Store || op.Inst.IsAtomic()))
+                    {
+                        hasGlobalWrite = true;
+                        break;
+                    }
+                }
+                if (hasGlobalWrite)
+                {
+                    break;
+                }
+            }
+
+            GtsContext gtsContext = new(hfm, ampere, gpuAccessor.QueryRawGlobalMemory(), hasGlobalWrite);
 
             foreach (BasicBlock block in blocks)
             {
@@ -1044,57 +1065,49 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 return context.Load(StorageKind.StorageBuffer, mapBinding, Const(0), context.IAdd(entry, Const(word)));
             }
 
-            Operand AtOrBelow(Operand high, Operand low)   // the address is at or above {low, high}
-            {
-                return context.BitwiseOr(
-                    context.ICompareLessUnsigned(high, addrHigh),
-                    context.BitwiseAnd(context.ICompareEqual(high, addrHigh), context.ICompareLessOrEqualUnsigned(low, addrLow)));
-            }
+            int[] cache = resourceManager.GetRawCacheMemory(gtsContext.HasGlobalWrite);
+            Operand baseLo = context.Load(StorageKind.LocalMemory, cache[0]);
+            Operand baseHi = context.Load(StorageKind.LocalMemory, cache[1]);
+            Operand span = context.Load(StorageKind.LocalMemory, cache[2]);
 
-            Operand Below(Operand high, Operand low)   // the address is below {low, high}
-            {
-                return context.BitwiseOr(
-                    context.ICompareLessUnsigned(addrHigh, high),
-                    context.BitwiseAnd(context.ICompareEqual(addrHigh, high), context.ICompareLessUnsigned(addrLow, low)));
-            }
+            // Shared register-cached pool range check across all raw helpers in this invocation: no pool-table loads on a hit.
+            // Keep dmsh_raw_find pure (no LocalMemory references) so Metal/LLVM promotes the cached words to pure SSA registers.
+            // The host supplies a 32-bit span only when the range stays within one 4 GiB window; a zero span (initial state or a
+            // 4 GiB-straddling entry) always takes dmsh_raw_find, which checks the exact 64-bit end and returns 0 on a miss.
+            Operand offset = context.ISubtract(addrLow, baseLo);
+            Operand cacheHit = context.BitwiseAnd(
+                context.ICompareEqual(addrHigh, baseHi),
+                context.ICompareLessUnsigned(offset, span));
 
-            Operand selected = Local();
             Operand lblChosen = Label();
-
-            // The entry this helper chose last in this invocation, if it holds the address: a shader reads a structure word after word from one pool, so all but the first access of a run
-            // choose the entry the first one chose (Ocarina of Time's foliage mesh shader 73dc0b90c4082e43, 135 reads, took 10.9 ms of a 683x384 frame). The table's ranges are disjoint
-            // (nvn_mtl.m gmem_map), so the search below would choose the same entry, and the host binds one table for a whole draw or dispatch. The word starts at 0, the empty entry
-            int lastBinding = resourceManager.AddRawLastEntryMemory();
-            Operand last = context.Load(StorageKind.LocalMemory, lastBinding);
-            Operand lastEntry = context.IMultiply(last, Const(GmemMapEntryWords));
-            Operand lastHolds;
+            Operand lblSkip = Label();
+            Operand selected = writes ? Local() : null;
             if (writes)
             {
-                lastHolds = context.BitwiseAnd(AtOrBelow(MapWord(lastEntry, 1), MapWord(lastEntry, 0)), Below(MapWord(lastEntry, 3), MapWord(lastEntry, 2)));
+                context.Copy(selected, context.Load(StorageKind.LocalMemory, cache[5]));
             }
-            else
+            context.BranchIfTrue(lblChosen, cacheHit);
+
+            // Miss: one pure function per shader (dmsh_raw_find, noinline outside mesh stages) searches the pool table, checks the
+            // exact 64-bit end, and returns the entry index (>= 1) or 0 on a miss (leaving the cached registers undisturbed).
+            Operand foundIdx = context.Call(GetRawFindFunction(gtsContext, mapBinding), true, addrLow, addrHigh);
+            context.BranchIfFalse(lblSkip, context.ICompareNotEqual(foundIdx, Const(0)));
+            Operand found = context.IMultiply(foundIdx, Const(GmemMapEntryWords));
+            context.Store(StorageKind.LocalMemory, cache[0], MapWord(found, 0));
+            context.Store(StorageKind.LocalMemory, cache[1], MapWord(found, 1));
+            context.Store(StorageKind.LocalMemory, cache[2], MapWord(found, 7));
+            context.Store(StorageKind.LocalMemory, cache[3], MapWord(found, 4));
+            context.Store(StorageKind.LocalMemory, cache[4], MapWord(found, 5));
+            if (gtsContext.HasGlobalWrite)
             {
-                // The host supplies a span only for ranges within one 4 GiB window.
-                // Unsigned subtraction rejects addresses below the start in that same
-                // window. A zero span always takes the exact lookup below.
-                Operand offset = context.ISubtract(addrLow, MapWord(lastEntry, 0));
-                lastHolds = context.BitwiseAnd(
-                    context.ICompareEqual(addrHigh, MapWord(lastEntry, 1)),
-                    context.ICompareLessUnsigned(offset, MapWord(lastEntry, 7)));
+                context.Store(StorageKind.LocalMemory, cache[5], foundIdx);
             }
-            context.Copy(selected, last);
-            context.BranchIfTrue(lblChosen, lastHolds);
+            if (writes)
+            {
+                context.Copy(selected, foundIdx);
+            }
 
-            // Else the hint of the address's chunk or a search finds it: one function for every call (RawFindFunction)
-            context.Copy(selected, context.Call(GetRawFindFunction(gtsContext, mapBinding), true, addrLow, addrHigh));
-            context.Store(StorageKind.LocalMemory, lastBinding, selected);
-            Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
-            Operand lblSkip = Label();
-            context.BranchIfFalse(lblSkip, Below(MapWord(found, 3), MapWord(found, 2)));   // an address in no pool: the entry below it ends below it
-
-            // The last entry's range held it, or the hint's or the search's entry does
             context.MarkLabel(lblChosen);
-            found = context.IMultiply(selected, Const(GmemMapEntryWords));
 
             if (writes)
             {
@@ -1109,9 +1122,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 
             // A small integer is read or written in its 32-bit word
             Operand wordLow = isSmall ? context.BitwiseAnd(addrLow, Const(~3)) : addrLow;
-            Operand hostLow = context.IAdd(wordLow, MapWord(found, 4));
+            Operand hostLow = context.IAdd(wordLow, context.Load(StorageKind.LocalMemory, cache[3]));
             Operand carry = context.ConditionalSelect(context.ICompareLessUnsigned(hostLow, wordLow), Const(1), Const(0));
-            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, MapWord(found, 5)), carry);
+            Operand hostHigh = context.IAdd(context.IAdd(addrHigh, context.Load(StorageKind.LocalMemory, cache[4])), carry);
 
             Operand resultValue = null;
 
@@ -1215,11 +1228,9 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             return true;
         }
 
-        // nxnative: the entry of the memory pool table that may hold an address (TryGenerateRawStorageOp's lookup past the last entry it chose): int dmsh_raw_find(address low, address high).
-        // One function for a shader's every raw access, by name (SpirvGenerator keeps dmsh_ names): spirv-cross writes every function always_inline (it ignores SPIR-V's DontInline), and
-        // the shader build writes this one noinline (dmsh_rewrite.py raw_noinline), so Metal's compiler builds the search once rather than at each access. Ocarina of Time's foliage mesh
-        // shader 3439aaa071d868ae makes 141 raw accesses. Only the last entry's check, the entry's end and the access stay at each call: building the whole lookup once also put
-        // the last entry and the vector words behind the call, and cost 2.5 ms of a 15 ms frame on an M4 Pro (docs/reference/shaders.md, Raw global lookups built once for every call)
+        // nxnative: find the memory pool table entry holding an address and check its exact 64-bit end: int dmsh_raw_find(address low, address high).
+        // Returns the entry index (>= 1) on a hit, or 0 on a miss. Kept pure (no LocalMemory references) so Metal/LLVM keeps the caller's cached
+        // range/delta words in pure SSA registers rather than spilling them around noinline calls.
         private static int GetRawFindFunction(GtsContext gtsContext, int mapBinding)
         {
             if (gtsContext.RawFindFunction >= 0)
@@ -1245,11 +1256,13 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand hintFits = context.BitwiseAnd(
                 context.BitwiseAnd(context.ICompareNotEqual(hintIndex, Const(0)), context.ICompareEqual(context.ShiftRightU32(hint, Const(GmemMapLog2)), chunk)),
                 context.ICompareLessUnsigned(addrHigh, Const(1 << (GmemHintShift - GmemMapLog2))));
+            Operand selected = Local();
             Operand lblSearch = Label();
-            context.BranchIfFalse(lblSearch, hintFits);
-            context.Return(hintIndex);
-            context.MarkLabel(lblSearch);
+            Operand lblCheck = Label();
+            context.Copy(selected, hintIndex);
+            context.BranchIfTrue(lblCheck, hintFits);
 
+            context.MarkLabel(lblSearch);
             // The last entry whose start is at or below the address (entry 0 starts at 0, so there always is one)
             Operand index = Const(0);
 
@@ -1264,7 +1277,16 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 index = context.ConditionalSelect(atOrAbove, candidate, index);
             }
 
-            context.Return(index);
+            context.Copy(selected, index);
+            context.MarkLabel(lblCheck);
+
+            Operand found = context.IMultiply(selected, Const(GmemMapEntryWords));
+            Operand endHigh = MapWord(found, 3);
+            Operand endLow = MapWord(found, 2);
+            Operand belowEnd = context.BitwiseOr(
+                context.ICompareLessUnsigned(addrHigh, endHigh),
+                context.BitwiseAnd(context.ICompareEqual(addrHigh, endHigh), context.ICompareLessUnsigned(addrLow, endLow)));
+            context.Return(context.ConditionalSelect(belowEnd, selected, Const(0)));
 
             Function function = new(ControlFlowGraph.Create(context.GetOperations()).Blocks, "dmsh_raw_find", true, 2, 0);
 

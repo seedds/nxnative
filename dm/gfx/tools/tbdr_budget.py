@@ -25,9 +25,14 @@ def tex_slots(key):
     try: return sum(1 for b in json.loads((LIB / f'{key}_b.json').read_bytes())['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
     except Exception: return 4
 nm = {}
-for ln in open(dmsh_chain.load_game().table('shader_map.tsv')):   # the current game profile's map (DM_GAME)
-    c = ln.rstrip('\n').split('\t')
-    if len(c) > 4 and c[0].endswith('.bin'): nm.setdefault(c[3], c[0][:-4])
+shader_map = dmsh_chain.load_game().table('shader_map.tsv')
+try:
+    with shader_map.open(encoding='utf-8') as src:
+        for ln in src:
+            c = ln.rstrip('\n').split('\t')
+            if len(c) > 4 and c[0].endswith('.bin'): nm.setdefault(c[3], c[0][:-4])
+except FileNotFoundError:
+    pass   # the generated map supplies display names; the log already carries the shader keys
 for l in open(log, errors='replace'):
     m = re.search(r'\[pass\] F(\d+) (\w) (\d+) (.*)', l)
     if not m: continue

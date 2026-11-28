@@ -78,7 +78,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
 | [Kirby's Dream Buffet](#kirbys-dream-buffet) | 0 | 0 | 1 | 0 | 0 | `game` |
-| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
+| [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 3 | 0 | 1 | `game`, `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Mario Kart World](#mario-kart-world) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [METAL GEAR SOLID: Peace Walker - Master Collection Version (Game)](#metal-gear-solid-peace-walker---master-collection-version-game) | 0 | 0 | 3 | 0 | 0 | `game` |
@@ -389,12 +389,15 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 ### Luigi's Mansion 3
 
-[Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`.
+[Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md), `0100DCA0064A6000`, [patches.py](../../dm/games/0100DCA0064A6000/patches.py).
 
+- **`game`**, runtime, at goal, checked: base 1.0.0 (v0) and update 1.4.0 (v327680) mains: RenderManager::RenderFrame, handle-free routine, handle-table initialization and component 0x3cd verified by disassembly, full rewrites and Unicorn replay of valid, freed/odd, reallocated/wrong-generation, zero-generation, null-slot, zero-count and missing-bone paths (2026-11-28): RenderManager::RenderFrame billboard skeleton lookup validates handle and skips missing bones (#672). The game's own RenderManager::RenderFrame billboard pass omits the handle generation check used by 113 other skeleton lookups and dereferences index -1 on a missing bone hash; function-matched (MATCH_STUBS) across 1.0.0 and 1.4.0 with handle-table layout assertion
 - **`build` → `engine`**, frame rate, blocked: one game on that engine here, judgement: Next Level Games' frame limiter target at a fixed address. The studio's engine, which its other games ship
 
 - **1.4.0 `main`** `79e5950f…`
   - host [hle_fpslock.c:39](../../dm/host/hle_fpslock.c#L39): engine frame limit set to fps_target: NLG frame limiter target
+- **function-matched stub** (`main` of builds without STUBS): RenderManager::RenderFrame billboard skeleton lookup validates handle and skips missing bones (#672): a function of 0x144a0 bytes, `+0xda34`, `+0xdacc`, `+0xdadc` in it
+- **function-matched stub** (`main` of builds without STUBS): RenderManager::RenderFrame billboard skeleton lookup validates handle and skips missing bones (#672): a function of 0x1130c bytes, `+0xc758`, `+0xc7f0`, `+0xc800` in it
 
 ### Mario + Rabbids® Sparks of Hope
 

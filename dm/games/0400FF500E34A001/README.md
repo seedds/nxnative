@@ -41,7 +41,7 @@ function-matched `AddressRegionManager` cut (`rewrite_sdk.log`).
 
 ## Shaders
 
-16,971 in [`shader_map.tsv`](shader_map.tsv): 11,417 pixel, 5,518 vertex, 33 compute, 3 geometry;
+16,971 in `shader_map.tsv`: 11,417 pixel, 5,518 vertex, 33 compute, 3 geometry;
 by source 8,933 map, 4,332 character, 2,826 `monolib`, 874 effect and 6 from `main`. All of them
 translate; a Mac build takes 1 min 33 s on the M6. The split leaves out 6 control sections in
 `main` (`@0xa0e928` to `@0xa0ed38`, 0xd0 apart) with no code area it can find; none was asked

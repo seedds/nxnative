@@ -5,7 +5,7 @@ Update 1.2 (v131072), Nintendo SDK 1.3.1, NVN. The Mac bring-up tested English o
 ## What it needs
 
 - [The profile](game.tsv) loads `main`, `sdk` and the GLSLC, NVN and `nn::sf` modules it imports. The NPDM declares zero system resource. The game opens 3.14 GiB of the 3.25 GiB guest heap region.
-- The [shader map](shader_map.tsv) includes the WAD arrays, the other loose GLSLC files, the boot-time GLSLC captures and shaders in `main`. The WAD reader extracts shader stages without guessing the original vertex and fragment pairings.
+- The shader map includes the WAD arrays, the other loose GLSLC files, the boot-time GLSLC captures and shaders in `main`. The WAD reader extracts shader stages without guessing the original vertex and fragment pairings.
 
 ## Found on this game
 

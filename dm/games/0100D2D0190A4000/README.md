@@ -7,7 +7,7 @@ Switch update 1.7.1 (v720896), SDK 14.3.0, `main` build `1db3976bc6f11c208b4957b
 | Setting | Where | Why |
 |---|---|---|
 | 5 GiB reservation, 1.25 GiB alias region, 32 MiB system resource | [`game.tsv`](game.tsv) | The game requests a 3.14 GiB heap and has virtual address memory enabled in its NPDM. |
-| NVN and GLSL libraries | [`shader_map.tsv`](shader_map.tsv), [`gl_capture.tsv`](gl_capture.tsv) | The split builds 570 NVN shaders. The renderer builds 387 GLSL stages at startup, which the packer captures and translates alongside the NVN library. |
+| NVN and GLSL libraries | `shader_map.tsv`, [`gl_capture.tsv`](gl_capture.tsv) | The split builds 570 NVN shaders. The renderer builds 387 GLSL stages at startup, which the packer captures and translates alongside the NVN library. |
 | Modules `main`, `subsdk0`, `sdk` | [`game.tsv`](game.tsv) | `subsdk0` is NintendoSDK_movie. The host answers the OpenGL imports without loading the game's NintendoSDK_OpenGL module. |
 
 ## Found on this game

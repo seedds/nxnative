@@ -5,7 +5,7 @@ Update 1.0.2 (v131072), Nintendo SDK 17.5.4, NVN. The Mac host and packaged app 
 ## What it needs
 
 - [The profile](game.tsv) loads `main`, `subsdk0` (GLSLC), `subsdk1` (NintendoSDK_movie) and `sdk`. The NPDM declares zero system resource and uses the standard 4 GB memory layout.
-- The full split finds [76 shaders](shader_map.tsv), 59 in the loose BNSH files under `shader/` and 17 in `main`. The [prewarm list](pso_manifest.tsv) covers the English prologue. The existing native-texture [movie slot handling](../../../docs/reference/movies.md#a-native-texture-movie-shows-a-picture-16-frames-ahead-then-goes-back) and [linear texture writes](../../../docs/reference/nvn-objects.md#writetexels-into-a-linear-texture-dropped-the-write) serve its 1080p videos.
+- The full split finds 76 shaders, 59 in the loose BNSH files under `shader/` and 17 in `main`. The [prewarm list](pso_manifest.tsv) covers the English prologue. The existing native-texture [movie slot handling](../../../docs/reference/movies.md#a-native-texture-movie-shows-a-picture-16-frames-ahead-then-goes-back) and [linear texture writes](../../../docs/reference/nvn-objects.md#writetexels-into-a-linear-texture-dropped-the-write) serve its 1080p videos.
 
 ## Found on this game
 

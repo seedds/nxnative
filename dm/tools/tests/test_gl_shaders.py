@@ -51,12 +51,42 @@ class Fixups(unittest.TestCase):
 
     def test_semicolon_after_a_function_body(self):   # Mega Man Legacy Collection's .glsl files end main with `};`; a struct's and a block's `};` stay
         t = ('struct L { vec4 c; };\nuniform B { vec4 v; } b;\nlayout(std140) uniform C { vec4 w; };\n'
-             'float f(float x) { if (x > 0.0) { return x; } return 0.0; } ;\nvoid main()\n{\n\tgl_Position = vec4(f(1.0));\n};\n')
-        g = gl_shaders.function_semicolons(t)
+             'float f(float x)\n#line 10\n{ if (x > 0.0) { return x; } return 0.0; } ;;\nvoid main()\n{\n\tgl_Position = vec4(f(1.0));\n};\n')
+        g = gl_shaders.empty_declarations(t)
         self.assertIn('struct L { vec4 c; };', g); self.assertIn('} b;', g); self.assertIn('uniform C { vec4 w; };', g)
-        self.assertIn('return 0.0; }\nvoid main', g)
+        self.assertIn('return 0.0; } \nvoid main', g)
         self.assertNotIn('} ;', g); self.assertTrue(g.rstrip().endswith('}'))
-        self.assertEqual(gl_shaders.function_semicolons(g), g)
+        self.assertEqual(gl_shaders.empty_declarations(g), g)
+
+    def test_empty_declarations_at_file_scope(self):   # Mark of the Ninja: Remastered's DECL_*_REGISTER macros end with `;` and are called with one; in-body `;;` stays
+        t = ('#version 450\n;\n'
+             'layout(binding = 6) uniform sampler2D FOWTexture;;\n'
+             'float FOWSampler; ;;\n'
+             'struct S { vec4 v; };;\n'
+             'const float k[2] = { 1.0, 2.0 };;\n'
+             'uniform float kept;\n;#line 42\n'
+             'void main()\n{\n\tfor (;;) break;\n\tif (gl_FragCoord.x < 0.0) discard;;\n};;\n')
+        g = gl_shaders.empty_declarations(t)
+        self.assertEqual(g, ('#version 450\n\n'
+                             'layout(binding = 6) uniform sampler2D FOWTexture;\n'
+                             'float FOWSampler; \n'
+                             'struct S { vec4 v; };\n'
+                             'const float k[2] = { 1.0, 2.0 };\n'
+                             'uniform float kept;\n#line 42\n'
+                             'void main()\n{\n\tfor (;;) break;\n\tif (gl_FragCoord.x < 0.0) discard;;\n}\n'))
+        self.assertEqual(gl_shaders.empty_declarations(g), g)
+
+    def test_named_block_members(self):   # Mark of the Ninja: Remastered finds cbuffer_wvp by its member mtxPVW (glGetActiveUniform, glGetActiveUniformsiv)
+        refl = {'types': {'_S': {'name': 'S', 'members': [{'name': 'a', 'type': 'float', 'offset': 0}, {'name': 'm', 'type': 'mat2', 'offset': 16, 'matrix_stride': 8, 'row_major': True}]}}}
+        ms = [{'name': 'mtxPVW', 'type': 'mat4', 'offset': 0, 'matrix_stride': 16},
+              {'name': 'arr', 'type': 'vec4', 'offset': 64, 'array': [3], 'array_stride': 16},
+              {'name': 's', 'type': '_S', 'offset': 112},
+              {'name': 'flag', 'type': 'uint', 'offset': 160},
+              {'name': 'aa', 'type': 'vec4', 'offset': 176, 'array': [2, 2]}]
+        f = []
+        gl_shaders.block_members(refl, ms, '', 0, 2, f, {'flag'})
+        self.assertEqual(f, ['m:mtxPVW=2:0:mat4:0:0:16:0', 'm:arr=2:64:vec4:3:16:0:0',
+                             'm:s.a=2:112:float:0:0:0:0', 'm:s.m=2:128:mat2:0:0:8:1', 'm:flag=2:160:bool:0:0:0:0'])
 
 
 # GLSL ES 1.00 as Fate/hollow ataraxia REMASTERED's built shaders write it: a sampler named `texture` (a built-in function from ES 3.00 on) and, as GameMaker's, a variable `sample`
@@ -240,6 +270,49 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             self.assertTrue(any(row.startswith('b:') and row.endswith(':180') for row in rows), rows)
             self.assertTrue(any(row.startswith('n:Materials=') and row.endswith(':16') for row in rows), rows)
 
+    def test_named_block_member_reflection_layout_and_instanced_names(self):
+        src = b'''#version 450 core
+#extension GL_EXT_scalar_block_layout : enable
+layout(std140) uniform Uninst {
+    mat4 mtxPVW;
+    layout(row_major) mat3 rm3;
+    vec4 arr[3];
+    bool flag;
+};
+layout(std140, row_major) uniform BlockA {
+    mat4 shared_m;
+    mat3x4 m3x4;
+} instA;
+layout(std140) uniform BlockB {
+    mat4 shared_m;
+} instB;
+layout(scalar) uniform Tight {
+    mat2 m2;
+    layout(row_major) mat2x3 m2x3r;
+};
+out vec4 color;
+void main() {
+    color = mtxPVW[0] + vec4(rm3[0], 0.0) + arr[0] + float(flag)
+          + instA.shared_m[0] + instA.m3x4[0] + instB.shared_m[0]
+          + vec4(m2[0], m2x3r[0].xy);
+}
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', '7' * 16, tmp)
+            self.assertIsInstance(r, tuple, r)
+            rows = r[1]
+            blocks = {row.split('=')[0][2:]: row.split('=')[1].split(':')[0] for row in rows if row.startswith('n:')}
+            members = {row.split('=')[0][2:]: row.split('=')[1] for row in rows if row.startswith('m:')}
+            self.assertEqual(members['mtxPVW'], f'{blocks["Uninst"]}:0:mat4:0:0:16:0')
+            self.assertEqual(members['rm3'], f'{blocks["Uninst"]}:64:mat3:0:0:16:1')
+            self.assertEqual(members['arr'], f'{blocks["Uninst"]}:112:vec4:3:16:0:0')
+            self.assertEqual(members['flag'], f'{blocks["Uninst"]}:160:bool:0:0:0:0')
+            self.assertEqual(members['BlockA.shared_m'], f'{blocks["BlockA"]}:0:mat4:0:0:16:1')
+            self.assertEqual(members['BlockA.m3x4'], f'{blocks["BlockA"]}:64:mat3x4:0:0:16:1')
+            self.assertEqual(members['BlockB.shared_m'], f'{blocks["BlockB"]}:0:mat4:0:0:16:0')
+            self.assertEqual(members['m2'], f'{blocks["Tight"]}:0:mat2:0:0:8:0')
+            self.assertEqual(members['m2x3r'], f'{blocks["Tight"]}:16:mat2x3:0:0:8:1')
+
     def test_texture_query_keeps_its_resource_arguments(self):
         src = b'#version 320 es\nprecision highp float;\nuniform sampler2D tex;\nout vec4 c;\nvoid main() { c = vec4(textureSize(tex, 0), 0, 1); }\n'
         with tempfile.TemporaryDirectory() as tmp:
@@ -338,6 +411,24 @@ void main() { gl_Position = position + value + palette[index] + lighting(); }
             err = gl_shaders.translate(b'#version 320 core\n' + body, 'frag', '3292' + 'e' * 12, tmp)
             self.assertIsInstance(err, str)
             self.assertIn('glslang -E:', err)
+
+    def test_empty_file_scope_declarations_translate_under_glsl_450(self):
+        # Mark of the Ninja: Remastered (#3415): semicolon-terminated macros produce `;;` at file scope in `#version 450`, which glslang rejects before 4.60.
+        src = (b'#version 450\n'
+               b'#define EMPTY_DECL(x)\n'
+               b'#define DECL_TEXTURE_REGISTER(name, slot) layout(binding = slot) uniform sampler2D name;\n'
+               b'EMPTY_DECL(a);\n'
+               b'DECL_TEXTURE_REGISTER(FOWTexture, 6);\n'
+               b'struct S { vec4 tint; };;;\n'
+               b'in vec2 uv;\nout vec4 color;\n'
+               b'void main() {\n'
+               b'\tif (uv.x < 0.0) discard;;\n'
+               b'\tcolor = texture(FOWTexture, uv);\n'
+               b'};;\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            r = gl_shaders.translate(src, 'frag', '3415' + 'f' * 12, tmp)
+            self.assertIsInstance(r, tuple, r)
+            self.assertIn('t:FOWTexture=0:1:sampler2D:6', r[1])
 
     def test_variable_texel_offsets_in_every_offset_function(self):
         # NVIDIA's compiler takes any expression as a texel offset; GLSL and glslang want a constant ("'texel offset' : argument must be compile-time constant").

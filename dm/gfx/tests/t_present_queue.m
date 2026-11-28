@@ -98,12 +98,12 @@ int main(void) { @autoreleasepool {
     // Display-link mode without a link thread: the present thread leaves the queue to the callback (t_present_alloc.m)
     g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1; g_delegate = [NvMetalDisplayLinkDelegate new];
     tex_t a = source(95001, 50, 150), b = source(95002, 100, 100), c = source(95003, 200, 200);
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick(); presents_done();   // the first present compiles the present pipeline
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); tick(); presents_done();   // the first present compiles the present pipeline
     char name[200];
 
     // 1. The game's queue runs while a present is held
     id<MTLSharedEvent> ev = hold_presents();
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); tick();
     uint64_t fence = submit(nil, 0);
     int ran = mtl_wait(fence, 500000000ull);
     snprintf(name, sizeof name, "a game submission completes while a present is held (fence %llu %s after 500 ms)", (unsigned long long)fence, ran ? "done" : "not done");
@@ -113,8 +113,8 @@ int main(void) { @autoreleasepool {
 
     // 2. A held present keeps its picture when the game draws into the texture it showed
     ev = hold_presents();
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); id<CAMetalDrawable> shown = tick();
-    present_enqueue(&b, 1. / 60, NULL, 0, NULL); tick();   // the next present is taken: the texture is the game's again
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); id<CAMetalDrawable> shown = tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, 0, NULL); tick();   // the next present is taken: the texture is the game's again
     id<MTLTexture> am = serial_get(a.serial);
     fence = submit(am, 220);
     CHECK("the drawing runs while the present is held", mtl_wait(fence, 500000000ull));
@@ -126,12 +126,12 @@ int main(void) { @autoreleasepool {
 
     // 3. Three presents held: the fourth uses the ring slot of the first, and waits for that one to run (g_present_alloc_done), so it cannot copy its picture over the first's
     ev = hold_presents();
-    present_enqueue(&b, 1. / 60, NULL, 0, NULL); id<CAMetalDrawable> first_dr = tick();
-    present_enqueue(&c, 1. / 60, NULL, 0, NULL); tick();
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick();
+    present_enqueue(&b, 1. / 60, NULL, 0, 0, NULL); id<CAMetalDrawable> first_dr = tick();
+    present_enqueue(&c, 1. / 60, NULL, 0, 0, NULL); tick();
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); tick();
     pthread_mutex_lock(&g_pq_mu); int inflight = g_pq_inflight; uint64_t first = g_pq_read - 2; pthread_mutex_unlock(&g_pq_mu);
     snprintf(name, sizeof name, "three presents held (%d in flight)", inflight); CHECK(name, inflight == 3);
-    present_enqueue(&c, 1. / 60, NULL, 0, NULL);
+    present_enqueue(&c, 1. / 60, NULL, 0, 0, NULL);
     g_held = drawable(); g_held_done = dispatch_semaphore_create(0); pthread_t th; pthread_create(&th, NULL, held_tick, NULL);
     int returned = dispatch_semaphore_wait(g_held_done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC)) == 0;
     snprintf(name, sizeof name, "the fourth present waits for ring slot %llu while ticket %llu is held", (unsigned long long)((first + 3) % 3), (unsigned long long)first);

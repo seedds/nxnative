@@ -5,7 +5,7 @@ Update 1.10.0 (v589824), Nintendo SDK 12.3.6, Traveller's Tales' engine, NVN. On
 ## What it needs
 
 - [The profile](game.tsv) loads `main`, `subsdk1` for movies and `sdk`. The NPDM declares zero system resource. The game opens a 3.13 GiB heap in the 3.25 GiB guest heap region. The game sets an upper-left window origin and zero-to-one depth. `depth_mode zero` supplies that depth mode to pipeline prebuilds.
-- [The base and update shader map](shader_map.tsv) covers 667 executable shaders and 97,648 RomFS shaders. With the 17 supplied add-ons, the NSP script derives a map with 984 more shader keys. All 99,299 shaders built for Mac on `e641898384f7`.
+- The base and update shader map covers 667 executable shaders and 97,648 RomFS shaders. With the 17 supplied add-ons, the NSP script derives a map with 984 more shader keys. All 99,299 shaders built for Mac on `e641898384f7`.
 
 ## Frame rate
 

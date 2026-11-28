@@ -185,10 +185,25 @@ namespace Ryujinx.Graphics.Shader.Translation
             }
         }
 
-        // nxnative: the pool table entry a raw global memory helper chose last in this invocation (GlobalToStorage.TryGenerateRawStorageOp), one word for each helper, zero at the start
-        public int AddRawLastEntryMemory()
+        // nxnative: the pool table entry cached in private registers across a shader's raw global memory helpers (GlobalToStorage.TryGenerateRawStorageOp):
+        // {baseLo, baseHi, span, deltaLo, deltaHi} and, when the shader has any global write/atomic, the entry index for gmem_log.
+        // Zero-initialized: span == 0 sends the first access (and any 4 GiB-straddling entry) through dmsh_raw_find.
+        private int[] _rawCacheMemoryIds;
+
+        public int[] GetRawCacheMemory(bool withIndex)
         {
-            return Properties.AddLocalMemory(new MemoryDefinition($"gmem_last_{Properties.LocalMemories.Count}", AggregateType.U32, 1, zeroInit: true));
+            if (_rawCacheMemoryIds == null)
+            {
+                int count = withIndex ? 6 : 5;
+                _rawCacheMemoryIds = new int[count];
+                string[] names = ["gmem_lo", "gmem_hi", "gmem_span", "gmem_dlo", "gmem_dhi", "gmem_idx"];
+                for (int i = 0; i < count; i++)
+                {
+                    _rawCacheMemoryIds[i] = Properties.AddLocalMemory(new MemoryDefinition(names[i], AggregateType.U32, 1, zeroInit: true));
+                }
+            }
+
+            return _rawCacheMemoryIds;
         }
 
         // nxnative: words 1 to 3 of a raw vector load (GlobalToStorage.TryGenerateRawStorageOp), one for the shader: the helper writes them and the loads of those words read them

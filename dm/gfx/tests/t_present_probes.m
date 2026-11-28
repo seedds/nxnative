@@ -92,10 +92,10 @@ int main(void) { @autoreleasepool {
     g_dm_present_link = 1; g_link_started = 1; g_link_owns_layer = 1; g_delegate = [NvMetalDisplayLinkDelegate new];
     tex_t a = source(94001, 120);
     char name[200];
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tick(); presents_done();   // the first present compiles the present pipeline
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); tick(); presents_done();   // the first present compiles the present pipeline
 
     // 1. Nothing held: both waits are short and known
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); uint64_t tk = tick();
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); uint64_t tk = tick();
     uint64_t fence = submit(20);
     CHECK("an unheld submission completes", mtl_wait(fence, 2000000000ull));
     CHECK("an unheld present completes", tk && presents_done());
@@ -106,7 +106,7 @@ int main(void) { @autoreleasepool {
     // 2. A present held 30 ms on the GPU, and a game submission committed behind it
     id<MTLSharedEvent> hold = [g_dev newSharedEvent];
     mtl_present_test_hold(hold, 1);
-    present_enqueue(&a, 1. / 60, NULL, 0, NULL); tk = tick();
+    present_enqueue(&a, 1. / 60, NULL, 0, 0, NULL); tk = tick();
     mtl_present_test_hold(nil, 0);
     fence = submit(30);
     usleep(HOLD_MS * 1000);

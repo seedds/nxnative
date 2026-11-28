@@ -32,7 +32,7 @@ There is no `patches.py`: this build needs no rewriter cut, no frame-step stub a
 
 ## Shaders
 
-20,376 rows in [`shader_map.tsv`](shader_map.tsv): **20,367 out of `shadercache.nx`** and **9 out of `startupshadercache.nx`**.
+20,376 rows in `shader_map.tsv`: **20,367 out of `shadercache.nx`** and **9 out of `startupshadercache.nx`**.
 The caches hold 20,384 records; 8 repeat a key and `shader_split.py` collapses them. Every shader translates, and the Mac
 build compiled 20,376 of 20,376 in 4:14 on an M1 Pro — the whole set exists before the game's first frame, so nothing is
 captured.

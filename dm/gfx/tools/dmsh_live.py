@@ -56,7 +56,6 @@ def compile_stage(profile, cache, chain, request, key):
 
         name = f'{stage}_live.bin'
         (profile_dir / 'shader_map.tsv').write_text(f'{name}\t0\t{split.STAGE_NAME[stage]}\t{key}\t/live\n')
-        (profile_dir / 'shader_map.tsv.conflicts.tsv').touch()
         (profile_dir / 'shader_pairs.tsv').touch()
         header = struct.pack('<8s8s24xII8x', b'BTCDBTCD', bytes.fromhex(key), len(control), len(code))
         (work / name).write_bytes(header + code + control)

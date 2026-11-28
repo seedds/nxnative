@@ -22,6 +22,7 @@
 #   r:<slot>:<count>                             the argument buffer's Metal buffer slot (-1 when absent), and number of argument IDs
 #   b:<id>:<size>                                the default uniform block: its argument ID and size in bytes
 #   n:<name>=<id>:<size>                         a named uniform block (DOOM 3's matrices_ubo): its argument ID and size in bytes
+#   m:<name>=<id>:<offset>:<type>:<count>:<array stride>:<matrix stride>:<row major>  a named uniform block member (qualified with <block>. when instanced)
 #   t:<name>=<texture id>:<sampler id>:<type>[:<unit>[:<count>]]  a combined sampler (-1 for absent sampler ID or implicit unit; count is for arrays)
 #   o:<name>=<location>                          a fragment output, [[color(location)]]
 # <TAB> where it came from
@@ -35,7 +36,8 @@ import mvgl
 from dmsh_chain import SPIRV_CROSS, MAC_MIN_FLAG   # the in-repo spirv-cross build the NVN chain uses too (spirv_cross_bin)
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); from ios_metal import IOS_FLAGS   # the iPhone's deployment target and math mode
 
-VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool', 'mat2', 'mat3', 'mat4'}
+VEC_TYPES = {'float', 'vec2', 'vec3', 'vec4', 'int', 'ivec2', 'ivec3', 'ivec4', 'uint', 'uvec2', 'uvec3', 'uvec4', 'bool',
+             'mat2', 'mat3', 'mat4', 'mat2x3', 'mat2x4', 'mat3x2', 'mat3x4', 'mat4x2', 'mat4x3'}
 TABLE_ABI = '# GL shader ABI 3'   # sampler arrays extend the argument-buffer table
 
 def red(msg): sys.exit('[RED] ' + msg)
@@ -119,8 +121,9 @@ def sources(roots):
 #   · the compatibility colour declared as a plain varying, `out vec4 gl_FrontColor;` in the vertex shader and `in vec4 gl_Color;` in the fragment shader (DOOM 3): NVIDIA links the two
 #     as GL's fixed pipeline does, so both become one varying, dm_Color, which the host matches by name;
 #   · `sampler` as a name (DOOM 3's helpers take `sampler2D sampler`): a reserved word in Vulkan GLSL, an ordinary name in OpenGL's;
-#   · a function body closed with `};` (Mega Man Legacy Collection's shaders/nx/*.glsl end main that way): GLSL ES has no empty declaration at file scope, so the `;` goes.
-#     A struct's or a block's `};` ends its declaration and stays: only a `{` opened right after a `)` at file scope is a function body
+#   · empty declarations (`;`) at file scope (Mega Man Legacy Collection's `};` after main; Mark of the Ninja: Remastered's semicolon-terminated macros called with `;`, producing `;;`):
+#     glslang allows empty file-scope declarations only from desktop GLSL 4.60 on (never in ES), while NVIDIA accepts them in any version. A struct's, interface block's, or initializer's
+#     `};` ends its declaration and stays (only a `{` opened right after `)` at file scope is a function body); `;;` inside a function body is an empty statement and stays
 OLD_TEX = [(r'\btexture2DLod\s*\(', 'textureLod('), (r'\btextureCubeLod\s*\(', 'textureLod('), (r'\btexture3DLod\s*\(', 'textureLod('),
            (r'\btexture2DProj\s*\(', 'textureProj('), (r'\btexture3DProj\s*\(', 'textureProj('),
            (r'\btexture2D\s*\(', 'texture('), (r'\btexture3D\s*\(', 'texture('), (r'\btextureCube\s*\(', 'texture(')]
@@ -145,21 +148,39 @@ def own_name(t, decl, name, new, out=None):
     t = re.sub(decl, out or '', t, flags=re.M)
     return re.sub(rf'\b{name}\b', new, t)
 
-def function_semicolons(t):
-    """t without the `;` right after the `}` that closes a function body at file scope"""
-    out, depth, body, i, k = [], 0, False, 0, 0
-    while k < len(t):
+def empty_declarations(t):
+    """t without empty declarations (`;`) at file scope: after a function body's `}`, doubled/repeated `;;`, or standalone `;` after directives."""
+    out, depth, body, decl_start, last, sol, i, k, n = [], 0, False, True, '', True, 0, 0, len(t)
+    while k < n:
         c = t[k]
-        if c == '{':
-            if depth == 0: body = t[:k].rstrip().endswith(')')
-            depth += 1
-        elif c == '}' and depth:
-            depth -= 1
-            if depth == 0 and body:
-                m = re.match(r'\s*;', t[k + 1:])
-                if m: out.append(t[i:k + 1]); i = k + 1 + m.end(); k = i; continue
+        if sol and c == '#':
+            nl = t.find('\n', k)
+            k = n if nl < 0 else nl + 1
+            sol = True
+            continue
+        if depth == 0:
+            if c == ';':
+                if decl_start:
+                    out.append(t[i:k]); i = k + 1; k += 1; continue
+                decl_start, last, sol = True, ';', False
+            elif c == '{':
+                body, depth, decl_start, last, sol = last == ')', 1, False, '{', False
+            elif c == '\n':
+                sol = True
+            elif c in ' \t\r':
+                pass
+            elif c.isspace():
+                sol = False
+            else:
+                decl_start, last, sol = False, c, False
+        else:
+            if c == '{': depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0: decl_start, last = body, '}'
+            sol = True if c == '\n' else (sol if c in ' \t\r' else False)
         k += 1
-    return ''.join(out) + t[i:]
+    return ''.join(out) + t[i:] if out else t
 
 def rename_identifier(t, name, base, renamed, keep_calls=False):
     """Rename an identifier into a free name, recording only replacements made in this translation."""
@@ -173,7 +194,7 @@ def rename_identifier(t, name, base, renamed, keep_calls=False):
 
 def fixups(t, stage, renamed=None):
     if renamed is None: renamed = {}
-    t = function_semicolons(t)
+    t = empty_declarations(t)
     for a, b in OLD_TEX: t = re.sub(a, b, t)
     t = re.sub(BUILTIN_DECL, '', t, flags=re.M)
     t = rename_identifier(t, 'sampler', 'dm_sampler', renamed)
@@ -361,6 +382,13 @@ def active_default_uniforms(log):
     if not block: return set()
     return {name for name, index in re.findall(r'^(\S+): [^\n]*\bindex (-?\d+),', uniforms, re.M) if index == block[1]}
 
+def active_bool_uniforms(log):
+    """Read active GL_BOOL (0x8b56) uniform names from glslang -q. SPIR-V lowers bool members in uniform blocks to uint."""
+    _, uniform_header, data = log.partition('Uniform reflection:\n')
+    uniforms, block_header, _ = data.partition('\nUniform block reflection:\n')
+    if not uniform_header or not block_header: return set()
+    return {name for name, ty in re.findall(r'^(\S+): [^\n]*\btype ([0-9a-f]+),', uniforms, re.M) if ty.lower() == '8b56'}
+
 def uni_members(refl, ms, prefix, base, f, bools, active):
     """Table rows for default block members. A struct's members recurse with their dotted name, which is the name the game passes to GL (u_LightEnv.m_dirLights_dir[0]); the
     reflection gives a nested member's offset relative to its parent, so the parent's offset is added"""
@@ -375,9 +403,31 @@ def uni_members(refl, ms, prefix, base, f, bools, active):
             continue
         if name not in active: continue
         ty = glsl_type(mb['type'], refl)
-        if ty == 'uint' and mb['name'] in bools: ty = 'bool'
+        if ty == 'uint' and (mb['name'] in bools or name in bools): ty = 'bool'
         if ty not in VEC_TYPES: return f'uniform {name}: type {ty} (structs are not implemented)'
         f.append(f'u:{name}={base + mb["offset"]}:{ty}:{arr[0] if arr else 0}:{mb.get("array_stride", 0)}')
+
+def block_members(refl, ms, prefix, base, aid, f, bools=()):
+    """Table rows for a named block's members:
+    m:<name>=<block argument ID>:<offset>:<type>:<count>:<array stride>:<matrix stride>:<row major>.
+    GL lists them among the active uniforms (glGetActiveUniform, glGetActiveUniformsiv); a block declared with an instance name qualifies its members with `<BlockName>.`.
+    A std140 block's members are all active, so every representable member is listed; arrays of arrays, arrays of structs and opaque types are omitted while the block still
+    works by its name."""
+    for mb in ms:
+        arr = mb.get('array', [])
+        name = prefix + mb['name']
+        if len(arr) > 1: continue
+        if 'members' in refl['types'].get(mb['type'], {}):
+            if not arr: block_members(refl, refl['types'][mb['type']]['members'], name + '.', base + mb['offset'], aid, f, bools)
+            continue
+        ty = glsl_type(mb['type'], refl)
+        if ty == 'uint' and name in bools: ty = 'bool'
+        if ty not in VEC_TYPES: continue
+        count = arr[0] if arr else 0
+        astride = mb.get('array_stride', 0) if count else 0
+        mstride = mb.get('matrix_stride', 0)
+        row_major = 1 if mb.get('row_major') else 0
+        f.append(f'm:{name}={aid}:{base + mb["offset"]}:{ty}:{count}:{astride}:{mstride}:{row_major}')
 
 # GLSL ES 1.00 (#version 100 or unversioned) and legacy desktop GLSL (#version 110 / 120 / 130): `attribute`, `varying`, `texture2D`/`texture3D`, `gl_FragColor`,
 # precision statements and lowp / mediump / highp qualifiers. ES 1.00 promotes to `#version 310 es`; legacy desktop GLSL promotes to `#version 450 core`, preserving
@@ -451,7 +501,7 @@ def explicit_sampler_bindings(text):
 # The game's names that the rewrite renames (es100, fixups): the table rows give them back as the game wrote them, since the host finds attributes, uniforms and samplers by the
 # game's name (glGetAttribLocation, glGetUniformLocation); the key is the hash of the game's own source
 def game_names(f, renamed):
-    """table fields with the renamed names in their name part (a:, o:, u:, t:, n: up to the '=') given back"""
+    """table fields with the renamed names in their name part (a:, o:, u:, t:, n:, m: up to the '=') given back"""
     def back(x):
         k, sep, rest = x.partition('=')
         return re.sub(r'\b\w+\b', lambda m: renamed.get(m.group(0), m.group(0)), k) + sep + rest
@@ -488,7 +538,8 @@ def argument_names(spv):
     open(spv, 'wb').write(struct.pack(f'<{len(out)}I', *out))
     textures = {names.get(v, ''): name for v, name in renamed.items() if variables[v][1] == 0}   # UniformConstant
     buffers = {f'_{pointers[variables[v][0]]}': name for v, name in renamed.items() if variables[v][1] == 2}   # Uniform
-    return textures, buffers
+    instanced = {f'_{pointers[variables[v][0]]}' for v in renamed if variables[v][1] == 2 and names.get(v)}
+    return textures, buffers, instanced
 
 def translate(src, stage, key, tmp):
     """GLSL → MSL; returns (msl path, table fields) or an error string"""
@@ -517,6 +568,7 @@ def translate(src, stage, key, tmp):
     if r.returncode: return 'glslang: ' + ' | '.join(l for l in (r.stdout + r.stderr).splitlines() if 'ERROR' in l and 'compilation' not in l)[:400]
     active = active_default_uniforms(r.stdout)
     if active is None: return 'glslang: could not read active uniform reflection'
+    active_bools = active_bool_uniforms(r.stdout)
     refl = json.loads(subprocess.run([SPIRV_CROSS, spv, '--reflect'], capture_output=True, text=True, check=True).stdout)
     for k in ('separate_images', 'separate_samplers', 'images', 'ssbos', 'push_constants'):
         if refl.get(k): return f'{k} are not implemented'
@@ -525,7 +577,7 @@ def translate(src, stage, key, tmp):
     for t in refl.get('textures', []):
         if 'array' in t and (len(t['array']) != 1 or not 0 < t['array'][0] <= 96):
             return f'unsupported sampler array shape for {t["name"]}'
-    textures, buffers = argument_names(spv)
+    textures, buffers, instanced = argument_names(spv)
     cmd = [SPIRV_CROSS, spv, '--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-argument-buffer-tier', '1',
            '--msl-texture-buffer-native', '--rename-entry-point', 'main', f'gl_{key}_{stage[0]}', stage, '--output', msl]
     if stage == 'vert': cmd.append('--fixup-clipspace')
@@ -544,13 +596,16 @@ def translate(src, stage, key, tmp):
     else:
         for v in refl.get('outputs', []): f.append(f'o:{v["name"]}={v["location"]}')
     # a bool uniform is a uint in the SPIR-V block (it has no bool members), but the game asks GL for its declared type: LÖVE's Shader:send takes only a boolean for a GLSL bool
-    bools = {n for n in re.findall(r'\buniform\s+(?:(?:lowp|mediump|highp)\s+)?bool\s+(\w+)\s*;', pre)}
+    bools = {n for n in re.findall(r'\buniform\s+(?:(?:lowp|mediump|highp)\s+)?bool\s+(\w+)\s*;', pre)} | active_bools
     for u in refl.get('ubos', []):
         aid = ids.get(buffers[u['type']])
         if aid is None: continue
         t = refl['types'][u['type']]
         if t['name'] != 'gl_DefaultUniformBlock':   # a named block: the buffer the game binds to its binding point (glUniformBlockBinding, glBindBufferRange)
-            f.append(f'n:{t["name"]}={aid}:{u["block_size"]}'); continue
+            f.append(f'n:{t["name"]}={aid}:{u["block_size"]}')
+            prefix = f'{t["name"]}.' if u['type'] in instanced else ''
+            block_members(refl, t['members'], prefix, 0, aid, f, active_bools)
+            continue
         f.append(f'b:{aid}:{u["block_size"]}')
         e = uni_members(refl, t['members'], '', 0, f, bools, active)
         if e: return e
@@ -634,7 +689,7 @@ def main():
             if not any(k == key for k, _ in seen): print(f'[RED] {where} ({key}) does not translate: {" / ".join(errs)}')
         if not fixed and not seen: red('no GLSL shaders translated')
         tsv = [TABLE_ABI, '# GL shaders (dm/gfx/tools/gl_shaders.py): key = sha256(GLSL source)[:16], Metal function gl_<key>_v / gl_<key>_f; a: vertex inputs, u: default uniform block members '
-               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs']
+               '(offset:type:count:stride), r: argument buffer (slot:count), b: the block (id:size), n: named blocks (name=id:size), m: their members (name=block id:offset:type:count:array stride:matrix stride:row major), t: combined samplers (texture-id:sampler-id:type), o: fragment outputs']
         if fixed:
             tsv.append('# Fixed-function OpenGL uses the host Metal shaders')
         else:

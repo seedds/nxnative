@@ -454,17 +454,19 @@ MAP_ROWS, MAP_CONFLICT_ROWS = {}, {}
 for raw in open(MAP, 'rb'):
     c = raw.rstrip(b'\n').split(b'\t')
     if len(c) > 4: MAP_ROWS.setdefault(c[3].decode(), raw)
-for raw in open(MAP + '.conflicts.tsv', 'rb'):
-    c = raw.rstrip(b'\n').split(b'\t')
-    if len(c) > 1 and not raw.startswith((b'#', b'dm_')): MAP_CONFLICT_ROWS.setdefault(c[0].decode(), raw)
+if os.path.isfile(MAP + '.conflicts.tsv'):
+    for raw in open(MAP + '.conflicts.tsv', 'rb'):
+        c = raw.rstrip(b'\n').split(b'\t')
+        if len(c) > 1 and not raw.startswith((b'#', b'dm_')): MAP_CONFLICT_ROWS.setdefault(c[0].decode(), raw)
 for ln in open(MAP):
     c = ln.rstrip('\n').split('\t')
     if len(c) > 4 and c[0].endswith('.bin'):
         pc_of.setdefault(c[3], c[4]); loc.setdefault(c[3], (c[0], int(c[1])))
         if c[2] in ('rt', 'raytracing'): RT_KEYS.add(c[3])
-for ln in open(MAP + '.conflicts.tsv'):
-    c = ln.rstrip('\n').split('\t')
-    if len(c) > 1 and not ln.startswith('#') and not ln.startswith('dm_') and c[0] in pc_of: pc_of[c[0]] = c[1]
+if os.path.isfile(MAP + '.conflicts.tsv'):
+    for ln in open(MAP + '.conflicts.tsv'):
+        c = ln.rstrip('\n').split('\t')
+        if len(c) > 1 and not ln.startswith('#') and not ln.startswith('dm_') and c[0] in pc_of: pc_of[c[0]] = c[1]
 
 def vertex_ab(key, code, ctl):
     """Merge Maxwell's type-0 VertexA and type-1 VertexB as Ryujinx does. Control +0x748 lists each part's SPH offset and length from the SPH.
@@ -660,9 +662,9 @@ def load_pairs(game, package):
     pairs = collections.defaultdict(set)
     for table in ('shader_pairs.tsv', 'pso_pairs.tsv'):
         path = str(game.table(table))
-        if table == 'pso_pairs.tsv' and not os.path.isfile(path):
-            path = os.path.join(os.path.dirname(os.path.abspath(package)), table)   # the split's copy for profiles predating this table
-        if table == 'pso_pairs.tsv' and not os.path.isfile(path): continue
+        if not os.path.isfile(path):
+            path = os.path.join(os.path.dirname(os.path.abspath(package)), table)   # the split's copy beside the package
+        if not os.path.isfile(path): continue
         with open(path) as f:
             for ln in f:
                 if ln.strip() and not ln.startswith('#'): v, p = ln.split(); pairs[v].add(p)

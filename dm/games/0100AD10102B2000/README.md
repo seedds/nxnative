@@ -29,7 +29,7 @@ There is no `patches.py`: this build needs no rewriter cut, no frame-step stub a
 
 ## Shaders
 
-20,427 rows in [`shader_map.tsv`](shader_map.tsv): **20,419 out of `shadercache.nx`** and 8 out of `main` (the Phyre reader). Every one translates; the Mac
+20,427 rows in `shader_map.tsv`: **20,419 out of `shadercache.nx`** and 8 out of `main` (the Phyre reader). Every one translates; the Mac
 build compiles 20,427 of 20,427 in 3:23 on an M1 Pro (about 101 a second, none from the cache), so the whole set exists before the game's first frame and no
 capture pass is needed.
 

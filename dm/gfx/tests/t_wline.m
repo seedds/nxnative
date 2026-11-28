@@ -17,7 +17,7 @@ static NSString *k_vs =
 "    float4 p = in.m_0;\n    p.x += float(gl_InstanceIndex) * u.x * p.w;\n    out.gl_Position = p;\n    out.out_c = float4(float(gl_VertexIndex));\n    return out;\n}\n";
 static NSString *k_fs = @"#include <metal_stdlib>\nusing namespace metal;\nstruct I { float4 c [[user(locn0)]]; };\nfragment float4 fs(I in [[stage_in]]) { return float4(in.c.x + 1.0); }\n";
 typedef struct { uint64_t base; uint32_t stride, divisor; } dm_vstream_c;
-typedef struct { dm_vstream_c s[16]; uint32_t attr[16]; } dm_vlayout_c;
+typedef struct { dm_vstream_c s[16]; uint32_t attr[32]; } dm_vlayout_c;
 typedef struct { uint64_t ib; float vp[2]; float width; uint32_t prim, count; int32_t base; uint32_t isz, restart, ri, zclip, rect, pad; } wl_block;   // nvn_wline.inc
 enum { W = 64 };
 static id<MTLDevice> dev; static id<MTLCommandQueue> q; static id<MTLRenderPipelineState> ps;

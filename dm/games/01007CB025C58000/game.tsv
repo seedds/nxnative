@@ -1,0 +1,37 @@
+# Volcano Princess 1.0.2, Unity 6000.4.7f1 IL2CPP, Nintendo SDK 21.4.7, NVN 55.15.
+# Format: see dm/games/README.md.
+
+# ---- Identity ----
+title_id	01007CB025C58000
+program_id	01007CB025C58000
+
+# ---- App ----
+name	Volcano Princess
+ipa	VolcanoPrincess.ipa
+app_category	public.app-category.simulation-games
+
+# ---- Versions ----
+build	v131072	1.0.2	main=4b696178bb0386c3d9595bdc3b526228	subsdk0=92a5f1a1e8d50e4d05b2212f564bf226	sdk=ab3835b2a37b1916e296f27e82dd4e36
+package	v131072
+shader_versions	v131072
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/a88e2faeb081fd484bf22936b723bf66.bundle
+zip_store	.assets:.bin:.bundle:.dat:.resource:.ress:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MiB of system resource. Unity maps its own memory in the 4.375 GiB alias region.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# The game sets near = 0 before drawing. Build the offline pipeline bases for that mode.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Volcano Princess shaders

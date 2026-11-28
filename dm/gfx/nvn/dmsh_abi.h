@@ -31,6 +31,8 @@
 #define DMSH_C0_SSBO_MS 0x770            // NVN2 mesh stage storage buffer table: its mesh shaders read c0 0x770, 0x780, 0x790 and 0x7b0, and it binds slots from 0
 #define DMSH_MESH_DRAW_SLOT 29           // a task or object function's buffer: the draw's {count, first} workgroups, NVN's DrawMeshTasksIndirect record (dmsh_meshstage.py, nvn_geometry.inc mtk_encode)
 #define DMSH_MESH_GRID 1024              // Metal's limit of threadgroups in a mesh grid: a mesh shader with no task shader is drawn by an object function launching blocks of this many (dmsh_meshstage.py)
+#define DMSH_MESH_PAYLOAD_MAX 16384      // Metal's limit of an object function's payload: a task shader's larger payload goes through a device buffer (dmsh_meshstage.py payload_spill)
+#define DMSH_MESH_SPILL_SLOT 11          // that buffer, at this index of the object and vertex (mesh) tables: word 0 its slice count, then one slice of the payload's words rounded to 4 per task workgroup (nvn_geometry.inc mtk_encode)
 // A mesh function whose stage array is 6000 to 16384 bytes (a 32-thread group; dmsh_meshstage.py to_stage, reflection key mesh_spill) keeps it in a device slice, not in threadgroup memory:
 // buffer DMSH_MESH_SCRATCH_SLOT of the mesh stage, which shares the vertex argument table. A mesh draw binds slot 0 (the arguments) and this one; vertex draws use the others (1-12
 // converted streams, 8-11 transform feedback, 12-13 geometry, 14-29 streams, 30 the zero buffer) and rebind what they read, as nvn_mtl.m enc_r_vbuf tracks every write.
@@ -56,11 +58,6 @@
 #define DMSH_C0_DISPATCH_NVN2 4          // NVN2 compute keeps them here, below its per-shader layout at 0x10 (x and y read by Fire Emblem Fortune's Weave's light culling; z by their order)
 #define DMSH_C0_CS_UBO 0x210             // compute: uniform slot r's address and size at 0x210 + 0x10 r, read through global memory (the build's ubo_ptr bindings); it ends where the storage buffer table starts
 #define DMSH_C0_CS_UBO_SLOTS 16          // uniform slots of that table
-// NVN2 graphics stages read the buffer entries the game pushes for them from a bank of their own: stage i's (vertex 0, hull or mesh 1, domain 2, geometry 3, pixel 4) is
-// c[25 + i], which holds graphics push block 1 + i (DMSH_PUSH_BLOCKS): {address, size} entries of 16 bytes, or 8-byte handles. PRAGMATA's shaders read c[25] in 9,944
-// vertex shaders, c[26] in 538 mesh and 3 hull shaders, c[27] in 37 domain shaders, c[28] in 1 geometry shader and c[29] in 12,195 pixel shaders, and the game binds no
-// storage buffer at all. The translator maps the bank onto that block of c[24] (the build's job key stage_bank, InstEmitAmpere.cs AStageBlock)
-#define DMSH_NVN2_STAGE_BANK 25
 
 // NVN2 push constants (nvnCommandBufferPushGraphicsConstants / PushComputeConstants): the bytes the game pushes, read by its shaders as c[24] (the translator maps NVN2
 // compute's c0 push region there); one block for the graphics stages, one for compute
@@ -77,7 +74,7 @@
 // its offset, so every access landed that many bytes early. The host makes each such texture's view from that boundary, wider by the elements in between, and gives their count
 // in a table in a bank of its own (Ryujinx Constants.NxBufferImageBiasBank), which the shader adds to each coordinate of a buffer image or of a buffer texture read through a
 // texture slot (and takes from its size query), an array of buffer textures one per element, the entry of the element an access indexes; only a shader with one of them has it,
-// as long as its entries (the TBIAS binding's "n")
+// as long as its entries (the TBIAS binding's "n"). Wrapped 1D fetches take a second group after their lead entries: each logical width, 0 for an ordinary 1D texture.
 #define DMSH_TBIAS_BANK 26
 #define DMSH_TBIAS_SLOTS 512             // the most entries a table holds, a u32 each, as uint4s (a binding's entry: its "tbx"; an array's first element's)
 // Storage bounds: a storage buffer whose address the shader takes from a game uniform slot or the push constants (SBUFU, SBUFQ) has no size, and on the console the shader reads the GPU's
@@ -86,11 +83,11 @@
 // before the address B, then B plus the words from it on, at u32 2s and 2s + 1 for the binding's storage slot s (its "sbx"); only a shader with such a buffer has the table (GitHub issue #2618)
 #define DMSH_SBLEN_BANK 27
 #define DMSH_SBLEN_SLOTS 32              // storage slots of a table, two u32 each, as uint4s: 256 bytes
-// The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Block 1 + i holds
-// stage i's buffer entries: compute has one stage and reads block 1 where its c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9; the translator maps it
-// to c[24] + DMSH_PUSH_SIZE); graphics stage i reads its block through its own bank (DMSH_NVN2_STAGE_BANK + i), up to the pixel stage's block 5. PRAGMATA pushes 16-byte buffer
-// entries (a 64-bit GPU address, then a size) or 8-byte handles there before its dispatches and draws, and its shaders load and store through those addresses
-#define DMSH_PUSH_BLOCKS 6
+// The push call's word before the offset names a block of the stage group; c[24] holds block b at b * DMSH_PUSH_SIZE. Block 0 holds the group's constants. Every stage of the
+// group reads block b as bank c[DMSH_PUSH_BANK + b], which the translator maps to c[24] + b * DMSH_PUSH_SIZE (InstEmitAmpere.cs APushBlock); compute also reads block 1 where its
+// c0 layout counts it (control +0xaa, in words, right after block 0's +0xa9). The game chooses the blocks: PRAGMATA pushes 16-byte buffer entries (a 64-bit GPU address, then a
+// size) or 8-byte handles into blocks 1, 2 and 5 before its dispatches and draws, Cyberpunk 2077 an 8-byte address into block 7, and their shaders load and store through them
+#define DMSH_PUSH_BLOCKS 8              // native groups each contain eight 256-byte banks; RT consumes the compute group's full 0x800 bytes
 #define DMSH_C0_POINT_SIZE 0x610         // graphics stages: the largest point size, to which GLSLC clamps a shader-written gl_PointSize (Super Mario Odyssey's point sprites)
 #define DMSH_C0_SAMPLE_TABLE 0x620       // pixel stage: GLSLC's sample position table, one byte per (pixel of the location grid, sample): x and y in 1/16 pixel, low and high nibble
 #define DMSH_C0_SAMPLE_BYTES 16          // bytes of that table
@@ -124,26 +121,56 @@
 #define DMSH_KIND_TEX_C2A "tex_c2a"      // an array of c2 handles the shader indexes at run time: element k = the texture whose c2 word lies at off + 8 k
 #define DMSH_KIND_SAMP_C2A "samp_c2a"    // the same for samplers
 #define DMSH_KIND_TEX_POOL "tex_pool"    // the game's texture pool, indexed by the handle's texture ID (a handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
+#define DMSH_KIND_TEX_QUERY "tex_query"  // registered texture view metadata, indexed by the 20-bit texture ID of a dynamic TXQ
+#define DMSH_TEX_QUERY_MEMBER "nvn_texture_query"
+#define DMSH_TEX_QUERY_WORDS 6           // u32 bound, then per ID: width, height, depth/layers, mip levels, sample count, mipmapped coordinate mask. Last row is all zero.
 #define DMSH_KIND_SAMP_POOL "samp_pool"  // the sampler pool, indexed by the handle's sampler ID
+#define DMSH_KIND_IMG_POOL "img_pool"    // the image pool, indexed by the handle's image ID (an image handle traced to no slot; dmsh_reflect.py pool_arrays): elem = the element type
 #define DMSH_KIND_TEX_HTAB "tex_htab"    // a table the host builds of the handles in uniform slot reg from byte off, element k = the handle at off + 8k (nvn_mtl.m htab_gpu), laid out as a pool: elem = the element type
 #define DMSH_KIND_SAMP_HTAB "samp_htab"  // its samplers; soff and sreg as DMSH_KIND_SAMP_UBO's
 #define DMSH_KIND_BORDER "border"        // the shader's border colour block (dmsh_rewrite.py border_emu): a mask of the samplers to correct, then each one's factors
 
 #define DMSH_KIND_GMEM_MAP "gmem_map"    // the memory pool table for global memory the translator traced to no storage buffer (an address the shader loaded from memory): the host binds its table (nvn_mtl.m gmem_map)
 
+// Native RT kernels use their own descriptor arena and scheduler resources;
+// these are not ordinary game UBO slots. Handles remain opaque16-byte tokens.
+#define DMSH_KIND_RT_SCENE "rt_scene"
+#define DMSH_KIND_RT_PARAMETERS "rt_parameters"
+#define DMSH_KIND_RT_ERRORS "rt_errors"
+#define DMSH_KIND_RT_INSTANCE_SBT "rt_instance_sbt"
+#define DMSH_KIND_RT_BANK0 "rt_bank0"
+#define DMSH_KIND_RT_BANK3 "rt_bank3"
+#define DMSH_RT_CORE_BYTES 0x140
+#define DMSH_RT_DESCRIPTOR_BYTES 0x1430
+#define DMSH_RT_DESCRIPTOR_C0_BYTES 0x430
+#define DMSH_RT_DESCRIPTOR_HANDLES 0x430
+#define DMSH_RT_DESCRIPTOR_PUSH 0xB98
+#define DMSH_RT_HANDLE_BYTES 16
+#define DMSH_RT_RECORD_ALIGN 32
+#define DMSH_RT_LOCAL_BIAS 0x10000
+#define DMSH_RT_IMAGE_CLASSES 16
+#define DMSH_RT_IMAGE_SLOTS 8
+#define DMSH_RT_MEMBERSHIP 24
+
 // Raw global memory: the translator reserves that table as a storage buffer under this constant buffer slot, which no game has (Ryujinx GlobalToStorage.GmemMapCbSlot), finds the pool
 // holding an address by a binary search over the table's starts and accesses the address plus the pool's delta through a physical storage buffer pointer
 #define DMSH_GMEM_MAP_CB_SLOT 0xFF
 #define DMSH_GMEM_MAP_ENTRIES 8192       // entries of the table (GlobalToStorage.GmemMapLog2 = 13), sorted by start: entry 0 is empty (start 0, end 0) and unused entries start at ~0
-#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and 4 bytes of padding
+#define DMSH_GMEM_MAP_ENTRY 32           // bytes of an entry: start, end (exclusive) and delta (the pool's Metal GPU address minus its guest address), 64 bits each, then a 32-bit lookup hint and the byte span if the range fits in one 4 GiB window (0 otherwise)
 #define DMSH_GMEM_HINT_SHIFT 21          // the hint in entry (chunk & (entries - 1)) names the entry that holds all of this 2 MiB guest chunk: chunk in the high bits, entry index in the low 13, 0 = none. Tagged, so a colliding chunk searches
 // Where such a store or atomic lands is known only when the GPU runs it, so each one also sets the bit of its table entry in a write log, reserved under the same slot at offset 1
 // (Ryujinx GlobalToStorage.GmemLogCbOffset): a bitmap of the entries of the table bound beside it, bit i in 32-bit word i / 32. The host learns the pools from it
 #define DMSH_KIND_GMEM_LOG "gmem_log"    // that write log: the host gives each draw or dispatch its own, cleared (nvn_mtl.m gml_take)
 #define DMSH_GMEM_LOG_CB_OFFSET 1
+// Reflection-only raw pointer sources: [NVN storage slot, byte offset] on gmem_map's "pointers". Before each binding the host reads these words and admits their actual pools
+// to the existing table (nvn_mtl.m gmem_discover). No extra GPU binding or lookup path; unsupported sources keep relying on the table's addressed ranges.
+#define DMSH_GPTR_MAX 64
 
 // A pool binding points at a buffer the host keeps (nvn_mtl.m pool_gpu): a 32-bit bound n (the highest index the shader may read), then from DMSH_POOL_HEAD one 8-byte resource ID per ID
 #define DMSH_POOL_HEAD 16                // bytes before element 0 of a pool buffer: the bound n, 4 bytes of padding, and the 64-bit GPU address of the read bitmap: bit i in 32-bit word i / 32 is set by a shader that reads texture ID i (dmsh_reflect.py pool_arrays, nvn_mtl.m pool_seen_scan); 0 in a table of a uniform buffer's handles (htab_gpu), whose reads are not marked
+#define DMSH_POOL_BIAS 4                 // BUFFER tables: header word containing the byte offset of n+1 u32 element leads after the n+1 resource IDs; 0 for other tables
+#define DMSH_POOL_ROW_WORDS 3            // a wrapped 1D fetch binding: bound (low 32 bits), GPU addresses of the 2D and sampled BUFFER tables
+#define DMSH_POOL_BUFFER_ABSENT 0xffffffff  // sampled BUFFER table: this ID does not name a compatible buffer texture
 #define DMSH_KIND_UNKNOWN "?"            // a binding the build could not place: the host refuses the shader
 
 // The alpha test's state (dm/gfx/tools/dmsh_alpha.py, the _a entry points of the <key>_bx libraries): uint function (NVN_ALPHA_FUNC_*), float reference, at this fragment buffer index (nvn_mtl.m at_bind)
@@ -152,14 +179,15 @@
 // NVIDIA's "zero times anything is zero" float blend option, which NVN's driver switches on (SET_BLEND_FLOAT_OPTION; dm/gfx/tools/dmsh_rewrite.py blend_zero): a uint at this fragment buffer
 // index, DMSH_BLEND_ZERO_BITS bits per colour output from bit 0: 0 = the output's source colour weight is not known to be zero, 1 = it is zero where the output's alpha is 0 (SRC_ALPHA),
 // 2 = where its alpha is 1 (ONE_MINUS_SRC_ALPHA) (nvn_mtl.m bz_bind). A factor of ZERO needs none: Apple's blender leaves that term out (dm/gfx/tests/t_blend_zero.m)
-// A second uint after it rounds colour outputs as NVIDIA's colour unit converts them into a normalized target (dmsh_rewrite.py blend_zero, nvn_mtl.m rop_word):
-// DMSH_BLEND_ROUND_BITS bits per colour output from bit 0, DMSH_ROUND_* the target's channel widths; 0 = stored as Apple converts it (blended, float, sRGB, signed or another width)
+// A second uint after it rounds colour outputs as NVIDIA's colour unit converts them into a normalized or 16-bit float target (dmsh_rewrite.py blend_zero, nvn_mtl.m rop_word):
+// DMSH_BLEND_ROUND_BITS bits per colour output from bit 0, DMSH_ROUND_* the target's channel widths; 0 = stored as Apple converts it (blended, 32-bit or packed float, sRGB, signed, another width, or a GPU whose hardware already converts 16-bit float targets toward zero)
 #define DMSH_BLEND_BUFFER 28
 #define DMSH_BLEND_ZERO_BITS 2
-#define DMSH_BLEND_ROUND_BITS 2
+#define DMSH_BLEND_ROUND_BITS 3
 #define DMSH_ROUND_8 1                   // 8 bits a channel (255)
 #define DMSH_ROUND_16 2                  // 16 bits a channel (65535)
 #define DMSH_ROUND_10_2 3                // 10 bits rgb, 2 bits alpha (1023, 3)
+#define DMSH_ROUND_F16 4                 // a 16-bit float channel: the float converted toward zero (NVIDIA's rule; iOS/iPadOS GPUs such as M4/A19 Pro round to nearest even)
 
 // Border colours Metal has no sampler state for (it has transparent black, opaque black and opaque white): the build gives each sampler member a shader samples through a twin,
 // <member>_w, and the shader a block it reads per sample, r + (twin sample - r) * k when the sampler's bit is set (dmsh_rewrite.py border_emu, nvn_border.h)
@@ -170,14 +198,32 @@
 // The corrections' function constant (bool, every stage): true turns them off, for a pipeline whose draw or dispatch binds no sampler with a
 // twin (nvn_mtl.m border_need, fn_off). The twin samples go, and the registers they kept: Ocarina of Time's 1080p material passes spilled 300-400 bytes a thread with them. Undefined, every sample corrects as its bit says
 #define DMSH_BORDER_FC 216
+// The blend fix-up's function constant (bool, pixel shaders with dm_blend0, dmsh_rewrite.py blend_zero): true for a pipeline whose blend words are both 0 (nvn_mtl.m bz_word_for /
+// rop_word_for: no zero-weight NaN rule and no NVIDIA rounding for any of its targets), so the fix-up and the read of its words go. False or undefined, the words are read at
+// DMSH_BLEND_BUFFER as before (pair archives keep false so one pulling base serves every draw of a shader pair)
+#define DMSH_BLEND_OFF_FC 217
+// Metal compiler workarounds (dm/gfx/tools/dmsh_metalwa.py): bool, opt-in KosmicKrisp KK_WORKAROUND_3 ballot rewrite (default false). The host (nvn_mtl.m mwa_on)
+// and pso_offline.py leave it false by default (issue #3405: enabling KK3 on macOS 26.7.3 / M2 Max corrupted Ocarina of Time) so KK3 shaders stay in offline archives; DM_NVN_METALWA=1 opts in
+#define DMSH_MWA_FC 220
 // The logic operation's state (dm/gfx/tools/dmsh_logic.py, the _l entry points of the <key>_bx libraries): uint operation (NVN_LOGIC_OP_*), 12 bytes of padding, a uint4 channel mask per colour target, at this fragment buffer index (nvn_mtl.m lo_bind)
 #define DMSH_LOGIC_BUFFER 29
 // Its function constants: bool, colour target n is attached (the variant reads it only then), at this index + n (nvn_mtl.m lo_fn specializes the entry point per pass's targets)
 #define DMSH_LOGIC_FC 200
-// The integer-output entry point's function constants (dm/gfx/tools/dmsh_entry.py fs_uint): bool, colour output n goes to an unsigned integer target, at this index + n: main0_u returns that
-// output as the unsigned integer vector of its bits and the others as floats (nvn_mtl.m uint_fn specializes it per pipeline's integer targets)
+// The typed-output entry point's function constants (dm/gfx/tools/dmsh_entry.py fs_uint): bool, colour output n goes to an unsigned (DMSH_UINT_FC + n) or a signed (DMSH_SINT_FC + n)
+// integer target: main0_u returns that output as the integer vector of the same bits, and as a float where neither is set; bool, the alpha test runs (DMSH_TYPED_ALPHA_FC: its state at
+// DMSH_ALPHA_BUFFER, dmsh_alpha.py), the logic operation (DMSH_TYPED_LOGIC_FC: its state at DMSH_LOGIC_BUFFER, the targets it reads by DMSH_LOGIC_FC + n, dmsh_logic.py), and dual-source
+// blending (DMSH_TYPED_DUAL_FC: colour output 1 returned as [[color(0), index(1)]], outputs 1..7 absent). nvn_mtl.m typed_fn specializes it per pipeline's targets and fixed-function state
 #define DMSH_UINT_FC 208
+#define DMSH_SINT_FC 224
+#define DMSH_TYPED_ALPHA_FC 232
+#define DMSH_TYPED_LOGIC_FC 233
+#define DMSH_TYPED_DUAL_FC 234
 // Compute shared memory past Metal's limit (dm/gfx/tools/dmsh_rewrite.py tg_spill): a kernel whose threadgroup arrays exceed DMSH_TG_MAX bytes takes them from a device buffer at this compute
 // buffer index, one slice of the reflection's tg_spill bytes per workgroup, at the workgroup's index in the whole grid (nvn_mtl.m dispatch binds a slice for every workgroup of the dispatch)
 #define DMSH_TG_SLOT 30
 #define DMSH_TG_MAX 0x8000
+// Compute loop containment (#2664): a state at this compute buffer slot holds the submission's GPU abort address (u64) and this kernel's capped loop site
+// (atomic u32, initially UINT32_MAX). Only a kernel reaching its own per-function budget records a site; aborting another kernel's loop does not report a cap hit.
+#define DMSH_LOOP_SLOT 28
+#define DMSH_LOOP_BYTES 16
+#define DMSH_LOOP_HIT 8

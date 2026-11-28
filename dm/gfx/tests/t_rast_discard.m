@@ -74,9 +74,12 @@ int main(void) { @autoreleasepool {
     buf.size=32768;emit(OP_BIND_SSBO,&buf,sizeof buf);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);
     arrays=(p_draw){.prim=0,.count=4096,.instances=1};emit(OP_DRAW,&arrays,sizeof arrays);
     int32_t barrier=NVN_BARRIER_ORDER_PRIMITIVES_BIT;emit(OP_BARRIER,&barrier,sizeof barrier);
-    bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);execute();
+    bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+    uint64_t vp_before=g_stat_pass,vp_vbar=g_order_vbar;execute();
     int ordered=1;for(int i=0;i<4096;i++)ordered&=output[i+4096]==(uint32_t)(i+0x1200);
     CHECK(ordered,"primitive barrier orders vertex storage writes before the consuming draw");
+    CHECK(g_stat_pass-vp_before==(vbar_pass_on()?1u:2u)&&g_order_vbar-vp_vbar==(vbar_pass_on()?1u:0u),
+          "vertex-only write followed by primitive barrier keeps the pass behind an in-pass vertex barrier");
     // The barrier also orders the other way: a later draw's storage writes come after the pass's earlier draws (Xenoblade Chronicles 2 rewrites shared bone matrix slots
     // with a vertex-only draw after ORDER_PRIMITIVES). A barrier from the vertex stage inside the pass is enough when the earlier draws read memory only in their vertex stage or
     // the barrier orders only primitives; ORDER_FRAGMENTS after a draw that reads in its fragment stage ends the pass; a draw without writes, or a write with no barrier, changes nothing
@@ -104,6 +107,53 @@ int main(void) { @autoreleasepool {
         else{bp.prog=&fwp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);}
         uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
         CHECK(g_stat_pass-before==cases[c].passes&&g_order_vbar-vbar==cases[c].vbar,cases[c].what);
+    }
+    // Post-write barriers (DM_NVN_VBAR_PASS): repeated skinning + primitive barriers stay in one pass (including across same-target continuation),
+    // while ORDER_INDIRECT_DATA, fragment writes, and fragment barriers after fragment reads still split the pass.
+    int32_t ind=NVN_BARRIER_ORDER_PRIMITIVES_BIT|NVN_BARRIER_ORDER_INDIRECT_DATA_BIT;
+    int32_t ind_only=NVN_BARRIER_ORDER_INDIRECT_DATA_BIT;
+    {   // Two skinning cycles with same-target rebind in between
+        memset(output,0,32768);
+        discard(1);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        emit(OP_BARRIER,&barrier,4);
+        emit(OP_SET_RT,&rt,sizeof rt);
+        discard(0);bp.prog=&rd;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+        emit(OP_BARRIER,&barrier,4);
+        discard(1);bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
+        CHECK(g_stat_pass-before==(vbar_pass_on()?1u:2u)&&g_order_vbar-vbar==(vbar_pass_on()?2u:1u),
+              "repeated vertex-write barriers stay in one pass across same-target continuation");
+        int ok=1;for(int i=0;i<4096;i++)ok&=output[i+4096]==(uint32_t)(i+0x1200);
+        CHECK(ok,"chained vertex-write barriers preserve producer-to-consumer values");
+    }
+    {   // ORDER_INDIRECT_DATA after vertex write must end the pass (MTLStageVertex does not order indirect fetch)
+        discard(1);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        emit(OP_BARRIER,&ind,4);
+        bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
+        CHECK(g_stat_pass-before==2u&&g_order_vbar-vbar==0u,"ORDER_PRIMITIVES | ORDER_INDIRECT_DATA after vertex writes ends the pass");
+    }
+    {   // ORDER_INDIRECT_DATA alone after vertex write must also end the pass
+        discard(1);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        emit(OP_BARRIER,&ind_only,4);
+        bp.prog=&cp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
+        CHECK(g_stat_pass-before==2u&&g_order_vbar-vbar==0u,"ORDER_INDIRECT_DATA alone after vertex writes ends the pass");
+    }
+    {   // Fragment-stage write followed by primitive barrier must end the pass
+        discard(0);bp.prog=&fwp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+        emit(OP_BARRIER,&barrier,4);
+        bp.prog=&rd;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+        uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
+        CHECK(g_stat_pass-before==2u&&g_order_vbar-vbar==0u,"primitive barrier after fragment-stage writes ends the pass");
+    }
+    {   // Vertex write, then fragment-stage memory reader, then ORDER_FRAGMENTS must end the pass
+        discard(1);bp.prog=&pp;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&writes,sizeof writes);
+        discard(0);bp.prog=&rf;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+        emit(OP_BARRIER,&frag,4);
+        bp.prog=&rd;emit(OP_BIND_PROGRAM,&bp,sizeof bp);emit(OP_DRAW,&arrays,sizeof arrays);
+        uint64_t before=g_stat_pass,vbar=g_order_vbar;execute();
+        CHECK(g_stat_pass-before==2u&&g_order_vbar-vbar==0u,"ORDER_FRAGMENTS after vertex writes and a fragment read ends the pass");
     }
     printf("rasterizer discard: %d checks, %d failed\n",checks,fails);return fails!=0;
 } }

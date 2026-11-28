@@ -8,6 +8,11 @@ namespace Ryujinx.Graphics.Shader
     /// </summary>
     public interface IGpuAccessor : ILogger
     {
+        // A serialized callable program may use constant banks for its runtime
+        // descriptor arena, rather than the ordinary game-UBO address convention.
+        // Keep such global addresses in the checked flat address space.
+        bool QueryRawGlobalMemory() => false;
+
         // Fixed VS capture ABI used by the offline Metal geometry path.
         bool QueryGeometryInputFixed() => false;
 
@@ -39,21 +44,20 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
-        /// NVN2 (Switch 2) graphics stages: the stage's own constant bank, c[25 + stage index], which holds the buffer entries the game pushes into graphics push block
-        /// 1 + stage index; the translator maps it onto that block of c[24] (AStageBlock). -1 for other shaders.
-        /// </summary>
-        int QueryAmpereStageBank()
-        {
-            return -1;
-        }
-
-        /// <summary>
         /// NVN2 (Switch 2) task and mesh shaders, translated as compute: the byte offsets in shared memory of the stage memory the build reads back (dmsh_meshstage.py): the
         /// workgroup's number, the stage input (a task's payload), the outputs (a payload, or a mesh shader's attributes) and a mesh shader's primitive bytes; null for other shaders.
         /// </summary>
         int[] QueryAmpereStageMemory()
         {
             return null;
+        }
+
+        /// <summary>
+        /// Words of a mesh shader's stage input (ISBERD modes 0x30 / 0x34 / 0x38) kept in its own shared memory (dm_stage_in) apart from stage_memory; 0 when it stays in stage_memory.
+        /// </summary>
+        int QueryAmpereStageInputWords()
+        {
+            return 0;
         }
 
         /// <summary>
@@ -328,6 +332,14 @@ namespace Ryujinx.Graphics.Shader
         bool QueryHostSupportsNonConstantTextureOffset()
         {
             return true;
+        }
+
+        /// <summary>
+        /// Queries host support for the full range of runtime per-texel gather offsets.
+        /// </summary>
+        bool QueryHostSupportsNonConstantTextureGatherOffsets()
+        {
+            return QueryHostSupportsNonConstantTextureOffset();
         }
 
         /// <summary>

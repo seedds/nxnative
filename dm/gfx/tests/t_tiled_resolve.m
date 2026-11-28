@@ -15,13 +15,14 @@ uint64_t now_ns(void) { return bp_now(); }
 static int checks, failed;
 #define CHECK(c, what) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", what); } } while (0)
 
-static tex_t texture(int samples, int layers) {
+static tex_t texture_sz(int w, int h, int samples, int layers) {
     tex_t t = {.magic=MAGIC('T','E','X',0), .serial=nvn_new_serial()};
     t.d = (nvn_texdesc){.target=samples > 1 ? (layers > 1 ? NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY : NVN_TEXTURE_TARGET_2D_MULTISAMPLE)
                          : (layers > 1 ? NVN_TEXTURE_TARGET_2D_ARRAY : NVN_TEXTURE_TARGET_2D),
-        .format=NVN_FORMAT_RGBA8, .width=8, .height=8, .depth=layers, .levels=1, .samples=samples};
+        .format=NVN_FORMAT_RGBA8, .width=(uint32_t)w, .height=(uint32_t)h, .depth=layers, .levels=1, .samples=samples};
     return t;
 }
+static tex_t texture(int samples, int layers) { return texture_sz(8, 8, samples, layers); }
 static void completed(id<MTLCommandBuffer> cb) {
     [cb commit]; [cb waitUntilCompleted]; CHECK(cb.status == MTLCommandBufferStatusCompleted, "fixture GPU work completed");
 }
@@ -91,13 +92,72 @@ static void run_case(id<MTLLibrary> lib, int tiled, int views, int samples) {
     printf("%s samples=%d: checked pixels and retained recording\n", name, samples);
     h_nvnCommandBufferFinalize((NVNcommandBuffer *)&cmd); mtl_tex_release(&src); mtl_tex_release(&dst);
 }
+static void run_mismatched_size(id<MTLLibrary> lib, int sw, int sh, int dw, int dh) {
+    tex_t src = texture_sz(sw, sh, 4, 1), dst = texture_sz(dw, dh, 1, 1);
+    id<MTLTexture> s = [g_dev newTextureWithDescriptor:tex_desc(&src, 0)];
+    id<MTLTexture> d = [g_dev newTextureWithDescriptor:tex_desc(&dst, 0)];
+    CHECK(s && d, "mismatched resolve textures allocated"); if (!s || !d) return;
+    res_add(s); res_add(d); serial_put(src.serial, s); serial_put(dst.serial, d);
+    MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+    pd.vertexFunction = [lib newFunctionWithName:@"v"]; pd.fragmentFunction = [lib newFunctionWithName:@"fpos"];
+    pd.rasterSampleCount = 4; pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    NSError *err = nil; id<MTLRenderPipelineState> ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&err];
+    CHECK(ps != nil, "mismatched resolve fixture pipeline builds"); if (!ps) return;
+    id<MTLCommandQueue> q = [g_dev newCommandQueue]; id<MTLCommandBuffer> cb = [q commandBuffer];
+    {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = s; rp.colorAttachments[0].loadAction = MTLLoadActionDontCare; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
+        [e setRenderPipelineState:ps]; [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3]; [e endEncoding];
+    }
+    {
+        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = d; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 1, 1);
+        [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+    }
+    completed(cb);
+    cmd_t cmd; h_nvnCommandBufferInitialize((NVNcommandBuffer *)&cmd, NULL);
+    h_nvnCommandBufferBeginRecording((NVNcommandBuffer *)&cmd);
+    ((NVNT_nvnCommandBufferDownsample)nvn_lookup("nvnCommandBufferDownsample"))((NVNcommandBuffer *)&cmd, (NVNtexture *)&src, (NVNtexture *)&dst);
+    NVNcommandHandle handle = h_nvnCommandBufferEndRecording((NVNcommandBuffer *)&cmd);
+    uint8_t *record = nvn_rec_linear(handle, NULL);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); mtl_exec(record);
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "mismatched resolve submission completed");
+    CHECK(!mtl_last_commit_error(), "mismatched resolve has no Metal error"); free(record);
+    size_t row = (size_t)dw * 4, img = row * (size_t)dh;
+    id<MTLBuffer> out = [g_dev newBufferWithLength:img options:MTLResourceStorageModeShared];
+    CHECK(out != nil, "mismatched readback buffer allocated"); if (!out) abort();
+    cb = [q commandBuffer]; id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:d sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(dw, dh, 1)
+          toBuffer:out destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:img];
+    [blit endEncoding]; completed(cb);
+    const uint8_t *pixels = out.contents;
+    int cw = sw < dw ? sw : dw, ch = sh < dh ? sh : dh, good = 1;
+    // fpos writes (sample==0 ? 1 : 0, pos.x < 8 && pos.y < 6 ? 1 : 0, sample%2==0 ? 1 : 0, 1) -> unscaled (0..cw-1, 0..ch-1) resolves to (64, 255, 128, 255); outside stays magenta (255, 0, 255, 255).
+    for (int y = 0; y < dh; y++) for (int x = 0; x < dw; x++) {
+        const uint8_t *p = pixels + (size_t)y * row + (size_t)x * 4;
+        if (x < cw && y < ch) {
+            int g = (x < 8 && y < 6) ? 255 : 0;
+            good &= abs((int)p[0] - 64) <= 1 && p[1] == g && abs((int)p[2] - 128) <= 1 && p[3] == 255;
+        } else {
+            good &= p[0] == 255 && p[1] == 0 && p[2] == 255 && p[3] == 255;
+        }
+    }
+    CHECK(good, "mismatched-size resolve averages samples into the unscaled common corner");
+    printf("nvnCommandBufferDownsample %dx%d 4x -> %dx%d 1x: checked unscaled common corner\n", sw, sh, dw, dh);
+    h_nvnCommandBufferFinalize((NVNcommandBuffer *)&cmd); mtl_tex_release(&src); mtl_tex_release(&dst);
+}
 int main(void) { @autoreleasepool {
     mtl_init(); NSError *err = nil;
     id<MTLLibrary> lib = [g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
         "vertex float4 v(uint i[[vertex_id]]) { float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)}; return float4(p[i],0,1); }\n"
         "fragment float4 f(uint s[[sample_id]], constant uint &layer[[buffer(0)]]) { return float4(layer || s==0,s%2==0,1,1); }\n"
+        "fragment float4 fpos(float4 pos[[position]], uint s[[sample_id]]) { return float4(s==0, pos.x<8.0 && pos.y<6.0, s%2==0, 1); }\n"
         options:nil error:&err];
     CHECK(lib != nil, "synthetic sample shaders compile"); if (!lib) { fprintf(stderr, "%s\n", err.localizedDescription.UTF8String); return 1; }
     for (int samples = 2; samples <= 4; samples *= 2) for (int views = 0; views <= 1; views++) for (int tiled = 0; tiled <= 1; tiled++) run_case(lib, tiled, views, samples);
+    run_mismatched_size(lib, 16, 12, 8, 6);
+    run_mismatched_size(lib, 8, 6, 16, 12);
     printf("tiled resolves: %d checks, %d failed\n", checks, failed); return failed != 0;
 } }

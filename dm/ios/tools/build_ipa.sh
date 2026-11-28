@@ -7,12 +7,13 @@
 #   Environment: GAME=game profile (dm/games/<base game title ID>, or one in DM_GAMES_DIR; required), W=the game's work folder (required: <NSP folder>/<title ID>-work, never the home folder), PATCHED / ROMFS / MSL_IOS can each be overridden
 #   DM_COPY_ROMFS=NO leaves the game files (RomFS) out of the IPA, as it does for the Xcode build phase: the package then stays small (a large game's full package can exceed what iOS extracts), and the app takes the files from Documents/romfs.img (scripts/push_romfs.sh); default: they are packed
 #   DM_SHADER_FILES=1 packs an NVN game's shader library as its separate files, msl/b-<chain>/, not as the one file b-<chain>.img, for install tools that cannot copy a large file (AltServer; pack_ipa.py --shader-files); default: off
-#   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (default: Increased Memory Limit; an empty string = none)
+#   DM_ENTITLEMENTS=<plist> is the unsigned IPA's entitlements, signed ad-hoc into the executable (relative to the caller's directory; default: Increased Memory Limit; an empty string = none)
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none), GFXAPI=nvn / vulkan (default: by the shader libraries in MSL_IOS)
 #   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the app version is the display version in the packed game's control data (the one next to the RomFS:
 #   nx_extract saves the update's there when an update is packed, else the base game's), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_APP_VERSION / DM_BUNDLE_ID override them);
 #   CONTROL=<control.nacp> is the file whose languages the launcher's settings offer (the NSP script's languages_control; default: the packed game's control data as above);
 #   DM_METAL_CAPTURE=1 makes a development build that can write GPU frame captures (MetalCaptureEnabled in Info.plist, for the host's DM_GPU_CAPTURE switch);
+#   DM_PYTHON=<path> selects Python for build_ipa.sh and its helper tools (default: python3 on PATH; FONT_PY overrides it for make_shared_fonts.py);
 #   DM_SHOW_FPS=1 turns the frame-rate counter on (DMShowFPS in Info.plist; DM_SHOW_FPS in the app's Documents/env.txt overrides it on the phone);
 #   DM_LANG=<language code> is the game language (DMLanguage in Info.plist, default en-US; DM_LANG in the app's Documents/env.txt overrides it on the phone);
 #   both are also the launcher's defaults (dm/launcher.json from dm/games/settings.py; the player's choice there wins over them, Documents/env.txt over the choice);
@@ -22,12 +23,17 @@
 #   its tables and launcher settings in dm/p<N>/, its RomFS and offline HTML pages in p<N>/, its shader libraries in msl/p<N>/, and the host is built over a table of their profiles
 #   (game.py header_multi, the first program's profile lists them); main.m picks the program the last oe::ExecuteProgram recorded (Documents/program.bin). With --prepare-xcode the project's build phase copies them so (stage_resources.sh)
 set -u
+# Both output modes change directories before copying the caller's entitlements.
+case ${DM_ENTITLEMENTS-} in
+  '' | /*) ;;
+  *) DM_ENTITLEMENTS=$PWD/$DM_ENTITLEMENTS ;;
+esac
 cd "$(dirname "$0")/.." || exit 1
 IOS_SOURCE=$PWD; IOS=$PWD; DM=$(cd .. && pwd)
 t() { echo "[$(date +%T)] $*"; }; die() { t "FAIL: $*"; exit 1; }
-[ -n "${GAME:-}" ] || die "GAME is not set: GAME=<base game title ID> $0; profiles: $(python3 "$DM/games/game.py" list | awk -F'\t' '{printf "%s (%s)  ", $1, $3}')"
-export GAME; GD=$(python3 "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"   # dm/games/<id>, or a profile in DM_GAMES_DIR (the NSP script's provisional one); the make that gen_build.py runs uses the same GAME
-gp() { python3 "$DM/games/game.py" "$GAME" "$1" || die "game profile $GD: $1"; }   # read a key of the game profile
+[ -n "${GAME:-}" ] || die "GAME is not set: GAME=<base game title ID> $0; profiles: $("${DM_PYTHON:-python3}" "$DM/games/game.py" list | awk -F'\t' '{printf "%s (%s)  ", $1, $3}')"
+export GAME; GD=$("${DM_PYTHON:-python3}" "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"   # dm/games/<id>, or a profile in DM_GAMES_DIR (the NSP script's provisional one); the make that gen_build.py runs uses the same GAME
+gp() { "${DM_PYTHON:-python3}" "$DM/games/game.py" "$GAME" "$1" || die "game profile $GD: $1"; }   # read a key of the game profile
 [ -f "$GD/game.tsv" ] || die "no game profile $GD/game.tsv"
 [ -n "${W:-}" ] || die "W is not set: W=<NSP folder>/$GAME-work (the game's work folder) $0"
 PKG=$(gp package)
@@ -38,9 +44,9 @@ OUT_IPA=${1:-$(dirname "$W")/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 XCODE_DD=${DM_XCODE_DERIVED_DATA:-$W/build/ios/xcode-dd}
 MARKER=$(gp romfs_marker)
 NACP=$W/data/v0/control.nacp; [ -f "$NACP" ] || NACP=$(dirname "$ROMFS")/control.nacp
-[ -n "${DM_DISPLAY_NAME:-}" ] || DM_DISPLAY_NAME=$(python3 "$DM/tools/nacp.py" "$NACP") || die "no game name in $NACP (re-extract with nx_extract, or set DM_DISPLAY_NAME)"
+[ -n "${DM_DISPLAY_NAME:-}" ] || DM_DISPLAY_NAME=$("${DM_PYTHON:-python3}" "$DM/tools/nacp.py" "$NACP") || die "no game name in $NACP (re-extract with nx_extract, or set DM_DISPLAY_NAME)"
 VNACP=$(dirname "$ROMFS")/control.nacp; [ -f "$VNACP" ] || VNACP=$W/data/v0/control.nacp
-[ -n "${DM_APP_VERSION:-}" ] || DM_APP_VERSION=$(python3 "$DM/tools/nacp.py" --version "$VNACP") || { t "no display version in $VNACP: the app version is 1.0"; DM_APP_VERSION=1.0; }
+[ -n "${DM_APP_VERSION:-}" ] || DM_APP_VERSION=$("${DM_PYTHON:-python3}" "$DM/tools/nacp.py" --version "$VNACP") || { t "no display version in $VNACP: the app version is 1.0"; DM_APP_VERSION=1.0; }
 VNACP=${CONTROL:-$VNACP}   # from here on, the file that lists the game's languages for the launcher's settings
 export LC_ALL=C DM_BUNDLE_ID=${DM_BUNDLE_ID:-org.nxnative.$(echo "$GAME" | tr 'A-Z' 'a-z')} DM_DISPLAY_NAME DM_APP_VERSION DM_APP_CATEGORY=$(gp app_category) DM_TEAM_ID=${DM_TEAM_ID:-0000000000}   # placeholder identity: unsigned, the install tool replaces it
 if [ "${DM_SHOW_FPS:-0}" = 1 ]; then export DM_SHOW_FPS=YES; else export DM_SHOW_FPS=NO; fi
@@ -59,15 +65,15 @@ if [ "$PREPARE_XCODE" = YES ]; then
 else DM_SCHEME_NAME=DmIOS; fi
 export DM_SCHEME_NAME
 # An NVN game's libraries are the folder b-$V or the one file b-$V.img beside its name (dm/tools/shader_lib.py), read in place: whether they hold a shader, one of their files, the path to what is there
-lib_has() { python3 "$DM/tools/shader_lib.py" has "$1" 2> /dev/null; }
-lib_cat() { python3 "$DM/tools/shader_lib.py" cat "$1" "$2" 2> /dev/null; }
-lib_path() { python3 "$DM/tools/shader_lib.py" path "$1"; }
+lib_has() { "${DM_PYTHON:-python3}" "$DM/tools/shader_lib.py" has "$1" 2> /dev/null; }
+lib_cat() { "${DM_PYTHON:-python3}" "$DM/tools/shader_lib.py" cat "$1" "$2" 2> /dev/null; }
+lib_path() { "${DM_PYTHON:-python3}" "$DM/tools/shader_lib.py" path "$1"; }
 # The checks of one program's inputs (GAME, GD, PATCHED, ROMFS, MSL_IOS, GFXAPI, MODS, MARKER as set): every program of a game of several programs passes them
 check_program() {
 [ -f "$PATCHED/main.fixups.tsv" ] || die "no rewritten main in $PATCHED (run dm/tools/patch_nso.py first)"
-MODS=$(python3 "$DM/games/game.py" modules "$GAME" "$PATCHED") || die "game profile $GD: modules"   # main's build row, as the host picks them: a version may lack a module another has
+MODS=$("${DM_PYTHON:-python3}" "$DM/games/game.py" modules "$GAME" "$PATCHED") || die "game profile $GD: modules"   # main's build row, as the host picks them: a version may lack a module another has
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
-python3 "$DM/tools/romfs.py" "$ROMFS" "$MARKER" || die "no RomFS at $ROMFS (missing $MARKER)"
+"${DM_PYTHON:-python3}" "$DM/tools/romfs.py" "$ROMFS" "$MARKER" || die "no RomFS at $ROMFS (missing $MARKER)"
 V=${V:-$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")}   # the chain version the host is compiled with, one for every game
 # A Vulkan game (Hades): the shaders are the game's SPIR-V, translated by dm/gfx/tools/vk_shaders.py into $MSL_IOS/vk; an OpenGL game (Digimon Story Cyber Sleuth): its GLSL, translated by
 # dm/gfx/tools/gl_shaders.py into $MSL_IOS/gl; neither has NVN chain libraries. GFXAPI=nvn / vulkan / gl says which (the NSP script passes what main imports); without it, the shader
@@ -79,21 +85,24 @@ elif [ "$GFXAPI" = gl ]; then [ -f "$MSL_IOS/gl/gl_shaders.metallib" ] || die "n
 else [ -n "$V" ] && lib_has "$MSL_IOS/b-$V" || die "no iOS shader libraries $MSL_IOS/b-$V (IOSOUT=$MSL_IOS dmsh_build.py ...)"
   # One chain version serves every game and every state of a profile's tables: the libraries' stamp (b-$V/inputs.tsv, written by a full dmsh_build.py run) must name this game and the
   # digest of its profile's current inputs, and c1_full.tsv (not in the repository: the same build makes it, and cb_extent.tsv, from its Mac outputs) must name that digest, or the host ignores it
-  IN=$(DM_GAME="$GAME" python3 "$DM/gfx/tools/dmsh_chain.py" --inputs) || die "dmsh_chain.py --inputs (game profile $GD)"
+  IN=$(DM_GAME="$GAME" "${DM_PYTHON:-python3}" "$DM/gfx/tools/dmsh_chain.py" --inputs) || die "dmsh_chain.py --inputs (game profile $GD)"
   STAMP=$(lib_cat "$MSL_IOS/b-$V" inputs.tsv)
   printf '%s\n' "$STAMP" | grep -qxF "$(printf 'game\t%s' "$GAME")" && printf '%s\n' "$STAMP" | grep -qxF "$(printf 'inputs\t%s' "$IN")" ||
     die "the iOS shader libraries $MSL_IOS/b-$V are not a full build from this profile's current tables (inputs $IN; their stamp: $([ -n "$STAMP" ] && printf '%s\n' "$STAMP" | grep -v '^#' | tr '\n\t' '  ' || echo none)): build them again (IOSOUT=$MSL_IOS dmsh_build.py ...)"
-  head -1 "$GD/c1_full.tsv" 2> /dev/null | grep -q "^# chain b-$V inputs $IN " || die "$GD/c1_full.tsv is missing or not made from these libraries (chain $V, inputs $IN): a full dmsh_build.py run makes it and cb_extent.tsv"; fi
+  head -1 "$GD/c1_full.tsv" 2> /dev/null | grep -Eq "^# chain b-$V inputs $IN( |$)" || die "$GD/c1_full.tsv is missing or not made from these libraries (chain $V, inputs $IN): a full dmsh_build.py run makes it and cb_extent.tsv"; fi
+if [ "$GFXAPI" = nvn ] && [ -s "$GD/gl_capture.tsv" ]; then
+  [ -f "$MSL_IOS/gl/gl_shaders.metallib" ] && [ -f "$MSL_IOS/gl/gl_shaders.tsv" ] || die "no supplemental GL shader library and table at $MSL_IOS/gl"
+fi
 }
 check_program
 P0=$GAME; P0_PATCHED=$PATCHED; P0_ROMFS=$ROMFS; P0_MSL=$MSL_IOS; P0_GFX=$GFXAPI
 prog_rows() { grep -v '^#' "$PROGRAMS_TSV" | grep -v '^$'; }   # index, profile, patched, RomFS, iOS shaders, graphics API
 prog_set() {   # the globals of one row's program
   IFS=$'\t' read -r PN GAME PATCHED ROMFS MSL_IOS GFXAPI <<< "$1"; export GAME
-  GD=$(python3 "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"; MODS=$(gp modules); MARKER=$(gp romfs_marker)
+  GD=$("${DM_PYTHON:-python3}" "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"; MODS=$(gp modules); MARKER=$(gp romfs_marker)
   if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; elif [ "$GFXAPI" = gl ]; then MSLDIR=gl; else MSLDIR=b-$V; fi
 }
-prog_back() { GAME=$P0; export GAME; GD=$(python3 "$DM/games/game.py" dir "$GAME"); PATCHED=$P0_PATCHED; ROMFS=$P0_ROMFS; MSL_IOS=$P0_MSL; GFXAPI=$P0_GFX; MODS=$(gp modules); MARKER=$(gp romfs_marker); }
+prog_back() { GAME=$P0; export GAME; GD=$("${DM_PYTHON:-python3}" "$DM/games/game.py" dir "$GAME"); PATCHED=$P0_PATCHED; ROMFS=$P0_ROMFS; MSL_IOS=$P0_MSL; GFXAPI=$P0_GFX; MODS=$(gp modules); MARKER=$(gp romfs_marker); }
 if [ -n "${PROGRAMS_TSV:-}" ]; then
   [ -f "$PROGRAMS_TSV" ] || die "no PROGRAMS_TSV $PROGRAMS_TSV"
   while IFS= read -r row; do prog_set "$row"; t "program $PN: $GAME ($(gp name)), $GFXAPI"; check_program; done < <(prog_rows)
@@ -103,28 +112,32 @@ fi
 t "app: $DM_DISPLAY_NAME $DM_APP_VERSION ($DM_BUNDLE_ID), language $DM_LANG$([ $DM_SHOW_FPS = YES ] && echo ', frame-rate counter on')"
 t "generate Gen/ (host sources, embedded modules, tables)"
 rm -rf Gen && mkdir -p Gen/dm || die "mkdir Gen"
-python3 tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
+"${DM_PYTHON:-python3}" tools/gen_build.py "$DM/host" Gen > Gen/dm.xcconfig || die "gen_build"
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (the host is built over a table of the programs' profiles: the first program's profile lists them, game.py header_multi)
   F=; : > Gen/embed.S
   while IFS= read -r row; do prog_set "$row"
     J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")   # the nn::jit image (dm/tools/jit_capture.py), beside the RomFS
-    F="$F $(python3 tools/gen_embed.py --tag "p$PN" ${J[@]+"${J[@]}"} "$PATCHED" "Gen/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
+    F="$F $("${DM_PYTHON:-python3}" tools/gen_embed.py --tag "p$PN" ${J[@]+"${J[@]}"} "$PATCHED" "Gen/embed_p$PN.S" $MODS)" || die "gen_embed (program $PN)"
     cat "Gen/embed_p$PN.S" >> Gen/embed.S && rm "Gen/embed_p$PN.S"
   done < <(prog_rows); prog_back
 else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")
-  F=$(python3 tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
+  F=$("${DM_PYTHON:-python3}" tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
 echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"
 if [ -f "$PATCHED/nro.tsv" ]; then cp "$PATCHED/nro.tsv" $TD/ || die "copy the NRO table"; fi   # the NRO modules the game loads with nn::ro (hle_ro.c), embedded by gen_embed.py
-if [ "$GFXAPI" = vulkan ] || [ "$GFXAPI" = gl ]; then cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" $TD/ || die "copy shader tables"   # empty NVN tables: the NVN layer draws nothing
-else cp "$GD/shader_map.tsv" "$GD/pso_manifest.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
+if [ "$GFXAPI" = vulkan ] || [ "$GFXAPI" = gl ]; then
+  if [ -f "$GD/shader_map.tsv" ]; then cp "$GD/shader_map.tsv" $TD/ || die "copy shader tables"; fi   # optional empty NVN table: the NVN layer draws nothing
+else cp "$GD/shader_map.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
   if [ -f "$GD/cb_extent.tsv" ]; then cp "$GD/cb_extent.tsv" $TD/ || die "copy cb_extent.tsv"; else t "no $GD/cb_extent.tsv: the host copies whole uniform bindings"; fi
   # the shader pairs, beside the shader map where the pipeline prebuild reads them (nvn_mtl.m pso_prebuild): without them the app makes no pulling bases, and a hybrid draw has no stand-in
   for f in shader_pairs.tsv pso_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done; fi   # optional
+# A profile may have no recorded prewarm seeds yet (Pokopia). The host also reads the device's own list.
+if [ -f "$GD/pso_manifest.tsv" ]; then cp "$GD/pso_manifest.tsv" $TD/ || die "copy pso_manifest.tsv"
+else t "no $GD/pso_manifest.tsv: no bundled prewarm seed list"; fi
 # The launcher's settings for this game (Launcher.swift): dm/games/settings.tsv filtered by the profile, main's rewriter table and the game's languages (dm/games/settings.py)
-L=$(GFXAPI="$GFXAPI" python3 "$DM/games/settings.py" "$GAME" "$PATCHED" "$VNACP" $TD/launcher.json) || die "launcher settings (dm/games/settings.py)"; t "launcher: $L"
+L=$(GFXAPI="$GFXAPI" "${DM_PYTHON:-python3}" "$DM/games/settings.py" "$GAME" "$PATCHED" "$VNACP" $TD/launcher.json) || die "launcher settings (dm/games/settings.py)"; t "launcher: $L"
 # The game's control data, which the host answers control-property queries from (hle_fs.c control_read: fs::GetCacheStorageMax); main.m names it in DM_CONTROL_NACP
 if [ -f "$VNACP" ]; then cp "$VNACP" $TD/control.nacp || die "copy $VNACP"; else t "[RED] no control data at $VNACP: fs::GetCacheStorageMax fails in the app"; fi
 }
@@ -141,22 +154,32 @@ else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
 # pso_offline.py's --gpu), else g18p, and none for the games that do not set pso_mtl4 on (their app would carry it unread). It goes into the app as pso/ (main.m hands it to the host as
 # DM_PSO_BUNDLE), with the pulling vertex libraries the bases are made of. Each architecture adds about 650 MB to the app (Breath of the Wild; 220 MB in the IPA) and 4 minutes to the first build;
 # made again only when its inputs change (the libraries, the pairs, the profile's depth_mode, metal-tt)
-PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
+PSO=; P4=$("${DM_PYTHON:-python3}" "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$("${DM_PYTHON:-python3}" "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
 PGK=g18p; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
 if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g18p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults follow pso_mtl4) - taking g18p" ;; esac; fi
 if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
 if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
   PSO=$W/build/ios/pso/bundle
+  # The prewarm lists' pipelines (the R rows' bases with a vertex layout and the M rows' task / mesh pipelines, which the archive above does not hold) go in beside it when there is a Mac
+  # host of this checkout and game to make them (pso_offline.py --prewarm-host: its prebuild tool, then metal-tt): DM_PSO_HOST=<the Mac dmhost>, else the existing per-game host in
+  # dm/host/gen/<id>/dmhost (made current here first), none: not made. Without them the device builds every listed one at its first start, and again after an OS update refuses its own archive
+  PH=${DM_PSO_HOST:-}
+  if [ -z "$PH" ] && [ -x "$DM/host/gen/$GAME/dmhost" ]; then
+    mkdir -p "$W/build/ios/pso"
+    if make -s -C "$DM/host" GAME="$GAME" "gen/$GAME/dmhost" > "$W/build/ios/pso/host_make.log" 2>&1; then PH=$DM/host/gen/$GAME/dmhost; else t "[RED] prewarm pipelines: make -C dm/host GAME=$GAME failed (see $W/build/ios/pso/host_make.log): the app gets none"; fi
+  fi
+  [ "$PH" != none ] || PH=
+  [ -n "$PH" ] || t "prewarm pipelines: no Mac host of this game (make -C dm/host GAME=$GAME, or DM_PSO_HOST=<host>): the device builds the prewarm lists' pipelines at its first start"
   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
-  python3 "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} \
-    | while IFS= read -r ln; do t "$ln"; done
+  "${DM_PYTHON:-python3}" "$DM/gfx/tools/pso_offline.py" --game "$GAME" --msl "$MSL_IOS/b-$V" --out "$PSO" --work "$W/build/ios/pso/work" --gpu "$GPUS" ${DM_PSO_IOS_MIN:+--os-min "$DM_PSO_IOS_MIN"} \
+    ${PH:+--prewarm-host "$PH"} | while IFS= read -r ln; do t "$ln"; done
   if [ "${PIPESTATUS[0]}" != 0 ]; then   # an optimization: the device builds the bases on its first start without it
     t "[RED] pipeline archive: pso_offline.py failed (its output is above); the app is built without one and the device builds its pipeline bases on its first start (DM_PSO_GPUS=none skips this step)"
     rm -rf "$PSO"; PSO=
   fi
 else [ "$GFXAPI" != nvn ] || t "no pipeline archive ($([ -n "${DM_PSO_GPUS+set}" ] && echo "DM_PSO_GPUS=${GPUS:-empty}" || echo "the profile does not set pso_mtl4 on; DM_PSO_GPUS=g18p builds one")$([ -f "$GD/shader_pairs.tsv" ] || echo ', no shader_pairs.tsv'))"; fi
 # The packed language (DMLanguage) is the Game language row's default, which settings.py makes the game's first language when it lacks DM_LANG: the screen and DM_LAUNCHER=0 then agree
-LD=$(python3 -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
+LD=$("${DM_PYTHON:-python3}" -c 'import json, sys; print(next((s["default"] for s in json.load(open(sys.argv[1]))["settings"] if s["env"] == "DM_LANG"), ""))' $LJ) || die "launcher settings ($LJ)"
 if [ -n "$LD" ] && [ "$LD" != "$DM_LANG" ]; then t "game language: the game has no $DM_LANG; packing $LD, its first"; export DM_LANG=$LD; fi
 # Diagnostic build: DM_ENV_FILE=file → dm/env.txt in the bundle (main.m sets one environment variable per line at boot)
 if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy DM_ENV_FILE"; t "env: $(grep -v '^#' "$DM_ENV_FILE" | tr '\n' ' ')"; fi
@@ -164,7 +187,7 @@ if [ -n "${DM_ENV_FILE:-}" ]; then cp "$DM_ENV_FILE" Gen/dm/env.txt || die "copy
 if [ "$GFXAPI" = vulkan ]; then MSLDIR=vk; elif [ "$GFXAPI" = gl ]; then MSLDIR=gl; else MSLDIR=b-$V; fi
 # Shared-font stand-ins, one per type (make_shared_fonts.py, about 7 s: unhinted cuts of STD_FONT, by default macOS's Arial Unicode, which iOS lacks, and the button icons; needs fontTools,
 # FONT_PY names a python that has it)
-mkdir -p Gen/dm/font && "${FONT_PY:-python3}" "$DM/tools/make_shared_fonts.py" Gen/dm/font "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" > /dev/null \
+mkdir -p Gen/dm/font && "${FONT_PY:-${DM_PYTHON:-python3}}" "$DM/tools/make_shared_fonts.py" Gen/dm/font "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" > /dev/null \
   || die "make_shared_fonts.py (pip install fonttools, or FONT_PY=python with fontTools; STD_FONT=a TTF)"
 # App icon: the game's own icon (icon.jpg saved from the control data by nx_extract, the English 256x256 one). DM_ICON can point at another image; by default the icon.jpg next to the RomFS is used.
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
@@ -173,7 +196,8 @@ ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
-  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null || die "sips: cannot convert the icon $ICON"
+  # sips skips an empty file with a warning and exits 0 without writing the PNG; actool then builds the app without an icon and says nothing, so the PNG itself is checked
+  sips -s format png -z 1024 1024 "$ICON" --out "$AI/icon.png" > /dev/null && [ -s "$AI/icon.png" ] || die "the icon $ICON is not an image sips can read (empty, unreadable or not an image): give a JPEG or PNG"
   printf '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}\n' > "$AI/Contents.json"
   echo "DM_APPICON = AppIcon" >> Gen/dm.xcconfig
   t "app icon: $ICON"
@@ -190,16 +214,25 @@ fi
 # DM_COPY_ROMFS=NO also for the prepared project: its Copy game resources phase (stage_resources.sh) then leaves the game files out and writes the image's identity; Gen/dm.xcconfig is made again by every run
 [ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> Gen/dm.xcconfig
 xcodegen generate -q > /dev/null || die "xcodegen"
-# DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
+plutil -replace DMTitleID -string "$GAME" -- Gen/Info.plist || die "DMTitleID"
+PREWARM_URL=${DM_PREWARM_UPLOAD_URL-}
+if [ -z "${DM_PREWARM_UPLOAD_URL+x}" ] && [ -f "$DM/services/prewarm-inbox/endpoint.txt" ]; then
+  PREWARM_URL=$(<"$DM/services/prewarm-inbox/endpoint.txt")
+fi
+if [ "$GFXAPI" = nvn ] && [ -n "$PREWARM_URL" ]; then
+  plutil -replace DMPrewarmUploadURL -string "$PREWARM_URL" -- Gen/Info.plist || die "DMPrewarmUploadURL"
+fi
+# DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c).
+# plutil -replace inserts or overwrites (and sets the type), so a project.yml that already defines these keys does not abort the prepare.
 COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
-  /usr/libexec/PlistBuddy -c "Add :DMCommit string $COMMIT" Gen/Info.plist > /dev/null || die "DMCommit"; t "source: $COMMIT"; }
-case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
+  plutil -replace DMCommit -string "$COMMIT" -- Gen/Info.plist || die "DMCommit"; t "source: $COMMIT"; }
+case "$MSLDIR" in b-*) plutil -replace DMChain -string "${MSLDIR#b-}" -- Gen/Info.plist || die "DMChain";; esac
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
-if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
+if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then plutil -replace MetalCaptureEnabled -bool true -- Gen/Info.plist || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi
-DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME python3 tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"
+DM_RESOURCE_BUILD=${PKG:-} GAME=$GAME "${DM_PYTHON:-python3}" tools/gen_resources.py "$IOS" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" "$AOC" "$XCODE_DD" "$DM/gfx/nvn/dmsh_chain.h" "$PSO" $RP || die "generate Xcode resource paths"
 if [ "$PREPARE_XCODE" = YES ]; then
   t "Xcode project: $IOS/DmIOS.xcodeproj"
   t "Xcode derived data: $XCODE_DD"
@@ -238,7 +271,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
 fi
 P=Payload/DmIOS.app
-SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit)
+SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit --skip $P/romfs_programs)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
   MAPS=("$P=$APP")
@@ -246,8 +279,10 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, 
   while IFS= read -r row; do prog_set "$row"; SKIP+=(--skip "$P/p$PN")
     if [ -f "$ROMFS" ]; then MAPS+=("$P/p$PN/romfs.img=$ROMFS"); else MAPS+=("$P/p$PN/romfs=$ROMFS"); fi
     MAPS+=("$P/msl/p$PN/$MSLDIR=$MSL_IOS/$MSLDIR")
+    if [ "$GFXAPI" = nvn ] && [ -s "$GD/gl_capture.tsv" ]; then MAPS+=("$P/msl/p$PN/gl=$MSL_IOS/gl"); fi
     if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/p$PN/html=$(dirname "$ROMFS")/html"); fi
     if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/p$PN/jit=$(dirname "$ROMFS")/jit"); t "program $PN: nn::jit image $(dirname "$ROMFS")/jit"; fi   # beside its RomFS (loader.c dm_jit_serve_dir)
+    if [ -d "$(dirname "$ROMFS")/romfs_programs" ]; then MAPS+=("$P/p$PN/romfs_programs=$(dirname "$ROMFS")/romfs_programs"); fi   # the other programs' RomFS (hle_fs.c MountRom by program index)
   done < <(prog_rows); prog_back
 else
 MAPS=()
@@ -256,22 +291,25 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
   # The image's identity (dm/host/romfs_identity.h) goes into the app as romfs.id: main.m then uses only a Documents/romfs.img with the same size and index hash, and says so when it is another version or missing.
   # A RomFS folder has no image to name yet (push_romfs.sh packs it on the Mac), so such a build carries no identity and accepts any complete image
   if [ -f "$ROMFS" ]; then
-    mkdir -p "$O" && python3 -I "$DM/tools/romfs_image.py" --identity "$ROMFS" "$GAME" "$DM_APP_VERSION" "${PKG:-}" > "$O/romfs.id" || die "identity of $ROMFS"
+    mkdir -p "$O" && "${DM_PYTHON:-python3}" -I "$DM/tools/romfs_image.py" --identity "$ROMFS" "$GAME" "$DM_APP_VERSION" "${PKG:-}" > "$O/romfs.id" || die "identity of $ROMFS"
     MAPS=("$P/romfs.id=$O/romfs.id"); t "game files identity: $(cat "$O/romfs.id")"
   fi
 elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
 MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
+if [ "$GFXAPI" = nvn ] && [ -s "$GD/gl_capture.tsv" ]; then MAPS+=("$P/msl/gl=$MSL_IOS/gl"); fi
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)
   if [ -d "$(dirname "$ROMFS")/jit" ]; then MAPS+=("$P/jit=$(dirname "$ROMFS")/jit"); t "nn::jit image: $(dirname "$ROMFS")/jit"; fi
+  # the RomFS of the application's other programs (scripts/pack_nup.py: a Switch 2 Edition's Switch 1 program), which the game mounts by program index; in the app also with DM_COPY_ROMFS=NO (main.m)
+  if [ -d "$(dirname "$ROMFS")/romfs_programs" ]; then MAPS+=("$P/romfs_programs=$(dirname "$ROMFS")/romfs_programs"); t "other programs' RomFS: $(ls "$(dirname "$ROMFS")/romfs_programs" | grep '\.img$' | tr '\n' ' ')"; fi
 fi
 t "pack IPA (already-compressed game files stored, everything else deflated)"
 # The device can enable Metal 4/prebuild at run time even when the profile defaults it off. Without an offline archive, its prebuild needs these pulling vertex libraries just as the hybrid pipelines do.
 # IOS_PULL=0 explicitly omits them; an IPA with an offline archive (pso/) always carries them, whatever IOS_PULL says (an Xcode build copies them always).
 # Keep this array nonempty: macOS Bash 3.2 treats an empty array as unset under set -u.
-ZS=$(gp zip_store); [ -z "${PROGRAMS_TSV:-}" ] || ZS=$(for g in $(prog_rows | cut -f2); do python3 "$DM/games/game.py" "$g" zip_store; done | tr ':' '\n' | sort -u | paste -sd: -)   # every program's
+ZS=$(gp zip_store); [ -z "${PROGRAMS_TSV:-}" ] || ZS=$(for g in $(prog_rows | cut -f2); do "${DM_PYTHON:-python3}" "$DM/games/game.py" "$g" zip_store; done | tr ':' '\n' | sort -u | paste -sd: -)   # every program's
 PACK_OPTS=(--store "$ZS"); [ -n "${PSO:-}" ] || [ "${IOS_PULL:-1}" = 1 ] || PACK_OPTS+=(--skip-suffix _bp.metallib)
 [ "${DM_SHADER_FILES:-0}" != 1 ] || PACK_OPTS+=(--shader-files)
-python3 tools/pack_ipa.py "$OUT_IPA" "${PACK_OPTS[@]}" "${SKIP[@]}" "${MAPS[@]}" || die "pack_ipa"
+"${DM_PYTHON:-python3}" tools/pack_ipa.py "$OUT_IPA" "${PACK_OPTS[@]}" "${SKIP[@]}" "${MAPS[@]}" || die "pack_ipa"
 t "done: $OUT_IPA ($(du -h "$OUT_IPA" | cut -f1))"

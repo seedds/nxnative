@@ -50,6 +50,7 @@ static class P {
         }
         try { return Run(a); }
         catch (KeysMissing e) { Console.WriteLine($"[RED] {e.Message}"); return 6; }
+        catch (PackageDamaged e) { Console.WriteLine($"[RED] the NSP is damaged: {e.Message}"); return 3; }
         // The tables a filesystem opens from fail the hash check (Mario & Luigi: Brothership's update: its Program NCA does not match its content ID): no file can be listed, so no file can be
         // named or written as read. Exit code 3, as for damaged files, not an unhandled exception's stack trace
         catch (HorizonResultException e) when (HashError(e)) {
@@ -84,38 +85,28 @@ static class P {
             return 0;
         }
         Fit(new[] { MissingKey(ks, basePkg, a[1]), updPkg == null ? null : MissingKey(ks, updPkg, a[2]) });
-        Nca baseProg = Pick(basePkg, NcaContentType.Program, progId) ?? throw new Exception(progId == null ? "no Program NCA in the base NSP" : $"no Program NCA {progId:x16} in the base NSP");
-        if (html) {   // an update's NCA is read alone, or over a base game's NCA when its header marks the data section a patch (a relocation table); which base NCA it patches the
-                      // header does not say: the one it reads with passes the hash check
-            int k = 0; ulong tid = baseProg.Header.TitleId; var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
-            bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
-                int damaged = g_damaged.Count;
-                try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
-                catch (Exception e) when (e is not KeysMissing) { }
-                g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
-                if (Directory.Exists(dst)) Directory.Delete(dst, true);
-                return false;
-            }
-            foreach (Nca u in updPkg ?? new List<Nca>()) {
-                if (u.Header.ContentType != NcaContentType.Manual || u.Header.TitleId != tid) continue;
-                string dst = Path.Combine(a[3], $"html{k}");
-                bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
-                if (!patch) { Copy(() => u.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst, null); k++; }   // a full NCA: its damage is the NSP's
-                else if (bases.Exists(b => Try(() => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), dst))) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); k++; }
-                else Console.WriteLine($"[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
-            }
-            foreach (Nca b in bases) {
-                // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
-                // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA
-                if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
-                Copy(() => b.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(a[3], $"html{k++}"), null);
-            }
-            Console.WriteLine($"{k} HtmlDocument NCAs");
-            return Damaged();
+        Nca baseProg = Pick(basePkg, NcaContentType.Program, progId);
+        ulong tid = baseProg?.Header.TitleId ?? progId ?? throw new Exception("no Program NCA in the base NSP");
+        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, tid);
+        if (baseProg == null && updProg == null) {
+            Console.WriteLine($"[RED] no Program NCA {tid:x16} in the supplied NSPs");
+            return 4;
         }
-        Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program, baseProg.Header.TitleId) ?? throw new Exception("no Program NCA of the base game's program in the update NSP");
-        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, baseProg.Header.TitleId);
-        Console.WriteLine($"title {baseProg.Header.TitleId:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
+        if (html) {
+            var bases = basePkg.FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            var updates = (updPkg ?? new List<Nca>()).FindAll(n => n.Header.ContentType == NcaContentType.Manual && n.Header.TitleId == tid);
+            return ExtractHtml(bases, updates, a[3]);
+        }
+        if (updPkg != null && updProg == null) throw new Exception("no Program NCA of the base game's program in the update NSP");
+        // An update can add a program (XCOM 2 Collection: War of the Chosen). Its RomFS can be a BKTR even when every relocation names the update's own storage.
+        // LibHac only applies the relocation map in OpenStorageWithPatch. Pass the update as both arguments after checking it never needs the first storage.
+        if (baseProg == null && (Sparse(updProg) || !SelfContainedSection(updProg, NcaSectionType.Code) || !SelfContainedSection(updProg, NcaSectionType.Data))) {
+            Console.WriteLine($"[RED] update program {tid:x16} needs a matching base Program NCA");
+            return 4;
+        }
+        Nca source = baseProg ?? updProg;
+        Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control, tid);
+        Console.WriteLine($"title {tid:x16}" + (updProg != null ? $", update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
         if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);
@@ -126,12 +117,12 @@ static class P {
             if (icon != null) { File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), icon); Console.WriteLine($"icon {lang} ({icon.Length} bytes)"); }
             else Console.WriteLine("no icon in the control data");
         }
-        if (updProg == null && Sparse(baseProg)) {   // Horizon mounts a sparse NCA only through its patch; alone, the left-out data fails the hash check
+        if (updProg == null && Sparse(source)) {   // Horizon mounts a sparse NCA only through its patch; alone, the left-out data fails the hash check
             Console.WriteLine("[RED] the base game's program is sparse: it can be read only with its update NSP");
             return 4;
         }
         // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
-        Copy(() => updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(outDir, "ExeFS"), null);
+        Copy(() => updProg != null ? source.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : source.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid), Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
         foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
             if (new FileInfo(p).Length < 0x50) continue;
@@ -140,14 +131,19 @@ static class P {
         }
         // A program can embed all assets in its code modules (ANIMAL WELL 1.0.10).
         // Preserve the extraction layout without asking LibHac to open an absent section.
-        if (!baseProg.SectionExists(1) && (updProg == null || !updProg.SectionExists(1))) {
+        if (!source.SectionExists(1) && (updProg == null || !updProg.SectionExists(1))) {
             if (image && !manifest) WriteImage(null, Path.Combine(outDir, "RomFS.img"));
             else if (!manifest) Directory.CreateDirectory(Path.Combine(outDir, "RomFS"));
             if (manifest) File.WriteAllText(Path.Combine(outDir, "romfs_manifest.tsv"), "# path\tbytes\tfirst 32 bytes (hex)\n");
             Console.WriteLine("program has no data section: empty RomFS");
             return Damaged();
         }
-        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : baseProg.OpenStorage(NcaSectionType.Data, level));
+        // An update that changes only code can carry a data section that is a patch with an empty AES-CTR-Ex table (Pokémon Legends: Z-A 1.0.1: one relocation entry, no
+        // encryption entries); LibHac 0.19 refuses to open it (ResultFsInvalidArgument, 2002-6001, from Aes128CtrExStorage). When its IVFC hash data is also the base's,
+        // the patched RomFS is the base RomFS byte for byte, so read that.
+        bool sameData = baseProg != null && updProg != null && PatchKeepsData(baseProg, updProg);
+        if (sameData) Console.WriteLine("the update's data section is a patch that changes nothing (empty AES-CTR-Ex table, the base's IVFC hash): the base game's RomFS is read");
+        IFileSystem Romfs(IntegrityCheckLevel level) => new RomFsFileSystem(updProg != null && !sameData ? source.OpenStorageWithPatch(updProg, NcaSectionType.Data, level) : source.OpenStorage(NcaSectionType.Data, level));
         Func<IFileSystem> romfs = () => Romfs(IntegrityCheckLevel.ErrorOnInvalid);
         // the same RomFS without hash checks, for reading damaged files as they are (--allow-damaged)
         g_lenient = () => Romfs(IntegrityCheckLevel.IgnoreOnInvalid);
@@ -155,6 +151,75 @@ static class P {
         else if (image) WriteImage(romfs, Path.Combine(outDir, "RomFS.img"));
         else Copy(romfs, Path.Combine(outDir, "RomFS"), cmpDir);
         return Damaged();
+    }
+
+    // Offline HTML pages (--html): an update's Manual NCA is read alone, or over a base game's Manual NCA when its data section is a patch (a relocation table);
+    // which base NCA it patches the header does not say, so the one it reads cleanly with passes the hash check. A sparse base Manual NCA is skipped only when an
+    // update patch actually read through that exact base NCA; otherwise stop with exit code 4 (as for a sparse base Program NCA without its update) instead of
+    // silently writing an incomplete HTML set.
+    internal static int ExtractHtml(List<Nca> bases, List<Nca> updates, string outDir,
+        Func<Nca, Func<IFileSystem>> openFull = null, Func<Nca, Nca, Func<IFileSystem>> openPatch = null) {
+        openFull ??= n => () => n.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        openPatch ??= (b, u) => () => b.OpenFileSystemWithPatch(u, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        int k = 0, damagedBefore = g_damaged.Count;
+        var patched = new HashSet<Nca>();
+        var created = new List<string>();
+        bool Try(Func<IFileSystem> open, string dst) {   // a read over the wrong base does not throw: each file fails the hash check, which Copy lists and goes on; such a read is undone
+            int damaged = g_damaged.Count;
+            try { Copy(open, dst, null); if (g_damaged.Count == damaged) return true; }
+            catch (Exception e) when (e is not KeysMissing) { }
+            g_damaged.RemoveRange(damaged, g_damaged.Count - damaged);
+            if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            return false;
+        }
+        foreach (Nca u in updates ?? new List<Nca>()) {
+            string dst = Path.Combine(outDir, $"html{k}");
+            bool patch = u.Header.GetFsHeader(Nca.GetSectionIndexFromType(NcaSectionType.Data, u.Header.ContentType)).IsPatchSection();
+            if (!patch) { Copy(openFull(u), dst, null); created.Add(dst); k++; }   // a full NCA: its damage is the NSP's
+            else {
+                Nca matched = bases.Find(b => Try(openPatch(b, u), dst));
+                if (matched != null) { Console.WriteLine($"{dst}: a patch of the base game's NCA"); patched.Add(matched); created.Add(dst); k++; }
+                else Console.WriteLine("[RED] an HtmlDocument NCA of the update patches none of the base game's: read over each, it fails the hash check");
+            }
+        }
+        bool missing = false;
+        foreach (Nca b in bases) {
+            // Horizon mounts a sparse NCA only through its patch; read alone, the left-out ranges fail the hash check while its tables open (exit code 3, "the NSP is damaged").
+            // Minecraft Dungeons II's base has one (16 KB, the HtmlDocument its update patches), beside its sparse Program NCA.
+            if (!Sparse(b) || patched.Contains(b)) continue;
+            Console.WriteLine($"[RED] a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes) has no update patch to read it through: its pages are missing; pack the base game with its update NSP");
+            missing = true;
+        }
+        if (missing) {
+            g_damaged.RemoveRange(damagedBefore, g_damaged.Count - damagedBefore);
+            foreach (string dst in created) if (Directory.Exists(dst)) Directory.Delete(dst, true);
+            return 4;
+        }
+        foreach (Nca b in bases) {
+            if (Sparse(b)) { Console.WriteLine($"a sparse HtmlDocument NCA of the base game ({b.Header.NcaSize} bytes): read only through the update's patch, not alone"); continue; }
+            Copy(openFull(b), Path.Combine(outDir, $"html{k++}"), null);
+        }
+        Console.WriteLine($"{k} HtmlDocument NCAs");
+        return Damaged();
+    }
+
+    static bool SelfContainedSection(Nca program, NcaSectionType section) {
+        int index = Nca.GetSectionIndexFromType(section, program.Header.ContentType);
+        if (!program.SectionExists(index) || !program.Header.GetFsHeader(index).IsPatchSection()) return true;
+        using var raw = program.OpenRawStorageWithPatch(program, index);
+        if (raw is not IndirectStorage patch) return false;
+        patch.GetSize(out long size).ThrowIfFailure();
+        Span<IndirectStorage.Entry> entries = stackalloc IndirectStorage.Entry[256];
+        for (long offset = 0; offset < size;) {
+            patch.GetEntryList(entries, out int count, offset, size - offset).ThrowIfFailure();
+            foreach (var entry in entries[..count]) if (entry.StorageIndex != 1) return false;
+            if (count < entries.Length) return count > 0;
+            // Resume at the last entry so no relocation boundary can be missed.
+            long next = entries[count - 1].GetVirtualOffset();
+            if (next <= offset || next >= size) return false;
+            offset = next;
+        }
+        return true;
     }
 
     // Every content meta of each package (the header says what is printed): the NSP script's scan of an NSP folder, one run for all its packages. Only headers and the meta NCAs are read
@@ -228,6 +293,25 @@ static class P {
                               $"dump prod.keys again from a console on {fw}{(rev < Firmware.Length ? " or later" : "")}");
     }
 
+    // The update's data section is a RomFS AesCtrEx patch whose AES-CTR-Ex table is empty and whose IVFC hash data (header, levels, salt, master hash) is the base data section's.
+    internal static bool PatchKeepsData(Nca baseNca, Nca upd) {
+        int bi = Nca.GetSectionIndexFromType(NcaSectionType.Data, baseNca.Header.ContentType), ui = Nca.GetSectionIndexFromType(NcaSectionType.Data, upd.Header.ContentType);
+        if (!baseNca.SectionExists(bi) || !upd.SectionExists(ui)) return false;
+        // GetFsHeader verifies each FS header's SHA-256 hash against the NCA header.
+        var bf = baseNca.GetFsHeader(bi); var uf = upd.GetFsHeader(ui);
+        if (!uf.IsPatchSection() || bf.FormatType != NcaFormatType.Romfs || uf.FormatType != NcaFormatType.Romfs) return false;
+        if (bf.HashType != NcaHashType.Ivfc || uf.HashType != NcaHashType.Ivfc || uf.EncryptionType != NcaEncryptionType.AesCtrEx) return false;
+        if (bf.ExistsSparseLayer() || uf.ExistsSparseLayer() || bf.ExistsCompressionLayer() || uf.ExistsCompressionLayer()) return false;
+        ReadOnlySpan<byte> enc = uf.GetPatchInfo().EncryptionTreeHeader;
+        if (!enc[..4].SequenceEqual("BKTR"u8) || BinaryPrimitives.ReadInt32LittleEndian(enc[8..12]) != 0) return false;
+        if (baseNca.Header.FormatVersion != NcaVersion.Nca3 && baseNca.Header.FormatVersion != NcaVersion.Nca2) return false;
+        if (upd.Header.FormatVersion != NcaVersion.Nca3 && upd.Header.FormatVersion != NcaVersion.Nca2) return false;
+        Span<byte> bh = stackalloc byte[0x200], uh = stackalloc byte[0x200];
+        using (var s = baseNca.OpenDecryptedHeaderStorage()) s.Read(0x400 + 0x200 * bi, bh).ThrowIfFailure();
+        using (var s = upd.OpenDecryptedHeaderStorage()) s.Read(0x400 + 0x200 * ui, uh).ThrowIfFailure();
+        return bh.Slice(0x08, 4).SequenceEqual("IVFC"u8) && bh.Slice(0x08, 0xF8).SequenceEqual(uh.Slice(0x08, 0xF8));
+    }
+
     static bool Sparse(Nca n) {
         for (int i = 0; i < 4; i++) if (n.Header.IsSectionEnabled(i) && n.Header.GetFsHeader(i).ExistsSparseLayer()) return true;
         return false;
@@ -275,6 +359,7 @@ static class P {
         }
     }
 
+    sealed class PackageDamaged : Exception { public PackageDamaged(string m) : base(m) { } }
     internal static IStorage PackageStorage(IStorage source) {
         source.GetSize(out long size).ThrowIfFailure();
         if (size < 16) throw new InvalidDataException("truncated PFS0 header");
@@ -287,6 +372,13 @@ static class P {
         byte[] header = new byte[(int)headerSize + 1];
         source.Read(0, header.AsSpan(0, (int)headerSize)).ThrowIfFailure();
         for (int i = 0; i < count; i++) {
+            ulong fileOffset = BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16 + 24 * i));
+            ulong fileSize = BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(16 + 24 * i + 8));
+            ulong available = (ulong)(size - headerSize);
+            // Check against the original payload before the optional virtual NUL is inserted.
+            // Subtraction avoids wrapping a damaged 64-bit offset/size into an apparently valid range.
+            if (fileOffset > available || fileSize > available - fileOffset)
+                throw new InvalidDataException($"PFS0 entry {i} lies outside the package payload (offset {fileOffset}, size {fileSize}, available {available})");
             uint offset = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(16 + 24 * i + 16));
             if (offset >= strings) throw new InvalidDataException("PFS0 file-name offset outside the string table");
         }
@@ -305,13 +397,17 @@ static class P {
     // first 0x4000 bytes (the NCA header and section headers, which nsz keeps as they were): enough for the key check, not for reading
     static List<Nca> OpenNsp(KeySet ks, string path, ContentMetaType? only = null, ulong? id = null, bool ncz = false) {
         IFileSystem pfs; var st0 = new LocalStorage(path, FileAccess.Read);
-        byte[] magic = new byte[4]; st0.Read(0x100, magic).ThrowIfFailure();
+        st0.GetSize(out long packageSize).ThrowIfFailure();
+        byte[] magic = new byte[4]; if (packageSize >= 0x104) st0.Read(0x100, magic).ThrowIfFailure();
         if (System.Text.Encoding.ASCII.GetString(magic) == "HEAD") {   // XCI: the card header's magic at 0x100
             var xci = new Xci(ks, st0);
             if (!xci.HasPartition(XciPartitionType.Secure)) throw new Exception($"no secure partition in {path}");
             pfs = xci.OpenPartition(XciPartitionType.Secure);
         } else {
-            var p = new PartitionFileSystem(); p.Initialize(PackageStorage(st0)).ThrowIfFailure(); pfs = p;
+            IStorage storage;
+            try { storage = PackageStorage(st0); }
+            catch (InvalidDataException e) { throw new PackageDamaged($"{Path.GetFileName(path)}: {e.Message}; copy or download the complete package again"); }
+            var p = new PartitionFileSystem(); p.Initialize(storage).ThrowIfFailure(); pfs = p;
         }
         var ncas = new List<Nca>(); var ids = new List<string>();   // ids: content IDs (the file names' hex)
         foreach (DirectoryEntryEx e in pfs.EnumerateEntries("*", SearchOptions.Default)) {
@@ -395,8 +491,21 @@ static class P {
         public string Path; public byte[] Name; public bool Directory, Damaged; public long Size; public ulong A, B;
         public List<ImageEntry> Children = new List<ImageEntry>();
     }
+    static void OpenArchiveFile(IFileSystem fs, ref UniqueRef<IFile> file, string path) {
+        var name = path.ToU8Span();
+        var result = fs.OpenFile(ref file, name, OpenMode.Read);
+        // LibHac's string overload validates guest paths and rejects the colon in names
+        // such as the literal "D:" directory in a DLC RomFS. Enumeration already yields
+        // an absolute archive path; read it through the typed overload in every mode.
+        if (ResultFs.InvalidCharacter.Includes(result) && fs is RomFsFileSystem) {
+            using var archived = new LibHac.Fs.Path();
+            archived.SetShallowBuffer(name.Value).ThrowIfFailure();
+            result = fs.OpenFile(ref file, in archived, OpenMode.Read);
+        }
+        result.ThrowIfFailure();
+    }
     // Stream the merged, integrity-checked filesystem directly into DMROMFS1. No RomFS directories or per-resource host files are created.
-    static void WriteImage(Func<IFileSystem> open, string dst) {
+    internal static void WriteImage(Func<IFileSystem> open, string dst) {
         IFileSystem fs = open?.Invoke();
         var root = new ImageEntry { Path = "/", Name = Array.Empty<byte>(), Directory = true };
         var byPath = new Dictionary<string, ImageEntry>(StringComparer.Ordinal) { ["/"] = root };
@@ -425,7 +534,7 @@ static class P {
                     if (e.Directory) continue;
                     e.A = (ulong)output.Position; e.B = (ulong)e.Size; files++; bytes += e.Size;
                     using var f = new UniqueRef<IFile>();
-                    fs.OpenFile(ref f.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                    OpenArchiveFile(fs, ref f.Ref, e.Path);
                     try { WriteStream(f.Get, output, e.Size, buffer); }
                     catch (HorizonResultException x) when (HashError(x)) {
                         fs = Failed(e.Path, open);
@@ -433,7 +542,7 @@ static class P {
                         e.Damaged = true;
                         g_lenientFs ??= g_lenient();
                         using var lf = new UniqueRef<IFile>();
-                        g_lenientFs.OpenFile(ref lf.Ref, e.Path.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                        OpenArchiveFile(g_lenientFs, ref lf.Ref, e.Path);
                         output.Position = (long)e.A; output.SetLength(output.Position);
                         WriteStream(lf.Get, output, e.Size, buffer);
                     }
@@ -464,7 +573,7 @@ static class P {
     }
 
     // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
-    static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
+    internal static void Copy(Func<IFileSystem> open, string dst, string cmpDir) {
         IFileSystem fs = open();
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -472,7 +581,7 @@ static class P {
             if (e.Type == DirectoryEntryType.Directory) { Directory.CreateDirectory(op); continue; }
             Directory.CreateDirectory(Path.GetDirectoryName(op)); n++; bytes += e.Size;
             using var f = new UniqueRef<IFile>();
-            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            OpenArchiveFile(fs, ref f.Ref, e.FullPath);
             string cp = cmpDir == null ? null : Path.Combine(cmpDir, rel);
             try {
                 if (cp != null && File.Exists(cp) && new FileInfo(cp).Length == e.Size && Same(f.Get, cp, e.Size, buf, cb)) {
@@ -487,7 +596,7 @@ static class P {
                 if (!g_allow || g_lenient == null) { File.Delete(op); continue; }
                 g_lenientFs ??= g_lenient();
                 using var lf = new UniqueRef<IFile>();
-                g_lenientFs.OpenFile(ref lf.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+                OpenArchiveFile(g_lenientFs, ref lf.Ref, e.FullPath);
                 Write(lf.Get, op, e.Size, buf);
             }
             written += e.Size;
@@ -503,7 +612,7 @@ static class P {
         }
     }
     // List the RomFS only (path, size, first 32 bytes) without writing game files, except the NRO modules (code the game loads with nn::ro, read like the ExeFS)
-    static void Manifest(Func<IFileSystem> open, string path) {
+    internal static void Manifest(Func<IFileSystem> open, string path) {
         IFileSystem fs = open();
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -512,7 +621,7 @@ static class P {
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
             if (e.Type == DirectoryEntryType.Directory) continue;
             using var f = new UniqueRef<IFile>();
-            fs.OpenFile(ref f.Ref, e.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
+            OpenArchiveFile(fs, ref f.Ref, e.FullPath);
             long got = 0; int want = (int)Math.Min(h.Length, e.Size);
             try { if (want > 0) f.Get.Read(out got, 0, h.AsSpan(0, want), ReadOption.None).ThrowIfFailure(); }
             catch (HorizonResultException x) when (HashError(x)) { fs = Failed(e.FullPath, open); got = 0; }   // the survey goes on; the file is listed as damaged

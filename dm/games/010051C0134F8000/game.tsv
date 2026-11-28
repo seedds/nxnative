@@ -1,0 +1,40 @@
+# DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET, update 1.70 (v1048576), Unreal Engine 4.24, SDK 9.3.1, NVN and CRIWARE.
+# See dm/games/README.md for the format.
+
+# ---- Identity ----
+title_id	010051C0134F8000
+program_id	010051C0134F8000
+
+# ---- App ----
+name	DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET
+ipa	DragonBallZKakarotANewPowerAwakensSet.ipa
+app_category	public.app-category.games
+pad_layout	full
+
+# ---- Versions ----
+build	v1048576	1.70	main=e99dffa39354b6068f8e7c984c77bc84	subsdk0=5a7ada8dd7447c10aa244944f64d0aff	sdk=ad3fdfbd62a5f4b082d385ffe420d440
+package	v1048576
+shader_versions	v1048576
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	AT/Content/Paks/pakchunk0-Switch.pak
+zip_store	.awb:.pak:.ttf:.usm:.metallib
+
+# ---- Memory ----
+# The 16 MiB NPDM system resource enables virtual address memory. In the 5 GiB guest block, the existing Unreal region gate gives the engine 4,160 MiB,
+# and the engine-wide FMallocBinned3 replacement allocates from a host malloc zone. See the game note for the iPhone-sized boot check.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+
+# ---- Graphics ----
+# The game calls nvnDeviceSetDepthMode with near = 0. Use that mode when building its pipeline bases.
+depth_mode	zero
+
+# ---- Shader split ----
+# The inline shader labels from the version 8 paks produce the fallback group with these archive grouping rules.
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	DRAGON BALL Z: KAKAROT + A NEW POWER AWAKENS SET shaders

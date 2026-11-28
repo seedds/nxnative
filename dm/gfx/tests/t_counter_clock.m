@@ -1,5 +1,10 @@
 // Feed a delayed CPU/GPU sample to the production counter replay without a Metal device.
+#define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#undef nvn_game_fps
+#define g_ft g_ft_hle
+#include "../nvn/hle_nvn.c"
+#undef g_ft
 
 module_t *g_mod;
 int g_nmod;
@@ -8,7 +13,7 @@ module_t *module_of(const void *p) { (void)p; return NULL; }
 void *module_sym(module_t *m, const char *name) { (void)m; (void)name; return NULL; }
 void *guest_sym(const char *name) { (void)name; return NULL; }
 void svc_thread_dump(void) {}
-void dm_guest_clock_advanced(void) {}
+void dm_thread_native_wait(int entering) { (void)entering; }   // no guest scheduler in this test
 
 static unsigned checks, failures;
 #define CHECK(label, condition) do { checks++; if (!(condition)) { failures++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
@@ -144,15 +149,31 @@ int main(void) {
         CHECK("projection subtracts the time spent frozen", guest < host && guest >= frozen);
         CHECK("a host sample older than the pause offset cannot underflow", guest_ns_at_host_time(1) == 0);
         CHECK("feedback conversion uses the resumed guest epoch", llabs((int64_t)gpu_s_guest_ns(host / 1e9) - (int64_t)guest) <= 2);
+        { int bad = 0; for (int i = 0; i < 20000; i++) { uint64_t h = now_ns(); if (!gpu_s_guest_ns(h / 1e9)) bad++; } CHECK("a feedback time in the clock tick of the read is not in the future", bad == 0); }
+        CHECK("a feedback time one double step ahead of the read is the read's time", gpu_s_guest_ns_at(nextafter(host / 1e9, INFINITY), host) == guest);
+        {
+            uint64_t ticks = 24000000ull * 86400 * 100 + 1;   // 100 days uptime, ticks % 3 == 1 (now_ns truncates 2/3 ns)
+            uint64_t long_now = ticks * 125 / 3, long_g = guest_ns_at_host_time(long_now);
+            CHECK("same-tick Metal 24 MHz float time at 100 days uptime is accepted", llabs((int64_t)gpu_s_guest_ns_at((double)ticks * (125.0 / 3e9), long_now) - (int64_t)long_g) <= 2);
+            CHECK("one double step ahead at 100 days uptime is the read's time", gpu_s_guest_ns_at(nextafter(long_now / 1e9, INFINITY), long_now) == long_g);
+            CHECK("a feedback time just past slack is rejected as future", gpu_s_guest_ns_at((long_now + 100) / 1e9, long_now) == 0);
+        }
         CHECK("future feedback is rejected", gpu_s_guest_ns(host / 1e9 + 1) == 0);
-        CHECK("invalid feedback is rejected", gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
+        CHECK("invalid feedback is rejected", gpu_s_guest_ns(0) == 0 && gpu_s_guest_ns(-1) == 0 && gpu_s_guest_ns(9.5e9) == 0 && gpu_s_guest_ns(NAN) == 0 && gpu_s_guest_ns(INFINITY) == 0);
 
         setenv("DM_DETCLOCK", "1000000", 1);
-        dm_guest_frame_tick();
+        // A synthetic window with no textures exercises the present's clock accounting without submitting a GPU job.
+        NVNwindow window = {0};
+        h_nvnWindowSetPresentInterval(&window, 1);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
         uint64_t deterministic = guest_ns();
+        uint64_t frame = dm_guest_frame();
         CHECK("deterministic projection uses the current guest frame", guest_ns_at_host_time(host) == deterministic);
-        dm_guest_frame_tick();
-        CHECK("deterministic projection advances by the configured step", guest_ns_at_host_time(host) == deterministic + 1000000);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
+        CHECK("an interval-1 present advances one frame and one step", dm_guest_frame() == frame + 1 && guest_ns_at_host_time(host) == deterministic + 1000000);
+        h_nvnWindowSetPresentInterval(&window, 2);
+        h_nvnQueuePresentTexture(NULL, &window, 0);
+        CHECK("an interval-2 present advances one frame and one step", dm_guest_frame() == frame + 2 && guest_ns_at_host_time(host) == deterministic + 2000000);
     }
     printf("counter clock: %u checks, %u failed\n", checks, failures);
     return failures != 0;

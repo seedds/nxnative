@@ -91,6 +91,9 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     NSTimer *_tick; uint64_t _reports; BOOL _handshaken; s2_rest _rest;
     s2_clock _clk; uint64_t _lost; char _serial[15]; uint64_t _restSaved;   // sample times from the controller's clock; the serial its learned gyro offset is kept under
     CBCharacteristic *_vib; uint8_t _vseq; int _offLeft; s2_rumble_cursor _rcur;   // _rcur: where this controller is in its player's rumble log
+    // The console's own command path (switch2_proto.h): its vibration + command channel and its side report. _viaVc: the first command got no answer on _wr before any reply
+    // came back, so commands go to _vc from then on, and the side report gives its buttons, stick and motion (_sm: the last orientation of its compact motion)
+    CBCharacteristic *_vc, *_side; BOOL _viaVc, _replied; s2_side_motion _sm;
     int _player;   // the player at the last read (playerSync): a pad waiting for its first button press (DM_PAD_PRESS_TO_JOIN) gets one later
     int16_t _mouseX, _mouseY; BOOL _mouseSeen, _mouseOn;   // _mouseOn: its mouse sensor is turned on (features)   // the mouse sensor's counters at the last report
     s2_hold _hold;   // the choosing gesture this Joy-Con holds now (s2_gesture)
@@ -131,21 +134,31 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     S2Command *c = [S2Command new]; c.cmd = cmd; c.sub = sub; c.payload = [NSData dataWithBytes:pl length:n]; c.done = done;
     [_queue addObject:c]; [self pump];
 }
+- (size_t)frameCmd:(uint8_t *)out cap:(size_t)cap cmd:(uint8_t)cmd sub:(uint8_t)sub payload:(const uint8_t *)pl len:(size_t)n {
+    return _viaVc ? s2_command_vc(out, cap, cmd, sub, pl, n) : s2_command(out, cap, cmd, sub, pl, n);
+}
 - (void)pump {
-    if (_pending || !_queue.count || !_wr) return;
+    CBCharacteristic *ch = _viaVc ? _vc : _wr;
+    if (_pending || !_queue.count || !ch) return;
     S2Command *c = _queue.firstObject; [_queue removeObjectAtIndex:0];
-    uint8_t f[8 + 255]; size_t n = s2_command(f, sizeof f, c.cmd, c.sub, c.payload.bytes, c.payload.length);
+    uint8_t f[S2_VC_PREFIX + 8 + 255]; size_t n = [self frameCmd:f cap:sizeof f cmd:c.cmd sub:c.sub payload:c.payload.bytes len:c.payload.length];
     if (!n) { if (c.done) c.done(nil); [self pump]; return; }
     _pending = YES; _pendingCmd = c.cmd; _cb = c.done; NSUInteger mine = ++_seq; uint8_t id = c.cmd;
     __weak S2Session *w = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         S2Session *s = w; if (!s || !s->_pending || s->_seq != mine) return;
+        if (!s->_viaVc && !s->_replied && s->_vc && s->_pid != S2_PID_PRO) {   // no answer to the first command on the shared channel: resend on the console's channel and take its side report
+            LOG("[sw2] %s: command 0x%02x got no answer on the command channel: commands go to the vibration + command channel, as the console sends them", s2_kind(s->_pid), id);
+            s->_viaVc = YES; s->_pending = NO; s->_cb = nil; [s->_queue insertObject:c atIndex:0];
+            if (s->_side) [s->_peripheral setNotifyValue:YES forCharacteristic:s->_side];
+            [s pump]; return;
+        }
         s->_pending = NO; void (^d)(NSData *) = s->_cb; s->_cb = nil;
         LOG("[sw2] %s: command 0x%02x timed out", s2_kind(s->_pid), id);
         if (d) d(nil);
         [s pump];
     });
-    [_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:_wr type:CBCharacteristicWriteWithoutResponse];
+    [_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:ch type:CBCharacteristicWriteWithoutResponse];
 }
 - (void)readMemory:(uint8_t)len at:(uint32_t)addr done:(void (^)(NSData *))done {
     uint8_t p[8]; s2_memory_payload(p, len, addr);
@@ -187,6 +200,11 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
         if (pid != s->_pid) LOG("[sw2] advertised 0x%04x but identifies as 0x%04x", s->_pid, pid);
         s->_pid = pid; memcpy(s->_serial, serial, sizeof s->_serial);
         void (^calibrate0)(void) = ^{ S2Session *a = w; if (!a) return;
+            if (a->_viaVc) {   // a controller that needed the console's channel keeps no stick calibration in its memory (its blocks read as filler, and its stick drifted with them)
+                s2_cal_default(&a->_cal[0]); s2_cal_default(&a->_cal[1]);
+                LOG("[sw2] %s: its stored stick calibration is not used (the controller keeps none): typical values", s2_kind(a->_pid));
+                [a finish]; return;
+            }
             [a readCal:0 done:^{ S2Session *b = w; if (!b) return;
                 void (^next)(void) = ^{ S2Session *c = w; if (!c) return; [c finish]; };
                 if (b->_pid == S2_PID_PRO) [b readCal:1 done:next]; else next();
@@ -297,13 +315,14 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (_player < 0) LOG("[sw2] %s connected: a player once a button is pressed%s", s2_kind(_pid), fresh ? "" : " (joined the Joy-Con already there)");
     else LOG("[sw2] %s connected: player %d%s", s2_kind(_pid), _player + 1, fresh ? "" : " (joined the Joy-Con already there)");
     [self setLEDs:nil];
-    [_peripheral setNotifyValue:YES forCharacteristic:_inp];
+    if (!_viaVc) [_peripheral setNotifyValue:YES forCharacteristic:_inp];
     __weak S2Session *w = self;   // the link drops after about ten seconds without a write from the host, so the LEDs are written once a second
     _tick = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *t) {
         S2Session *s = w; if (!s) { [t invalidate]; return; }
-        int pl = s2_player(s->_pad); uint8_t l[4] = {s2_led_pattern[pl >= 0 && pl < 8 ? pl : 0], 0, 0, 0}; uint8_t f[12];
-        size_t n = s2_command(f, sizeof f, S2_CMD_LEDS, S2_SUB_LEDS_SET, l, 4);
-        if (s->_wr && n) [s->_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:s->_wr type:CBCharacteristicWriteWithoutResponse];
+        int pl = s2_player(s->_pad); uint8_t l[4] = {s2_led_pattern[pl >= 0 && pl < 8 ? pl : 0], 0, 0, 0}; uint8_t f[S2_VC_PREFIX + 12];
+        CBCharacteristic *ch = s->_viaVc ? s->_vc : s->_wr;
+        size_t n = [s frameCmd:f cap:sizeof f cmd:S2_CMD_LEDS sub:S2_SUB_LEDS_SET payload:l len:4];
+        if (ch && n) [s->_peripheral writeValue:[NSData dataWithBytes:f length:n] forCharacteristic:ch type:CBCharacteristicWriteWithoutResponse];
         if (!s->_mouseOn && [s features] != S2_FEATURES) [s mouseOn];
     }];
 }
@@ -328,6 +347,12 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (!_peripheral.canSendWriteWithoutResponse) g_rstat.busy++;
     g_rstat.sent++;
     [_peripheral writeValue:[NSData dataWithBytes:pk length:n] forCharacteristic:_vib type:CBCharacteristicWriteWithoutResponse];
+}
+// A Joy-Con's side report as the common report (s2_side_to_common): its buttons, its stick and its motion; the clock is the host's, as the side report has no millisecond clock
+- (void)sideReport:(NSData *)d {
+    uint8_t out[63];
+    if (!s2_side_to_common(d.bytes, d.length, _pid == S2_PID_JOYCON_R, (uint32_t)(now_ns() / 1000000ull), g_gyro, &_sm, out)) return;
+    [self report:[NSData dataWithBytes:out length:sizeof out]];
 }
 - (void)report:(NSData *)d {
     s2_report r; if (!_pad || !s2_report_parse(d.bytes, d.length, &r)) return;
@@ -418,9 +443,13 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
     if (e) { [self fail:[NSString stringWithFormat:@"characteristic discovery: %@", e.localizedDescription]]; return; }
     CBUUID *wr = [CBUUID UUIDWithString:@S2_UUID_CMD_WR], *rs = [CBUUID UUIDWithString:@S2_UUID_CMD_RSP], *in = [CBUUID UUIDWithString:@S2_UUID_INPUT];
     CBUUID *vr = [CBUUID UUIDWithString:@S2_UUID_VIB_JOYCON_R], *vl = [CBUUID UUIDWithString:@S2_UUID_VIB_JOYCON_L], *vp = [CBUUID UUIDWithString:@S2_UUID_VIB_PRO];
+    CBUUID *vcr = [CBUUID UUIDWithString:@S2_UUID_VC_JOYCON_R], *vcl = [CBUUID UUIDWithString:@S2_UUID_VC_JOYCON_L];
+    CBUUID *sr = [CBUUID UUIDWithString:@S2_UUID_SIDE_JOYCON_R], *sl = [CBUUID UUIDWithString:@S2_UUID_SIDE_JOYCON_L];
     for (CBCharacteristic *c in s.characteristics) {
         if ([c.UUID isEqual:wr]) _wr = c; else if ([c.UUID isEqual:rs]) _rsp = c; else if ([c.UUID isEqual:in]) _inp = c;
         else if ([c.UUID isEqual:vr] || [c.UUID isEqual:vl] || [c.UUID isEqual:vp]) _vib = c;
+        else if ([c.UUID isEqual:vcr] || [c.UUID isEqual:vcl]) _vc = c;
+        else if ([c.UUID isEqual:sr] || [c.UUID isEqual:sl]) _side = c;
     }
     if (_wr && _rsp && _inp && !_handshaken && !_live) [p setNotifyValue:YES forCharacteristic:_rsp];
 }
@@ -430,9 +459,10 @@ static s2_pad *s2_pad_for(uint16_t pid) {   // a Joy-Con joins a pad that has th
 }
 - (void)peripheral:(CBPeripheral *)p didUpdateValueForCharacteristic:(CBCharacteristic *)c error:(NSError *)e {
     if (e || !c.value.length) return;
-    if (c == _inp) { [self report:c.value]; return; }
+    if (c == _inp) { if (!_viaVc) [self report:c.value]; return; }
+    if (c == _side) { if (_viaVc && _pid != S2_PID_PRO) [self sideReport:c.value]; return; }
     if (c == _rsp && _pending && s2_reply_is(c.value.bytes, c.value.length, _pendingCmd)) {
-        _pending = NO; void (^d)(NSData *) = _cb; _cb = nil;
+        _replied = YES; _pending = NO; void (^d)(NSData *) = _cb; _cb = nil;
         if (d) d(c.value);
         [self pump];
     }

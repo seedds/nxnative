@@ -119,8 +119,67 @@ static int test_output_lifetime(void) {
     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
     return 0;
 }
+// audout takes 0 or 48000 and refuses any other rate with 0x699 (ResultInvalidSampleRate). Mega Man Legacy Collection (SDK 3.7) asks for 44.1 kHz first and opens again with the
+// defaults when refused: the refused open leaves no output and the guest AudioOut as it was, and the second one opens at 48 kHz
+static int test_rate_refused(void) {
+    uint32_t out[16] = {0}; uint8_t prm[16];
+    h_au_InitParam(prm); *(int32_t *)prm = 44100;
+    Result r = h_au_OpenDef0(out, prm);
+    if (r != 0x699 || objmap_get(out) || out[0] || out[1]) { printf("FAIL 44.1 kHz open: result %#x, output %p, guest fields %u %u (0x699, none, 0 0 expected)\n", r, objmap_get(out), out[0], out[1]); return 1; }
+    for (int k = 0; k < AOMAX; k++) if (g_aos[k]) { puts("FAIL 44.1 kHz open: a consumer is registered"); return 1; }
+    *(int32_t *)prm = 0;
+    if (h_au_OpenDef0(out, prm) || out[0] != RATE || h_au_Rate(out) != RATE) { puts("FAIL the open with the default rate after the refusal"); return 1; }
+    h_au_Close(out);
+    *(int32_t *)prm = RATE;
+    if (h_au_OpenDef0(out, prm)) { puts("FAIL a 48 kHz open"); return 1; }
+    h_au_Close(out);
+    puts("AudioOut rate: 44.1 kHz refused with 0x699 and nothing opened; 0 and 48000 open at 48 kHz");
+    return 0;
+}
+// DM_AUDIO_DUMP: each output's accepted blocks go to a file of their own (<file> for #0, <file>.<N> after it), blocks refused by a full queue are omitted,
+// and a host DeviceSink output unpacks its 2-channel stereo fold on the silent sink instead of dumping the 8-slot internal layout.
+static int test_dump_per_output(void) {
+    char path[512]; snprintf(path, sizeof path, "%s/t_audio_dump_%d.raw", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", (int)getpid());
+    setenv("DM_AUDIO_DUMP", path, 1);
+    char o1[64], o2[64], ev[64]; uint8_t prm[16]; aout_buf b1[2], b2[2], bs; static int16_t p1[2][480], p2[2][480], ps[257 * DM_AUDIO_SINK_CHANNELS];
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 480; j++) { p1[i][j] = 1; p2[i][j] = 2; }
+    for (int i = 0; i < 257; i++) for (int j = 0; j < DM_AUDIO_SINK_CHANNELS; j++) ps[i * DM_AUDIO_SINK_CHANNELS + j] = (int16_t)(1000 * j + i);
+    h_au_InitParam(prm);
+    int o1_open = !h_au_Open(o1, ev, NULL, prm), o2_open = o1_open && !h_au_Open(o2, ev, NULL, prm);
+    if (!o2_open) { if (o1_open) h_au_Close(o1); unsetenv("DM_AUDIO_DUMP"); return 1; }
+    void *sink = dm_pcmout_open_sink();
+    int id1 = ao(o1)->id, id2 = ao(o2)->id, ids = ao(sink)->id, ok = 1;
+    for (int i = 0; ok && i < 2; i++) {   // appended in turn, as Divinity's two outputs were
+        set_buf(&b1[i], p1[i], sizeof p1[i], sizeof p1[i]); set_buf(&b2[i], p2[i], sizeof p2[i], sizeof p2[i]);
+        ok &= h_au_Append(o1, &b1[i]) && h_au_Append(o2, &b2[i]);
+    }
+    // Fill o1's queue to QMAX with empty descriptors, then verify a refused non-empty block is not written to o1's dump
+    aout_buf pad[QMAX], refused; static int16_t bad[480];
+    for (int j = 0; j < 480; j++) bad[j] = 9;
+    set_buf(&refused, bad, sizeof bad, sizeof bad);
+    for (int i = 2; ok && i < QMAX; i++) { set_buf(&pad[i], NULL, 0, 0); ok &= h_au_Append(o1, &pad[i]) != 0; }
+    if (ok && h_au_Append(o1, &refused)) { puts("FAIL DM_AUDIO_DUMP: full queue accepted an extra block"); ok = 0; }
+    set_buf(&bs, ps, sizeof ps, sizeof ps);
+    if (ok) ok &= dm_pcmout_append(sink, &bs) != 0;
+    h_au_Close(o1); h_au_Close(o2); dm_pcmout_close(sink); unsetenv("DM_AUDIO_DUMP");
+    for (int k = 0; k < 2; k++) {
+        char p[600]; int id = k ? id2 : id1;
+        if (id) snprintf(p, sizeof p, "%s.%d", path, id); else snprintf(p, sizeof p, "%s", path);
+        FILE *f = fopen(p, "rb"); int16_t v[2000]; size_t n = f ? fread(v, 2, 2000, f) : 0; if (f) fclose(f); unlink(p);
+        int same = n == 960; for (size_t i = 0; i < n; i++) same &= v[i] == (k ? 2 : 1);
+        if (!same) { printf("FAIL DM_AUDIO_DUMP: output #%d's file %s holds %zu samples, not its own 960\n", id, p, n); ok = 0; }
+    }
+    char sp[600]; snprintf(sp, sizeof sp, "%s.%d", path, ids);
+    FILE *sf = fopen(sp, "rb"); int16_t sv[257 * DM_AUDIO_SINK_CHANNELS]; size_t sn = sf ? fread(sv, 2, sizeof sv / 2, sf) : 0; if (sf) fclose(sf); unlink(sp);
+    int sink_ok = sn == 257 * 2;
+    for (int i = 0; sink_ok && i < 257; i++) sink_ok &= sv[2 * i] == 6000 + i && sv[2 * i + 1] == 7000 + i;
+    if (!sink_ok) { printf("FAIL DM_AUDIO_DUMP: DeviceSink #%d's file %s holds %zu samples, not the 2-channel stereo fold\n", ids, sp, sn); ok = 0; }
+    if (ok) printf("DM_AUDIO_DUMP: outputs #%d, #%d and DeviceSink #%d each in a file of their own\n", id1, id2, ids);
+    return !ok;
+}
 int main(void) {
-    if (test_buffer_layout() || test_surround_output() || test_output_lifetime()) return 1;
+    if (test_dump_per_output()) return 1;
+    if (test_buffer_layout() || test_surround_output() || test_output_lifetime() || test_rate_refused()) return 1;
     char out[64], ev[64]; uint8_t prm[16]; aout_buf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
     if (h_au_Open(out, ev, NULL, prm)) return 1;
@@ -150,7 +209,8 @@ int main(void) {
     while (got2 < 6 && now_ns() - t0 < 10000000000ull) {
         uint64_t ms = (now_ns() - t0) / 1000000;
         if (!susp && ms >= 150) { dm_audio_suspend(1); susp = 1; }
-        if (susp && !resumed && ms >= 350) { dm_audio_suspend(0); resumed = 1; }
+        // Stopping the AudioUnit can take past the resume deadline while buffers finish.
+        if (susp && !resumed && (now_ns() - t0) / 1000000 >= 350) { dm_audio_suspend(0); resumed = 1; }
         order_ok = drain_signaled(out2, b2, 6, &got2, &seen2);
         if (!order_ok) break;
         if (got2 < 6) usleep(1000);
@@ -196,3 +256,5 @@ int main(void) {
     printf("device stall: released %d/20 in order=%d in %.0f ms (expected 1900-5000), AudioUnit restarted and calling back again=%d (silent sink stood in %d times, %.0f ms) %s\n", got3, order3, total3, back, standins, waited3, ok3 ? "✓" : "✗");
     return !ok3;
 }
+
+void dm_audio_device_changed(void) {}   // renderer notification delivery is checked by t_audren_work

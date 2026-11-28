@@ -8,7 +8,7 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 |---|---|---|
 | `depth_mode zero` | `game.tsv` | the game selects near-zero NVN depth; offline pipeline bases must use the matching vertex entry |
 | `sys_resource 0x800000` | [`game.tsv`](game.tsv) | the NPDM's 8 MB of system resource: virtual address memory |
-| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0x40000000` | `game.tsv` | Below Zero's layout (a 1 GB pool); see [Memory](#memory) |
+| 5 GB guest layout: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000`, `stdalloc_cap 0x40000000` | `game.tsv` | Below Zero's layout (a 1 GB pool); see [Memory](#memory) |
 | Node area cut 1 GB → 62 MB, region alignment 4 MB / 32 MB / 1 GB → 2 MB | `dm/tools/sdk_patches.py` SDK-wide rules, `sdk` build `3644a676…` | nirvanA Initiative's and Below Zero's build |
 | ALLOC_BUCKET at most 63 blocks (255 on the Switch) | the engine-wide rule `dm/tools/unity_bucket.py`, found by the allocator's name in any build (`main+0x60ea64` on `b3db5a1e…`) | as on Below Zero; see [Memory](#memory) |
 | `pad_layout full` | `game.tsv` | first-person 3D: the right stick looks around |
@@ -45,6 +45,7 @@ Update 1.23.83358 (v458752) over the base game, SDK 13.3.5. Unity 2019.4.36f1 IL
 
 ## Open
 
+- The profile was migrated from `app_pool 0x40000000` to the hardware pool (`app_pool 0xCD500000`) plus `stdalloc_cap 0x40000000` (1 GB StandardAllocator cap; [The heap check's 1 GB pool picked a game's low graphics](../../../docs/reference/memory.md#the-heap-checks-1-gb-pool-picked-a-games-low-graphics)); re-testing under `DM_ALIAS_SIZE=<mem_alias>` on Mac / on iPhone with that layout remains open.
 - iOS untested.
 - Leaving the lifepod and swimming: the world outside, its streaming and the address space it takes (watch the `[mem] alias region mapped up to` lines) are not measured.
 - The audio stall at start ([Audio](#audio)) and the texture type mismatch ([Files and shaders](#files-and-shaders)).

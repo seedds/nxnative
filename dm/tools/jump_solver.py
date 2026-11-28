@@ -15,7 +15,9 @@ and of at most 0xfff) is computed exactly.
 Control enters a function at its start, at the entries the caller names (direct branches from other functions, targets of tables elsewhere), all with every register
 unknown, and at its C++ exception landing pads (from the LSDA), with what the calls they catch left: the callee-saved registers as they were. An edge carrying an unchecked
 index into a guarded run makes the bound fail by itself. Calls and system calls clobber x0-x18 and x30. Provably local fixed stack slots inside the function's allocated frame
-survive calls and reloads as long as no stack pointer escapes to a call, memory, or an unhandled operation and no overlapping store writes the slot. A dispatch through any register counts: its targets are edges (a byte
+survive calls and reloads as long as no stack pointer escapes to memory, an unhandled operation, or an unproved call and no overlapping store writes the slot. A direct `bl`
+receiving stack pointers is summarized over the callee's CFG (and known no-pointer scalar C99 PLT imports) to prove non-capture and exact written byte ranges, killing only
+overlapping slots and tracking any surviving pointer register lazily (`('sp?',)`). A dispatch through any register counts: its targets are edges (a byte
 or halfword table whose index stays unbounded lands on every pad it can). A br that reads no table (an indirect tail call) leaves the function, and code that nothing above
 reaches is dead to the analysis, as both are to the rewriter's own sites. A number (mov) inside page zero is never a table base: Horizon never maps page zero, so no path of a
 working game carries it to a load (Cuphead 1.3.7 main+0x59dc90 interleaves four dispatch loops that share x12 as a base and as the constant 1).
@@ -27,7 +29,7 @@ solve() returns {br address: targets} for every dispatch it proves and {br addre
 import struct
 from functools import lru_cache
 from typing import Any
-from capstone import CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT
+from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM, CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT
 from capstone.arm64 import ARM64_OP_IMM, ARM64_OP_REG, ARM64_OP_MEM, ARM64_EXT_UXTW, ARM64_EXT_SXTW, ARM64_EXT_INVALID, ARM64_EXT_UXTX, ARM64_EXT_SXTX, ARM64_SFT_LSL
 
 M32, M64 = (1 << 32) - 1, (1 << 64) - 1
@@ -40,6 +42,11 @@ ENUM = 1 << 12              # a root range this small is enumerated exactly
 WIDEN = 6                   # visits of an entry point before growing ranges and constant sets widen to unknown
 OUTER = 16                  # rounds of table edges before giving up
 STEPS = 3_000_000           # instructions interpreted per round before giving up
+CALLEE_INSNS = 512          # decoded instruction cap per summarized callee
+CALLEE_STEPS = 4096         # abstract step cap per summarized callee
+CALLEE_DEPTH = 3            # nested direct-call depth cap inside callee summaries
+CALLEE_SLOTS = 64           # tracked caller-pointer spill slots inside a callee (fail closed on overflow)
+CALLEE_WRITES = 64          # distinct written byte intervals recorded per callee (fail closed on overflow)
 
 def _mask(w): return M32 if w == 32 else M64
 
@@ -167,7 +174,7 @@ def _widen(old, new, root):
 class State:
     """regs: 31 values; cons: root → (lo, hi, bits, masks) where narrower than its width; flags: (kind, value, imm, width, register) of the last compare, or None;
     frame: bytes allocated below entry sp; slots: {offset: (size, value)} of provably local fixed stack slots inside [0, frame); escaped: whether any stack pointer may have escaped.
-    A value is ('c', values, numbers) constants, numbers being those of them a mov wrote rather than an adrp / adr (addresses), ('s', root, chain) symbolic (a root ('e', k, ...) is the entry the table load at instruction k gave, a number like any other), ('t', k, constants, shift) a table target, or ('sp', offset) a stack pointer sp + offset"""
+    A value is ('c', values, numbers) constants, numbers being those of them a mov wrote rather than an adrp / adr (addresses), ('s', root, chain) symbolic (a root ('e', k, ...) is the entry the table load at instruction k gave, a number like any other), ('t', k, constants, shift) a table target, ('sp', offset) a stack pointer sp + offset, or ('sp?',) a register that may hold an unknown stack pointer (escaping on use, clearing on overwrite)"""
     __slots__ = ('regs', 'cons', 'flags', 'frame', 'slots', 'escaped')
     def __init__(self, regs, cons, flags, frame=0, slots=None, escaped=False):
         self.regs, self.cons, self.flags = regs, cons, flags
@@ -331,6 +338,30 @@ PURE_LOADS = frozenset((
     'ld1', 'ld2', 'ld3', 'ld4', 'ld1r', 'ld2r', 'ld3r', 'ld4r',
     'prfm', 'prfum',
 ))
+# Standard C99 scalar-only imports that take no pointer arguments (strictly excluding pointer-taking libm functions such as frexp*, modf*, remquo*, sincos*, lgamma*_r, nan*).
+SAFE_NO_PTR_IMPORTS = frozenset((
+    'sqrtf', 'sqrt', 'cbrtf', 'cbrt',
+    'sinf', 'sin', 'cosf', 'cos', 'tanf', 'tan',
+    'asinf', 'asin', 'acosf', 'acos', 'atanf', 'atan', 'atan2f', 'atan2',
+    'sinhf', 'sinh', 'coshf', 'cosh', 'tanhf', 'tanh',
+    'asinhf', 'asinh', 'acoshf', 'acosh', 'atanhf', 'atanh',
+    'expf', 'exp', 'exp2f', 'exp2', 'expm1f', 'expm1',
+    'logf', 'log', 'log2f', 'log2', 'log10f', 'log10', 'log1pf', 'log1p', 'logbf', 'logb', 'ilogbf', 'ilogb',
+    'powf', 'pow', 'hypotf', 'hypot', 'fmodf', 'fmod', 'remainderf', 'remainder',
+    'ldexpf', 'ldexp', 'scalbnf', 'scalbn', 'scalblnf', 'scalbln',
+    'floorf', 'floor', 'ceilf', 'ceil', 'truncf', 'trunc', 'roundf', 'round',
+    'lroundf', 'lround', 'llroundf', 'llround', 'rintf', 'rint', 'lrintf', 'lrint', 'llrintf', 'llrint',
+    'nearbyintf', 'nearbyint', 'fabsf', 'fabs', 'copysignf', 'copysign',
+    'fmaf', 'fma', 'fmaxf', 'fmax', 'fminf', 'fmin', 'fdimf', 'fdim',
+    'nextafterf', 'nextafter', 'nexttowardf', 'nexttoward',
+    'erff', 'erf', 'erfcf', 'erfc', 'tgammaf', 'tgamma', 'lgammaf', 'lgamma',
+    'abs', 'labs', 'llabs',
+    '__errno_location',
+))
+
+def _signed(v, bits):
+    s = 1 << (bits - 1)
+    return v - (s << 1) if v & s else v
 
 def _is_sp(p, op): return op.type == ARM64_OP_REG and p.reg_name(op.reg) in ('sp', 'wsp')
 
@@ -338,6 +369,19 @@ def _reg_size(name):
     if name in ('xzr', 'fp', 'lr'): return 8
     if name == 'wzr': return 4
     if name and name[1:].isdigit(): return {'x': 8, 'd': 8, 'w': 4, 's': 4, 'q': 16, 'h': 2, 'b': 1}.get(name[0])
+    return None
+
+def _load_size(p, m, ops):
+    if m in ('prfm', 'prfum'): return 0
+    if m in ('ldrb', 'ldurb', 'ldarb', 'ldaprb', 'ldtrb', 'ldxrb', 'ldaxrb', 'ldrsb', 'ldursb', 'ldtrsb'): return 1
+    if m in ('ldrh', 'ldurh', 'ldarh', 'ldaprh', 'ldtrh', 'ldxrh', 'ldaxrh', 'ldrsh', 'ldursh', 'ldtrsh'): return 2
+    if m in ('ldrsw', 'ldursw', 'ldtrsw'): return 4
+    if m == 'ldpsw': return 8
+    if m in ('ldr', 'ldur', 'ldar', 'ldapr', 'ldtr', 'ldxr', 'ldaxr') and ops and ops[0].type == ARM64_OP_REG:
+        return _reg_size(p.reg_name(ops[0].reg))
+    if m in ('ldp', 'ldnp', 'ldxp', 'ldaxp') and len(ops) >= 2 and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_REG:
+        s0, s1 = _reg_size(p.reg_name(ops[0].reg)), _reg_size(p.reg_name(ops[1].reg))
+        return 2 * s0 if s0 and s0 == s1 else None
     return None
 
 def _store_size(p, m, ops):
@@ -393,9 +437,483 @@ class Ins:
         if self._control is None: self._control = any(self.p.group(g) for g in (CS_GRP_JUMP, CS_GRP_CALL, CS_GRP_RET, CS_GRP_INT))
         return self._control
 
+class _CState:
+    """Abstract state inside a summarized callee: regs[0..30] hold ('o',), ('csp', off), ('arg', r, off), or ('arg_any',);
+    frame is bytes allocated below entry sp (or None if unknown); slots maps fixed 8-byte offsets in [0, frame) holding a caller pointer."""
+    __slots__ = ('regs', 'frame', 'slots', 'escaped')
+    def __init__(self, regs, frame=0, slots=None, escaped=False):
+        self.regs, self.frame, self.slots, self.escaped = regs, frame, {} if slots is None else slots, escaped
+    def copy(self): return _CState(list(self.regs), self.frame, dict(self.slots), self.escaped)
+    def key(self): return (tuple(self.regs), self.frame, tuple(sorted(self.slots.items())), self.escaped)
+
+
+def _cjoin_val(x, y, frame):
+    if x == y: return ('arg_any',) if x[0] == 'csp' and frame is None else x
+    return ('arg_any',)
+
+
+class CalleeAnalyzer:
+    """Bounded, fail-closed pointer-effect summarizer for direct `bl` callees that receive stack pointers.
+    Proves that a callee never captures caller pointers, never writes outside its own frame except at bounded constant offsets from
+    tracked pointer arguments, and reports both those written intervals and any caller-saved registers that may still hold a caller pointer at return."""
+    def __init__(self, img, code_ok):
+        self.img, self.code_ok = img, code_ok
+        self._md = None
+        self._ins: dict[int, Ins | None] = {}
+        self._imports: dict[int, str] | None = None
+        self._cache: dict[tuple[int, frozenset[int], frozenset[int]], Any] = {}
+
+    def _decode(self, addr):
+        if addr in self._ins: return self._ins[addr]
+        if addr < 0 or addr & 3 or addr + 4 > len(self.img) or not self.code_ok(addr):
+            self._ins[addr] = None
+            return None
+        if self._md is None:
+            self._md = Cs(CS_ARCH_ARM64, CS_MODE_ARM); self._md.detail = True
+        p = next(self._md.disasm(bytes(self.img[addr:addr + 4]), addr), None)
+        res = Ins(p) if p is not None else None
+        self._ins[addr] = res
+        return res
+
+    def _import_slots(self):
+        if self._imports is not None: return self._imports
+        out = {}
+        try:
+            img = self.img
+            mod = struct.unpack_from('<I', img, 4)[0]
+            if img[mod:mod + 4] == b'MOD0':
+                dyn = mod + struct.unpack_from('<i', img, mod + 4)[0]
+                tags = {}
+                for k in range(4096):
+                    t, v = struct.unpack_from('<qQ', img, dyn + 16 * k)
+                    if t == 0: break
+                    tags.setdefault(t, v)
+                if tags.get(20) == 7:   # DT_PLTREL == RELA
+                    for pos in range(tags[23], tags[23] + tags[2], 24):
+                        slot, info, _ = struct.unpack_from('<QQq', img, pos)
+                        if info & 0xffffffff != 1026: continue   # R_AARCH64_JUMP_SLOT
+                        name = struct.unpack_from('<I', img, tags[6] + (info >> 32) * 24)[0] + tags[5]
+                        out[slot] = bytes(img[name:img.index(0, name)]).decode('utf-8')
+        except (KeyError, ValueError, IndexError, struct.error):
+            out = {}
+        self._imports = out
+        return out
+
+    def _plt_import(self, target):
+        """Imported symbol name if target is a standard AArch64 PLT stub (with optional leading `bti c`), else None."""
+        img = self.img
+        if target < 0 or target & 3 or target + 16 > len(img): return None
+        off = target
+        if struct.unpack_from('<I', img, off)[0] == 0xd503245f:   # bti c (Switch 2)
+            off += 4
+            if off + 16 > len(img): return None
+        a, b, c, d = struct.unpack_from('<4I', img, off)
+        if (a & 0x9f00001f == 0x90000010 and b & 0xffc003ff == 0xf9400211
+                and c & 0xffc003ff == 0x91000210 and d == 0xd61f0220):
+            page = (off & ~0xfff) + (_signed(((a >> 29) & 3) | ((a >> 5) & 0x7ffff) << 2, 21) << 12)
+            lo = ((b >> 10) & 0xfff) * 8
+            if (c >> 10) & 0xfff == lo: return self._import_slots().get(page + lo)
+        return None
+
+    def summarize(self, target, exact, any_):
+        """(writes, ret_ptrs) or None when unsafe/unproved.
+        writes: tuple of (arg_reg, lo, hi) written byte ranges; ret_ptrs: {ret_reg: ('arg', orig_reg, off) | ('arg_any',)}."""
+        key = (target, exact, any_)
+        if key in self._cache: return self._cache[key]
+        res = self._summarize(target, exact, any_, 0, set())
+        self._cache[key] = res
+        return res
+
+    @staticmethod
+    def _csp_shift(st, delta):
+        if st.frame is None: return False
+        if delta < 0:
+            st.frame += -delta
+            if st.slots: st.slots = {off - delta: sv for off, sv in st.slots.items()}
+        elif delta > 0:
+            if delta > st.frame: return False
+            st.frame -= delta
+            if st.slots: st.slots = {off - delta: sv for off, sv in st.slots.items() if off >= delta}
+        for i, v in enumerate(st.regs):
+            if v[0] == 'csp':
+                off = v[1] - delta
+                if delta > 0 and off < 0:
+                    st.escaped = True
+                    if st.slots: return False
+                    st.regs[i] = ('arg_any',)
+                else:
+                    st.regs[i] = ('csp', off)
+        return True
+
+    @staticmethod
+    def _cjoin(a, b):
+        frame = a.frame if a.frame == b.frame else None
+        escaped = a.escaped or b.escaped or frame is None or any((x[0] == 'csp' or y[0] == 'csp') and x != y for x, y in zip(a.regs, b.regs))
+        regs = [_cjoin_val(x, y, frame) for x, y in zip(a.regs, b.regs)]
+        if escaped or frame is None:
+            if a.slots or b.slots: return None
+            slots = {}
+        else:
+            slots = {}
+            for off in set(a.slots) | set(b.slots):
+                sa, sb = a.slots.get(off), b.slots.get(off)
+                if sa is not None and sb is not None: slots[off] = (8, _cjoin_val(sa[1], sb[1], frame))
+                else: slots[off] = (8, ('arg_any',))
+            if len(slots) > CALLEE_SLOTS: return None
+        return _CState(regs, frame, slots, escaped)
+
+    @staticmethod
+    def _overlap(slots, lo, hi): return any(so < hi and lo < so + ssz for so, (ssz, _) in slots.items())
+
+    @staticmethod
+    def _kill_slots(slots, lo, hi):
+        for so in [so for so, (ssz, _) in slots.items() if so < hi and lo < so + ssz]: del slots[so]
+
+    @staticmethod
+    def _check_return_cs(st, exact, any_):
+        if st.frame != 0: return False
+        for r in range(19, 30):
+            if r in exact:
+                if st.regs[r] != ('arg', r, 0): return False
+            elif r in any_:
+                if st.regs[r] != ('arg_any',): return False
+            else:
+                if st.regs[r] != ('o',): return False
+        return True
+
+    @staticmethod
+    def _reads_tracked(st, p):
+        """(reads_arg, reads_csp) for a non-memory instruction p."""
+        r_arg = r_csp = False
+        def check_name(name):
+            nonlocal r_arg, r_csp
+            if name in ('sp', 'wsp'): r_csp = True; return
+            r = _name(name)
+            if r not in (None, 'zr'):
+                tag = st.regs[r[0]][0]
+                if tag in ('arg', 'arg_any'): r_arg = True
+                elif tag == 'csp': r_csp = True
+        for name in p.reads(): check_name(name)
+        for i, op in enumerate(p.operands):
+            if op.type == ARM64_OP_REG and (i > 0 or p.mnemonic in ('dc', 'ic', 'at', 'tlbi')):
+                check_name(p.reg_name(op.reg))
+        return r_arg, r_csp
+
+    def _summarize(self, target, exact, any_, depth, active):
+        if self._plt_import(target) in SAFE_NO_PTR_IMPORTS: return ((), {})
+        if not self.code_ok(target) or target in active: return None
+        active = active | {target}
+        init_regs = [('arg', r, 0) if r in exact else (('arg_any',) if r in any_ else ('o',)) for r in range(31)]
+        states: dict[int, _CState] = {target: _CState(init_regs)}
+        work = [target]
+        seen_insns: set[int] = set()
+        writes: set[tuple[int, int, int]] = set()
+        ret_regs: list[Any] | None = None
+        saw_ret = False
+        steps = 0
+
+        def merge_ret(cur_regs):
+            nonlocal ret_regs, saw_ret
+            saw_ret = True
+            if ret_regs is None:
+                ret_regs = list(cur_regs)
+            else:
+                ret_regs = [_cjoin_val(a, b, 0) for a, b in zip(ret_regs, cur_regs)]
+
+        while work:
+            addr = work.pop()
+            st = states[addr].copy()
+            while True:
+                steps += 1
+                if steps > CALLEE_STEPS: return None
+                p = self._decode(addr)
+                if p is None: return None
+                seen_insns.add(addr)
+                if len(seen_insns) > CALLEE_INSNS: return None
+                m, ops = p.mnemonic, p.operands
+                if m in ('udf', 'hlt', 'eret', 'drps', 'eretaa', 'eretab'): return None
+                if m == 'brk': break
+                if m in RETS:
+                    if not self._check_return_cs(st, exact, any_): return None
+                    for r in range(19):
+                        if st.regs[r][0] == 'csp': return None
+                    merge_ret(st.regs[:19])
+                    break
+                if m == 'b':
+                    dest = ops[0].imm
+                    if self._plt_import(dest) in SAFE_NO_PTR_IMPORTS:
+                        if not self._check_return_cs(st, exact, any_) or st.slots: return None
+                        merge_ret([('o',)] * 19)
+                        break
+                    if not self.code_ok(dest): return None
+                    succ = [(dest, st)]
+                elif (m.startswith('b.') and m[2:] in CONDS) or m in ('cbz', 'cbnz', 'tbz', 'tbnz'):
+                    dest = ops[-1].imm
+                    if not self.code_ok(dest) or not self.code_ok(addr + 4): return None
+                    succ = [(dest, st.copy()), (addr + 4, st)]
+                elif m == 'bl':
+                    dest = ops[0].imm
+                    if not self.code_ok(addr + 4): return None
+                    arg_regs = {r: st.regs[r] for r in range(19) if st.regs[r][0] in ('arg', 'arg_any')}
+                    csp_regs = [r for r in range(19) if st.regs[r][0] == 'csp']
+                    plt_safe = self._plt_import(dest) in SAFE_NO_PTR_IMPORTS
+                    if csp_regs and not plt_safe: return None
+                    new_ret = {}
+                    if arg_regs and not plt_safe:
+                        if depth >= CALLEE_DEPTH or not self.code_ok(dest) or dest in active: return None
+                        sub_exact = frozenset(r for r in range(30) if st.regs[r][0] == 'arg')
+                        sub_any = frozenset(r for r in range(30) if st.regs[r][0] == 'arg_any')
+                        sub = self._summarize(dest, sub_exact, sub_any, depth + 1, active)
+                        if sub is None: return None
+                        sub_writes, sub_rets = sub
+                        for sr, lo, hi in sub_writes:
+                            sv = st.regs[sr]
+                            if sv[0] != 'arg': return None
+                            writes.add((sv[1], sv[2] + lo, sv[2] + hi))
+                            if len(writes) > CALLEE_WRITES: return None
+                        for r, rv in sub_rets.items():
+                            if rv[0] == 'arg' and st.regs[rv[1]][0] == 'arg':
+                                orig = st.regs[rv[1]]
+                                new_ret[r] = ('arg', orig[1], orig[2] + rv[2])
+                            else:
+                                new_ret[r] = ('arg_any',)
+                    for r in range(19): st.regs[r] = new_ret.get(r, ('o',))
+                    st.regs[30] = ('o',)
+                    succ = [(addr + 4, st)]
+                elif m in BLRS or m in BRS or m in ('br', 'svc', 'hvc', 'smc') or p.control():
+                    return None
+                else:
+                    if not self._step_data(st, p, writes): return None
+                    if not self.code_ok(addr + 4): return None
+                    succ = [(addr + 4, st)]
+
+                if len(succ) == 1 and succ[0][0] == addr + 4 and (addr + 4) not in states:
+                    addr = addr + 4; st = succ[0][1]; continue
+                for dest, s2 in succ:
+                    old = states.get(dest)
+                    if old is None:
+                        states[dest] = s2; work.append(dest)
+                    else:
+                        joined = self._cjoin(old, s2)
+                        if joined is None: return None
+                        if joined.key() != old.key():
+                            states[dest] = joined; work.append(dest)
+                break
+
+        if not saw_ret or ret_regs is None: return None
+        ret_ptrs = {r: v for r, v in enumerate(ret_regs) if v[0] in ('arg', 'arg_any')}
+        return (tuple(sorted(writes)), ret_ptrs)
+
+    def _step_data(self, st, p, writes):
+        m, ops = p.mnemonic, p.operands
+        if not ops:
+            for name in p.writes():
+                r = _name(name)
+                if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
+            return True
+        mem_idx = next((i for i, op in enumerate(ops) if op.type == ARM64_OP_MEM), None)
+        if mem_idx is not None: return self._step_mem(st, p, m, ops, mem_idx, writes)
+        sets = p.update_flags
+        # Stack pointer updates
+        if _is_sp(p, ops[0]):
+            if not sets and m in ('add', 'sub') and len(ops) == 3 and ops[2].type == ARM64_OP_IMM:
+                if _is_sp(p, ops[1]):
+                    return self._csp_shift(st, _imm(ops[2]) if m == 'add' else -_imm(ops[2]))
+                sr = _reg(p, ops[1])
+                if sr not in (None, 'zr') and sr[1] == 64 and st.regs[sr[0]][0] == 'csp':
+                    return self._csp_shift(st, st.regs[sr[0]][1] + (_imm(ops[2]) if m == 'add' else -_imm(ops[2])))
+            elif not sets and m == 'mov' and len(ops) == 2:
+                if _is_sp(p, ops[1]): return True
+                sr = _reg(p, ops[1])
+                if sr not in (None, 'zr') and sr[1] == 64 and st.regs[sr[0]][0] == 'csp':
+                    return self._csp_shift(st, st.regs[sr[0]][1])
+            st.frame = None; st.escaped = True
+            if st.slots: return False
+            for i, v in enumerate(st.regs):
+                if v[0] == 'csp': st.regs[i] = ('arg_any',)
+            return True
+        if m in ('cmp', 'cmn', 'tst', 'ccmp', 'ccmn'): return True
+        dst = _reg(p, ops[0])
+        if not sets and dst not in (None, 'zr') and dst[1] == 64:
+            if m == 'mov' and len(ops) == 2 and _is_sp(p, ops[1]):
+                st.regs[dst[0]] = ('csp', 0) if not st.escaped and st.frame is not None else ('arg_any',)
+                return True
+            if m in ('add', 'sub') and len(ops) == 3 and _is_sp(p, ops[1]) and ops[2].type == ARM64_OP_IMM:
+                off = _imm(ops[2]) if m == 'add' else -_imm(ops[2])
+                st.regs[dst[0]] = ('csp', off) if not st.escaped and st.frame is not None else ('arg_any',)
+                return True
+            if len(ops) >= 2 and (sr := _reg(p, ops[1])) not in (None, 'zr') and sr[1] == 64:
+                sv = st.regs[sr[0]]
+                if m == 'mov' and len(ops) == 2 and ops[1].shift.value == 0:
+                    st.regs[dst[0]] = sv; return True
+                if m in ('add', 'sub') and len(ops) == 3 and ops[2].type == ARM64_OP_IMM:
+                    delta = _imm(ops[2]) if m == 'add' else -_imm(ops[2])
+                    if sv[0] == 'arg': st.regs[dst[0]] = ('arg', sv[1], sv[2] + delta); return True
+                    if sv[0] == 'csp':
+                        st.regs[dst[0]] = ('csp', sv[1] + delta) if not st.escaped and st.frame is not None else ('arg_any',)
+                        return True
+                    if sv[0] == 'arg_any': st.regs[dst[0]] = ('arg_any',); return True
+        r_arg, r_csp = self._reads_tracked(st, p)
+        if r_arg or r_csp:
+            if m in ('dc', 'ic', 'at', 'tlbi', 'msr'): return False
+            if r_csp:
+                st.escaped = True
+                if st.slots: return False
+            wr_names = p.writes()
+            for name in wr_names:
+                if name == 'nzcv': continue
+                if _name(name) is None: return False   # moved a tracked pointer into a vector/FP/system register
+            for name in wr_names:
+                r = _name(name)
+                if r not in (None, 'zr'): st.regs[r[0]] = ('arg_any',)
+            return True
+        for name in p.writes():
+            r = _name(name)
+            if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
+        return True
+
+    def _step_mem(self, st, p, m, ops, mem_idx, writes):
+        mo = ops[mem_idx]; base_name = p.reg_name(mo.mem.base); has_idx = bool(mo.mem.index); disp = mo.mem.disp
+        base_is_sp = base_name in ('sp', 'wsp')
+        base_r = None if base_is_sp else _name(base_name)
+        base_val = ('csp', 0) if base_is_sp else (st.regs[base_r[0]] if base_r not in (None, 'zr') else ('o',))
+        idx_r = _name(p.reg_name(mo.mem.index)) if has_idx else None
+        idx_val = st.regs[idx_r[0]] if idx_r not in (None, 'zr') else ('o',)
+        post_imm = p.writeback and mem_idx < len(ops) - 1 and ops[-1].type == ARM64_OP_IMM
+        pre_wb = p.writeback and mem_idx == len(ops) - 1
+        if m in PURE_LOADS:
+            if m in ('prfm', 'prfum'): return True
+            wb_val = None
+            if p.writeback:
+                if base_is_sp:
+                    if pre_wb:
+                        if not self._csp_shift(st, disp): return False
+                    elif not post_imm:
+                        st.frame = None; st.escaped = True
+                        if st.slots: return False
+                elif base_val[0] == 'arg':
+                    wb_val = ('arg', base_val[1], base_val[2] + (disp if pre_wb else _imm(ops[-1]))) if (pre_wb or post_imm) else ('arg_any',)
+                elif base_val[0] == 'csp':
+                    if pre_wb or post_imm:
+                        wb_val = ('csp', base_val[1] + (disp if pre_wb else _imm(ops[-1]))) if not st.escaped and st.frame is not None else ('arg_any',)
+                    else:
+                        st.escaped = True; wb_val = ('arg_any',)
+                        if st.slots: return False
+                elif base_val[0] == 'arg_any':
+                    wb_val = ('arg_any',)
+            if base_val[0] == 'csp' and st.slots:
+                if has_idx or st.frame is None or st.escaped: return False
+                off = 0 if (base_is_sp and p.writeback) else base_val[1] + (0 if post_imm else disp)
+                dst = _reg(p, ops[0])
+                if m in ('ldr', 'ldur', 'ldar') and dst not in (None, 'zr') and dst[1] == 64:
+                    if p.writeback and base_r not in (None, 'zr') and dst[0] == base_r[0]: return False
+                    if off in st.slots:
+                        lv = st.slots[off][1]
+                    elif self._overlap(st.slots, off, off + 8):
+                        return False
+                    else:
+                        lv = ('o',)
+                    st.regs[dst[0]] = lv
+                elif m in ('ldp', 'ldnp') and len(ops) >= 3 and dst not in (None, 'zr') and dst[1] == 64 and (d2 := _reg(p, ops[1])) not in (None, 'zr') and d2[1] == 64:
+                    if p.writeback and base_r not in (None, 'zr') and base_r[0] in (dst[0], d2[0]): return False
+                    v1 = st.slots[off][1] if off in st.slots else (None if self._overlap(st.slots, off, off + 8) else ('o',))
+                    v2 = st.slots[off + 8][1] if (off + 8) in st.slots else (None if self._overlap(st.slots, off + 8, off + 16) else ('o',))
+                    if v1 is None or v2 is None: return False
+                    st.regs[dst[0]] = v1; st.regs[d2[0]] = v2
+                else:
+                    lsz = _load_size(p, m, ops)
+                    if lsz is None or self._overlap(st.slots, off, off + lsz): return False
+                    for name in p.writes():
+                        r = _name(name)
+                        if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
+            else:
+                if p.writeback and base_r not in (None, 'zr') and wb_val is not None:
+                    loaded = {_reg(p, op)[0] for op in ops[:mem_idx] if _reg(p, op) not in (None, 'zr')}
+                    if base_r[0] in loaded: return False
+                for name in p.writes():
+                    r = _name(name)
+                    if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
+            if p.writeback and not base_is_sp and base_r not in (None, 'zr') and wb_val is not None:
+                st.regs[base_r[0]] = wb_val
+            if post_imm and base_is_sp:
+                if not self._csp_shift(st, _imm(ops[-1])): return False
+            return True
+        # Memory write or atomic RMW
+        if idx_val[0] in ('arg', 'arg_any', 'csp'): return False
+        data_ops = ops[1:mem_idx] if m in ('stxr', 'stxrb', 'stxrh', 'stlxr', 'stlxrb', 'stlxrh', 'stxp', 'stlxp') else ops[:mem_idx]
+        arg_data = []
+        for idx_d, op in enumerate(data_ops):
+            if _is_sp(p, op):
+                st.escaped = True
+                if st.slots: return False
+                continue
+            r = _reg(p, op)
+            if r not in (None, 'zr'):
+                dv = st.regs[r[0]]
+                if dv[0] == 'csp':
+                    st.escaped = True
+                    if st.slots: return False
+                elif dv[0] in ('arg', 'arg_any'):
+                    arg_data.append((idx_d, r[1], dv))
+        if arg_data:
+            if (base_val[0] != 'csp' or has_idx or st.escaped or st.frame is None or post_imm
+                    or m not in ('str', 'stur', 'stlr', 'stp', 'stnp') or any(w != 64 for _, w, _ in arg_data)):
+                return False
+        if base_val[0] == 'arg_any': return False
+        if base_val[0] == 'arg':
+            if has_idx: return False
+            wsz = _store_size(p, m, ops)
+            if wsz is None: return False
+            addr_off = base_val[2] + (0 if post_imm else disp)
+            writes.add((base_val[1], addr_off, addr_off + wsz))
+            if len(writes) > CALLEE_WRITES: return False
+            if p.writeback and base_r not in (None, 'zr'):
+                if pre_wb: st.regs[base_r[0]] = ('arg', base_val[1], base_val[2] + disp)
+                elif post_imm: st.regs[base_r[0]] = ('arg', base_val[1], base_val[2] + _imm(ops[-1]))
+                else: st.regs[base_r[0]] = ('arg_any',)
+            for name in p.writes():
+                r = _name(name)
+                if r not in (None, 'zr') and not (p.writeback and base_r not in (None, 'zr') and r[0] == base_r[0]):
+                    st.regs[r[0]] = ('o',)
+            return True
+        if base_val[0] == 'csp':
+            if p.writeback:
+                if base_is_sp and pre_wb:
+                    if not self._csp_shift(st, disp): return False
+                elif base_is_sp and not post_imm:
+                    return False
+                elif not base_is_sp:
+                    if not (pre_wb or post_imm): return False
+            if has_idx or st.frame is None or st.escaped: return False
+            wsz = _store_size(p, m, ops)
+            if wsz is None: return False
+            addr_off = 0 if (base_is_sp and p.writeback) else base_val[1] + (0 if post_imm else disp)
+            if addr_off < 0 or addr_off + wsz > st.frame: return False
+            self._kill_slots(st.slots, addr_off, addr_off + wsz)
+            for idx_d, _, dv in arg_data:
+                st.slots[addr_off + 8 * idx_d] = (8, dv)
+                if len(st.slots) > CALLEE_SLOTS: return False
+            if p.writeback:
+                if post_imm and base_is_sp:
+                    if not self._csp_shift(st, _imm(ops[-1])): return False
+                elif not base_is_sp and base_r not in (None, 'zr'):
+                    st.regs[base_r[0]] = ('csp', base_val[1] + (disp if pre_wb else _imm(ops[-1])))
+            for name in p.writes():
+                r = _name(name)
+                if r not in (None, 'zr') and not (p.writeback and not base_is_sp and base_r not in (None, 'zr') and r[0] == base_r[0]):
+                    st.regs[r[0]] = ('o',)
+            return True
+        # Store to non-caller-stack, non-callee-stack memory
+        for name in p.writes():
+            r = _name(name)
+            if r not in (None, 'zr'): st.regs[r[0]] = ('o',)
+        return True
+
+
 class Function:
-    def __init__(self, insl, img, code_ok, consts):
+    def __init__(self, insl, img, code_ok, consts, callees=None):
         self.insl, self.img, self.code_ok, self.consts = insl, img, code_ok, consts
+        self.callees = callees
         self.at = {p.address: k for k, p in enumerate(insl)}
         self.leaders = set(); self.calls = None; self.landing = {}
 
@@ -467,9 +985,9 @@ class Function:
     def _escape(self, st, k):
         """A stack pointer may have escaped: drop all tracked local slots and stop tracking stack pointers."""
         st.escaped = True; st.frame = 0; st.slots.clear()
-        if st.flags and st.flags[1][0] == 'sp': st.flags = None
+        if st.flags and st.flags[1][0] in ('sp', 'sp?'): st.flags = None
         for i, v in enumerate(st.regs):
-            if v[0] == 'sp':
+            if v[0] in ('sp', 'sp?'):
                 root = ('es', k, i, 64); self.detach(st, root, i)
                 st.regs[i] = ('s', root, ())
 
@@ -491,7 +1009,7 @@ class Function:
     def _sp_reset(self, st, k):
         """sp was written to an unknown value (dynamic alloca or unknown base)."""
         st.frame = 0; st.slots.clear()
-        if any(v[0] == 'sp' for v in st.regs): self._escape(st, k)
+        if any(v[0] in ('sp', 'sp?') for v in st.regs): self._escape(st, k)
 
     def _slot_kill(self, st, off, sz):
         if not st.slots: return
@@ -523,24 +1041,46 @@ class Function:
 
     def _reads_sp(self, st, p):
         if st.escaped: return False
-        has_sp_reg = any(v[0] == 'sp' for v in st.regs)
+        has_sp_reg = any(v[0] in ('sp', 'sp?') for v in st.regs)
         if not has_sp_reg and 'sp' not in p.op_str: return False
         for name in p.reads():
             if name in ('sp', 'wsp'): return True
             if has_sp_reg:
                 r = _name(name)
-                if r not in (None, 'zr') and st.regs[r[0]][0] == 'sp': return True
+                if r not in (None, 'zr') and st.regs[r[0]][0] in ('sp', 'sp?'): return True
         if has_sp_reg:
             for i, op in enumerate(p.operands):
                 if op.type == ARM64_OP_REG and (i > 0 or p.mnemonic in ('dc', 'ic', 'at', 'tlbi')):
                     r = _name(p.reg_name(op.reg))
-                    if r not in (None, 'zr') and st.regs[r[0]][0] == 'sp': return True
+                    if r not in (None, 'zr') and st.regs[r[0]][0] in ('sp', 'sp?'): return True
         return False
 
-    def clobber(self, st, k, syscall=False):
-        if not st.escaped and (syscall or any(st.regs[n][0] == 'sp' for n in (*range(19), 30))):
-            self._escape(st, k)
-        for n in list(range(19)) + [30]: st.regs[n] = self.fresh(st, k, n, 64)
+    def clobber(self, st, k, syscall=False, target=None):
+        ret_vals = {}
+        if not st.escaped:
+            if syscall:
+                self._escape(st, k)
+            else:
+                sp_call = any(st.regs[n][0] in ('sp', 'sp?') for n in range(19))
+                if sp_call:
+                    summary = None
+                    if target is not None and self.callees is not None:
+                        exact = frozenset(n for n in range(30) if st.regs[n][0] == 'sp')
+                        any_ = frozenset(n for n in range(30) if st.regs[n][0] == 'sp?')
+                        summary = self.callees.summarize(target, exact, any_)
+                    if summary is None:
+                        self._escape(st, k)
+                    else:
+                        writes, ret_ptrs = summary
+                        for r, lo, hi in writes:
+                            self._slot_kill(st, st.regs[r][1] + lo, hi - lo)
+                        for r, rv in ret_ptrs.items():
+                            if rv[0] == 'arg' and st.regs[rv[1]][0] == 'sp':
+                                ret_vals[r] = ('sp', st.regs[rv[1]][1] + rv[2])
+                            else:
+                                ret_vals[r] = ('sp?',)
+        for n in list(range(19)) + [30]:
+            st.regs[n] = ret_vals[n] if n in ret_vals else self.fresh(st, k, n, 64)
         st.flags = None
 
     # Instructions
@@ -572,7 +1112,7 @@ class Function:
                 if ok: out.append((dest, s2))
             return out
         if m in ('bl', 'svc', 'hvc', 'smc') + BLRS:
-            self.clobber(st, k, m in ('svc', 'hvc', 'smc'))
+            self.clobber(st, k, m in ('svc', 'hvc', 'smc'), ops[0].imm if m == 'bl' else None)
             if (m == 'bl' or m in BLRS) and self.calls is not None: self.calls.append((p.address, st.copy()))
             return fall
         if m in BRS: return []   # an authenticated indirect branch (braa / brab ...): leaves the function, as a br that reads no table does
@@ -599,8 +1139,9 @@ class Function:
         base_is_sp = base_name in ('sp', 'wsp')
         base_r = None if base_is_sp else _name(base_name)
         base_sp_off = 0 if base_is_sp else (st.regs[base_r[0]][1] if not st.escaped and base_r not in (None, 'zr') and st.regs[base_r[0]][0] == 'sp' else None)
+        base_sp_any = not st.escaped and base_r not in (None, 'zr') and st.regs[base_r[0]][0] == 'sp?'
         idx_r = _name(p.reg_name(mo.mem.index)) if has_idx else None
-        if not st.escaped and idx_r not in (None, 'zr') and st.regs[idx_r[0]][0] == 'sp': self._escape(st, k); base_sp_off = None
+        if not st.escaped and idx_r not in (None, 'zr') and st.regs[idx_r[0]][0] in ('sp', 'sp?'): self._escape(st, k); base_sp_off = None; base_sp_any = False
         post_imm = p.writeback and mem_idx < len(ops) - 1 and ops[-1].type == ARM64_OP_IMM
         pre_wb = p.writeback and mem_idx == len(ops) - 1
         if m in PURE_LOADS:
@@ -620,7 +1161,7 @@ class Function:
                     self._sp_shift(st, k, disp); self.unknown(st, k); return
                 if base_is_sp and not post_imm:
                     self._sp_reset(st, k); self.unknown(st, k); return
-                if not base_is_sp and base_sp_off is not None:
+                if not base_is_sp and (base_sp_off is not None or base_sp_any):
                     self._escape(st, k); self.unknown(st, k); return
             reloaded = False
             if not st.escaped and base_sp_off is not None and not has_idx:
@@ -647,7 +1188,8 @@ class Function:
             for op in data_ops:
                 if _is_sp(p, op): self._escape(st, k); break
                 r = _reg(p, op)
-                if r not in (None, 'zr') and st.regs[r[0]][0] == 'sp': self._escape(st, k); break
+                if r not in (None, 'zr') and st.regs[r[0]][0] in ('sp', 'sp?'): self._escape(st, k); break
+        if not st.escaped and base_sp_any: self._escape(st, k)
         if p.writeback:
             if base_is_sp and pre_wb:
                 self._sp_shift(st, k, disp)
@@ -792,11 +1334,13 @@ class Function:
 
     # The fixpoint
     def _join_val(self, a, b, x, y, k, tag, key_id, widen, escaped, cons, phis, pairs, assigned):
-        if x == y and not (escaped and x[0] == 'sp'):
+        if x == y and not (escaped and x[0] in ('sp', 'sp?')):
             if x[0] == 's' and x[1] not in cons:
                 r = x[1]; ca = a.con(r); c = _cunion(ca, b.con(r))
                 cons[r] = _widen(ca, c, r) if widen else c
             return x
+        if not escaped and (x[0] in ('sp', 'sp?') or y[0] in ('sp', 'sp?')):
+            return ('sp?',)
         if x[0] == 'c' and y[0] == 'c' and len(x[1] | y[1]) <= MAXC and not (widen and not y[1] <= x[1]):
             return ('c', x[1] | y[1], x[2] | y[2])
         if x[0] == 's' and y[0] == 's' and x[2] == y[2]:   # one root on each side: the join of the roots, the chain kept
@@ -824,7 +1368,7 @@ class Function:
         w17 at the loop's head, w17 checked again in every case block)"""
         regs, cons, widen = [], {}, visits > WIDEN
         phis, pairs, assigned = set(), {}, set()
-        escaped = a.escaped or b.escaped or any((x[0] == 'sp' or y[0] == 'sp') and x != y for x, y in zip(a.regs, b.regs))
+        escaped = a.escaped or b.escaped
         frame = 0 if escaped else min(a.frame, b.frame)
         if widen and frame < a.frame: frame = 0
         for i, (x, y) in enumerate(zip(a.regs, b.regs)):
@@ -993,13 +1537,14 @@ def solve(insl, img, code_ok, entries=(), outside=(), landing=None, unwound=True
     if not insl: return {}, {}
     insl = [Ins(p) for p in insl]
     x18 = {p.address for p in insl if p.mnemonic == 'br' and p.op_str == 'x18'}
+    callees = CalleeAnalyzer(img, code_ok)
     edges: dict = {}
     for _ in range(OUTER):   # each reading starts from every edge either has found: the guards' tables reach case blocks the constants rule out, and back
         try:
-            full = Function(insl, img, code_ok, True); found, failed = full.solve(entries, outside, edges, landing, unwound)
+            full = Function(insl, img, code_ok, True, callees); found, failed = full.solve(entries, outside, edges, landing, unwound)
             used = dict(edges)
             for a, ts in full.edges.items(): used[a] = sorted(set(used.get(a, ())) | set(ts))
-            guard = Function(insl, img, code_ok, False); guarded, _ = guard.solve(entries, outside, used, landing, unwound)
+            guard = Function(insl, img, code_ok, False, callees); guarded, _ = guard.solve(entries, outside, used, landing, unwound)
         except Unsupported as e: return {}, {p.address: str(e) for p in insl if p.mnemonic == 'br'}
         new = dict(used)
         for a, ts in guarded.items(): new[a] = sorted(set(new.get(a, ())) | set(ts))   # the guards add the tables they prove, at the size the guards allow

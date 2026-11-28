@@ -71,7 +71,14 @@ def dc_zva(r): return 0xd50b7420 | r                                      # dc z
 def csel_x(d, a, b): return 0x9a800000 | b << 16 | a << 5 | d             # csel xD, xA, xB, eq
 def lsr_x(d, s, n): return 0xd340fc00 | n << 16 | s << 5 | d              # lsr xD, xS, #n
 def ubfx_x(d, s, lsb, k): return 0xd3400000 | lsb << 16 | (lsb + k - 1) << 10 | s << 5 | d   # ubfx xD, xS, #lsb, #k
-RETAB = 0xd65f0fff
+def ldp_x_sp_post(a, b, off): return 0xa8c003e0 | ((off // 8) & 0x7f) << 15 | b << 10 | a
+def stp_x_base(a, b, base, off=0): return 0xa9000000 | ((off // 8) & 0x7f) << 15 | b << 10 | base << 5 | a
+def blr(r): return 0xd63f0000 | r << 5
+def fmov_d_x(d, r): return 0x9e670000 | r << 5 | d
+LDP_D01_X0, LDP_D23_X1, LDR_S4_X2, FSQRT_S0 = 0x6d400400, 0x6d400c22, 0xbd400044, 0x1e21c000
+STR_XZR_X0_POST8, LDR_W8_X0_POST4 = 0xf800841f, 0xb8404408
+BRK, BTI_C, RET_AB = 0xd4200000, 0xd503245f, 0xd65f0fff
+RETAB = RET_AB
 
 
 class Solver(unittest.TestCase):
@@ -353,6 +360,195 @@ class Bounds(Solver):
         lp_esc = [sub_sp(0x40), ADRP(19, 4, self.TABLE), ADDI(19, 19, 0), subs_w(4, 8, 1), str_x_sp(4, 0x10), add_x_sp(0, 0x20), bl(24, 0x400), RET,
                   ldr_x_sp(4, 0x10), cmp_w(4, 3), bcond(HI, 40, 76), ldrsw(18, 19, 4), ADDR(18, 18, 19), BR(18)] + [RET] * 6
         self.assertIsNone(self.site(lp_esc, landing={32: [(24, 28)]}))
+
+    def _put_code(self, addr, words):
+        for i, w in enumerate(words):
+            struct.pack_into('<I', self.img, addr + 4 * i, w)
+
+    def _install_plt(self, plt_addr, got_addr, sym_name, bti=False):
+        # Minimal MOD0 + DT_DYNAMIC + R_AARCH64_JUMP_SLOT + PLT stub in self.img (away from code < 0x4000 and TABLE at 0x4000).
+        mod0, dyn, strtab, symtab, jmprel = 0x5000, 0x5040, 0x5100, 0x5140, 0x5180
+        struct.pack_into('<I', self.img, 4, mod0)
+        self.img[mod0:mod0 + 4] = b'MOD0'
+        struct.pack_into('<i', self.img, mod0 + 4, dyn - mod0)
+        ents = [(5, strtab), (6, symtab), (20, 7), (23, jmprel), (2, 24), (0, 0)]
+        for i, (tag, val) in enumerate(ents):
+            struct.pack_into('<qQ', self.img, dyn + 16 * i, tag, val)
+        raw_name = b'\0' + sym_name.encode() + b'\0'
+        self.img[strtab:strtab + len(raw_name)] = raw_name
+        struct.pack_into('<IBBHQQ', self.img, symtab + 24, 1, 0x12, 0, 0, 0, 0)
+        struct.pack_into('<QQq', self.img, jmprel, got_addr, (1 << 32) | 1026, 0)
+        off = plt_addr
+        stub = []
+        if bti:
+            stub.append(BTI_C)
+            off += 4
+        lo = got_addr & 0xfff
+        stub += [ADRP(16, off, got_addr), 0xf9400211 | ((lo // 8) << 10), ADDI(16, 16, lo), 0xd61f0220]
+        self._put_code(plt_addr, stub)
+
+    def _build_callee_dispatch(self, callee_setup, between=(), extra_loop_back=False):
+        """Sonic Racing: CrossWorlds 1.41 main+0x726244 frame (sub sp,#0x140; add x29,sp,#0x110) with a call passing
+        stack-local pointers and a spilled 32-bit index at [sp,#0x80] reloaded as 64-bit before cmp w4,#5; b.hi; br x18."""
+        self.img = bytearray(0x6000)
+        # Prologue: sub sp, #0x140; stp x29, x30, [sp, #0x110]; add x29, sp, #0x110
+        head = [sub_sp(0x140), stp_x_sp(29, 30, 0x110), add_x_sp(29, 0x110)]
+        loop_at = 4 * len(head)
+        # Loop body: subs w4, w8, #1; cbz w0, spill_blk; callee_setup; mov x0, #0; mov x1, #0; b loop (or join)
+        call_blk = list(callee_setup)
+        body_pre = [subs_w(4, 8, 1)]
+        cbz_at = loop_at + 4 * len(body_pre)
+        call_at = cbz_at + 4
+        spill_at = call_at + 4 * (len(call_blk) + 1)
+        mid = [str_x_sp(4, 0x80)] + list(between) + [ldr_x_sp(4, 0x80)]
+        join_at = spill_at + 4 * len(mid)
+        adr_at = join_at + 16
+        t0 = join_at + 32
+        t = [t0 + 4 * i for i in range(6)]
+        exit_at = t0 + 24
+        self.table(t, rel=adr_at)
+        call_end = call_at + 4 * len(call_blk)
+        call_branch = B(call_end, loop_at if extra_loop_back else join_at)
+        tail = [
+            cmp_w(4, 5), bcond(HI, join_at + 4, exit_at),
+            ADRP(17, join_at + 8, self.TABLE), ADDI(17, 17, self.TABLE & 0xfff),
+            adr(18, adr_at, adr_at), ldrsw(0, 17, 4), ADDR(18, 18, 0), BR(18),
+        ]
+        # Replace placeholder bl targets encoded relative to 0 with actual PC-relative offsets where needed? Caller supplies PC-aware builder or fixed addresses.
+        w = head + body_pre + [cbz(0, cbz_at, spill_at)] + call_blk + [call_branch] + mid + tail + [RET] * 7
+        return w, t, call_at
+
+    def test_bounded_callee_preserves_spilled_index(self):
+        # Sonic Racing: CrossWorlds 1.41 main+0x726244 + callee 0x38c5fb0 (issue #3383): two calls in the same loop pass
+        # x0 = x29 - 0x40 (sp+0xd0) and x1 = x29 - 0x10 (sp+0x100) to a read-only helper whose slow path calls sqrtf.
+        callee_at, sqrtf_at, plt_at = 0x2000, 0x2200, 0x2800
+        # 1. Read-only framed callee calling local sqrtf on slow path, leaving x0/x1 untouched on fast path, looping back to the spill path
+        w, t, call_at = self._build_callee_dispatch(
+            [sub_x_imm(0, 29, 0x40), sub_x_imm(1, 29, 0x10), mov_x(2, 9), bl(0x14 + 12, callee_at),
+             sub_x_imm(0, 29, 0x40), sub_x_imm(1, 29, 0x10), bl(0x14 + 24, callee_at),
+             movz(0, 0), movz(1, 0)],
+            between=[bl(0, 0x400), bl(0, 0x400)], extra_loop_back=True)
+        self.assertEqual(call_at, 0x14)
+        self._put_code(sqrtf_at, [FSQRT_S0, RET])
+        self._put_code(callee_at, [
+            stp_x_sp_pre(29, 30, -0x20), add_x_sp(29, 0),
+            LDP_D01_X0, LDP_D23_X1, LDR_S4_X2,
+            cbz(2, callee_at + 20, callee_at + 28),
+            bl(callee_at + 24, sqrtf_at),
+            ldp_x_sp_post(29, 30, 0x20), RET,
+        ])
+        self.assertEqual(self.site(w), t)
+        # 2. Same callee whose slow path calls sqrtf via an AArch64 PLT stub (and Switch 2 BTI PLT stub) while x0/x1 remain untouched
+        for bti in (False, True):
+            with self.subTest(bti=bti):
+                w, t, _ = self._build_callee_dispatch(
+                    [sub_x_imm(0, 29, 0x40), sub_x_imm(1, 29, 0x10), mov_x(2, 9), bl(0x14 + 12, callee_at),
+                     movz(0, 0), movz(1, 0)],
+                    between=[bl(0, 0x400)], extra_loop_back=True)
+                self._install_plt(plt_at, 0x5200, 'sqrtf', bti=bti)
+                self._put_code(callee_at, [
+                    stp_x_sp_pre(29, 30, -0x20), add_x_sp(29, 0),
+                    LDP_D01_X0, LDP_D23_X1, LDR_S4_X2,
+                    cbz(2, callee_at + 20, callee_at + 28),
+                    bl(callee_at + 24, plt_at),
+                    ldp_x_sp_post(29, 30, 0x20), RET,
+                ])
+                self.assertEqual(self.site(w), t)
+        # 3. Read-only callee with a post-increment read loop over x0 (converges as read-only)
+        w, t, _ = self._build_callee_dispatch(
+            [sub_x_imm(0, 29, 0x40), bl(0x14 + 4, callee_at), movz(0, 0)],
+            between=[bl(0, 0x400)], extra_loop_back=True)
+        self._put_code(callee_at, [LDR_W8_X0_POST4, subs_w(2, 2, 1), bcond(NE, callee_at + 8, callee_at), RET])
+        self.assertEqual(self.site(w), t)
+        # 4. Bounded-range writer callee writing [x0, #0..#16) at sp+0xd0 (disjoint from [sp, #0x80])
+        w, t, _ = self._build_callee_dispatch(
+            [sub_x_imm(0, 29, 0x40), bl(0x14 + 4, callee_at), movz(0, 0)],
+            between=[sub_x_imm(0, 29, 0x40), bl(0x14 + 16 + 8, callee_at), movz(0, 0), bl(0, 0x400)], extra_loop_back=True)
+        self._put_code(callee_at, [stp_x_base(8, 9, 0, 0), RET])
+        self.assertEqual(self.site(w), t)
+        # 5. Callee with a cold brk path and a normal ret path still proves read-only
+        w, t, _ = self._build_callee_dispatch(
+            [sub_x_imm(0, 29, 0x40), bl(0x14 + 4, callee_at), movz(0, 0)],
+            between=[bl(0, 0x400)], extra_loop_back=True)
+        self._put_code(callee_at, [LDP_D01_X0, cbz(2, callee_at + 4, callee_at + 12), RET, BRK])
+        self.assertEqual(self.site(w), t)
+        # 6. Mismatched ('sp', off) across a join that is overwritten before any read or call does not escape the frame
+        w, t, _ = self._build_callee_dispatch(
+            [cbz(1, 0x14, 0x20), add_x_sp(9, 0x20), B(0x1c, 0x24), add_x_sp(9, 0x30), movz(9, 0)],
+            between=[bl(0, 0x400)], extra_loop_back=True)
+        self.assertEqual(self.site(w), t)
+
+    def test_bounded_callee_soundness_refusals(self):
+        # Negative cases: overlapping bounded writes (including negative offset from a disjoint base), unbounded/loop writes,
+        # pointer capture/return/escape, writes above callee sp, pointer-taking PLT imports, and unproved/trap/recursive callees.
+        callee_at, plt_at = 0x2000, 0x2800
+
+        def run_between_call(setup, callee_words, post_call=(), plt=None):
+            # Spill [sp,#0x80], run setup + bl callee_at + post_call + unknown bl 0x400, reload [sp,#0x80].
+            # Compute bl address inside mid: head(3) + subs(1) + cbz(1) + call_blk(0) + B(1) + str(1) = 7 words = 0x1c.
+            bl_at = 0x1c + 4 * len(setup)
+            between = list(setup) + [bl(bl_at, callee_at)] + list(post_call) + [bl(0, 0x400)]
+            w, t, call_at = self._build_callee_dispatch([], between=between)
+            self.assertEqual(call_at + 8 + 4 * len(setup), bl_at)
+            if plt is not None:
+                self._install_plt(plt_at, 0x5200, plt)
+            if callee_words is not None:
+                self._put_code(callee_at, callee_words)
+            return self.site(w), t
+
+        # Sanity check: with a read-only callee and cleared x0, run_between_call resolves all 6 targets (so every refusal below is due to the tested failure mode)
+        found, t = run_between_call([sub_x_imm(0, 29, 0x40)], [LDP_D01_X0, RET], [movz(0, 0)])
+        self.assertEqual(found, t)
+        # 1. Overlapping bounded writes: direct [sp+0x80], partial [sp+0x7c..0x84), and negative offset [x0 - 0x50] from x0 = sp+0xd0
+        self.assertIsNone(run_between_call([add_x_sp(0, 0x80)], [str_x_base(8, 0, 0), RET], [movz(0, 0)])[0])
+        self.assertIsNone(run_between_call([add_x_sp(0, 0x7c)], [str_x_base(8, 0, 0), RET], [movz(0, 0)])[0])
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [sub_x_imm(8, 0, 0x50), str_x_base(9, 8, 0), RET], [movz(0, 0)])[0])
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [0xf81b0009, RET], [movz(0, 0)])[0])   # stur x9, [x0, #-0x50]
+        # 2. Unbounded / indexed / loop / derived-offset writes through x0
+        for bad_write in (
+            [str_x_idx(8, 0, 1), RET],
+            [STR_XZR_X0_POST8, subs_w(2, 2, 1), bcond(NE, callee_at + 8, callee_at), RET],
+            [0x8b020008, str_x_base(9, 8, 0), RET],   # add x8, x0, x2; str x9, [x8]
+        ):
+            with self.subTest(bad_write=bad_write):
+                self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], bad_write, [movz(0, 0)])[0])
+        # 3. Pointer capture / escape inside callee (stored to heap/global, moved to FP/SIMD, dc zva, blr, br, svc, udf, brk-only, pointer-taking PLT, recursion)
+        for bad_escape in (
+            [str_x_base(0, 2, 0), RET],
+            [fmov_d_x(0, 0), RET],
+            [dup_v_x(0, 0), RET],
+            [dc_zva(0), RET],
+            [blr(2), RET],
+            [BR(2)],
+            [SVC, RET],
+            [0x00000000],                              # udf #0 (zero-filled)
+            [BRK],                                     # no reachable ret
+            [bl(callee_at, callee_at), RET],           # direct recursion cycle
+            [bl(callee_at, 0x400), RET],               # unproved nested callee while x0 holds caller pointer
+            [mov_x(19, 0), RET],                       # leaks x0 in callee-saved x19
+            [stur_x(8, 29, -0x90), RET],               # writes through caller's x29 into [sp, #0x80]
+        ):
+            with self.subTest(bad_escape=bad_escape):
+                self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], bad_escape, [movz(0, 0)])[0])
+        # Pointer-taking PLT imports (modff / frexpf / memcpy) must NOT be treated as safe no-pointer calls
+        for ptr_plt in ('modff', 'frexpf', 'memcpy'):
+            with self.subTest(ptr_plt=ptr_plt):
+                self.assertIsNone(run_between_call(
+                    [sub_x_imm(0, 29, 0x40)],
+                    [stp_x_sp_pre(29, 30, -0x20), bl(callee_at + 4, plt_at), ldp_x_sp_post(29, 30, 0x20), RET],
+                    [movz(0, 0)], plt=ptr_plt)[0])
+        # 4. Callee returns caller pointer (identity: ret) and caller writes through returned x0 or passes it untouched to an unproved bl
+        self.assertIsNone(run_between_call([add_x_sp(0, 0x80)], [RET], [str_x_base(9, 0, 0), movz(0, 0)])[0])
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [RET], [])[0])   # x0 stays ('sp', 0xd0) into bl 0x400
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [csel_x(0, 0, 2), RET], [str_x_base(9, 0, 0), movz(0, 0)])[0])
+        # 5. Callee writes outside its own frame (above entry sp into caller's stack)
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [str_x_sp(8, 0x80), RET], [movz(0, 0)])[0])
+        self.assertIsNone(run_between_call([sub_x_imm(0, 29, 0x40)], [sub_sp(0x20), str_x_sp(8, 0x20), add_sp(0x20), RET], [movz(0, 0)])[0])
+        # 6. Callee spills x0 to its own stack and passes its own stack pointer to an unproved nested call
+        self.assertIsNone(run_between_call(
+            [sub_x_imm(0, 29, 0x40)],
+            [sub_sp(0x20), str_x_sp(0, 0x10), add_x_sp(0, 0x10), bl(callee_at + 12, 0x400), add_sp(0x20), RET],
+            [movz(0, 0)])[0])
 
     def test_shifted_down_then_a_32_bit_compare(self):
         # ASTRAL CHAIN main+0x6db104: lsr x17,x11,#32; cmp w17,#5; b.hi; ldrsw x17,[x13,x17,lsl #2]: the shift leaves the upper half zero

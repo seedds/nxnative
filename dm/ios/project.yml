@@ -57,6 +57,7 @@ targets:
               public.filename-extension: [dmsave]
         LSSupportsGameMode: true
         GCSupportsControllerUserInteraction: true   # Physical controllers (GameController)
+        NSBluetoothAlwaysUsageDescription: "Plays Nintendo Switch 2 controllers over Bluetooth while you hold Sync on one."   # pad_switch2_apple.m (DM_SW2); without it the transport stays off
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
         CADisableMinimumFrameDurationOnPhone: true

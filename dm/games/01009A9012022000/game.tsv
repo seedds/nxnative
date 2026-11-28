@@ -1,0 +1,46 @@
+# Game profile of Atelier Ryza 2: Lost Legends & the Secret Fairy (Switch, update v458752 = 1.0.7). Plays on the Mac
+# Format: see dm/games/README.md
+# Gust's engine on Koei Tecmo's KTGL (KtglFsThread_Host, KTSL2 sound, KIDS tasks), on NVN, SDK 9.6.0 (the same sdk module build as Hyrule Warriors: Age of Calamity). Modules main + subsdk0 (NintendoSDK_movie) + sdk.
+# RomFS: loose files, 6.87 GB, 17,898 files: Data/NX (G1T textures, G1S shader files, 6,037 .gz archives, KTSL2 sound banks, three MP4 movies), event scripts, XML tables, text.
+# 24 DLC packages (indices 200-205, 207-214, 300, 301, 400, 401, 600-602, 700-702); the NSP script packs each DLC's RomFS as build/aoc/<index>.img, the host reports them owned and mounts them
+
+# ---- Identity ----
+title_id	01009A9012022000
+program_id	01009A9012022000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID
+name	Atelier Ryza 2: Lost Legends & the Secret Fairy
+ipa	AtelierRyza2LostLegendsTheSecretFairy.ipa
+app_category	public.app-category.role-playing-games
+# A 3D game: right stick for the camera, the D-pad for the field map. main reads no touch screen
+pad_layout	full
+
+# ---- Versions ----
+build	v458752	1.0.7	main=c2979457a57852161f627b71e1eeeb4d	subsdk0=3ab92c3444d4ece2f52417b5d8ee86eb	sdk=95832210b36121e88b4f9b7b66239dad
+package	v458752
+shader_versions	v458752
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/NX/Sound/VOICE.ktsl2stbin
+zip_store	.gz:.ktsl2asbin:.ktsl2stbin:.mp4:.trmd:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (META +0x14 = 0): no virtual address memory; nninitStartup sets a heap of 3.14 GB. The DX's 4 GB layout (256 MB in front + 256 MB alias region + 256 MB
+# stack region + 3.25 GB heap region). Mac, over the opening and into the first field: 4.4 to 4.5 GB resident, 1.8 GB of it Metal allocations
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Presentation ----
+# No fps_target: the Switch version runs at 30 fps and the game paces itself by the present interval it sets (1 or 2 by scene). It steps once per presented frame, and this build has
+# no frame step and no engine limit the host writes, so a cap would not apply in game mode and display mode at 60 runs the game at twice the speed (README: Frame rate and memory).
+# Mac, M4 Pro, headless: frame time p50 33.3 ms, p95 33.9-36 ms over the title, the opening cutscenes and the first field; GPU p50 6.4-11.2 ms. Mac numbers, not phone numbers
+
+# ---- Shader split (shader_split.py; 1,556 GLSLC outputs in the G2S containers of Data/NX/Shader/*.g1s, the .fpo / .cpo files, the elixir archives and main) ----
+shader_groups	/Data/=data /Event/=event /Saves/=saves /Script/=script /DLC/=dlc
+shader_note	Atelier Ryza 2: Lost Legends & the Secret Fairy shaders

@@ -48,6 +48,12 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
 
         private static int PackCbufInfo(int slot, int offset)
         {
+            // nxnative: an offset that does not fit would change the slot (ConstantFolding reads 0 past the bank instead)
+            if ((uint)offset >= 1u << CbufSlotLsb || (uint)slot > CbufSlotMask)
+            {
+                throw new ArgumentOutOfRangeException(nameof(offset), $"Constant buffer operand c{slot}[word {offset}] does not fit its packing.");
+            }
+
             return (slot << CbufSlotLsb) | offset;
         }
 

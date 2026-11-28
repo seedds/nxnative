@@ -1,0 +1,41 @@
+# Persona 5 Tactica 1.1.0, Unity 2021.3.23f1 IL2CPP, SDK 16.2.0, NVN.
+
+# ---- Identity ----
+title_id	010087701B092000
+program_id	010087701B092000
+
+# ---- App ----
+name	Persona 5 Tactica
+ipa	Persona5Tactica.ipa
+app_category	public.app-category.strategy-games
+pad_layout	full
+
+# ---- Versions ----
+build	v262144	1.1.0	main=b6333790be11542c03ff0ae1d550f34b	subsdk0=ff0149d0b5e882b87c2f06a981302b13	sdk=3053b22935e32ddf15ef81997603e5c2
+package	v262144
+shader_versions	v262144
+
+# ---- Files ----
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Switch/CriStreamingData/se_title.acb854607e3b146c6a886eedff6b9579adc
+zip_store	.bundle:.metallib
+
+# ---- Memory ----
+# The NPDM declares 16 MB of system resource. Unity uses virtual address memory without a process heap.
+sys_resource	0x1000000
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# Keep room for Unity's own regions in the iPhone layout. StandardAllocator reserves 3.12 GiB
+# but maps 0.41 GiB in the startup probe, while Unity's regions take the layout past +5 GiB.
+stdalloc_cap	0x60000000
+
+# ---- Graphics ----
+depth_mode	zero
+# Use the frame-rate settings found by Unity's internal-call matcher.
+fps_target	60
+
+# ---- Shader split ----
+shader_groups	/Data/=data
+shader_note	Persona 5 Tactica shaders

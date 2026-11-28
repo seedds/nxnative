@@ -1,0 +1,10 @@
+# Fresh language selection, title and opening story into the first room (GameMaker's ES 1.00 shaders and framebuffer composite).
+save	new
+keys	10:a,14:a,18:a,22:a,26:a,30:a,34:a,38:a,42:a,46:a,50:a,54:a,58:a,62:a,66:a,70:a,74:a,78:a,82:a,86:a,90:a,94:a,98:a,102:a,106:a,110:a
+secs	120
+quick	60
+reach	1800@100
+shots	100,115
+window	90	25
+hang	30
+prebuild	off

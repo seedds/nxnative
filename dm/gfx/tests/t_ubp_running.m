@@ -26,7 +26,6 @@ static void words(const uint32_t *got, const uint32_t *want, int n, const char *
 }
 
 int main(void) { @autoreleasepool {
-    setenv("DM_NVN_TBDR", "0", 1);
     mtl_init();
     mem = mmap(NULL, LEN, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     CHECK(mem != MAP_FAILED, "memory allocated"); if (mem == MAP_FAILED) return 1;

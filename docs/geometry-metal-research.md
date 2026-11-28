@@ -24,7 +24,7 @@ General geometry shader emulation is feasible. A mesh pipeline can keep expansio
 
 ## AI: THE SOMNIUM FILES evidence
 
-The registered profile contains exactly three geometry keys. Existing build logs fail these with an `unknown` MSL stage declaration. The profile maps the following effects; candidate vertex keys come from adjacent entries of the same Unity shader, not a captured runtime binding. [Shader inventory](../dm/games/010089B00D09C000/shader_map.tsv), [existing bring-up observations](development.md).
+The registered profile contains exactly three geometry keys. Existing build logs fail these with an `unknown` MSL stage declaration. The profile maps the following effects; candidate vertex keys come from adjacent entries of the same Unity shader, not a captured runtime binding. Shader inventory, [existing bring-up observations](development.md).
 
 | GS key | Effect | Body and declared output | Candidate VS |
 | --- | --- | --- | --- |

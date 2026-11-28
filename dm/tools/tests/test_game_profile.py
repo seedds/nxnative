@@ -121,3 +121,69 @@ class BuildModules(unittest.TestCase):
         r, text = self.run_game(self.ROWS.replace('subsdk1=', 'subsdk2='), 'header', ID, '{d}/game.h')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('{"' + 'd' * 32 + '", "main subsdk0 sdk"}', text)
+
+
+class MemMapLimit(unittest.TestCase):
+    def header_text(self, rows=''):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + rows)
+            out = Path(d, 'game.h')
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(out)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            return r.returncode, out.read_text() if out.exists() else (r.stderr + r.stdout).strip()
+
+    def test_tristate_macro_and_validation(self):
+        for rows, want in (('', '-1'), ('mem_map_limit\ton\n', '1'), ('mem_map_limit\toff\n', '0')):
+            rc, text = self.header_text(rows)
+            self.assertEqual(rc, 0, text)
+            self.assertIn(f'#define DM_GAME_MEM_MAP_LIMIT {want}', text)
+        rc, out = self.header_text('mem_map_limit\tmaybe\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('mem_map_limit must be on or off: maybe', out)
+
+    def test_multi_program_header_keeps_tristate_type(self):
+        other = '0400000000F0F001'
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, ID).mkdir(); Path(d, other).mkdir()
+            (Path(d, ID) / 'game.tsv').write_text(TSV + f'programs\t1={other}\n')
+            (Path(d, other) / 'game.tsv').write_text(TSV.replace(ID, other) + 'mem_map_limit\toff\n')
+            out = Path(d, 'game.h')
+            r = subprocess.run([sys.executable, str(GAME), 'header', ID, str(out)],
+                               env={**os.environ, 'DM_GAMES_DIR': d}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            text = out.read_text()
+            self.assertIn('.mem_map_limit = -1', text)
+            self.assertIn('.mem_map_limit = 0', text)
+
+
+class ShaderCovers(unittest.TestCase):
+    BASE = ('build\tv0\t1.0.0\tmain=' + 'a' * 32 + '\n'
+            'build\tv65536\t1.1.0\tmain=' + 'b' * 32 + '\n'
+            'shader_versions\tv0\n')
+
+    def test_valid_shader_covers(self):
+        rc, out = header(self.BASE + 'shader_covers\tv65536\n')
+        self.assertEqual((rc, out), (0, ''))
+
+    def test_rejected_shader_covers(self):
+        rc, out = header(self.BASE + 'shader_covers\tv131072\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('shader_covers names unregistered build(s): v131072', out)
+        rc, out = header(self.BASE + 'shader_covers\tv0\n')
+        self.assertNotEqual(rc, 0)
+        self.assertIn('shader_covers repeats shader_versions: v0', out)
+
+    def test_repository_profiles_shader_coverage_keys_are_valid(self):
+        sys.path.insert(0, str(REPO / 'dm/games'))
+        import game
+        for d in sorted((REPO / 'dm/games').iterdir()):
+            if not (d / 'game.tsv').is_file(): continue
+            g = game.Game(d)
+            builds, sv, cov = g.builds(), g.words('shader_versions', ''), g.words('shader_covers', '')
+            self.assertTrue(sv, f'{g.id}: missing shader_versions')
+            for v in sv:
+                self.assertIn(v, builds, f'{g.id}: shader_versions {v} is not a registered build')
+            for v in cov:
+                self.assertIn(v, builds, f'{g.id}: shader_covers {v} is not a registered build')
+                self.assertNotIn(v, sv, f'{g.id}: shader_covers repeats shader_versions {v}')

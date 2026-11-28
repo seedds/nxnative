@@ -1,0 +1,45 @@
+# Game profile of Mortal Kombat 11 (Switch, update v1703936 = 1.0.26).
+# Format: see dm/games/README.md. The game note records gameplay coverage.
+# NetherRealm's modified Unreal engine, Wwise and Havok; NVN, SDK 9.3.1.
+# NintendoSDK_movie in subsdk0 demuxes MP4 / H.264 with AAC 5.1 audio.
+
+# ---- Identity ----
+title_id	0100F2200C984000
+program_id	0100F2200C984000
+
+# ---- App ----
+name	Mortal Kombat 11
+ipa	MortalKombat11.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1703936	1.0.26	main=4f7ab1a3eefc7eb20413936e8e37c2e9	subsdk0=5a7ada8dd7447c10aa244944f64d0aff	sdk=d145f1048fc57e03685da0441d823ce4
+package	v1703936
+shader_versions	v1703936
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	Movies/MK11_029_043.mp4
+zip_store	.chs:.cht:.eng:.esp:.fra:.ger:.ita:.mko:.mp4:.png:.por:.psf:.rus:.spa:.xxx:.metallib
+
+# ---- Memory ----
+# Switch application pool with 256 MiB each for the alias and stack regions.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# The NPDM declares no system resource. The SDK uses a normal heap.
+sys_resource	0x0
+
+# ---- Graphics ----
+# Observed nvnDeviceSetDepthMode: near=0; offline pipeline archives must agree.
+depth_mode	zero
+
+# ---- Shader split ----
+shader_groups	/Asset/=asset /Movies/=movies /MKScript/=mkscript /Localization/=localization /Config/=config /misc/=misc /Server/=server
+shader_note	Mortal Kombat 11 shaders
+
+# ---- After the rewrite ----
+# Used memory reported beside the heap. Preserve the heap size from the tested profile.
+mem_used	0xcba4000

@@ -1,10 +1,12 @@
 // Mac app launcher: the settings window shown before the game starts, in the launcher's own process (launcher.c calls dm_mac_launcher before it starts the host). Its settings come from the
 // app's Resources/dm/launcher.json (dm/games/settings.py with SETTINGS_PLATFORM=mac); the model and the rows are the iOS launcher's (dm/ios/Sources/LauncherSettings.swift, LauncherRow.swift),
-// and so is the store: launcher.<VAR> in the app's preferences, which launcher.c reads when the window is not shown (docs/frontends.md, Saved choices). Basic settings (level basic) come
+// and so is the store: launcher.<VAR> in the app's preferences, which LauncherModel reads on both windowed and no-window launches (docs/frontends.md, Saved choices). Basic settings (level basic) come
 // first, the others under Advanced settings, each in the list's sections. Play puts the settings into this process's environment, which the host inherits; Quit and closing the window end the
-// app without the game. "Show this window at launch" off: no window unless Option is held at launch, and launcher.c applies the saved choices. The window never takes focus by itself: an app
+// app without the game. "Show this window at launch" off: no window unless Option is held at launch, and LauncherModel applies the saved choices and launcher.json defaults without saving. The window never takes focus by itself: an app
 // opened in the background (open -g) keeps its window behind until the player switches to it
 import AppKit
+import AVFAudio
+import CoreAudio
 import QuartzCore
 import SwiftUI
 
@@ -21,13 +23,17 @@ private func save_sync_report(_ save: UnsafePointer<CChar>, _ title: UnsafePoint
 enum SaveCheck {
     enum Outcome { case play(String?), retry, cancel }
 
+    /// The folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "" or "0" = off.
+    static func effectiveFolder(defaults: UserDefaults = .standard) -> String {
+        getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (defaults.string(forKey: "cloudSaves.folder") ?? "")
+    }
+
     /// Blocks while the cloud's file comes (SaveSyncReport.waitMs at most): call it off the main thread. nil: no report (sync is then left to the host as before)
-    static func report() -> SaveSyncReport? {
+    static func report(folder: String? = nil) -> SaveSyncReport? {
         // getenv, not ProcessInfo.environment: launcher.c sets DM_SAVE and applies the env files in this process before the window
         guard let save = getenv("DM_SAVE") else { fputs("launcher: save sync: no DM_SAVE\n", stderr); return nil }
         guard let id = info("DMTitleID"), !id.isEmpty else { fputs("launcher: save sync: no DMTitleID\n", stderr); return nil }
-        // the folder as launcher.c will pass it (cloud_saves_folder): DM_SAVE_SYNC from the launch environment or an env file, else the window's choice; "0" = off
-        let folder = getenv("DM_SAVE_SYNC").map { String(cString: $0) } ?? (UserDefaults.standard.string(forKey: "cloudSaves.folder") ?? "")
+        let folder = folder ?? effectiveFolder()
         var buf = [CChar](repeating: 0, count: 1024)
         let r = (folder.isEmpty ? "0" : folder).withCString { save_sync_report(save, id, $0, SaveSyncReport.waitMs, &buf, buf.count) }
         let line = String(cString: buf)
@@ -56,6 +62,24 @@ enum SaveCheck {
             case .alertSecondButtonReturn: return .play(r.cloudChoice)
             default: return .cancel
             }
+        case .missing:
+            guard let r else { return .play(nil) }
+            let a = NSAlert()
+            a.messageText = SaveSyncReport.missingTitle
+            a.informativeText = r.missingMessage(here: "Mac")
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Try Again")
+            a.addButton(withTitle: "Play Without Sending")
+            a.addButton(withTitle: r.sendLabel(here: "Mac"))
+            a.addButton(withTitle: cancel)
+            a.buttons[2].hasDestructiveAction = true
+            a.buttons[3].keyEquivalent = "\u{1b}"
+            switch a.runModal() {
+            case .alertFirstButtonReturn: return .retry
+            case .alertSecondButtonReturn: return .play("offline")   // this Mac's save, not sent: the next start compares again
+            case .alertThirdButtonReturn: return .play(r.localChoice)   // local:none
+            default: return .cancel
+            }
         case .unreadable:
             let a = NSAlert()
             a.messageText = SaveSyncReport.unreadableTitle
@@ -79,14 +103,16 @@ enum SaveCheck {
     }
 
     /// With the window off: the check and its question before the game, the app in front only while it asks. false: the player quit
-    static func withoutWindow() -> Bool {
+    static func withoutWindow(defaults: UserDefaults = .standard) -> Bool {
+        let folder = effectiveFolder(defaults: defaults)
+        guard SaveSyncReport.syncEnabled(folder) else { return true }
         final class Box: @unchecked Sendable { let lock = NSLock(); var report: SaveSyncReport?; var waiting = false }
         let app = NSApplication.shared
         defer { app.setActivationPolicy(.prohibited) }
         while true {
             let box = Box(), sem = DispatchSemaphore(value: 0)
             DispatchQueue.global(qos: .userInitiated).async {
-                let r = report()
+                let r = report(folder: folder)
                 box.lock.lock(); box.report = r; box.lock.unlock()
                 sem.signal()
                 DispatchQueue.main.async { if box.waiting { app.abortModal() } }   // runs inside the waiting alert's modal loop, if there is one
@@ -139,9 +165,21 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                if m.values["DM_MIC"] == "1" { MicrophoneDevicePicker() }
                 CloudSavesSection()
+                PrewarmUploadSetting()
                 Section {
-                    DisclosureGroup("Advanced settings", isExpanded: $advanced) {}
+                    // a Button, not an empty DisclosureGroup: the sections below live outside it, and in a grouped Form a DisclosureGroup does not toggle on row/label clicks (and failed to open on macOS 27)
+                    Button { advanced.toggle() } label: {
+                        HStack {
+                            Image(systemName: "chevron.right").rotationEffect(.degrees(advanced ? 90 : 0)).foregroundStyle(.secondary).accessibilityHidden(true)
+                            Text("Advanced settings")
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityValue(advanced ? "Expanded" : "Collapsed")
                 }
                 if advanced {
                     settingSections(basic: false)
@@ -185,10 +223,12 @@ struct LauncherView: View {
 
     /// Play, once the cloud's save is compared with this Mac's: a save that changed on both sides is the player's pick, not the newer file's (SaveCheck)
     private func start() {
+        let folder = SaveCheck.effectiveFolder()
+        guard SaveSyncReport.syncEnabled(folder) else { done(true); return }
         check += 1; checking = true
         let mine = check
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = SaveCheck.report()
+            let r = SaveCheck.report(folder: folder)
             DispatchQueue.main.async {
                 guard checking, check == mine else { return }   // the player played without it
                 checking = false
@@ -240,6 +280,102 @@ struct LauncherView: View {
         a.alertStyle = style
         a.addButton(withTitle: "OK")
         a.runModal()
+    }
+}
+
+private struct MicrophoneDevicePicker: View {
+    @AppStorage("launcher.DM_MIC_DEVICE") private var savedDevice = "default"
+    @State private var devices = MicrophoneInputDevices.list()
+
+    var body: some View {
+        Section {
+            if let uid = getenv("DM_MIC_DEVICE") {
+                let value = String(cString: uid)
+                LabeledContent("Microphone input", value: devices.first { $0.uid == value }?.name ?? "System Default")
+            } else {
+                Picker("Microphone input", selection: $savedDevice) {
+                    Text("System Default").tag("default")
+                    if savedDevice != "default", !devices.contains(where: { $0.uid == savedDevice }) {
+                        Text("Selected device unavailable").tag(savedDevice)
+                    }
+                    ForEach(devices) { Text($0.name).tag($0.uid) }
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            devices = MicrophoneInputDevices.list()
+        }
+    }
+}
+
+private struct MicrophoneInputDevice: Identifiable, Hashable {
+    let uid: String
+    let name: String
+    var id: String { uid }
+}
+
+private enum MicrophoneInputDevices {
+    static func list() -> [MicrophoneInputDevice] {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioDeviceID>.size) else { return [] }
+        var ids = [AudioDeviceID](repeating: kAudioObjectUnknown, count: Int(size) / MemoryLayout<AudioDeviceID>.stride)
+        let status = ids.withUnsafeMutableBytes { bytes in
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, bytes.baseAddress!)
+        }
+        guard status == noErr else { return [] }
+        return ids.compactMap { device in
+            guard hasInput(device), let uid = string(device, selector: kAudioDevicePropertyDeviceUID),
+                  let name = string(device, selector: kAudioObjectPropertyName), !uid.isEmpty else { return nil }
+            return MicrophoneInputDevice(uid: uid, name: dualSenseOverUSB(device) ? "\(name) (USB)" : name)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func hasInput(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamConfiguration,
+                                                 mScope: kAudioDevicePropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr,
+              size >= UInt32(MemoryLayout<AudioBufferList>.size) else { return false }
+        let data = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { data.deallocate() }
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, data) == noErr else { return false }
+        let buffers = UnsafeMutableAudioBufferListPointer(data.assumingMemoryBound(to: AudioBufferList.self))
+        return buffers.contains { $0.mNumberChannels > 0 }
+    }
+
+    // A DualSense or DualSense Edge on USB: CoreAudio exposes its USB VID:PID at the end of ModelUID ("<name>:054C:0CE6" / ":0DF2").
+    private static func dualSenseOverUSB(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr,
+              transport == kAudioDeviceTransportTypeUSB,
+              let model = string(device, selector: kAudioDevicePropertyModelUID) else { return false }
+        let parts = model.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count >= 3,
+              let vid = UInt32(parts[parts.count - 2], radix: 16),
+              let pid = UInt32(parts[parts.count - 1], radix: 16) else { return false }
+        return vid == 0x054C && (pid == 0x0CE6 || pid == 0x0DF2)
+    }
+
+    private static func string(_ device: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: CFString?
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(device, &address, 0, nil, &size, UnsafeMutableRawPointer(pointer))
+        }
+        guard status == noErr, let value else { return nil }
+        return value as String
     }
 }
 
@@ -348,24 +484,79 @@ enum LauncherWindowLayout {
     }
 }
 
-// 1: Play (the window's settings are in the environment), 0: the player quit, 2: no window (no launcher.json, or "Show this window at launch" off): launcher.c applies the saved choices
+// Called on the main thread after settings and cloud-save decisions. The OS can present
+// its consent alert even when the settings window is suppressed.
+@_cdecl("dm_mac_microphone_consent")
+public func dmMacMicrophoneConsent() -> Int32 {
+    switch AVAudioApplication.shared.recordPermission {
+    case .granted: return 1
+    case .undetermined:
+        _ = NSApplication.shared
+        var allowed: Bool?
+        AVAudioApplication.requestRecordPermission { granted in
+            DispatchQueue.main.async { allowed = granted }
+        }
+        while allowed == nil {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        if allowed == true {
+            fputs("launcher: microphone permission allowed\n", stderr)
+            return 1
+        }
+    default: break
+    }
+    fputs("launcher: microphone permission denied\n", stderr)
+    return 0
+}
+
+private var cachedLauncherSettings: [Setting]?
+private var loadedLauncherSettings = false
+
+private func launcherSettings() -> [Setting]? {
+    if loadedLauncherSettings { return cachedLauncherSettings }
+    loadedLauncherSettings = true
+    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"),
+          let data = try? Data(contentsOf: url) else { return nil }
+    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data) else {
+        fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr)
+        return nil
+    }
+    cachedLauncherSettings = file.settings
+    return file.settings
+}
+
+// Record which settings in dm/launcher.json are already set in the launch environment, before launcher.c reads env.txt.
+@_cdecl("dm_mac_record_launch_keys")
+public func dmMacRecordLaunchKeys() {
+    let settings = launcherSettings() ?? []
+    let keys = settings.map(\.env).filter { getenv($0) != nil }
+    setenv("DM_ENV_LAUNCH_KEYS", keys.joined(separator: " "), 1)
+}
+
+// 1: start the game (resolved settings from dm/launcher.json are in the environment), 0: the player quit.
+// showWindow == 0 (DM_LAUNCHER=0 or --no-launcher): resolve and apply saved choices + launcher.json defaults without initializing AppKit or SaveCheck.
 @_cdecl("dm_mac_launcher")
-public func dmMacLauncher() -> Int32 {
-    guard let url = Bundle.main.resourceURL?.appendingPathComponent("dm/launcher.json"), let data = try? Data(contentsOf: url) else { return 2 }
-    guard let file = try? JSONDecoder().decode(SettingsFile.self, from: data), !file.settings.isEmpty else { fputs("[RED] launcher: dm/launcher.json cannot be read; starting the game\n", stderr); return 2 }
+public func dmMacLauncher(_ showWindow: Int32) -> Int32 {
+    guard let settings = launcherSettings(), !settings.isEmpty else { return 1 }
+    if showWindow == 0 {
+        LauncherModel(settings).apply(persist: false)
+        return 1
+    }
     if (UserDefaults.standard.object(forKey: "window.show") as? Bool) == false && !NSEvent.modifierFlags.contains(.option) {
         fputs("launcher: settings window off (hold Option at launch to show it)\n", stderr)
-        return SaveCheck.withoutWindow() ? 2 : 0
+        guard SaveCheck.withoutWindow() else { return 0 }
+        LauncherModel(settings).apply(persist: false)
+        return 1
     }
-    let model = LauncherModel(file.settings)
+    let model = LauncherModel(settings)
     let app = NSApplication.shared, launcher = Launcher(model)
     app.setActivationPolicy(.regular)
     app.delegate = launcher
-    fputs("launcher: \(file.settings.count) settings shown\n", stderr)
+    fputs("launcher: \(settings.count) settings shown\n", stderr)
     app.run()
     CATransaction.flush()   // finish's order-out
     app.setActivationPolicy(.prohibited)   // the host is the game's app from here on
     guard launcher.play else { fputs("launcher: quit without starting the game\n", stderr); return 0 }
-    model.apply()
+    model.apply(persist: true)
     return 1
 }

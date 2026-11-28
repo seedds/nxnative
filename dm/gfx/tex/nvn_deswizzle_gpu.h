@@ -19,3 +19,10 @@ int nvn_deswz_gpu_encode_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTa
                             id<MTLBuffer> params, size_t params_off, id<MTLBuffer> src, uint64_t src_off, int sparse,
                             const nvn_texdesc *d, unsigned level, unsigned layer,
                             id<MTLBuffer> dst, uint64_t dst_off, size_t dst_pitch);
+
+// Encode one depth-block-aligned region. va stays at the origin of the full
+// page table; base includes the byte offset of the region in that storage.
+void nvn_deswz_gpu_sparse_region_m4(id<MTL4ComputeCommandEncoder> enc, id<MTL4ArgumentTable> table,
+        id<MTLBuffer> params, size_t params_off, id<MTLBuffer> pages, uint64_t va, uint64_t base,
+        id<MTLBuffer> dst, uint64_t dst_off, uint32_t row, uint32_t rows, uint32_t depth,
+        unsigned th, unsigned td, unsigned columns, unsigned gob_order);

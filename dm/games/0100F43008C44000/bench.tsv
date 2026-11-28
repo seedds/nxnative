@@ -1,0 +1,4 @@
+# Station arrival save, facing down the platform after the opening train scene.
+# Seconds keep movement comparable at 30 and 60 fps. Measure after load/initial pacing settles.
+station-stand	20:A*3/4	40	100	station arrival save: stand on the platform, people and Pokemon animating
+station-walk	20:A*3/4,45:LUp~2,55:LDown~2	40	100	the same station save: walk forward for two seconds, then back for two seconds

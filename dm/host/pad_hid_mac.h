@@ -375,6 +375,7 @@ static int hidpad_known(const hid_pad *list, IOHIDDeviceRef hid, uint64_t entry)
     for (const hid_pad *d = list; d; d = d->next) if (d->hid == hid || (entry && hidpad_entry(d->hid) == entry)) return 1;
     return 0;
 }
+static int hidpad_ab_xbox(void) { const char *e = getenv("DM_PAD_AB"); return e && !strcmp(e, "xbox"); }   // DM_PAD_AB=xbox swaps the layout's A and B
 static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef hid) {
     (void)ctx; (void)sender;
     if (result != kIOReturnSuccess || IOHIDDeviceGetProperty(hid, CFSTR(kIOHIDGCSyntheticDeviceKey)) == kCFBooleanTrue) return;
@@ -397,7 +398,7 @@ static void hidpad_found(void *ctx, IOReturn result, void *sender, IOHIDDeviceRe
         d->nin |= pad_hid_nin_bit(IOHIDElementGetType(e) == kIOHIDElementTypeOutput, IOHIDElementGetReportID(e), page);
     }
     enum pad_hid_layout layout = pad_hid_layout_for(d->nin, d->vid, d->pid, has);
-    pad_hid_init(&d->st, getenv("DM_HID_MAP"), layout);
+    pad_hid_init(&d->st, getenv("DM_HID_MAP"), layout, hidpad_ab_xbox());
     for (int a = 0; a < PH_AXES; a++) if (has[a]) d->st.has[pad_hid_axis_for(layout, a)] = 1;
     d->hid = (IOHIDDeviceRef)CFRetain(hid);
     d->gc_hint = [GCController supportsHIDDevice:hid];   // once per device: the call is not cheap
@@ -531,7 +532,7 @@ static void hidpad_twins_take(GCController *gone) {
             IOHIDDeviceRegisterInputReportCallback(d->hid, d->report, sizeof d->report, hidpad_report, d);
         } else {
             uint8_t has[PH_AXES]; memcpy(has, d->st.has, sizeof has);   // the axes hidpad_found saw
-            pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->st.layout); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
+            pad_hid_init(&d->st, getenv("DM_HID_MAP"), d->st.layout, hidpad_ab_xbox()); memcpy(d->st.has, has, sizeof has);   // nothing held from an earlier turn
             IOHIDDeviceRegisterInputValueCallback(d->hid, hidpad_value, d);
         }
         hidpad_attach(d);

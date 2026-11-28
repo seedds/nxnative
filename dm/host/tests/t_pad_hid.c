@@ -7,38 +7,38 @@ static int checks, fails;
 
 int main(void) {
     pad_hid h; int32_t s[4];
-    pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT, 0);
     CHECK(pad_hid_buttons(&h) == 0);
     h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_A);             // usage 2 (right) is A
     h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_B);             // usage 1 (bottom) is B
     h.buttons = 1u << 11 | 1u << 9; CHECK(pad_hid_buttons(&h) == (DM_BTN_PLUS | DM_BTN_ZR));
-    pad_hid_init(&h, "a=1,B=2,bogus=3,ZR=99,X=,MINUS=13", PAD_HID_DEFAULT);
+    pad_hid_init(&h, "a=1,B=2,bogus=3,ZR=99,X=,MINUS=13", PAD_HID_DEFAULT, 0);
     h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);
     h.buttons = 1u << 12; CHECK(pad_hid_buttons(&h) == DM_BTN_MINUS);
     h.buttons = 1u << 9; CHECK(pad_hid_buttons(&h) == DM_BTN_ZR);           // 99 skipped: the default stays
     h.buttons = 1u << 4; CHECK(pad_hid_buttons(&h) == 0);                    // X= maps X to nothing
-    pad_hid_init(&h, NULL, PAD_HID_NINTENDO);                               // Nintendo's report 0x3F: B A Y X L R ZL ZR - + LS RS
+    pad_hid_init(&h, NULL, PAD_HID_NINTENDO, 0);                               // Nintendo's report 0x3F: B A Y X L R ZL ZR - + LS RS
     { static const uint64_t want[12] = {DM_BTN_B, DM_BTN_A, DM_BTN_Y, DM_BTN_X, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_LS, DM_BTN_RS};
       for (int b = 0; b < 12; b++) { h.buttons = 1u << b; CHECK(pad_hid_buttons(&h) == want[b]); } }
     h.buttons = 1u << 12 | 1u << 13; CHECK(pad_hid_buttons(&h) == 0);        // Home and Capture are not Npad buttons here
-    pad_hid_init(&h, "X=13", PAD_HID_NINTENDO); h.buttons = 1u << 12; CHECK(pad_hid_buttons(&h) == DM_BTN_X);   // DM_HID_MAP still replaces entries
+    pad_hid_init(&h, "X=13", PAD_HID_NINTENDO, 0); h.buttons = 1u << 12; CHECK(pad_hid_buttons(&h) == DM_BTN_X);   // DM_HID_MAP still replaces entries
     // The same physical buttons keep their mapping when report 0x3F changes to 0x30, including Home/Capture overrides and the hat.
-    pad_hid_init(&h, NULL, PAD_HID_NINTENDO);
+    pad_hid_init(&h, NULL, PAD_HID_NINTENDO, 0);
     for (int b = 0; b < 12; b++) CHECK(pad_hid_nin_buttons(&h, 1ull << b, 0) == (1ull << b));
-    pad_hid_init(&h, "A=1,B=2,X=13,Y=14,L=0,RIGHT=12", PAD_HID_NINTENDO);
+    pad_hid_init(&h, "A=1,B=2,X=13,Y=14,L=0,RIGHT=12", PAD_HID_NINTENDO, 0);
     h.buttons = 1u << 1 | 1u << 4 | 1u << 11 | 1u << 12 | 1u << 13; h.hat = 0;
     CHECK(pad_hid_buttons(&h) == (DM_BTN_B | DM_BTN_RS | DM_BTN_X | DM_BTN_Y | DM_BTN_RIGHT | DM_BTN_UP));
     CHECK(pad_hid_nin_buttons(&h, DM_BTN_A | DM_BTN_L | DM_BTN_RS | DM_BTN_UP, 0x30) == pad_hid_buttons(&h));
     h.hat = 4; h.has[PH_ACCEL] = 1; h.axis[PH_ACCEL] = 1;
     CHECK(pad_hid_nin_buttons(&h, 0, 0) == 0);   // no stale simple-report hat or analog trigger in full mode
-    pad_hid_init(&h, NULL, PAD_HID_NINTENDO); CHECK(h.layout == PAD_HID_NINTENDO);   // a raw stick, as the NANO's: rests at -0.08, reaches 0.78 either way
+    pad_hid_init(&h, NULL, PAD_HID_NINTENDO, 0); CHECK(h.layout == PAD_HID_NINTENDO);   // a raw stick, as the NANO's: rests at -0.08, reaches 0.78 either way
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, -0.08f)) < 1e-6f);
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, 0.27f) - 0.5f) < 1e-5f);          // half of the first reach
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, 0.70f) - 1) < 1e-5f && fabsf(pad_hid_raw_axis(&h, PH_X, 0.31f) - 0.5f) < 1e-5f);   // past it the reach grows
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, -0.78f) + 1) < 1e-5f);            // full on both sides, though the rest is off centre
     CHECK(fabsf(pad_hid_raw_axis(&h, PH_X, -0.08f)) < 1e-6f);
     CHECK(pad_hid_raw_axis(&h, PH_Y, 0.9f) == 1 && h.rest[PH_Y] == 0);       // held while connecting: not a rest
-    pad_hid_init(&h, NULL, PAD_HID_DEFAULT); CHECK(h.layout == PAD_HID_DEFAULT);
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT, 0); CHECK(h.layout == PAD_HID_DEFAULT);
     // Nintendo's descriptor, by its reports: buttons in 0x3F, the replies 0x21, the full report 0x30 and the subcommand output 0x01 make the protocol; 0x10 is the rumble
     { int bits = pad_hid_nin_bit(0, 0x3F, 9) | pad_hid_nin_bit(0, 0x21, 0xFF00) | pad_hid_nin_bit(0, 0x30, 0xFF00) | pad_hid_nin_bit(1, 0x01, 0xFF00);
       CHECK(pad_hid_nin_protocol(bits) && !(bits & PAD_NIN_RUMBLE) && pad_hid_nin_bit(1, 0x10, 0xFF00) == PAD_NIN_RUMBLE);
@@ -47,7 +47,15 @@ int main(void) {
       CHECK(!pad_hid_nin_lights(bits & ~PAD_NIN_SUBCMD) && !pad_hid_nin_lights(PAD_NIN_SIMPLE));
       CHECK(pad_hid_nin_bit(0, 0x3F, 1) == 0 && pad_hid_nin_bit(0, 1, 9) == 0 && pad_hid_nin_bit(1, 0x30, 0xFF00) == 0 && pad_hid_nin_bit(0, 0x01, 9) == 0);   // an 8BitDo's buttons in report 1
     }
-    pad_hid_init(&h, NULL, PAD_HID_DEFAULT);
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT, 1);
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);             // DM_PAD_AB=xbox: usage 1 (bottom) is A
+    h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == DM_BTN_B);             // usage 2 (right) is B
+    pad_hid_init(&h, "A=2", PAD_HID_DEFAULT, 1);
+    h.buttons = 1u << 1; CHECK(pad_hid_buttons(&h) == (DM_BTN_A | DM_BTN_B)); // DM_HID_MAP entries still apply over the swapped default
+    pad_hid_init(&h, NULL, PAD_HID_NINTENDO, 1);
+    h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);             // the swap holds in every layout: Nintendo's report 0x3F usage 1 (bottom) is A
+    CHECK(pad_hid_nin_buttons(&h, DM_BTN_A, 0) == DM_BTN_B && pad_hid_nin_buttons(&h, DM_BTN_B, 0) == DM_BTN_A);   // and in the full report 0x30
+    pad_hid_init(&h, NULL, PAD_HID_DEFAULT, 0);
     CHECK(pad_hid_hat(1, 1, 8) == 0 && pad_hid_hat(0, 1, 8) == -1 && pad_hid_hat(8, 0, 7) == -1 && pad_hid_hat(15, 0, 15) == -1);
     { static const uint64_t dir[8] = {DM_BTN_UP, DM_BTN_UP | DM_BTN_RIGHT, DM_BTN_RIGHT, DM_BTN_RIGHT | DM_BTN_DOWN,   // the hat's eight values, clockwise from up
                                       DM_BTN_DOWN, DM_BTN_DOWN | DM_BTN_LEFT, DM_BTN_LEFT, DM_BTN_LEFT | DM_BTN_UP};
@@ -66,7 +74,7 @@ int main(void) {
     // Replay the measured SHIELD 2015 16-bit trigger sweep and stick extremes through pad_hid_norm_bits.
     { static const long sweep[] = {0, 5305, 16397, 26314, 44624, 65535, 20445, 0};
       pad_hid sh; int32_t ss[4];
-      pad_hid_init(&sh, NULL, PAD_HID_DEFAULT);
+      pad_hid_init(&sh, NULL, PAD_HID_DEFAULT, 0);
       static const int axes[4] = {PH_X, PH_Y, PH_Z, PH_RZ};
       for (int i = 0; i < 4; i++) { sh.has[axes[i]] = 1; sh.axis[axes[i]] = pad_hid_norm_bits(0x7fff, -1, 0, 16); }
       pad_hid_sticks(&sh, ss);
@@ -113,7 +121,7 @@ int main(void) {
     CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x045e, 0x028e, has) == PAD_HID_NINTENDO);
     has[PH_RX] = 0; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
     has[PH_RX] = 1; has[PH_ACCEL] = 1; CHECK(pad_hid_layout_for(0, 0x045e, 0x028e, has) == PAD_HID_DEFAULT);
-    pad_hid_init(&h, NULL, PAD_HID_X360);
+    pad_hid_init(&h, NULL, PAD_HID_X360, 0);
     { static const unsigned usage[] = {1, 2, 4, 3, 10, 9, 5, 6, 12, 15, 13, 14};
       static const uint64_t want[] = {DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_Y, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_L, DM_BTN_R, DM_BTN_UP, DM_BTN_RIGHT, DM_BTN_DOWN, DM_BTN_LEFT};
       for (unsigned i = 0; i < sizeof usage / sizeof *usage; i++) { h.buttons = 1u << (usage[i] - 1); CHECK(pad_hid_buttons(&h) == want[i]); } }
@@ -130,22 +138,22 @@ int main(void) {
     CHECK(s[0] > DM_STICK_MAX / 3 && s[0] < DM_STICK_MAX * 2 / 3 && s[1] == DM_STICK_MAX);   // a half push stays a half push
     CHECK(s[2] == -DM_STICK_MAX && abs(s[3]) < 2);                                          // the right stick from Rx / Ry
     CHECK(pad_hid_buttons(&h) == DM_BTN_ZL);                                                // left trigger down, right one up
-    pad_hid_init(&h, "A=1,B=2", PAD_HID_X360); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    pad_hid_init(&h, "A=1,B=2", PAD_HID_X360, 0); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
     // The Switch wired HID map needs both halves of each verified USB ID. Nintendo report 0x3F takes precedence.
     uint8_t wired[PH_AXES] = {[PH_X] = 1, [PH_Y] = 1, [PH_Z] = 1, [PH_RZ] = 1};
     CHECK(pad_hid_layout_for(0, 0x0f0d, 0x00f0, wired) == PAD_HID_SWITCH_WIRED);
     CHECK(pad_hid_layout_for(0, 0x0f0d, 0x011c, wired) == PAD_HID_DEFAULT);
     CHECK(pad_hid_layout_for(0, 0x2dc8, 0x00f0, wired) == PAD_HID_DEFAULT);
     CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0f0d, 0x00f0, wired) == PAD_HID_NINTENDO);
-    pad_hid_init(&h, NULL, PAD_HID_SWITCH_WIRED);
+    pad_hid_init(&h, NULL, PAD_HID_SWITCH_WIRED, 0);
     { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_LS, DM_BTN_RS, 0, 0};
       for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
-    pad_hid_init(&h, "A=1,Y=3", PAD_HID_SWITCH_WIRED); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
+    pad_hid_init(&h, "A=1,Y=3", PAD_HID_SWITCH_WIRED, 0); h.buttons = 1u << 0; CHECK(pad_hid_buttons(&h) == DM_BTN_A);   // DM_HID_MAP still replaces entries
     // PDP's Wired Fight Pad Pro for Switch (0e6f:0185, GitHub issue #3290) uses the same layout: its reporter measured usages 1 Y, 2 B, 3 A, 4 X, 5 L, 6 R. Non-Switch PDP IDs keep the default.
     CHECK(pad_hid_layout_for(0, 0x0e6f, 0x0185, wired) == PAD_HID_SWITCH_WIRED);
     CHECK(pad_hid_layout_for(0, 0x0e6f, 0x02a8, wired) == PAD_HID_DEFAULT);
     CHECK(pad_hid_layout_for(PAD_NIN_SIMPLE, 0x0e6f, 0x0185, wired) == PAD_HID_NINTENDO);
-    pad_hid_init(&h, NULL, pad_hid_layout_for(0, 0x0e6f, 0x0185, wired));
+    pad_hid_init(&h, NULL, pad_hid_layout_for(0, 0x0e6f, 0x0185, wired), 0);
     { static const uint64_t want[] = {DM_BTN_Y, DM_BTN_B, DM_BTN_A, DM_BTN_X, DM_BTN_L, DM_BTN_R};
       for (unsigned i = 0; i < sizeof want / sizeof *want; i++) { h.buttons = 1u << i; CHECK(pad_hid_buttons(&h) == want[i]); } }
     // identical pads: a model is read here only with two or more pads and more than GameController lists, after the wait, and stops at once

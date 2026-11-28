@@ -158,6 +158,7 @@ One row per profile; the notes are each profile's `README.md`. Entries marked pr
 | [Kirby Star Allies](01007E3006DDA000/README.md) | `01007E3006DDA000` | 4.0.0a | 4.4.1 | HAL Laboratory's engine (NintendoWare) | NVN | — |
 | [L.A. Noire](0100830004FB6000/README.md) | `0100830004FB6000` | 1.2 | 1.3.1 | Team Bondi's engine (Havok, FMOD) | NVN | — |
 | [LEGO Star Wars: The Skywalker Saga](010042D00D900000/README.md) | `010042D00D900000` | 1.10.0 | 12.3.6 | Traveller's Tales' engine | NVN | 60 fps target |
+| [LOLLIPOP CHAINSAW RePOP](0100DD301A686000/README.md) | `0100DD301A686000` | 1.21.1 | 20.5.17 | Unreal Engine 5.6.0 | NVN | — |
 | [Luigi's Mansion 3](0100DCA0064A6000/README.md) | `0100DCA0064A6000` | 1.4.0 | 7.3.2 | Next Level Games' engine | NVN | 60 fps target |
 | [Mario & Luigi: Brothership](01006D0017F7A000/README.md) | `01006D0017F7A000` | 1.0.0 | 12.3.2 | Unreal Engine 4.27.2, Wwise | NVN | 60 fps target, [120 fps option](01006D0017F7A000/README.md#frame-rate) |
 | [Mario Golf: Super Rush](0100C9C00E25C000/README.md) | `0100C9C00E25C000` | 4.0.0 | 11.4.0 | Camelot's engine, NintendoWare | NVN | — |

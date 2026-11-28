@@ -1,0 +1,42 @@
+# Game profile of ROMANCE OF THE THREE KINGDOMS XIV with Power-Up Kit (Asia) (Switch, update v786432 = 1.1.1 over the base game v720896 = 1.1.0, with its 1 DLC). Plays on the iPad
+# Format: see dm/games/README.md
+# The Asian release of the game the Western profile 0100ED7012DB2000 covers: the same KTGL engine, memory layout and shader set, with Simplified and Traditional Chinese assets in the SC/TC folders instead of the EN ones.
+# Koei Tecmo's KTGL engine on NVN, SDK 10.4.1. Modules main + subsdk0 (NintendoSDK_movie: the MP4 logo, opening and event movies) + sdk.
+# RomFS: Age of Calamity's RDB layout (0002/*.rdb indexes over .rdb.bin* files and 0002/data/*.file), 12.3 GB.
+# Started from the NSP script's provisional profile, which booted to the strategy map with no change
+
+# ---- Identity ----
+title_id	0100CD4012DCA000
+program_id	0100CD4012DCA000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	ROMANCE OF THE THREE KINGDOMS XIV with Power-Up Kit (Asia)
+ipa	RomanceOfTheThreeKingdomsXivWithPowerUpKit.ipa
+app_category	public.app-category.strategy-games
+
+# ---- Versions ----
+build	v786432	1.1.1	main=33e595cff4fcb98133aec71353632f03	subsdk0=84e50460493a12f26100e5150fbff271	sdk=d9add76fc264863d85fbbd1d70076c76
+package	v786432
+shader_versions	v786432
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	0002/ScreenLayout.rdb.bin
+zip_store	.bin:.bin1:.bin10:.bin11:.bin14:.bin14_0:.bin15:.bin16:.bin18:.bin2:.bin20:.bin21:.bin22:.bin22_0:.bin3:.bin4:.bin5:.bin6:.bin7:.bin8:.file:.mp4:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource (META +0x14 = 0): nninitStartup sets a heap of the pool − used memory. The 4 GB block of the other games without virtual address memory
+# (256 MB in front + 256 MB alias region + 256 MB stack region + 3.25 GB heap region), the same as the Western release
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+# The rewritten modules take more than the default 64 MB of used memory, which SetHeapSize checks the request against (the NSP script's measure: 80 MB)
+mem_used	0x5000000
+
+# ---- Shader split (shader_split.py; KTGL G2S containers in the RDB entries under 0002, GLSLC outputs in main; the other groups hold none) ----
+shader_groups	/0002/=0002 /DLC_PATCH/=dlcpatch /0003/=0003 /0004/=0004 /0010_SC/=0010sc /0010_TC/=0010tc /0003_SC/=0003sc /0003_TC/=0003tc /0000/=0000 /0001_SC/=0001sc /0001_TC/=0001tc
+shader_note	ROMANCE OF THE THREE KINGDOMS XIV with Power-Up Kit (Asia) shaders

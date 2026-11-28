@@ -289,3 +289,10 @@ HLE_FORCE("_ZN2nn3mii9AppendMiiEPi", "MiiEdit applet; the default Mii is made an
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn3mii11ShowMiiEditEv", "MiiEdit applet; closed at once", Result, h_mii_Edit, void) { DM_APPLET("Mii editor"); LOG("mii: ShowMiiEdit (the host has no Mii editor)"); return RES_OK; }
+// EditAndUpdateMii opens the editor on a Mii and writes the edited one to *out. Unhooked, the SDK's StartImpl reached nn::applet::CreateLibraryApplet with no applet service and crashed
+// (sig 11, addr 0, sdk+0x1e3684; Nintendo Switch Sports Resort v65536 right after AppendMii). The host answers as the editor closed with no change: *out is the Mii as given
+HLE_FORCE("_ZN2nn3mii16EditAndUpdateMiiEPNS0_8CharInfoERKS1_", "MiiEdit applet; closed with no change", Result, h_mii_EditUpdate, mii_charinfo *out, const mii_charinfo *in) {
+    DM_APPLET("Mii editor");
+    if (out && in && out != in) memcpy(out, in, sizeof *out);
+    LOG("mii: EditAndUpdateMii (the host has no Mii editor: the Mii is kept as it was)"); return RES_OK;
+}

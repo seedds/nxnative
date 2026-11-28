@@ -126,18 +126,26 @@ class HostMSL(unittest.TestCase):
 
     def test_regress_cache_refreshes_shaders_before_reusing_a_host(self):
         regress = script('regress')
-        self.host_dirs(regress.HOST_DIRS)
+        self.host_dirs(script('build_ipa_from_nsp').HOST_DIRS)
         tree = NS(path=self.root, id='candidate')
         game = NS(id=GAME, env=lambda tree: self.env, profile_dir=lambda tree: self.root / f'dm/games/{GAME}')
         real_run = subprocess.run
         builds = []
+        built_bin = self.root / f'dm/host/gen/{GAME}/dmhost'
 
         def run(cmd, **kw):
-            if cmd[0] == 'make' and 'host_msl' not in cmd:
-                if 'dmhost' in cmd:
-                    builds.append(cmd)
-                    (self.root / 'dm/host/dmhost').write_bytes(b'host executable')
-                return NS(returncode=0)
+            if cmd[0] == 'make':
+                if '-n' in cmd:
+                    return NS(returncode=0, stdout='', stderr='')
+                if f'gen/{GAME}/dmhost' in cmd:
+                    p = real_run(['make', '-s', f'GAME={GAME}', 'host_msl'], cwd=kw['cwd'], env=kw['env'], capture_output=True, text=True)
+                    self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+                    hdr = self.header.read_bytes()
+                    if not built_bin.is_file() or built_bin.read_bytes() != hdr:
+                        builds.append(cmd)
+                        built_bin.parent.mkdir(parents=True, exist_ok=True)
+                        built_bin.write_bytes(hdr)
+                return NS(returncode=0, stdout='', stderr='')
             return real_run(cmd, **kw)
 
         with patch.object(regress, 'game_root', return_value=self.root / 'regress'), patch.object(regress, 'say'), patch.object(regress.subprocess, 'run', side_effect=run):

@@ -1,0 +1,29 @@
+# Ace Angler: Fishing Spirits, Switch update 1.2.3. Unity 2021.2.17f1, Nintendo SDK 13.3.5, NVN 55.15.
+title_id	01007C50132C8000
+program_id	01007C50132C8000
+name	Ace Angler: Fishing Spirits
+ipa	AceAnglerFishingSpirits.ipa
+app_category	public.app-category.games
+
+build	v589824	1.2.3	main=664cbdfdaa8a5de4a002107225e3d367	subsdk0=d0f13015e5badf2243d60a2bc9b978dd	sdk=3644a6760469451cabc99f00c540acc2
+package	v589824
+shader_versions	v589824
+
+# subsdk0 is NintendoSDK_movie.
+modules	main subsdk0 sdk
+romfs_marker	Data/StreamingAssets/aa/Cpk/_Res_Model_P__v1.cpk
+zip_store	.assets:.awb:.cpk:.dat:.json:.mp4:.ress:.metallib
+
+# The NPDM declares 16 MiB of system resource and the game uses virtual address memory.
+# StandardAllocator reserves 3.12 GiB at boot and maps 0.43 GiB in 15 seconds. The cap leaves
+# room for Unity's own regions within the iPhone alias region while reporting the hardware pool.
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x1000000
+stdalloc_cap	0x80000000
+
+shader_groups	/Data/=data
+shader_note	Ace Angler: Fishing Spirits shaders
+depth_mode	zero

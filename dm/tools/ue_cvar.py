@@ -4,8 +4,8 @@ and the host writes the variables the profile decides on (hle_fpslock.c: the fra
 ue_texture_pool).
 A TAutoConsoleVariable is a global in main's data: its static constructor loads the name (adrp + add), registers it through IConsoleManager (a blr), takes the object's address (adrp + add)
 and stores the variable's value pointer at +0x10 (str x0, [xN, #0x10]); the value holds the game thread's copy, then the render thread's. The same sequence registers every variable in the
-Unreal games here: Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), OCTOPATH TRAVELER 0 (UE 5, a
-base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6); OCTOPATH TRAVELER (4.18) inlines it, addressing the objects from a page base made far
+Unreal games here: Yoshi's Crafted World (UE 4.1x, UTF-32 names), Pikmin 4 (4.26), OCTOPATH TRAVELER II and DRAGON QUEST VII Reimagined (4.27, UTF-16), Hogwarts Legacy (4.27, UTF-8),
+OCTOPATH TRAVELER 0 (UE 5, a base constructor called between the address and the store) and FINAL FANTASY RESONANCE (5.6); OCTOPATH TRAVELER (4.18) inlines it, addressing the objects from a page base made far
 before the name (registered_at, base_of). A name registered at two objects gives none, with a [RED] reason.
 Usage on its own: ue_cvar.py <module>... (the objects of NAMES in each)"""
 import re, struct, sys, os
@@ -125,8 +125,8 @@ def find(img, text_end, ro_off, data_off, name):
     """(main's offset of the TAutoConsoleVariable registered under name, reason), or (None, why not); why starts '[RED] ' when the name is registered at more than one object"""
     word = lambda a: struct.unpack_from('<I', img, a)[0]
     objs = set()
-    for z in (2, 4):   # TCHAR: UTF-16 (UE 4.2x and 5), UTF-32 (older Switch builds)
-        pat = name.encode('utf-16-le' if z == 2 else 'utf-32-le') + b'\0' * z
+    for z in (1, 2, 4):   # TCHAR: UTF-8 (8-bit TCHAR builds such as Hogwarts Legacy's UE 4.27), UTF-16 (UE 4.2x and 5), UTF-32 (older Switch builds)
+        pat = name.encode({1: 'utf-8', 2: 'utf-16-le', 4: 'utf-32-le'}[z]) + b'\0' * z
         s = img.find(pat, ro_off, data_off)
         while s >= 0:
             if s % z == 0:

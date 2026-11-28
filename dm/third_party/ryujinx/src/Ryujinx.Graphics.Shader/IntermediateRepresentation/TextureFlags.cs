@@ -15,6 +15,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         Offset = 1 << 6,
         Offsets = 1 << 7,
         Coherent = 1 << 8,
+        RowWrap = 1 << 9,   // nxnative: a linear 1D fetch lowered to 16384-texel rows
 
         // Preserve the surface instruction's OOB policy through IR. IGN drops
         // the operation; TRAP/unknown must not silently become IGN on Metal.

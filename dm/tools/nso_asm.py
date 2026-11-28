@@ -1,7 +1,9 @@
 # AArch64 instruction encoders of the NSO rewriter (dm/tools/patch_nso.py) and of the per-build patch files (dm/tools/sdk_patches.py, dm/games/<id>/patches.py),
 # which assemble their stubs with them. Each returns the instruction word; a branch asserts its reach
 def B(frm, to):
-    off = to - frm; assert -(1 << 27) <= off < (1 << 27) and off % 4 == 0
+    off = to - frm
+    if not (-(1 << 27) <= off < (1 << 27) and off % 4 == 0):   # names the branch, so a site the layout puts out of reach shows where
+        raise AssertionError(f'B out of reach: to={to:#x} frm={frm:#x} off={off:#x}' + ('' if -(1 << 27) <= off < (1 << 27) else ' (beyond ±128 MiB)') + ('' if off % 4 == 0 else ' (misaligned)'))
     return 0x14000000 | ((off >> 2) & 0x3FFFFFF)
 def BL(frm, to): return B(frm, to) | 0x80000000
 def CBNZW(t, frm, to):   # cbnz wt, to

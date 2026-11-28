@@ -99,19 +99,24 @@ def check_stages(row: str, parsed: dict[str, list[str]], shaders: dict[str, str]
     kind, key, *rest = row.split('\t')
     if kind in ('R', 'M'):
         vertex, vs_stage, fragment, fs_stage, _ = parsed[row]
-        refs = [(vertex, 'mesh' if kind == 'M' else 'vertex', vs_stage)]
+        if kind == 'R' and vertex.endswith('_bgv'):
+            # Compute-path geometry readers (<key>_bgv) run in the vertex slot (stage 0).
+            refs = [(vertex[:-4] + '_b', 'geometry', vs_stage, '0')]
+        else:
+            stage = 'mesh' if kind == 'M' else 'vertex'
+            refs = [(vertex, stage, vs_stage, STAGES[stage])]
         if fragment:
-            refs.append((fragment, 'pixel', fs_stage))
+            refs.append((fragment, 'pixel', fs_stage, STAGES['pixel']))
         if kind == 'M' and key != '-':
-            refs.append((key, 'task', ''))
+            refs.append((key, 'task', '', ''))
     elif kind == 'G':
-        refs = [(key + '_b', 'vertex', ''), (rest[0] + '_b', 'geometry', '')]
+        refs = [(key + '_b', 'vertex', '', ''), (rest[0] + '_b', 'geometry', '', '')]
     else:
-        refs = [(key, 'compute', '')]
-    if any(key not in shaders for key, _, _ in refs):
+        refs = [(key, 'compute', '', '')]
+    if any(shader not in shaders for shader, _, _, _ in refs):
         return 'missing shader'
-    if any((stage and shaders[key] != stage) or (number and number not in STAGES.get(shaders[key], ''))
-           for key, stage, number in refs):
+    if any(shaders[shader] != stage or (number and number not in allowed)
+           for shader, stage, number, allowed in refs):
         return 'stage mismatch'
     return ''
 

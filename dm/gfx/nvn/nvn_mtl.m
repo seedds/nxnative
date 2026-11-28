@@ -14124,6 +14124,17 @@ static int warm_stale(NSString *key, NSMutableSet<NSString *> *stale) {
     if (![stale containsObject:key]) { [stale addObject:key]; g_warm_skip_stale++; }
     return 1;
 }
+static int warm_stale_vs(NSString *key, uint8_t stage, NSMutableSet<NSString *> *stale) {
+    // Compute-path geometry readers (<map key>_bgv) run in the vertex slot (stage 0) of an R row.
+    if (key.length > 4 && [key hasSuffix:@"_bgv"]) {
+        if (stage != 0) return 1;
+        NSString *st = g_shmap[[key substringToIndex:key.length - 4]];
+        if ([st isEqualToString:@"geometry"]) return 0;
+        if (!st && ![stale containsObject:key]) { [stale addObject:key]; g_warm_skip_stale++; }
+        return 1;
+    }
+    return warm_stale(key, stale);
+}
 static NvShader *warm_shader(NSString *key, int stage) {
     os_unfair_lock_lock(&g_warm_dict_lock);
     id sh = g_warm_dict[key];
@@ -14181,7 +14192,7 @@ static NSArray<WarmTask *> *warm_parse(NSArray<NSString *> *paths, long *lines) 
                 NSData *kd = [NSData dataWithBytes:&sk length:sizeof sk]; if ([seen_k containsObject:kd]) continue;
                 [seen_k addObject:kd];
                 NSString *vkey = warm_key(sk.vs, sizeof sk.vs), *fkey = warm_key(sk.fs, sizeof sk.fs);
-                if (!vkey.length || warm_stale(vkey, stale) || (fkey.length && warm_stale(fkey, stale))) continue;
+                if (!vkey.length || warm_stale_vs(vkey, sk.vs_stage, stale) || (fkey.length && warm_stale(fkey, stale))) continue;
                 NSString *pk = [NSString stringWithFormat:@"%@|%@", vkey, fkey];
                 t = pairs[pk];
                 if (!t) { t = [WarmTask new]; t->kind = 1; t->vkey = vkey; t->fkey = fkey; t->rs = [NSMutableArray array]; pairs[pk] = t; [tasks addObject:t]; }

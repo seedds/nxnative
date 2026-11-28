@@ -1,0 +1,39 @@
+# Assassin's Creed III Remastered for Switch, base 1.0.0. See dm/games/README.md for the profile format.
+
+# ---- Identity ----
+title_id	01007F600B134000
+program_id	01007F600B134000
+
+# ---- App ----
+name	Assassin's Creed® Ⅲ Remastered
+ipa	AssassinsCreedRemastered.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=10ac5e3aefdf16d10130195845171cee	subsdk1=11975fb8bdba5b7bf8128785e47dc9d5	subsdk2=41097c438a36afd2e879fa6f5e0f0850	sdk=26ffb122262ca25e4c016c0af2f92a29
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# The launcher and game NROs import the SDK movie module.
+modules	main subsdk1 subsdk2 sdk
+romfs_marker	ac3/DataNX.forge
+zip_store	.bik:.bntx:.forge:.nro:.pck:.txt:.xml:.metallib
+
+# ---- Memory ----
+# The NPDM declares no system resource. The 3.25 GiB heap region covers the SDK heap.
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+sys_resource	0x0
+
+# ---- Frame rate ----
+# AC III requests two vblanks per frame. Both games normally step by elapsed time,
+# so the host can pace presentation at the selected rate. See README.md, Frame rate.
+fps_target	60
+present_interval	display
+
+# ---- Shader split ----
+shader_groups	/ac3/=ac3 /acl/=acl /videos/=videos /.nrr/=nrr /nro/=nro
+shader_note	Assassin's Creed® Ⅲ Remastered shaders

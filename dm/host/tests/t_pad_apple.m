@@ -1,4 +1,4 @@
-// Face buttons of the shared GameController adapter (pad_apple.h) with fake pads: by position on most pads, by label on a Nintendo pad; no physical controller is needed.
+// Face buttons and player lights of the shared GameController adapter (pad_apple.h) with fake pads: by position on most pads, by label on a Nintendo pad; no physical controller is needed.
 #import "../pad_apple.h"
 #include <assert.h>
 #include <stdio.h>
@@ -10,6 +10,7 @@
 @end
 @interface TestController : NSObject
 @property NSString *productCategory;
+@property GCControllerPlayerIndex playerIndex;
 @end
 @implementation TestController
 @end
@@ -39,5 +40,13 @@ int main(void) { @autoreleasepool {
     }
     TestPad *g = [TestPad new];   // nothing pressed, buttons nil: none
     assert(dm_pad_face((GCExtendedGamepad *)(id)g) == 0);
+    // Player lights: nil is a no-op, players 1-4 light their own, 5-8 and a free controller clear the index
+    assert(dm_pad_lights(nil, 0) == 0);
+    TestController *c = [TestController new]; GCController *gc = (GCController *)(id)c;
+    c.playerIndex = GCControllerPlayerIndexUnset;
+    GCControllerPlayerIndex want[4] = {GCControllerPlayerIndex1, GCControllerPlayerIndex2, GCControllerPlayerIndex3, GCControllerPlayerIndex4};
+    for (int p = 0; p < 4; p++) { assert(dm_pad_lights(gc, p) == 1); assert(c.playerIndex == want[p]); }
+    for (int p = 4; p < 8; p++) { c.playerIndex = GCControllerPlayerIndex2; assert(dm_pad_lights(gc, p) == 0); assert(c.playerIndex == GCControllerPlayerIndexUnset); }
+    c.playerIndex = GCControllerPlayerIndex3; assert(dm_pad_lights(gc, -1) == 0); assert(c.playerIndex == GCControllerPlayerIndexUnset);
     printf("t_pad_apple OK\n");
 } return 0; }

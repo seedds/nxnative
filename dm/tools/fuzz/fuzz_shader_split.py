@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Fuzz the in-memory shader container readers of dm/gfx/tools/shader_split.py, dispatched as scan_file does for a loose file: scan_blob (BNSH, BAHS, MSHD, SARC and Yaz0
 around them, and the others it recognizes by magic), then glslc_shaders when nothing was found, sdf_shaders for 'SDF\\0' (RE Engine) and arh_entries for 'arh1' (Monolith's
-index), and uniq_keys / var_pairs over what they return.
+index), nxsd_shaders for 'NXSD', and uniq_keys / var_pairs over what they return.
 Seeds: one synthetic shader pair (a 0x880-byte control section and a small code area per stage, vertex and pixel), wrapped as a BNSH, a BAHS with its binary and program arrays,
-an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, and an ARH1 index with one path.
+an MSHD, a SARC of the BNSH compressed with Yaz0, a single-stage and a two-stage GLSLC output, an SDF definition, an ARH1 index with one path, an NXSD with separate control and code regions, and a DrinkBox SHADERS container with the two stages.
 Clean rejection: red() (SystemExit with a '[RED] ' message naming the problem), or a result (an empty one included). Any other exception is a finding: scan_file's net still
 turns it into an 'unreadable' red line, but one that names no layout problem (test_split_unreadable.py: a reader names its layout, "not an IndexError"); a hang or an oversized
 allocation gets past that net. Usage: see fuzzlib.py"""
 import struct
 import sys
+import zlib
 
 import fuzzlib
 
@@ -118,20 +119,81 @@ def rgxd():
     return bytes(d)
 
 
+def nxsd():
+    """NXSD v0x100: two descriptors followed by the controls and code areas they reference."""
+    ctl_start = 0x40 + 2 * 0x18; code_start = ctl_start + len(VS[0]) + len(PS[0])
+    d = bytearray(0x40); d[:4] = b'NXSD'
+    struct.pack_into('<7I', d, 4, 0x100, code_start + len(VS[1]) + len(PS[1]), code_start, 0, 2, 2 * 0x880, len(VS[1]) + len(PS[1]))
+    struct.pack_into('<3Q', d, 0x28, 0x40, ctl_start, code_start)
+    d += struct.pack('<6I', 0, 0, 0, 0, 0, 0) + struct.pack('<6I', 0x880, 0, len(VS[1]), 0, 0, 0)
+    return bytes(d) + VS[0] + PS[0] + VS[1] + PS[1]
+
+
+def nxsh(magic, pair):
+    """Media.Vision NXVS / NXFS container: 0x40-byte header with control and code spans."""
+    ctl, code = pair
+    d = bytearray(0x40); d[:4] = magic
+    struct.pack_into('<6I', d, 4, 0x40 + len(ctl) + len(code), 0, 0x40, len(ctl), 0x40 + len(ctl), len(code))
+    return bytes(d) + ctl + code
+
+
+def vfs2():
+    """Cornfox & Bros. VFS2 archive: 'VFS2', directory table, file table (mode 2 zlib + mode 0 raw), optional name table."""
+    vs_raw, ps_raw = glslc([VS]), glslc([PS])
+    vs_z = struct.pack('<I', len(vs_raw)) + zlib.compress(vs_raw)
+    dirs = struct.pack('<IIiii', 0, 0, -1, 1, -1) + struct.pack('<IIiii', 1, 1, 0, -1, 0)
+    entries = (struct.pack('<6I', 1, 0, 2, 1, 0, len(vs_z))
+               + struct.pack('<6I', 2, 1, 0, 1, len(vs_z), len(ps_raw)))
+    data_start = 8 + len(dirs) + 4 + len(entries) + 4
+    payload = vs_z + ps_raw
+    names_off = data_start + len(payload)
+    def strtab(items): return struct.pack('<I', len(items)) + b''.join(struct.pack('<I', len(s)) + s for s in items)
+    return (ss.VFS2 + struct.pack('<I', 2) + dirs + struct.pack('<I', 2) + entries
+            + struct.pack('<I', names_off) + payload + strtab([b'a.vs', b'a.ps']) + strtab([b'', b'effects']))
+
+
+def dbx():
+    """DrinkBox's SHADERS container: header, string table, uniform descriptors, shader blobs ({20-byte header, uniforms, code, ctl}) and trailing 29-byte entries."""
+    strtab = b'v.vsh\0main\0p.psh\0main\0'
+    uniforms = b'WorldViewProj\0'.ljust(ss.DBX_UNIFORM, b'\0')
+    data, entries = bytearray(), bytearray()
+    for sid, (name_off, entry_off, n_uni, kind, (ctl, code)) in enumerate(((0, 6, 1, 0, VS), (11, 17, 0, 1, PS))):
+        if len(data) % 16: data += bytes(16 - len(data) % 16)
+        d_off = len(data)
+        blob = struct.pack('<5I', len(code), len(ctl), n_uni, n_uni * 16, 0) + bytes(n_uni * ss.DBX_UNIFORM) + code + ctl
+        data += blob
+        entries += struct.pack('<6IBI', name_off, entry_off, 0, n_uni, d_off, len(blob), kind, sid)
+    return (ss.DBX
+            + struct.pack('<BI', 1, len(strtab)) + strtab
+            + struct.pack('<I', 1) + uniforms
+            + struct.pack('<I', len(data)) + bytes(data)
+            + struct.pack('<I', 2) + bytes(entries))
+
+
+def nsgz():
+    """Fenrir's HSPK package with one gzip-compressed BNSH record."""
+    import gzip
+    packed = gzip.compress(bnsh(), mtime=0)
+    return b'HSPK' + bytes(0x41c) + ss.NSGZ + struct.pack('<Q', len(packed)) + packed
+
+
 def seeds():
     b = bnsh()
     return {'bnsh': b, 'bahs': bahs(), 'mshd': mshd(), 'sarc-yaz0': yaz0(sarc([(b'shader.bnsh', b)])), 'glslc': glslc([VS]), 'glslc-program': glslc([VS, PS]),
-            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd()}
+            'sdf': sdf(), 'arh1': arh1(), 'rgxd': rgxd(), 'nxsd': nxsd(), 'nxvs': nxsh(b'NXVS', VS), 'nxfs': nxsh(b'NXFS', PS), 'vfs2': vfs2(), 'dbx': dbx(), 'nsgz': nsgz()}
 
 
 def check(data):
     try:
         if data[:4] == b'SDF\0': found = ss.sdf_shaders(data, '/fuzz.sdf')
+        elif data[:4] == b'NXSD':
+            found = ss.nxsd_shaders(data, '/fuzz.nxsd'); ss.separable_pairs(ss.uniq_keys(found))
         elif data[:4] == b'arh1': ss.arh_entries(data); return
         else:
             found = []; ss.scan_blob(data, '/fuzz', found)
             if not found and data[:4] != b'MSHD' and GLSLC in data: found += ss.glslc_shaders(data, '/fuzz', need=False)
-        ss.uniq_keys(found); ss.var_pairs(found)
+        keys = ss.uniq_keys(found); ss.var_pairs(found)
+        if data[:8] == ss.DBX: ss.separable_pairs(keys)
     except SystemExit as e:
         if not str(e).startswith('[RED] '): raise   # red(): the declared rejection
     finally: ss.BAHS_VAR.clear()

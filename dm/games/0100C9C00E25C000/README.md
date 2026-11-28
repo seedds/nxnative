@@ -20,7 +20,7 @@ Nothing else: no rewriter patch, no per-game host code. The profile moved from t
 
 ## Shaders
 
-25,270 in [`shader_map.tsv`](shader_map.tsv), all in `42`; all translate. A full build takes 16 minutes on an M6 from an empty cache, 7.5 minutes after a chain change (the NSP script's logs). [`pso_manifest.tsv`](pso_manifest.tsv) (1,310 lines) was recorded over the bring-up's Mac runs: boot, the movie, the title, the menus, the Rookie Course's first hole.
+25,270 in `shader_map.tsv`, all in `42`; all translate. A full build takes 16 minutes on an M6 from an empty cache, 7.5 minutes after a chain change (the NSP script's logs). [`pso_manifest.tsv`](pso_manifest.tsv) (1,310 lines) was recorded over the bring-up's Mac runs: boot, the movie, the title, the menus, the Rookie Course's first hole.
 
 ## Rendering
 

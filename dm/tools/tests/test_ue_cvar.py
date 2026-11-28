@@ -1,6 +1,6 @@
 """Unreal console variables found by their registered names (dm/tools/ue_cvar.py) on synthetic code, no game files: UE 4.18's constructor form with the object loaded before the
-name, UE 4.2x / 5's register call with the value pointer stored after it (and a base constructor between), a lookup that only reads the name, a name registered twice, UTF-32 names,
-the next variable's registration not taken for this one's; and every profile's ue_fps_cvar is a name the rewriter looks for."""
+name, UE 4.2x / 5's register call with the value pointer stored after it (and a base constructor between), a lookup that only reads the name, a name registered twice (including
+across encodings), UTF-8 and UTF-32 names, the next variable's registration not taken for this one's; and every profile's ue_fps_cvar is a name the rewriter looks for."""
 import struct
 import sys
 import unittest
@@ -21,7 +21,9 @@ def bl(frm, to): return B(frm, to) | 0x80000000
 def mov(d, s): return 0xAA0003E0 | s << 16 | d   # mov xD, xS
 
 
-def put_name(img, at, s, z=2): img[at:at + (len(s) + 1) * z] = s.encode('utf-16-le' if z == 2 else 'utf-32-le') + b'\0' * z
+def put_name(img, at, s, z=2):
+    raw = s.encode({1: 'utf-8', 2: 'utf-16-le', 4: 'utf-32-le'}[z]) + b'\0' * z
+    img[at:at + len(raw)] = raw
 
 
 def ctor_form(at, name, obj, nxt=None):
@@ -103,6 +105,35 @@ class FindTest(unittest.TestCase):
     def test_utf32_name(self):
         o, why = find(image(lambda a: register_form(a, NAME, OBJ), z=4))
         self.assertEqual(o, OBJ, why)
+
+    def test_utf8_name(self):   # 8-bit TCHAR builds (Hogwarts Legacy's UE 4.27): names in UTF-8
+        for kind, seq in (
+            ('register', lambda a: register_form(a, NAME, OBJ)),
+            ('base_ctor', lambda a: register_form(a, NAME, OBJ, base_ctor=True)),
+            ('ctor', lambda a: ctor_form(a, NAME, OBJ)),
+            ('inlined', lambda a: inline_form(a, NAME, OBJ)),
+        ):
+            with self.subTest(kind=kind):
+                o, why = find(image(seq, z=1))
+                self.assertEqual(o, OBJ, why)
+
+    def test_utf8_name_need_not_be_word_aligned(self):
+        img = image(lambda a: register_form(a, NAME + 1, OBJ), z=1)
+        put_name(img, NAME + 1, 't.MaxFPS', z=1)
+        o, why = find(img)
+        self.assertEqual(o, OBJ, why)
+
+    def test_utf8_lookup_only_is_not_found(self):
+        o, why = find(image(lambda a: register_form(a, NAME, 0, store=False), z=1))
+        self.assertIsNone(o)
+        self.assertFalse(why.startswith('[RED] '), why)
+
+    def test_duplicate_across_encodings_is_red(self):
+        img = image(lambda a: register_form(a, NAME, OBJ), lambda a: register_form(a, OTHER, OBJ2), z=1)
+        put_name(img, OTHER, 't.MaxFPS', z=2)
+        o, why = find(img)
+        self.assertIsNone(o)
+        self.assertTrue(why.startswith('[RED] ') and '2 objects' in why, why)
 
     def test_lookup_only_is_not_found(self):
         o, why = find(image(lambda a: register_form(a, NAME, 0, store=False)))

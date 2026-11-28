@@ -15,6 +15,7 @@ Never commit or attach game files, keys, title keys or anything extracted from a
 ## Before you start
 
 - Read [AGENTS.md](AGENTS.md): it lists where to start for each kind of task, and the rules for profiles, per-build knowledge and the shader translation chain.
+- Someone may already be working on it: search the open [pull requests](https://github.com/seedds/nxnative/pulls) and [issues](https://github.com/seedds/nxnative/issues) for the game's name or title ID, or for the feature or the log text (`gh pr list --repo seedds/nxnative --search "<words>"`). Build on an open pull request, or say on it what yours adds, rather than opening a second one for the same thing.
 - A crash, a hang or a wrong picture: search the [symptom index](docs/agents/symptoms.md) for the text in the log first.
 - Another game: run `scripts/build_ipa_from_nsp.py` on its NSP folder and follow [Port another game](docs/development.md#port-another-game).
 - Prefer a fix that holds for every game to a game-specific rule, and fix a bug at its cause ([AGENTS.md](AGENTS.md)).
